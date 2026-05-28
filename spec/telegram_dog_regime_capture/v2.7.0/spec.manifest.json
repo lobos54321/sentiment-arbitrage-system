@@ -15,8 +15,8 @@
   "rendered_views": [
     {
       "file": "Telegram_Dog_Regime_Capture_System_v2.7.0_Canonical_Spec_Part1.md",
-      "lines": 504,
-      "sha256": "a25ae775ef8e85a46042988af6f2fb01aa414a0554dab9b9548591aaeb8e1f66",
+      "lines": 619,
+      "sha256": "6af907ed42353cc5da7e2a3971ea8f48914009e07c59b968d690f6dec53600dc",
       "sections": [
         "S00",
         "S01",
@@ -29,8 +29,8 @@
     },
     {
       "file": "Telegram_Dog_Regime_Capture_System_v2.7.0_Canonical_Spec_Part2.md",
-      "lines": 667,
-      "sha256": "0416805d07f14599e5f70f018187a3eb399796a55eb03305fd4d4d733ec91c95",
+      "lines": 1014,
+      "sha256": "52a04106f2d9e80dccca1dfbe8f6538c8a0f97dad027a26d78e6952270e31e39",
       "sections": [
         "S07",
         "S08",
@@ -43,8 +43,8 @@
     },
     {
       "file": "Telegram_Dog_Regime_Capture_System_v2.7.0_Canonical_Spec_Part3.md",
-      "lines": 872,
-      "sha256": "73fb4cf9ead7e2425a589465653c8aebf6fb14790d59fcc2c7d1973ea74c77e8",
+      "lines": 1017,
+      "sha256": "65c8460e7979225af1955c2e05ccd0d4ca4f18e50ba000f15f669afc260d5a22",
       "sections": [
         "S14",
         "S15",

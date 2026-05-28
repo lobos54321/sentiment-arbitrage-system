@@ -52,6 +52,24 @@ DEFAULT_LOG_REDACTION_POLICY = PROJECT_ROOT / "config" / "v27-log-redaction-poli
 DEFAULT_SERVICE_READINESS_PROBES = PROJECT_ROOT / "config" / "v27-service-readiness-probes.json"
 DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-dashboard-action-separation-policy.json"
 DEFAULT_NUMERIC_PRECISION_POLICY = PROJECT_ROOT / "config" / "v27-numeric-precision-policy.json"
+DEFAULT_METRIC_DEFINITION_REGISTRY = PROJECT_ROOT / "config" / "v27-metric-definition-registry.json"
+DEFAULT_THRESHOLD_CATALOG = PROJECT_ROOT / "config" / "v27-threshold-catalog.json"
+DEFAULT_RUNTIME_CONFIG_DRIFT_POLICY = PROJECT_ROOT / "config" / "v27-runtime-config-drift-policy.json"
+DEFAULT_ENVIRONMENT_SEPARATION_POLICY = PROJECT_ROOT / "config" / "v27-environment-separation-policy.json"
+DEFAULT_NULL_VALUE_POLICY = PROJECT_ROOT / "config" / "v27-null-value-policy.json"
+DEFAULT_FEATURE_VECTOR_SNAPSHOT_POLICY = PROJECT_ROOT / "config" / "v27-feature-vector-snapshot-policy.json"
+DEFAULT_TRAINING_DATASET_MANIFEST_POLICY = PROJECT_ROOT / "config" / "v27-training-dataset-manifest-policy.json"
+DEFAULT_DATA_LINEAGE_GRAPH_POLICY = PROJECT_ROOT / "config" / "v27-data-lineage-graph-policy.json"
+DEFAULT_DETECTOR_SHADOW_CALIBRATION_POLICY = PROJECT_ROOT / "config" / "v27-detector-shadow-calibration-policy.json"
+DEFAULT_CAPACITY_LOAD_LATENCY_POLICY = PROJECT_ROOT / "config" / "v27-capacity-load-latency-policy.json"
+DEFAULT_OPERATOR_RUNTIME_SAFETY_POLICY = PROJECT_ROOT / "config" / "v27-operator-runtime-safety-policy.json"
+DEFAULT_REPLAY_BUILD_MODEL_POLICY = PROJECT_ROOT / "config" / "v27-replay-build-model-policy.json"
+DEFAULT_SPEC_GOVERNANCE_FEASIBILITY_POLICY = PROJECT_ROOT / "config" / "v27-spec-governance-feasibility-policy.json"
+DEFAULT_IDENTITY_UNIT_PROVIDER_FINALITY_POLICY = PROJECT_ROOT / "config" / "v27-identity-unit-provider-finality-policy.json"
+DEFAULT_EXECUTION_EXIT_SAFETY_POLICY = PROJECT_ROOT / "config" / "v27-execution-exit-safety-policy.json"
+DEFAULT_DELIVERY_TRACEABILITY_POLICY = PROJECT_ROOT / "config" / "v27-delivery-traceability-policy.json"
+DEFAULT_RELEASE_EXPERIMENT_SAFETY_POLICY = PROJECT_ROOT / "config" / "v27-release-experiment-safety-policy.json"
+DEFAULT_MARKOV_LIFECYCLE_FORECAST_POLICY = PROJECT_ROOT / "config" / "v27-markov-lifecycle-forecast-policy.json"
 DEFAULT_REASON_TAXONOMY_POLICY = PROJECT_ROOT / "config" / "v27-reason-taxonomy-policy.json"
 DEFAULT_SECURITY_SESSION_POLICY = PROJECT_ROOT / "config" / "v27-security-session-policy.json"
 DEFAULT_RUNTIME_PIPELINE_POLICY = PROJECT_ROOT / "config" / "v27-runtime-pipeline-policy.json"
@@ -69,6 +87,134 @@ SECRET_ACCESS_AUDIT_REQUIRED_FIELDS = (
     "access_reason",
     "audit_event_id",
     "accessed_at",
+)
+SECRETS_MANAGEMENT_REQUIRED_FIELDS = (
+    "secret_name",
+    "scope",
+    "rotation_interval_days",
+    "last_rotated_at",
+    "owner",
+    "leak_detected",
+    "revocation_status",
+    "environment_allowed",
+)
+SYSTEM_SLO_REQUIRED_FIELDS = (
+    "slo_id",
+    "metric_id",
+    "threshold_id",
+    "measured_value",
+    "status",
+    "severity",
+    "new_entry_action",
+    "exit_safety_action",
+)
+NO_TRADE_ROOT_CAUSE_REQUIRED_FIELDS = (
+    "root_cause_id",
+    "root_cause_code",
+    "d3a_candidate_count",
+    "fill_count",
+    "category",
+    "owner",
+    "remediation_action",
+    "metric_id",
+    "threshold_id",
+)
+RELEASE_COMPLEXITY_REQUIRED_FIELDS = (
+    "release_id",
+    "max_new_gates_per_release",
+    "new_gates",
+    "max_new_detectors_per_release",
+    "new_detectors",
+    "required_shadow_hours_before_gate",
+    "observed_shadow_hours",
+    "rollback_metric",
+    "status",
+    "metric_id",
+    "threshold_id",
+)
+BACKPRESSURE_POLICY_REQUIRED_FIELDS = (
+    "component",
+    "queue_depth",
+    "max_queue_depth",
+    "backpressure_action",
+    "drops_p0_p1_allowed",
+    "exit_safety_priority",
+    "metric_id",
+    "threshold_id",
+)
+BUDGET_RESERVE_REQUIRED_FIELDS = (
+    "reserve_id",
+    "budget_pool",
+    "reserved_for",
+    "reserved_amount",
+    "current_usage",
+    "hard_limit",
+    "priority_class",
+    "borrow_allowed",
+    "metric_id",
+    "threshold_id",
+)
+BLINDED_HOLDOUT_REQUIRED_FIELDS = (
+    "holdout_id",
+    "window_id",
+    "blinded",
+    "access_count",
+    "no_retune_enforced",
+    "contamination_status",
+    "promotion_evidence_allowed",
+    "metric_id",
+    "threshold_id",
+)
+MANUAL_OVERRIDE_REQUIRED_FIELDS = (
+    "override_id",
+    "operator_id",
+    "action",
+    "quarantine_required",
+    "promotion_evidence_allowed",
+    "training_allowed",
+    "audit_event_id",
+    "approval_status",
+    "metric_id",
+    "threshold_id",
+)
+CONTRACT_TEST_SUITE_REQUIRED_FIELDS = (
+    "suite_id",
+    "contract_id",
+    "test_command",
+    "pass_fail",
+    "coverage_class",
+    "evidence_hash",
+    "metric_id",
+    "threshold_id",
+)
+ADVERSARIAL_REPLAY_SUITE_REQUIRED_FIELDS = (
+    "replay_id",
+    "scenario",
+    "expected_action",
+    "observed_action",
+    "machine_checked",
+    "pass_fail",
+    "criticality",
+    "metric_id",
+    "threshold_id",
+)
+MARKOV_CENSORING_POLICY_REQUIRED_FIELDS = (
+    "censoring_policy_version",
+    "outcome_status",
+    "censoring_reason",
+    "training_weight_policy",
+)
+MARKOV_WALK_FORWARD_REQUIRED_FIELDS = (
+    "validation_id",
+    "cutoff_seq",
+    "train_window_id",
+    "no_lookahead_proof",
+)
+MARKOV_HMM_BOUNDARY_REQUIRED_FIELDS = (
+    "artifact_id",
+    "research_only",
+    "online_filtering_only",
+    "full_sequence_viterbi_allowed",
 )
 TELEGRAM_SESSION_SECURITY_REQUIRED_FIELDS = (
     "session_id",
@@ -225,6 +371,1112 @@ NUMERIC_PRECISION_ROUNDING = {
     "ROUND_HALF_UP": ROUND_HALF_UP,
 }
 NUMERIC_PRECISION_OVERFLOW_POLICIES = {"reject", "fail_closed"}
+METRIC_DEFINITION_REQUIRED_FIELDS = (
+    "metric_id",
+    "metric_name",
+    "formula",
+    "numerator_definition",
+    "denominator_definition",
+    "window_id",
+    "event_time_basis",
+    "inclusion_criteria",
+    "exclusion_criteria",
+    "late_event_policy",
+    "partial_window_policy",
+    "unit",
+    "owner",
+    "spec_section_id",
+    "metric_version",
+    "metric_hash",
+)
+METRIC_EVENT_TIME_BASIS = {
+    "decision_available_at",
+    "matrix_build_cutoff_seq",
+    "position_closed_at",
+    "simulated_fill_ts",
+    "snapshot_collected_at",
+}
+THRESHOLD_CATALOG_REQUIRED_FIELDS = (
+    "threshold_id",
+    "threshold_name",
+    "threshold_value",
+    "unit",
+    "comparison_operator",
+    "scope",
+    "applies_to_metric",
+    "applies_to_mode",
+    "owner",
+    "source_spec_section_id",
+    "policy_bundle_id",
+    "effective_from",
+    "effective_to",
+    "change_reason",
+    "approval_id",
+    "threshold_hash",
+)
+THRESHOLD_COMPARISON_OPERATORS = {">=", ">", "<=", "<", "==", "!="}
+THRESHOLD_ALLOWED_MODES = {"observe_only", "shadow", "ultra_tiny", "normal_tiny", "all_modes"}
+RUNTIME_CONFIG_DRIFT_REQUIRED_FIELDS = (
+    "runtime_config_hash",
+    "env_vars_hash",
+    "feature_flags_hash",
+    "provider_config_hash",
+    "route_registry_hash",
+    "source_registry_hash",
+    "threshold_catalog_hash",
+    "metric_registry_hash",
+    "policy_bundle_hash",
+    "loaded_at",
+    "expected_hash",
+    "drift_detected",
+    "drift_action",
+)
+RUNTIME_CONFIG_DRIFT_ACTIONS = {
+    "block_new_promotion_and_revalidate_before_execution",
+    "shadow_only",
+    "global_circuit_breaker",
+}
+ENVIRONMENT_SEPARATION_REQUIRED_FIELDS = (
+    "environment_id",
+    "environment_type",
+    "allowed_event_logs",
+    "allowed_databases",
+    "allowed_provider_keys",
+    "allowed_routes",
+    "allowed_modes",
+    "write_permissions",
+    "read_permissions",
+    "data_export_allowed",
+    "promotion_allowed",
+    "environment_hash",
+)
+ENVIRONMENT_TYPES = {
+    "local_dev",
+    "research",
+    "shadow",
+    "paper",
+    "backfill_research",
+    "dashboard_readonly",
+    "operator_admin",
+    "live_prohibited",
+}
+NULL_VALUE_POLICY_REQUIRED_FIELDS = (
+    "field_name",
+    "null_class",
+    "allowed_in_modes",
+    "default_value_allowed",
+    "imputation_policy",
+    "training_allowed",
+    "decision_allowed",
+    "dashboard_display",
+    "owner",
+    "policy_version",
+    "policy_hash",
+)
+NULL_VALUE_CLASSES = {
+    "missing_not_observed",
+    "not_applicable",
+    "provider_unknown",
+    "parse_failed",
+    "delayed_unavailable",
+    "redacted",
+    "invalid",
+    "true_zero",
+}
+REQUIRED_NULL_POLICY_FIELDS = {
+    "critical_risk_status",
+    "entry_quote_price",
+    "exit_quote_price",
+    "reference_price",
+    "token_identity_confidence",
+    "feature_available_at",
+    "gmgn_risk_status",
+}
+FEATURE_AVAILABILITY_REQUIRED_FIELDS = (
+    "feature_name",
+    "feature_window_start",
+    "feature_window_end",
+    "feature_available_at",
+    "decision_available_at",
+    "label_available_at",
+    "feature_source",
+    "feature_research_only",
+    "null_policy_field",
+    "availability_hash",
+)
+FEATURE_VECTOR_SNAPSHOT_REQUIRED_FIELDS = (
+    "feature_vector_hash",
+    "feature_names_ordered",
+    "feature_values_serialized",
+    "missing_value_policy",
+    "normalization_version",
+    "model_input_schema_version",
+    "decision_ts",
+    "feature_available_at_map",
+    "source_lineage_node_ids",
+)
+TRAINING_DATASET_MANIFEST_REQUIRED_FIELDS = (
+    "dataset_id",
+    "event_log_hash_range",
+    "included_sample_ids",
+    "excluded_sample_ids",
+    "exclusion_reasons",
+    "label_versions",
+    "feature_versions",
+    "observation_weights_hash",
+    "created_at",
+    "build_hash",
+    "spec_hash",
+    "metric_registry_hash",
+    "threshold_catalog_hash",
+    "manifest_hash",
+)
+DATA_LINEAGE_NODE_REQUIRED_FIELDS = (
+    "lineage_node_id",
+    "node_type",
+    "source_id",
+    "source_hash",
+    "parent_node_ids",
+    "edge_type",
+    "created_at",
+    "environment_id",
+    "spec_hash",
+    "build_hash",
+    "lineage_hash",
+)
+REQUIRED_DATA_LINEAGE_NODE_TYPES = {
+    "raw_telegram_message",
+    "parsed_signal",
+    "token_identity",
+    "quote_event",
+    "feature_snapshot",
+    "feature_vector",
+    "forecast",
+    "decision",
+    "execution_event",
+    "ledger_event",
+    "outcome_label",
+    "metric_value",
+    "dashboard_panel",
+    "training_dataset_manifest",
+}
+DETECTOR_SHADOW_REQUIRED_FIELDS = (
+    "detector_id",
+    "contract_id",
+    "detector_name",
+    "detector_version",
+    "detector_output_states",
+    "allowed_modes",
+    "gate_allowed",
+    "threshold_ids",
+    "metric_ids",
+    "required_feature_available_at_fields",
+    "feature_available_at_required",
+    "source_event_type",
+    "failure_action",
+    "detector_hash",
+)
+DETECTOR_CALIBRATION_REQUIRED_FIELDS = (
+    "calibration_id",
+    "detector_id",
+    "metric_id",
+    "threshold_id",
+    "window_id",
+    "sample_n",
+    "observed_value",
+    "comparison_operator",
+    "threshold_value",
+    "calibration_status",
+    "promotion_allowed",
+    "contaminated_sample_count",
+    "checked_at",
+    "calibration_hash",
+)
+DETECTOR_SHADOW_CONTRACTS = {
+    "reclaim_detector": {
+        "contract_id": "ReclaimDetector",
+        "required_outputs": {
+            "RECLAIM_FORMING_OBSERVED",
+            "RECLAIM_CONFIRMED_OBSERVED",
+            "RECLAIM_FAILED_OBSERVED",
+        },
+        "blocking_reason": "reclaim_detector_missing_malformed_or_unsafe",
+    },
+    "overextension_detector": {
+        "contract_id": "OverextensionDetector",
+        "required_outputs": {
+            "OVEREXTENDED_OBSERVED",
+            "NOT_OVEREXTENDED_OBSERVED",
+            "LATE_CLEAN_NOT_ACTIONABLE",
+        },
+        "blocking_reason": "overextension_detector_missing_malformed_or_unsafe",
+    },
+}
+DETECTOR_CALIBRATION_STATUSES = {"shadow_healthy", "shadow_insufficient", "shadow_failed"}
+CAPACITY_PLAN_REQUIRED_FIELDS = (
+    "capacity_plan_id",
+    "component",
+    "expected_peak_qps",
+    "measured_peak_qps",
+    "p95_latency_budget_ms",
+    "p99_latency_budget_ms",
+    "queue_depth_limit",
+    "headroom_pct",
+    "degradation_threshold",
+    "owner",
+    "last_verified_at",
+    "metric_id",
+    "threshold_id",
+    "protects_priorities",
+    "exit_safety_reserved",
+    "capacity_hash",
+)
+LOAD_TEST_REPLAY_REQUIRED_FIELDS = (
+    "load_test_id",
+    "event_log_hash",
+    "replay_speed_multiplier",
+    "synthetic_burst_profile",
+    "components_under_test",
+    "expected_invariants",
+    "observed_invariants",
+    "pass_fail",
+    "run_at",
+    "build_hash",
+    "runtime_config_hash",
+    "metric_id",
+    "threshold_id",
+    "load_test_hash",
+)
+LATENCY_ATTRIBUTION_REQUIRED_FIELDS = (
+    "token_lifecycle_key",
+    "signal_seen_at",
+    "signal_available_at",
+    "pool_resolved_available_at",
+    "quote_available_at",
+    "risk_available_at",
+    "reclaim_available_at",
+    "decision_started_at",
+    "decision_available_at",
+    "queued_at",
+    "claimed_at",
+    "quote_refreshed_at",
+    "simulated_fill_ts",
+    "peak_ts",
+    "latency_class",
+    "latency_ms",
+    "blocking_component",
+    "owner",
+    "metric_id",
+    "threshold_id",
+    "latency_hash",
+)
+PROVIDER_QUOTA_ISOLATION_REQUIRED_FIELDS = (
+    "provider",
+    "budget_pool",
+    "priority_order",
+    "quota_limit_per_min",
+    "current_usage_per_min",
+    "exit_safety_reserved_pct",
+    "shadow_polling_limit_per_min",
+    "quota_isolation_status",
+    "metric_id",
+    "threshold_id",
+    "quota_hash",
+)
+ECONOMIC_COST_BUDGET_REQUIRED_FIELDS = (
+    "budget_id",
+    "budget_pool",
+    "owner",
+    "reserved_for",
+    "soft_limit",
+    "hard_limit",
+    "current_usage",
+    "measurement_window_ms",
+    "exit_safety_reserved",
+    "metric_id",
+    "threshold_id",
+    "budget_hash",
+)
+REQUIRED_CAPACITY_COMPONENTS = {
+    "telegram_ingest",
+    "quote_polling",
+    "risk_fetch",
+    "event_log_write",
+    "outbox_publish",
+    "projection_consumer",
+    "read_model_update",
+    "forecast_builder",
+    "decision_arbiter",
+    "entry_executor",
+    "exit_executor",
+    "dashboard_query",
+    "alert_delivery",
+}
+REQUIRED_LOAD_TEST_SCENARIOS = {
+    "telegram_burst",
+    "quote_provider_slow",
+    "provider_429",
+    "dlq_poison_event",
+    "projection_lag",
+    "read_model_lag",
+    "exit_queue_burst",
+    "outbox_lag",
+    "worker_crash_during_entry",
+    "worker_crash_during_exit",
+}
+LATENCY_CLASSES = {
+    "source_latency",
+    "ingestion_latency",
+    "parse_latency",
+    "pool_resolution_latency",
+    "provider_quote_latency",
+    "risk_provider_latency",
+    "read_model_latency",
+    "forecast_latency",
+    "decision_latency",
+    "queue_latency",
+    "execution_latency",
+    "projection_latency",
+    "dashboard_latency",
+}
+OPERATOR_AUDIT_REQUIRED_FIELDS = (
+    "audit_event_id",
+    "operator_id",
+    "action",
+    "before_value",
+    "after_value",
+    "reason",
+    "ticket_or_experiment_id",
+    "timestamp",
+    "approval_required",
+    "approval_status",
+    "environment_id",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "operator_audit_hash",
+)
+OPERATOR_SAFETY_REQUIRED_FIELDS = (
+    "safety_check_id",
+    "operator_id",
+    "action",
+    "danger_level",
+    "environment_id",
+    "dashboard_freshness_ok",
+    "required_runbook_ack",
+    "required_second_approval",
+    "cooldown_ok",
+    "blast_radius_preview",
+    "confirmation_phrase_required",
+    "operator_safety_status",
+    "audit_event_id",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "safety_hash",
+)
+OWNERSHIP_ONCALL_REQUIRED_FIELDS = (
+    "component",
+    "owner",
+    "oncall_primary",
+    "oncall_secondary",
+    "escalation_path",
+    "runbook_url",
+    "ack_sla_minutes",
+    "resolution_sla_minutes",
+    "last_reviewed_at",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "ownership_hash",
+)
+ALERT_POLICY_REQUIRED_FIELDS = (
+    "alert_id",
+    "severity",
+    "trigger_condition",
+    "auto_action",
+    "owner_component",
+    "runbook_id",
+    "notification_channel_id",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "alert_hash",
+)
+ALERT_ACK_ESCALATION_REQUIRED_FIELDS = (
+    "alert_instance_id",
+    "alert_id",
+    "severity",
+    "created_at",
+    "ack_required_by",
+    "acked_at",
+    "acked_by",
+    "escalation_target",
+    "escalation_level",
+    "auto_action_taken",
+    "resolved_at",
+    "resolution_note",
+    "ack_sla_met",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "alert_ack_hash",
+)
+KILL_SWITCH_DRILL_REQUIRED_FIELDS = (
+    "drill_id",
+    "kill_switch_type",
+    "target_scope",
+    "initiated_by",
+    "started_at",
+    "completed_at",
+    "expected_effect",
+    "observed_effect",
+    "open_positions_policy_checked",
+    "exit_safety_preserved",
+    "new_entry_blocked",
+    "recovery_steps_verified",
+    "pass_fail",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "evidence_hash",
+)
+OPERATOR_DANGER_LEVELS = {"read", "mutation", "admin_mutation", "critical"}
+OPERATOR_SAFETY_STATUSES = {"safe", "rejected_safe"}
+REQUIRED_OWNERSHIP_COMPONENTS = {
+    "event_log",
+    "outbox",
+    "dlq",
+    "projection",
+    "read_model",
+    "dashboard",
+    "entry_executor",
+    "exit_executor",
+    "position_ledger",
+    "capital_ledger",
+    "provider_quota",
+    "source_registry",
+    "route_registry",
+    "metric_registry",
+    "threshold_catalog",
+    "runtime_config",
+    "paper_live_safety",
+    "holdout",
+    "operator_access",
+}
+REQUIRED_ALERT_IDS = {
+    "global_circuit_breaker_triggered",
+    "duplicate_execution_detected",
+    "stale_state_execution_detected",
+    "paper_live_boundary_breach",
+    "outbox_stuck_critical",
+    "DLQ_critical_unresolved",
+    "projection_ordering_critical",
+    "read_model_stale_critical",
+    "canonical_spec_hash_mismatch",
+    "metric_registry_critical_mismatch",
+    "threshold_catalog_critical_mismatch",
+    "runtime_config_unauthorized_drift",
+    "environment_contamination_critical",
+    "operator_unsafe_override_critical",
+    "kill_switch_failed",
+    "no_trade_2h_with_D3a_candidates",
+    "fast_lane_p1_sla_breach",
+    "capacity_headroom_low",
+    "load_test_replay_failed",
+    "latency_attribution_spike",
+}
+REQUIRED_KILL_SWITCH_TYPES = {
+    "global_circuit_breaker",
+    "route_kill_switch",
+    "source_kill_switch",
+    "provider_kill_switch",
+    "model_kill_switch",
+    "feature_flag_rollback",
+    "paper_live_safety_breaker",
+    "entry_disable_exit_only",
+}
+REPLAY_DETERMINISM_REQUIRED_FIELDS = (
+    "replay_check_id",
+    "event_log_hash",
+    "policy_manifest_hash",
+    "model_snapshot_id",
+    "threshold_catalog_hash",
+    "metric_registry_hash",
+    "runtime_config_hash",
+    "feature_code_version",
+    "build_hash",
+    "spec_hash",
+    "decision_hash",
+    "forecast_hash",
+    "outcome_hash",
+    "ledger_hash",
+    "feature_vector_hash",
+    "pass_fail",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "replay_hash",
+)
+REPRODUCIBLE_BUILD_REQUIRED_FIELDS = (
+    "build_id",
+    "code_commit_hash",
+    "dependency_lock_hash",
+    "runtime_version",
+    "container_image_hash",
+    "feature_code_hash",
+    "model_code_hash",
+    "build_created_at",
+    "reproducible_build_hash",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+)
+SUPPLY_CHAIN_ARTIFACT_REQUIRED_FIELDS = (
+    "artifact_id",
+    "artifact_type",
+    "code_commit_hash",
+    "dependency_lock_hash",
+    "container_image_hash",
+    "signature_status",
+    "SBOM_hash",
+    "vulnerability_scan_status",
+    "provenance_attestation",
+    "approved_builder",
+    "created_at",
+    "promoted_by",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "artifact_hash",
+)
+POLICY_BUNDLE_COMPATIBILITY_REQUIRED_FIELDS = (
+    "policy_bundle_id",
+    "model_snapshot_id",
+    "state_definition_version",
+    "feature_schema_version",
+    "label_contract_version",
+    "source_dog_label_version",
+    "trade_outcome_label_version",
+    "reference_price_version",
+    "stop_contract_version",
+    "threshold_version",
+    "metric_registry_version",
+    "exit_policy_version",
+    "runtime_config_version",
+    "compatibility_status",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "compatibility_hash",
+)
+MODEL_EXPIRY_REQUIRED_FIELDS = (
+    "model_snapshot_id",
+    "trained_until",
+    "max_age_minutes",
+    "min_recent_samples",
+    "recent_sample_count",
+    "expiry_ts",
+    "checked_at",
+    "expired_action_cap",
+    "model_expiry_status",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "model_expiry_hash",
+)
+FORECAST_SANITY_REQUIRED_FIELDS = (
+    "forecast_id",
+    "model_snapshot_id",
+    "raw_forecast",
+    "sanitized_forecast",
+    "sanity_cap_reason",
+    "forecast_sanity_version",
+    "threshold_id",
+    "metric_id",
+    "feature_vector_hash",
+    "sample_n",
+    "fallback_level",
+    "calibration_bucket_status",
+    "data_quality_score",
+    "forecast_sanity_status",
+    "observed_value",
+    "forecast_sanity_hash",
+)
+SUPPLY_CHAIN_ARTIFACT_TYPES = {
+    "code",
+    "container",
+    "dependency_lock",
+    "model_snapshot",
+    "policy_bundle",
+    "feature_binary",
+    "dashboard_bundle",
+}
+MODEL_EXPIRED_ACTION_CAPS = {"shadow", "ultra_tiny"}
+RENDERED_SPEC_VIEW_REQUIRED_FIELDS = (
+    "rendered_view_id",
+    "source_spec_hash",
+    "rendered_doc_hash",
+    "renderer_version",
+    "rendered_at",
+    "section_count",
+    "missing_section_ids",
+    "extra_section_ids",
+    "render_validation_status",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "view_hash",
+)
+HEALTH_STATE_REQUIRED_FIELDS = (
+    "health_component",
+    "health_state",
+    "state_reason",
+    "severity",
+    "first_seen_at",
+    "last_seen_at",
+    "blocking_modes",
+    "recovery_condition",
+    "source_event_id",
+    "owner",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "health_hash",
+)
+CONTRACT_LIFECYCLE_REQUIRED_FIELDS = (
+    "contract_id",
+    "contract_version",
+    "status",
+    "introduced_in_version",
+    "deprecated_in_version",
+    "superseded_by",
+    "allowed_modes",
+    "migration_required",
+    "backfill_required",
+    "owner",
+    "sunset_deadline",
+    "contract_tests_status",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "lifecycle_hash",
+)
+OBJECTIVE_PRIORITY_REQUIRED_FIELDS = (
+    "objective_conflict_id",
+    "conflicting_objectives",
+    "chosen_objective",
+    "priority_rank",
+    "reason",
+    "policy_version",
+    "operator_override_allowed",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "conflict_hash",
+)
+GOAL_CONFIDENCE_REQUIRED_FIELDS = (
+    "metric_id",
+    "metric_name",
+    "numerator",
+    "denominator",
+    "min_denominator",
+    "point_estimate",
+    "wilson_lower_bound",
+    "beta_posterior_lower_bound",
+    "status",
+    "metric_version",
+    "window_id",
+    "threshold_id",
+    "observed_value",
+    "confidence_hash",
+)
+FILL_TIME_ANCHOR_REQUIRED_FIELDS = (
+    "anchor_id",
+    "decision_ts",
+    "decision_available_at",
+    "quote_ts",
+    "entry_quote_at_decision_ts",
+    "simulated_fill_ts",
+    "position_open_confirmed_ts",
+    "fill_time_anchor_type",
+    "latency_components",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "anchor_hash",
+)
+EX_ANTE_POSTHOC_FEASIBILITY_REQUIRED_FIELDS = (
+    "feasibility_id",
+    "ex_ante_feasible",
+    "posthoc_feasible",
+    "feasibility_class",
+    "feasibility_policy_version",
+    "system_min_decision_latency_sec",
+    "system_min_entry_latency_sec",
+    "feature_available_at",
+    "decision_ts",
+    "earliest_actionable_ts",
+    "peak_ts",
+    "used_future_peak_in_ex_ante",
+    "ex_ante_source_fields",
+    "required_inputs_available_at",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "feasibility_hash",
+)
+HEALTH_STATE_ENUM_VALUES = {
+    "HEALTHY",
+    "WARN",
+    "DEGRADED",
+    "STALE",
+    "DIRTY",
+    "UNAVAILABLE",
+    "BLOCKED",
+    "FATAL",
+    "UNKNOWN",
+}
+CONTRACT_LIFECYCLE_STATUSES = {
+    "draft",
+    "research_only",
+    "shadow_only",
+    "gating_candidate",
+    "active_gate",
+    "deprecated",
+    "retired",
+}
+OBJECTIVE_PRIORITY_RANKS = {
+    "paper_live_safety": 1,
+    "exit_safety": 2,
+    "ledger_capital_correctness": 3,
+    "data_spec_truth": 4,
+    "no_duplicate_stale_execution": 5,
+    "capture_quality": 6,
+    "net_ev": 7,
+    "exploration_learning": 8,
+    "dashboard_convenience": 9,
+    "roi_expansion": 10,
+}
+FEASIBILITY_CLASSES = {
+    "physically_capturable",
+    "latency_impossible",
+    "provider_impossible",
+    "reclaim_confirm_too_late",
+    "quote_clean_after_peak",
+    "telegram_signal_after_peak",
+    "pool_resolution_after_peak",
+    "risk_available_after_peak",
+}
+FORBIDDEN_EX_ANTE_FIELDS = {
+    "future_peak_ts",
+    "future_outcome",
+    "future_clean_quote",
+    "future_liquidity_recovery",
+    "posthoc_label",
+}
+SPEC_GOVERNANCE_FEASIBILITY_CONTRACTS = {
+    "RenderedSpecViewContract",
+    "HealthStateEnumContract",
+    "ContractLifecycleContract",
+    "ObjectivePriorityContract",
+    "GoalConfidenceContract",
+    "FillTimeAnchorContract",
+    "ExAnteVsPosthocFeasibilityContract",
+}
+TOKEN_IDENTITY_REQUIRED_FIELDS = (
+    "identity_id",
+    "chain",
+    "token_ca",
+    "normalized_ca",
+    "checksum",
+    "symbol",
+    "symbol_conflict_count",
+    "pool_address",
+    "pool_authority",
+    "quote_mint",
+    "liquidity_pair_valid",
+    "identity_confidence",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "identity_hash",
+)
+DATA_UNIT_REQUIRED_FIELDS = (
+    "unit_id",
+    "token_decimals",
+    "quote_mint",
+    "quote_decimals",
+    "price_unit",
+    "liquidity_unit",
+    "market_cap_unit",
+    "quote_size_sol",
+    "normalized_price",
+    "unit_validation_status",
+    "unit_conversion_version",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "unit_hash",
+)
+CHAIN_FINALITY_REQUIRED_FIELDS = (
+    "finality_id",
+    "chain",
+    "slot",
+    "block_time",
+    "commitment_level",
+    "finalized_at",
+    "rpc_provider",
+    "rpc_consistency_check",
+    "indexer_lag_sec",
+    "chain_reorg_detected",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "finality_hash",
+)
+PROVIDER_SCHEMA_REQUIRED_FIELDS = (
+    "provider_name",
+    "schema_version",
+    "required_fields",
+    "optional_fields",
+    "field_type_contract",
+    "canary_parse_result",
+    "schema_drift_detected",
+    "last_schema_check_at",
+    "missing_required_field_rate",
+    "field_type_error_rate",
+    "unexpected_enum_rate",
+    "null_spike_rate",
+    "value_range_anomaly",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "schema_hash",
+)
+IDENTITY_UNIT_PROVIDER_FINALITY_CONTRACTS = {
+    "TokenIdentityContract",
+    "DataUnitContract",
+    "ChainFinalityContract",
+    "ProviderSchemaContract",
+}
+FINALITY_COMMITMENT_ORDER = {
+    "processed": 1,
+    "confirmed": 2,
+    "finalized": 3,
+}
+LIFECYCLE_STATE_MACHINE_REQUIRED_FIELDS = (
+    "state_machine_id",
+    "states",
+    "allowed_transitions",
+    "terminal_states",
+    "current_state",
+    "state_version_fencing_required",
+    "entry_gate_requires_module_closure",
+    "invalid_transition_action",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "state_machine_hash",
+)
+EXIT_EXECUTION_STATE_MACHINE_REQUIRED_FIELDS = (
+    "exit_state_machine_id",
+    "states",
+    "allowed_transitions",
+    "terminal_states",
+    "open_position_state",
+    "exit_quote_required",
+    "lease_fencing_required",
+    "state_revalidation_required",
+    "exit_safety_preserved",
+    "failure_events",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "exit_state_machine_hash",
+)
+EXIT_POLICY_REQUIRED_FIELDS = (
+    "exit_policy_id",
+    "exit_policy_version",
+    "applies_to_modes",
+    "take_profit_rules",
+    "stop_loss_rules",
+    "time_stop_rules",
+    "entry_outcome_separation",
+    "effective_from",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "exit_policy_hash",
+)
+CIRCUIT_BREAKER_POSITION_POLICY_REQUIRED_FIELDS = (
+    "policy_id",
+    "trigger_events",
+    "new_entry_disabled",
+    "exit_safety_remains_active",
+    "open_position_policy",
+    "operator_ack_required",
+    "resume_condition",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "circuit_breaker_hash",
+)
+EMERGENCY_EXIT_JOURNAL_REQUIRED_FIELDS = (
+    "journal_id",
+    "journal_event_id",
+    "position_id",
+    "reason",
+    "initiated_at",
+    "completed_at",
+    "outcome",
+    "reconciled_to_ledger",
+    "journal_append_only",
+    "operator_audit_required",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "journal_hash",
+)
+EXIT_QUEUE_HEALTH_REQUIRED_FIELDS = (
+    "queue_id",
+    "exit_queue_status",
+    "oldest_open_exit_age_sec",
+    "max_allowed_open_exit_age_sec",
+    "stuck_open_position_count",
+    "exit_quote_failure_count",
+    "exit_state_machine_failure_count",
+    "exit_safety_budget_reserved",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "queue_health_hash",
+)
+EXECUTION_EXIT_SAFETY_CONTRACTS = {
+    "LifecycleStateMachineContract",
+    "ExitExecutionStateMachine",
+    "ExitPolicyContract",
+    "CircuitBreakerPositionPolicy",
+    "EmergencyExitJournal",
+    "ExitQueueHealthContract",
+}
+RECONCILIATION_POLICY_REQUIRED_FIELDS = (
+    "reconciliation_policy_id",
+    "mismatch_class",
+    "repair_class",
+    "auto_repair_allowed",
+    "manual_review_required",
+    "audit_required",
+    "dashboard_surface",
+    "promotion_evidence_allowed",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "reconciliation_hash",
+)
+DASHBOARD_STALENESS_REQUIRED_FIELDS = (
+    "panel_name",
+    "data_seq",
+    "event_log_latest_seq",
+    "panel_lag_sec",
+    "max_allowed_panel_lag_sec",
+    "stale_banner_required",
+    "last_refresh_at",
+    "staleness_threshold_id",
+    "operator_override_allowed",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "panel_hash",
+)
+SPEC_TRACEABILITY_MATRIX_REQUIRED_FIELDS = (
+    "traceability_id",
+    "contract_id",
+    "spec_section_id",
+    "requirement",
+    "implementation_module",
+    "test_file",
+    "dashboard_surface",
+    "rollout_flag",
+    "issue_id",
+    "status",
+    "metric_ids",
+    "threshold_ids",
+    "owner",
+    "traceability_hash",
+)
+IMPLEMENTATION_ISSUE_GRAPH_REQUIRED_FIELDS = (
+    "issue_id",
+    "spec_section_ids",
+    "dependency_ids",
+    "acceptance_tests",
+    "mode_readiness_target",
+    "owner",
+    "status",
+    "metric_ids",
+    "threshold_ids",
+    "issue_hash",
+)
+MODULE_CLOSURE_REQUIRED_FIELDS = (
+    "module_name",
+    "input_events",
+    "output_events",
+    "decision_fields",
+    "failure_events",
+    "outcome_metrics",
+    "governance_rules",
+    "dashboard_surface",
+    "kill_condition",
+    "contract_tests",
+    "owner",
+    "spec_section_ids",
+    "mode_readiness_target",
+    "runtime_config_keys",
+    "metric_ids",
+    "threshold_ids",
+    "module_closure_hash",
+)
+DECOMMISSION_POLICY_REQUIRED_FIELDS = (
+    "artifact_id",
+    "artifact_type",
+    "status",
+    "decommission_reason",
+    "deprecated_at",
+    "retired_at",
+    "replacement_artifact_id",
+    "allowed_historical_use",
+    "runtime_reference_allowed",
+    "training_reference_allowed",
+    "new_promotion_evidence_allowed",
+    "dashboard_display_policy",
+    "operator_audit_required",
+    "direct_entry_allowed",
+    "owner",
+    "metric_id",
+    "threshold_id",
+    "observed_value",
+    "decommission_hash",
+)
+DELIVERY_TRACEABILITY_CONTRACTS = {
+    "ReconciliationPolicyContract",
+    "DashboardStalenessContract",
+    "SpecTraceabilityMatrix",
+    "ImplementationIssueGraphContract",
+    "ModuleClosureContract",
+    "DecommissionPolicyContract",
+}
+RELEASE_EXPERIMENT_SAFETY_CONTRACTS = {
+    "SecretsManagementContract",
+    "SystemSLO",
+    "NoTradeRootCause",
+    "ReleaseComplexityBudget",
+    "BackpressurePolicy",
+    "BudgetReserveContract",
+    "BlindedHoldoutContract",
+    "ManualOverrideContract",
+    "ContractTestSuite",
+    "AdversarialReplaySuite",
+}
 ACCESS_CONTROL_REQUIRED_FIELDS = (
     "endpoint",
     "required_role",
@@ -580,6 +1832,4441 @@ def _missing_required_fields(record, fields):
         if value is None or value == "" or value == [] or value == {}:
             missing.append(field)
     return missing
+
+
+def _hash_record_without(record, key):
+    if not isinstance(record, dict):
+        return None
+    reduced = {field: value for field, value in record.items() if field != key}
+    return _sha256_json(reduced)
+
+
+def _validate_registry_source_files(source_files):
+    source_checks = []
+    source_errors = []
+    source_files = source_files if isinstance(source_files, list) else []
+    for index, source in enumerate(source_files):
+        if not isinstance(source, dict):
+            source_errors.append({"index": index, "source_file": None, "reason": "source_record_not_object"})
+            continue
+        source_file = source.get("source_file")
+        source_anchor = source.get("source_anchor")
+        required_patterns = source.get("required_patterns") if isinstance(source.get("required_patterns"), list) else []
+        text, error = _read_project_text(source_file)
+        if error:
+            source_errors.append({"index": index, **error})
+            continue
+        missing_patterns = [str(pattern) for pattern in required_patterns if str(pattern) not in text]
+        anchor_present = bool(source_anchor and str(source_anchor) in text)
+        check = {
+            "source_file": source_file,
+            "source_anchor": source_anchor,
+            "anchor_present": anchor_present,
+            "required_pattern_count": len(required_patterns),
+            "missing_patterns": missing_patterns,
+        }
+        source_checks.append(check)
+        if not anchor_present or missing_patterns:
+            source_errors.append({"index": index, "source_file": source_file, "reason": "source_anchor_or_pattern_missing", **check})
+    return source_checks, source_errors
+
+
+def _scan_threshold_hardcode_guard(guard):
+    guard = guard if isinstance(guard, dict) else {}
+    guard_id = str(guard.get("guard_id") or "")
+    protected_source_files = guard.get("protected_source_files") if isinstance(guard.get("protected_source_files"), list) else []
+    forbidden_patterns = guard.get("forbidden_literal_patterns") if isinstance(guard.get("forbidden_literal_patterns"), list) else []
+    malformed_patterns = []
+    source_errors = []
+    violations = []
+    for index, pattern in enumerate(forbidden_patterns):
+        if not isinstance(pattern, dict):
+            malformed_patterns.append({"index": index, "literal": None, "reason": "pattern_not_object"})
+            continue
+        literal = str(pattern.get("literal") or "")
+        threshold_id = str(pattern.get("threshold_id") or "")
+        if not literal or not threshold_id:
+            malformed_patterns.append({"index": index, "literal": literal or None, "reason": "literal_and_threshold_id_required"})
+
+    valid_patterns = [pattern for pattern in forbidden_patterns if isinstance(pattern, dict) and pattern.get("literal") and pattern.get("threshold_id")]
+    for source_file in protected_source_files:
+        text, error = _read_project_text(source_file)
+        if error:
+            source_errors.append(error)
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for pattern in valid_patterns:
+                literal = str(pattern.get("literal"))
+                if literal in line:
+                    violations.append(
+                        {
+                            "source_file": source_file,
+                            "line": line_number,
+                            "literal": literal,
+                            "threshold_id": str(pattern.get("threshold_id")),
+                            "reason": str(pattern.get("reason") or "threshold_literal_must_come_from_catalog"),
+                        }
+                    )
+    evidence = {
+        "guard_id": guard_id,
+        "protected_source_files": protected_source_files,
+        "forbidden_literal_count": len(forbidden_patterns),
+        "malformed_patterns": malformed_patterns,
+        "violations": violations,
+        "source_errors": source_errors,
+    }
+    errors = []
+    if not guard_id:
+        errors.append("guard_id_required")
+    if not protected_source_files:
+        errors.append("protected_source_files_required")
+    if not forbidden_patterns:
+        errors.append("forbidden_literal_patterns_required")
+    if malformed_patterns:
+        errors.append("malformed_forbidden_literal_patterns")
+    if source_errors:
+        errors.append("guard_source_missing")
+    if violations:
+        errors.append("hardcoded_threshold_literal_detected")
+    return evidence, sorted(set(errors))
+
+
+def verify_metric_definition_registry(registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY):
+    try:
+        registry = _load_json(registry_path)
+    except Exception as exc:
+        return _contract("MetricDefinitionRegistry", False, "metric_definition_registry_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(registry, dict):
+        return _contract("MetricDefinitionRegistry", False, "metric_definition_registry_not_object", {"registry_path": str(registry_path)})
+
+    metrics = registry.get("metrics") if isinstance(registry.get("metrics"), list) else []
+    malformed_metrics = []
+    duplicate_metric_ids = []
+    metric_records = {}
+    seen_metric_ids = set()
+    for index, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            malformed_metrics.append({"index": index, "metric_id": None, "missing_fields": list(METRIC_DEFINITION_REQUIRED_FIELDS), "violations": ["metric_not_object"]})
+            continue
+        metric_id = str(metric.get("metric_id") or "")
+        missing = _missing_required_fields(metric, METRIC_DEFINITION_REQUIRED_FIELDS)
+        violations = []
+        if metric_id in seen_metric_ids:
+            duplicate_metric_ids.append(metric_id)
+        if metric_id:
+            seen_metric_ids.add(metric_id)
+            metric_records[metric_id] = metric
+        if metric_id and not re.match(r"^[a-z][a-z0-9_]*$", metric_id):
+            violations.append("metric_id_must_be_lower_snake_case")
+        if str(metric.get("metric_name") or "").strip() == "":
+            violations.append("metric_name_required")
+        event_time_basis = str(metric.get("event_time_basis") or "")
+        if event_time_basis not in METRIC_EVENT_TIME_BASIS:
+            violations.append("event_time_basis_not_allowed")
+        for field_name in ("inclusion_criteria", "exclusion_criteria"):
+            if not isinstance(metric.get(field_name), list) or not metric.get(field_name):
+                violations.append(f"{field_name}_must_be_nonempty_list")
+        if str(metric.get("late_event_policy") or "").strip() == "":
+            violations.append("late_event_policy_required")
+        if str(metric.get("partial_window_policy") or "").strip() == "":
+            violations.append("partial_window_policy_required")
+        if str(metric.get("metric_version") or "").strip() == "":
+            violations.append("metric_version_required")
+        metric_hash = str(metric.get("metric_hash") or "")
+        expected_metric_hash = _hash_record_without(metric, "metric_hash") if metric_id else None
+        if metric_hash and expected_metric_hash and metric_hash != expected_metric_hash:
+            violations.append("metric_hash_mismatch")
+        if missing or violations:
+            malformed_metrics.append({"index": index, "metric_id": metric_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_metrics = sorted(
+        {
+            "telegram_capture_rate_d3a",
+            "telegram_capture_rate_d3b",
+            "entered_net_delayed_executable_peak30_rate",
+            "telegram_realized_roi_24h",
+            "filesystem_free_bytes",
+            "p_absorb_peak30",
+            "p_absorb_stop_before_peak",
+            "reclaim_confirmed_precision_for_peak30",
+            "overextended_false_negative_peak30_rate",
+            "capacity_headroom_pct",
+            "load_test_replay_pass_rate",
+            "latency_sla_breach_rate",
+            "provider_quota_exit_reserve_pct",
+            "economic_cost_budget_utilization",
+            "operator_audit_completeness_rate",
+            "operator_safety_reject_count",
+            "oncall_coverage_rate",
+            "alert_policy_coverage_rate",
+            "alert_ack_sla_rate",
+            "kill_switch_drill_pass_rate",
+            "replay_determinism_pass_rate",
+            "reproducible_build_hash_coverage_rate",
+            "supply_chain_artifact_verified_rate",
+            "policy_bundle_compatibility_rate",
+            "model_not_expired_rate",
+            "forecast_sanity_guard_pass_rate",
+            "rendered_spec_view_valid_rate",
+            "health_state_enum_valid_rate",
+            "contract_lifecycle_active_gate_coverage_rate",
+            "objective_priority_conflict_resolution_rate",
+            "goal_confidence_lower_bound",
+            "fill_time_anchor_valid_rate",
+            "ex_ante_feasibility_valid_rate",
+            "token_identity_confidence_min",
+            "data_unit_validation_rate",
+            "chain_finality_health_rate",
+            "provider_schema_canary_pass_rate",
+            "reconciliation_policy_safe_rate",
+            "dashboard_staleness_safe_rate",
+            "spec_traceability_valid_rate",
+            "implementation_issue_graph_valid_rate",
+            "module_closure_valid_rate",
+            "decommission_policy_safe_rate",
+        }
+        - set(metric_records)
+    )
+
+    source_checks, source_errors = _validate_registry_source_files(registry.get("source_files"))
+    passed = (
+        registry.get("schema_version") == "v2.7.0.metric_definition_registry.v1"
+        and registry.get("failure_action") == "metric_invalid"
+        and bool(metrics)
+        and not malformed_metrics
+        and not duplicate_metric_ids
+        and not missing_required_metrics
+        and not source_errors
+    )
+    return _contract(
+        "MetricDefinitionRegistry",
+        passed,
+        "metric_definition_registry_missing_malformed_or_drifted",
+        {
+            "registry_path": str(registry_path),
+            "schema_version": registry.get("schema_version"),
+            "scope": registry.get("scope"),
+            "failure_action": registry.get("failure_action"),
+            "required_fields": list(METRIC_DEFINITION_REQUIRED_FIELDS),
+            "metric_count": len(metrics),
+            "missing_required_metrics": missing_required_metrics,
+            "duplicate_metric_ids": sorted(str(item) for item in duplicate_metric_ids),
+            "malformed_metrics": malformed_metrics,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_threshold_catalog(threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG, metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY):
+    try:
+        catalog = _load_json(threshold_catalog_path)
+        metric_registry = _load_json(metric_registry_path)
+    except Exception as exc:
+        return _contract("ThresholdCatalogContract", False, "threshold_catalog_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(catalog, dict):
+        return _contract("ThresholdCatalogContract", False, "threshold_catalog_not_object", {"threshold_catalog_path": str(threshold_catalog_path)})
+    if not isinstance(metric_registry, dict):
+        return _contract("ThresholdCatalogContract", False, "metric_registry_not_object", {"metric_registry_path": str(metric_registry_path)})
+
+    metrics = metric_registry.get("metrics") if isinstance(metric_registry.get("metrics"), list) else []
+    metric_ids = {str(metric.get("metric_id") or "") for metric in metrics if isinstance(metric, dict) and metric.get("metric_id")}
+
+    thresholds = catalog.get("thresholds") if isinstance(catalog.get("thresholds"), list) else []
+    malformed_thresholds = []
+    duplicate_threshold_ids = []
+    threshold_records = {}
+    seen_threshold_ids = set()
+    for index, threshold in enumerate(thresholds):
+        if not isinstance(threshold, dict):
+            malformed_thresholds.append({"index": index, "threshold_id": None, "missing_fields": list(THRESHOLD_CATALOG_REQUIRED_FIELDS), "violations": ["threshold_not_object"]})
+            continue
+        threshold_id = str(threshold.get("threshold_id") or "")
+        missing = _missing_required_fields(threshold, THRESHOLD_CATALOG_REQUIRED_FIELDS)
+        violations = []
+        if threshold_id in seen_threshold_ids:
+            duplicate_threshold_ids.append(threshold_id)
+        if threshold_id:
+            seen_threshold_ids.add(threshold_id)
+            threshold_records[threshold_id] = threshold
+        if threshold_id and not re.match(r"^[a-z][a-z0-9_]*$", threshold_id):
+            violations.append("threshold_id_must_be_lower_snake_case")
+        if str(threshold.get("threshold_name") or "").strip() == "":
+            violations.append("threshold_name_required")
+        if str(threshold.get("unit") or "").strip() == "":
+            violations.append("threshold_unit_required")
+        if str(threshold.get("comparison_operator") or "") not in THRESHOLD_COMPARISON_OPERATORS:
+            violations.append("comparison_operator_not_allowed")
+        threshold_value = threshold.get("threshold_value")
+        try:
+            Decimal(str(threshold_value))
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("threshold_value_not_numeric")
+        applies_to_metric = str(threshold.get("applies_to_metric") or "")
+        if applies_to_metric not in metric_ids:
+            violations.append("applies_to_metric_unknown")
+        applies_to_mode = threshold.get("applies_to_mode")
+        if isinstance(applies_to_mode, list):
+            modes = [str(mode) for mode in applies_to_mode]
+        elif isinstance(applies_to_mode, str) and applies_to_mode:
+            modes = [applies_to_mode]
+        else:
+            modes = []
+        if not modes or any(mode not in THRESHOLD_ALLOWED_MODES for mode in modes):
+            violations.append("applies_to_mode_not_allowed")
+        if not _parse_iso_ts(threshold.get("effective_from")):
+            violations.append("effective_from_invalid")
+        if str(threshold.get("effective_to") or "").strip() != "open" and not _parse_iso_ts(threshold.get("effective_to")):
+            violations.append("effective_to_invalid")
+        if str(threshold.get("approval_id") or "").strip() == "":
+            violations.append("approval_id_required")
+        threshold_hash = str(threshold.get("threshold_hash") or "")
+        expected_threshold_hash = _hash_record_without(threshold, "threshold_hash") if threshold_id else None
+        if threshold_hash and expected_threshold_hash and threshold_hash != expected_threshold_hash:
+            violations.append("threshold_hash_mismatch")
+        if missing or violations:
+            malformed_thresholds.append({"index": index, "threshold_id": threshold_id or None, "missing_fields": missing, "violations": violations})
+
+    missing_required_thresholds = sorted(
+        {
+            "thr_capture_rate_d3a_24h_min",
+            "thr_capture_rate_d3b_24h_min",
+            "thr_entered_peak30_rate_24h_min",
+            "thr_realized_roi_24h_min",
+            "thr_filesystem_free_bytes_min",
+            "thr_p_absorb_peak30_shadow_min",
+            "thr_p_absorb_stop_before_peak_shadow_max",
+            "thr_reclaim_confirmed_precision_shadow_min",
+            "thr_overextended_false_negative_shadow_max",
+            "thr_capacity_headroom_pct_min",
+            "thr_load_test_replay_pass_rate_min",
+            "thr_latency_sla_breach_rate_max",
+            "thr_provider_quota_exit_reserve_pct_min",
+            "thr_economic_cost_budget_utilization_max",
+            "thr_operator_audit_completeness_rate_min",
+            "thr_operator_safety_reject_count_max",
+            "thr_oncall_coverage_rate_min",
+            "thr_alert_policy_coverage_rate_min",
+            "thr_alert_ack_sla_rate_min",
+            "thr_kill_switch_drill_pass_rate_min",
+            "thr_replay_determinism_pass_rate_min",
+            "thr_reproducible_build_hash_coverage_rate_min",
+            "thr_supply_chain_artifact_verified_rate_min",
+            "thr_policy_bundle_compatibility_rate_min",
+            "thr_model_not_expired_rate_min",
+            "thr_forecast_sanity_guard_pass_rate_min",
+            "thr_rendered_spec_view_valid_rate_min",
+            "thr_health_state_enum_valid_rate_min",
+            "thr_contract_lifecycle_active_gate_coverage_rate_min",
+            "thr_objective_priority_conflict_resolution_rate_min",
+            "thr_goal_confidence_lower_bound_min",
+            "thr_fill_time_anchor_valid_rate_min",
+            "thr_ex_ante_feasibility_valid_rate_min",
+            "thr_token_identity_confidence_min",
+            "thr_data_unit_validation_rate_min",
+            "thr_chain_finality_health_rate_min",
+            "thr_provider_schema_canary_pass_rate_min",
+            "thr_reconciliation_policy_safe_rate_min",
+            "thr_dashboard_staleness_safe_rate_min",
+            "thr_spec_traceability_valid_rate_min",
+            "thr_implementation_issue_graph_valid_rate_min",
+            "thr_module_closure_valid_rate_min",
+            "thr_decommission_policy_safe_rate_min",
+        }
+        - set(threshold_records)
+    )
+
+    hardcode_guard_evidence, hardcode_guard_errors = _scan_threshold_hardcode_guard(catalog.get("hardcoded_threshold_guard"))
+    source_checks, source_errors = _validate_registry_source_files(catalog.get("source_files"))
+    passed = (
+        catalog.get("schema_version") == "v2.7.0.threshold_catalog.v1"
+        and catalog.get("failure_action") == "policy_bundle_incompatible"
+        and bool(thresholds)
+        and not malformed_thresholds
+        and not duplicate_threshold_ids
+        and not missing_required_thresholds
+        and not hardcode_guard_errors
+        and not source_errors
+    )
+    return _contract(
+        "ThresholdCatalogContract",
+        passed,
+        "threshold_catalog_missing_malformed_or_drifted",
+        {
+            "threshold_catalog_path": str(threshold_catalog_path),
+            "schema_version": catalog.get("schema_version"),
+            "scope": catalog.get("scope"),
+            "failure_action": catalog.get("failure_action"),
+            "required_fields": list(THRESHOLD_CATALOG_REQUIRED_FIELDS),
+            "threshold_count": len(thresholds),
+            "missing_required_thresholds": missing_required_thresholds,
+            "duplicate_threshold_ids": sorted(str(item) for item in duplicate_threshold_ids),
+            "malformed_thresholds": malformed_thresholds,
+            "hardcode_guard": hardcode_guard_evidence,
+            "hardcode_guard_errors": hardcode_guard_errors,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def _project_file_hashes(source_files):
+    hashes = {}
+    errors = []
+    for source_file in source_files if isinstance(source_files, list) else []:
+        raw_source_file = str(source_file)
+        resolved = _resolve_project_file(raw_source_file)
+        if not resolved or not resolved.exists():
+            errors.append({"source_file": raw_source_file, "reason": "source_missing"})
+            continue
+        hashes[raw_source_file] = _sha256_file(resolved)
+    return hashes, errors
+
+
+def _hash_file_group(source_files):
+    hashes, errors = _project_file_hashes(source_files)
+    return _sha256_json(hashes), hashes, errors
+
+
+def _runtime_env_values(profile, env):
+    values = {}
+    violations = []
+    for item in profile.get("env_vars") if isinstance(profile.get("env_vars"), list) else []:
+        if not isinstance(item, dict):
+            violations.append("env_var_record_not_object")
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            violations.append("env_var_name_required")
+            continue
+        actual = (env or {}).get(name)
+        if actual is None:
+            actual = item.get("default_value")
+        actual = str(actual)
+        expected = str(item.get("expected_value") or "")
+        values[name] = actual
+        if item.get("required") is True and actual == "":
+            violations.append(f"{name}_required")
+        if expected and actual != expected:
+            violations.append(f"{name}_drifted")
+    return values, violations
+
+
+def _runtime_config_component_hashes(profile, env):
+    env_values, env_violations = _runtime_env_values(profile, env)
+    env_vars_hash = _sha256_json(env_values)
+    feature_flags_hash, feature_flag_files, feature_flag_errors = _hash_file_group(profile.get("feature_flag_files"))
+    provider_config_hash, provider_config_files, provider_config_errors = _hash_file_group(profile.get("provider_config_files"))
+    policy_bundle_hash, policy_bundle_files, policy_bundle_errors = _hash_file_group(profile.get("policy_bundle_files"))
+
+    single_files = {
+        "route_registry_hash": profile.get("route_registry_file"),
+        "source_registry_hash": profile.get("source_registry_file"),
+        "threshold_catalog_hash": profile.get("threshold_catalog_file"),
+        "metric_registry_hash": profile.get("metric_registry_file"),
+    }
+    single_hashes = {}
+    single_errors = []
+    for key, source_file in single_files.items():
+        hashes, errors = _project_file_hashes([source_file])
+        single_hashes[key] = next(iter(hashes.values()), None)
+        single_errors.extend(errors)
+
+    component_hashes = {
+        "env_vars_hash": env_vars_hash,
+        "feature_flags_hash": feature_flags_hash,
+        "provider_config_hash": provider_config_hash,
+        "route_registry_hash": single_hashes.get("route_registry_hash"),
+        "source_registry_hash": single_hashes.get("source_registry_hash"),
+        "threshold_catalog_hash": single_hashes.get("threshold_catalog_hash"),
+        "metric_registry_hash": single_hashes.get("metric_registry_hash"),
+        "policy_bundle_hash": policy_bundle_hash,
+    }
+    runtime_config_hash = _sha256_json(component_hashes)
+    return {
+        "component_hashes": component_hashes,
+        "runtime_config_hash": runtime_config_hash,
+        "expected_hash": runtime_config_hash,
+        "env_values": env_values,
+        "feature_flag_files": feature_flag_files,
+        "provider_config_files": provider_config_files,
+        "policy_bundle_files": policy_bundle_files,
+        "source_errors": feature_flag_errors + provider_config_errors + policy_bundle_errors + single_errors,
+        "env_violations": env_violations,
+    }
+
+
+def verify_runtime_config_drift_contract(policy_path=DEFAULT_RUNTIME_CONFIG_DRIFT_POLICY, env=None):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("RuntimeConfigDriftContract", False, "runtime_config_drift_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("RuntimeConfigDriftContract", False, "runtime_config_drift_policy_not_object", {"policy_path": str(policy_path)})
+
+    profiles = policy.get("profiles") if isinstance(policy.get("profiles"), list) else []
+    active_profile_id = str(policy.get("active_profile_id") or "")
+    profile_by_id = {str(item.get("profile_id")): item for item in profiles if isinstance(item, dict) and item.get("profile_id")}
+    malformed_profiles = []
+    profile_evidence = []
+    for index, profile in enumerate(profiles):
+        if not isinstance(profile, dict):
+            malformed_profiles.append({"index": index, "profile_id": None, "missing_fields": list(RUNTIME_CONFIG_DRIFT_REQUIRED_FIELDS), "violations": ["profile_not_object"]})
+            continue
+        profile_id = str(profile.get("profile_id") or "")
+        missing = _missing_required_fields(profile, ("profile_id",) + RUNTIME_CONFIG_DRIFT_REQUIRED_FIELDS)
+        violations = []
+        if profile_id and not re.match(r"^[a-z][a-z0-9_]*$", profile_id):
+            violations.append("profile_id_must_be_lower_snake_case")
+        if not _parse_iso_ts(profile.get("loaded_at")):
+            violations.append("loaded_at_invalid")
+        if str(profile.get("drift_action") or "") not in RUNTIME_CONFIG_DRIFT_ACTIONS:
+            violations.append("drift_action_not_allowed")
+        if profile.get("drift_detected") is not False:
+            violations.append("drift_detected_must_be_false_for_readiness")
+
+        computed = _runtime_config_component_hashes(profile, env or {})
+        if computed["source_errors"]:
+            violations.append("source_file_missing")
+        if computed["env_violations"]:
+            violations.append("env_var_drift")
+        for key, actual_hash in computed["component_hashes"].items():
+            if profile.get(key) != actual_hash:
+                violations.append(f"{key}_mismatch")
+        if profile.get("runtime_config_hash") != computed["runtime_config_hash"]:
+            violations.append("runtime_config_hash_mismatch")
+        if profile.get("expected_hash") != computed["expected_hash"]:
+            violations.append("expected_hash_mismatch")
+
+        profile_evidence.append(
+            {
+                "profile_id": profile_id,
+                "env_values": computed["env_values"],
+                "component_hashes": computed["component_hashes"],
+                "runtime_config_hash": profile.get("runtime_config_hash"),
+                "expected_runtime_config_hash": computed["runtime_config_hash"],
+                "source_errors": computed["source_errors"],
+                "env_violations": computed["env_violations"],
+            }
+        )
+        if missing or violations:
+            malformed_profiles.append({"index": index, "profile_id": profile_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.runtime_config_drift_policy.v1"
+        and policy.get("failure_action") == "runtime_config_drift"
+        and active_profile_id in profile_by_id
+        and bool(profiles)
+        and not malformed_profiles
+        and not source_errors
+    )
+    return _contract(
+        "RuntimeConfigDriftContract",
+        passed,
+        "runtime_config_drift_missing_malformed_or_drifted",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "active_profile_id": active_profile_id,
+            "required_fields": list(RUNTIME_CONFIG_DRIFT_REQUIRED_FIELDS),
+            "profile_count": len(profiles),
+            "profile_evidence": profile_evidence,
+            "malformed_profiles": malformed_profiles,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_environment_separation_contract(policy_path=DEFAULT_ENVIRONMENT_SEPARATION_POLICY, env=None):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("EnvironmentSeparationContract", False, "environment_separation_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("EnvironmentSeparationContract", False, "environment_separation_policy_not_object", {"policy_path": str(policy_path)})
+
+    environments = policy.get("environments") if isinstance(policy.get("environments"), list) else []
+    environment_by_id = {
+        str(item.get("environment_id")): item
+        for item in environments
+        if isinstance(item, dict) and item.get("environment_id")
+    }
+    active_environment_id = str((env or {}).get("V27_ENVIRONMENT_ID") or policy.get("active_environment_default") or "")
+    malformed_environments = []
+    duplicate_environment_ids = []
+    environment_evidence = []
+    seen_environment_ids = set()
+    for index, environment in enumerate(environments):
+        if not isinstance(environment, dict):
+            malformed_environments.append({"index": index, "environment_id": None, "missing_fields": list(ENVIRONMENT_SEPARATION_REQUIRED_FIELDS), "violations": ["environment_not_object"]})
+            continue
+        environment_id = str(environment.get("environment_id") or "")
+        missing = [
+            field
+            for field in ENVIRONMENT_SEPARATION_REQUIRED_FIELDS
+            if field not in environment
+            or environment.get(field) is None
+            or (isinstance(environment.get(field), str) and not environment.get(field))
+        ]
+        violations = []
+        if environment_id in seen_environment_ids:
+            duplicate_environment_ids.append(environment_id)
+        if environment_id:
+            seen_environment_ids.add(environment_id)
+        if environment_id and not re.match(r"^[a-z][a-z0-9_]*$", environment_id):
+            violations.append("environment_id_must_be_lower_snake_case")
+        environment_type = str(environment.get("environment_type") or "")
+        if environment_type not in ENVIRONMENT_TYPES:
+            violations.append("environment_type_not_allowed")
+        for field in ("allowed_event_logs", "allowed_databases", "allowed_provider_keys", "allowed_routes", "allowed_modes", "write_permissions", "read_permissions"):
+            if not isinstance(environment.get(field), list):
+                violations.append(f"{field}_must_be_list")
+        allowed_modes = set(str(item) for item in environment.get("allowed_modes") or [])
+        if not allowed_modes <= (BACKGROUND_JOB_ALLOWED_MODES | {"all_modes"}):
+            violations.append("allowed_modes_not_allowed")
+        provider_keys = [str(item).lower() for item in environment.get("allowed_provider_keys") or []]
+        if any("live_private_key" in item or "signing" in item or "real_order_router" in item for item in provider_keys):
+            violations.append("live_capability_allowed")
+        if environment_type == "dashboard_readonly" and environment.get("write_permissions"):
+            violations.append("dashboard_readonly_has_write_permissions")
+        if environment_type in {"local_dev", "research", "backfill_research", "dashboard_readonly"} and environment.get("promotion_allowed") is True:
+            violations.append("non_promotion_environment_allows_promotion")
+        if not isinstance(environment.get("data_export_allowed"), bool):
+            violations.append("data_export_allowed_must_be_bool")
+        if not isinstance(environment.get("promotion_allowed"), bool):
+            violations.append("promotion_allowed_must_be_bool")
+        expected_environment_hash = _hash_record_without(environment, "environment_hash")
+        if environment.get("environment_hash") != expected_environment_hash:
+            violations.append("environment_hash_mismatch")
+        environment_evidence.append(
+            {
+                "environment_id": environment_id,
+                "environment_type": environment_type,
+                "allowed_modes": sorted(allowed_modes),
+                "write_permission_count": len(environment.get("write_permissions") or []),
+                "promotion_allowed": environment.get("promotion_allowed"),
+                "environment_hash": environment.get("environment_hash"),
+                "expected_environment_hash": expected_environment_hash,
+            }
+        )
+        if missing or violations:
+            malformed_environments.append({"index": index, "environment_id": environment_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    runtime_violations = []
+    active_environment = environment_by_id.get(active_environment_id)
+    if active_environment is None:
+        runtime_violations.append("active_environment_unknown")
+    live_execution_enabled = str((env or {}).get("PREMIUM_LIVE_EXECUTION_ENABLED") or "false").strip().lower()
+    if live_execution_enabled not in {"", "0", "false", "no", "off"}:
+        runtime_violations.append("live_execution_env_enabled")
+    live_secret_env_names = ["LIVE_PRIVATE_KEY", "SOLANA_PRIVATE_KEY", "NETWORK_TRANSACTION_SIGNING_KEY"]
+    live_secret_present = [name for name in live_secret_env_names if (env or {}).get(name)]
+    if live_secret_present:
+        runtime_violations.append("live_secret_present")
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.environment_separation_policy.v1"
+        and policy.get("failure_action") == "environment_contamination"
+        and bool(environments)
+        and not malformed_environments
+        and not duplicate_environment_ids
+        and not runtime_violations
+        and not source_errors
+    )
+    return _contract(
+        "EnvironmentSeparationContract",
+        passed,
+        "environment_separation_missing_malformed_or_contaminated",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "active_environment_id": active_environment_id,
+            "required_fields": list(ENVIRONMENT_SEPARATION_REQUIRED_FIELDS),
+            "environment_count": len(environments),
+            "duplicate_environment_ids": sorted(str(item) for item in duplicate_environment_ids),
+            "malformed_environments": malformed_environments,
+            "runtime_violations": runtime_violations,
+            "live_secret_present": live_secret_present,
+            "environment_evidence": environment_evidence,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_null_value_policy_contract(policy_path=DEFAULT_NULL_VALUE_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("NullValuePolicyContract", False, "null_value_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("NullValuePolicyContract", False, "null_value_policy_not_object", {"policy_path": str(policy_path)})
+
+    null_policies = policy.get("null_policies") if isinstance(policy.get("null_policies"), list) else []
+    seen_fields = set()
+    duplicate_fields = []
+    malformed_policies = []
+    for index, item in enumerate(null_policies):
+        if not isinstance(item, dict):
+            malformed_policies.append({"index": index, "field_name": None, "missing_fields": list(NULL_VALUE_POLICY_REQUIRED_FIELDS), "violations": ["null_policy_not_object"]})
+            continue
+        field_name = str(item.get("field_name") or "")
+        missing = _missing_required_fields(item, NULL_VALUE_POLICY_REQUIRED_FIELDS)
+        violations = []
+        if field_name in seen_fields:
+            duplicate_fields.append(field_name)
+        if field_name:
+            seen_fields.add(field_name)
+        if field_name and not re.match(r"^[a-z][a-z0-9_]*$", field_name):
+            violations.append("field_name_must_be_lower_snake_case")
+        if item.get("null_class") not in NULL_VALUE_CLASSES:
+            violations.append("null_class_not_allowed")
+        allowed_modes = item.get("allowed_in_modes") if isinstance(item.get("allowed_in_modes"), list) else []
+        if not allowed_modes or any(str(mode) not in THRESHOLD_ALLOWED_MODES for mode in allowed_modes):
+            violations.append("allowed_in_modes_not_allowed")
+        for field in ("default_value_allowed", "training_allowed", "decision_allowed"):
+            if not isinstance(item.get(field), bool):
+                violations.append(f"{field}_must_be_bool")
+        if field_name in REQUIRED_NULL_POLICY_FIELDS and item.get("default_value_allowed") is True:
+            violations.append("critical_field_default_value_forbidden")
+        if field_name in REQUIRED_NULL_POLICY_FIELDS and item.get("decision_allowed") is True and item.get("null_class") != "true_zero":
+            violations.append("critical_unknown_decision_allowed")
+        if str(item.get("imputation_policy") or "").strip() == "":
+            violations.append("imputation_policy_required")
+        if str(item.get("dashboard_display") or "").strip() == "":
+            violations.append("dashboard_display_required")
+        expected_policy_hash = _hash_record_without(item, "policy_hash")
+        if item.get("policy_hash") != expected_policy_hash:
+            violations.append("policy_hash_mismatch")
+        if missing or violations:
+            malformed_policies.append({"index": index, "field_name": field_name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    missing_required_fields = sorted(REQUIRED_NULL_POLICY_FIELDS - seen_fields)
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.null_value_policy.v1"
+        and policy.get("failure_action") == "feature_invalid_or_shadow_only"
+        and bool(null_policies)
+        and not duplicate_fields
+        and not missing_required_fields
+        and not malformed_policies
+        and not source_errors
+    )
+    return _contract(
+        "NullValuePolicyContract",
+        passed,
+        "null_value_policy_missing_malformed_or_unsafe",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "null_policy_count": len(null_policies),
+            "duplicate_fields": sorted(str(item) for item in duplicate_fields),
+            "missing_required_fields": missing_required_fields,
+            "malformed_policies": malformed_policies,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_feature_availability_contract(
+    policy_path=DEFAULT_FEATURE_VECTOR_SNAPSHOT_POLICY,
+    null_policy_path=DEFAULT_NULL_VALUE_POLICY,
+):
+    try:
+        policy = _load_json(policy_path)
+        null_policy = _load_json(null_policy_path)
+    except Exception as exc:
+        return _contract("FeatureAvailabilityContract", False, "feature_availability_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("FeatureAvailabilityContract", False, "feature_availability_policy_not_object", {"policy_path": str(policy_path)})
+    if not isinstance(null_policy, dict):
+        return _contract("FeatureAvailabilityContract", False, "null_value_policy_not_object", {"null_policy_path": str(null_policy_path)})
+
+    null_fields = {
+        str(item.get("field_name"))
+        for item in null_policy.get("null_policies", [])
+        if isinstance(item, dict) and item.get("field_name")
+    }
+    records = policy.get("feature_availability") if isinstance(policy.get("feature_availability"), list) else []
+    seen_features = set()
+    duplicate_features = []
+    malformed_records = []
+    for index, item in enumerate(records):
+        if not isinstance(item, dict):
+            malformed_records.append({"index": index, "feature_name": None, "missing_fields": list(FEATURE_AVAILABILITY_REQUIRED_FIELDS), "violations": ["feature_availability_not_object"]})
+            continue
+        feature_name = str(item.get("feature_name") or "")
+        missing = _missing_required_fields(item, FEATURE_AVAILABILITY_REQUIRED_FIELDS)
+        violations = []
+        if feature_name in seen_features:
+            duplicate_features.append(feature_name)
+        if feature_name:
+            seen_features.add(feature_name)
+        if feature_name and not re.match(r"^[a-z][a-z0-9_]*$", feature_name):
+            violations.append("feature_name_must_be_lower_snake_case")
+        window_start = _parse_iso_ts(item.get("feature_window_start"))
+        window_end = _parse_iso_ts(item.get("feature_window_end"))
+        feature_available_at = _parse_iso_ts(item.get("feature_available_at"))
+        decision_available_at = _parse_iso_ts(item.get("decision_available_at"))
+        label_available_at = _parse_iso_ts(item.get("label_available_at"))
+        if not all([window_start, window_end, feature_available_at, decision_available_at, label_available_at]):
+            violations.append("timestamp_invalid")
+        else:
+            if window_end < window_start:
+                violations.append("feature_window_end_before_start")
+            if window_end > decision_available_at:
+                violations.append("feature_window_end_after_decision")
+            if feature_available_at > decision_available_at:
+                violations.append("feature_available_after_decision")
+            if label_available_at <= decision_available_at:
+                violations.append("label_available_not_after_decision")
+        if not isinstance(item.get("feature_research_only"), bool):
+            violations.append("feature_research_only_must_be_bool")
+        null_policy_field = str(item.get("null_policy_field") or "")
+        if null_policy_field not in null_fields:
+            violations.append("null_policy_field_unknown")
+        expected_hash = _hash_record_without(item, "availability_hash")
+        if item.get("availability_hash") != expected_hash:
+            violations.append("availability_hash_mismatch")
+        if missing or violations:
+            malformed_records.append({"index": index, "feature_name": feature_name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    required_features = {"critical_risk_status", "entry_quote_price", "exit_quote_price", "reference_price"}
+    missing_required_features = sorted(required_features - seen_features)
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.feature_vector_snapshot_policy.v1"
+        and policy.get("failure_action") == "feature_leakage_detected"
+        and bool(records)
+        and not duplicate_features
+        and not missing_required_features
+        and not malformed_records
+        and not source_errors
+    )
+    return _contract(
+        "FeatureAvailabilityContract",
+        passed,
+        "feature_availability_missing_malformed_or_leaky",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "feature_availability_count": len(records),
+            "duplicate_features": sorted(str(item) for item in duplicate_features),
+            "missing_required_features": missing_required_features,
+            "malformed_feature_availability": malformed_records,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_feature_vector_snapshot_contract(
+    policy_path=DEFAULT_FEATURE_VECTOR_SNAPSHOT_POLICY,
+    null_policy_path=DEFAULT_NULL_VALUE_POLICY,
+):
+    try:
+        policy = _load_json(policy_path)
+        null_policy = _load_json(null_policy_path)
+    except Exception as exc:
+        return _contract("FeatureVectorSnapshotContract", False, "feature_vector_snapshot_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("FeatureVectorSnapshotContract", False, "feature_vector_snapshot_policy_not_object", {"policy_path": str(policy_path)})
+    if not isinstance(null_policy, dict):
+        return _contract("FeatureVectorSnapshotContract", False, "null_value_policy_not_object", {"null_policy_path": str(null_policy_path)})
+
+    null_fields = {
+        str(item.get("field_name"))
+        for item in null_policy.get("null_policies", [])
+        if isinstance(item, dict) and item.get("field_name")
+    }
+    snapshots = policy.get("feature_vector_snapshots") if isinstance(policy.get("feature_vector_snapshots"), list) else []
+    malformed_snapshots = []
+    for index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict):
+            malformed_snapshots.append({"index": index, "feature_vector_hash": None, "missing_fields": list(FEATURE_VECTOR_SNAPSHOT_REQUIRED_FIELDS), "violations": ["feature_vector_snapshot_not_object"]})
+            continue
+        missing = _missing_required_fields(snapshot, FEATURE_VECTOR_SNAPSHOT_REQUIRED_FIELDS)
+        violations = []
+        feature_names = snapshot.get("feature_names_ordered") if isinstance(snapshot.get("feature_names_ordered"), list) else []
+        feature_values = snapshot.get("feature_values_serialized") if isinstance(snapshot.get("feature_values_serialized"), dict) else {}
+        feature_available_at_map = snapshot.get("feature_available_at_map") if isinstance(snapshot.get("feature_available_at_map"), dict) else {}
+        if not feature_names:
+            violations.append("feature_names_ordered_required")
+        if set(str(name) for name in feature_names) != set(str(name) for name in feature_values):
+            violations.append("feature_names_values_mismatch")
+        if set(str(name) for name in feature_names) != set(str(name) for name in feature_available_at_map):
+            violations.append("feature_names_availability_mismatch")
+        decision_ts = _parse_iso_ts(snapshot.get("decision_ts"))
+        if not decision_ts:
+            violations.append("decision_ts_invalid")
+        else:
+            for feature_name, available_at in feature_available_at_map.items():
+                parsed = _parse_iso_ts(available_at)
+                if not parsed:
+                    violations.append(f"{feature_name}_available_at_invalid")
+                elif parsed > decision_ts:
+                    violations.append(f"{feature_name}_available_after_decision")
+        if str(snapshot.get("missing_value_policy") or "") not in null_fields:
+            violations.append("missing_value_policy_unknown")
+        if not isinstance(snapshot.get("source_lineage_node_ids"), list) or not snapshot.get("source_lineage_node_ids"):
+            violations.append("source_lineage_node_ids_required")
+        expected_hash = _hash_record_without(snapshot, "feature_vector_hash")
+        if snapshot.get("feature_vector_hash") != expected_hash:
+            violations.append("feature_vector_hash_mismatch")
+        if missing or violations:
+            malformed_snapshots.append({"index": index, "feature_vector_hash": snapshot.get("feature_vector_hash"), "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.feature_vector_snapshot_policy.v1"
+        and policy.get("failure_action") == "feature_leakage_detected"
+        and bool(snapshots)
+        and not malformed_snapshots
+        and not source_errors
+    )
+    return _contract(
+        "FeatureVectorSnapshotContract",
+        passed,
+        "feature_vector_snapshot_missing_malformed_or_unreproducible",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "snapshot_count": len(snapshots),
+            "malformed_feature_vector_snapshots": malformed_snapshots,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_data_lineage_graph_contract(policy_path=DEFAULT_DATA_LINEAGE_GRAPH_POLICY):
+    try:
+        policy = _load_json(policy_path)
+    except Exception as exc:
+        return _contract("DataLineageGraphContract", False, "data_lineage_graph_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("DataLineageGraphContract", False, "data_lineage_graph_policy_not_object", {"policy_path": str(policy_path)})
+
+    nodes = policy.get("lineage_nodes") if isinstance(policy.get("lineage_nodes"), list) else []
+    node_ids = {str(node.get("lineage_node_id")) for node in nodes if isinstance(node, dict) and node.get("lineage_node_id")}
+    node_types = {str(node.get("node_type")) for node in nodes if isinstance(node, dict) and node.get("node_type")}
+    duplicate_node_ids = []
+    seen_node_ids = set()
+    malformed_nodes = []
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            malformed_nodes.append({"index": index, "lineage_node_id": None, "missing_fields": list(DATA_LINEAGE_NODE_REQUIRED_FIELDS), "violations": ["lineage_node_not_object"]})
+            continue
+        node_id = str(node.get("lineage_node_id") or "")
+        missing = [
+            field
+            for field in DATA_LINEAGE_NODE_REQUIRED_FIELDS
+            if field not in node
+            or node.get(field) is None
+            or (isinstance(node.get(field), str) and not node.get(field))
+        ]
+        violations = []
+        if node_id in seen_node_ids:
+            duplicate_node_ids.append(node_id)
+        if node_id:
+            seen_node_ids.add(node_id)
+        if node_id and not re.match(r"^[a-z][a-z0-9_:-]*$", node_id):
+            violations.append("lineage_node_id_invalid")
+        if str(node.get("node_type") or "") not in REQUIRED_DATA_LINEAGE_NODE_TYPES:
+            violations.append("node_type_not_required")
+        parent_ids = node.get("parent_node_ids") if isinstance(node.get("parent_node_ids"), list) else []
+        unknown_parent_ids = sorted(str(parent_id) for parent_id in parent_ids if str(parent_id) not in node_ids)
+        if unknown_parent_ids:
+            violations.append("unknown_parent_node_id")
+        if str(node.get("edge_type") or "") not in {"root", "derived_from", "used_by", "generated", "supersedes", "excluded_by", "quarantined_by", "audited_by"}:
+            violations.append("edge_type_not_allowed")
+        if not _parse_iso_ts(node.get("created_at")):
+            violations.append("created_at_invalid")
+        if str(node.get("environment_id") or "") == "":
+            violations.append("environment_id_required")
+        expected_hash = _hash_record_without(node, "lineage_hash")
+        if node.get("lineage_hash") != expected_hash:
+            violations.append("lineage_hash_mismatch")
+        if missing or violations:
+            malformed_nodes.append({"index": index, "lineage_node_id": node_id or None, "missing_fields": missing, "violations": sorted(set(violations)), "unknown_parent_ids": unknown_parent_ids})
+
+    missing_required_node_types = sorted(REQUIRED_DATA_LINEAGE_NODE_TYPES - node_types)
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.data_lineage_graph_policy.v1"
+        and policy.get("failure_action") == "sample_not_eligible_for_training"
+        and bool(nodes)
+        and not duplicate_node_ids
+        and not missing_required_node_types
+        and not malformed_nodes
+        and not source_errors
+    )
+    return _contract(
+        "DataLineageGraphContract",
+        passed,
+        "data_lineage_graph_missing_malformed_or_broken",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "lineage_node_count": len(nodes),
+            "duplicate_node_ids": sorted(str(item) for item in duplicate_node_ids),
+            "missing_required_node_types": missing_required_node_types,
+            "malformed_lineage_nodes": malformed_nodes,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def verify_training_dataset_manifest_contract(
+    policy_path=DEFAULT_TRAINING_DATASET_MANIFEST_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+    manifest_path=MANIFEST_PATH,
+    catalog_path=CATALOG_PATH,
+    registry_path=ENTRY_MODE_REGISTRY_PATH,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry_hash = _sha256_file(_resolve_project_file(metric_registry_path))
+        threshold_catalog_hash = _sha256_file(_resolve_project_file(threshold_catalog_path))
+        spec_report = validate_all(manifest_path=manifest_path, catalog_path=catalog_path, registry_path=registry_path)
+        spec_error = None
+    except Exception as exc:
+        return _contract("TrainingDatasetManifestContract", False, "training_dataset_manifest_policy_missing_or_invalid", {"error": str(exc)})
+    if not isinstance(policy, dict):
+        return _contract("TrainingDatasetManifestContract", False, "training_dataset_manifest_policy_not_object", {"policy_path": str(policy_path)})
+
+    manifests = policy.get("training_dataset_manifests") if isinstance(policy.get("training_dataset_manifests"), list) else []
+    duplicate_dataset_ids = []
+    seen_dataset_ids = set()
+    malformed_manifests = []
+    for index, manifest in enumerate(manifests):
+        if not isinstance(manifest, dict):
+            malformed_manifests.append({"index": index, "dataset_id": None, "missing_fields": list(TRAINING_DATASET_MANIFEST_REQUIRED_FIELDS), "violations": ["training_manifest_not_object"]})
+            continue
+        dataset_id = str(manifest.get("dataset_id") or "")
+        missing = _missing_required_fields(manifest, TRAINING_DATASET_MANIFEST_REQUIRED_FIELDS)
+        violations = []
+        if dataset_id in seen_dataset_ids:
+            duplicate_dataset_ids.append(dataset_id)
+        if dataset_id:
+            seen_dataset_ids.add(dataset_id)
+        if dataset_id and not re.match(r"^[a-z][a-z0-9_:-]*$", dataset_id):
+            violations.append("dataset_id_invalid")
+        for field in ("included_sample_ids", "excluded_sample_ids"):
+            if not isinstance(manifest.get(field), list):
+                violations.append(f"{field}_must_be_list")
+        if not manifest.get("included_sample_ids"):
+            violations.append("included_sample_ids_required")
+        if not isinstance(manifest.get("exclusion_reasons"), dict):
+            violations.append("exclusion_reasons_must_be_object")
+        if not isinstance(manifest.get("label_versions"), dict):
+            violations.append("label_versions_must_be_object")
+        if not isinstance(manifest.get("feature_versions"), dict):
+            violations.append("feature_versions_must_be_object")
+        if _parse_iso_ts(manifest.get("created_at")) is None:
+            violations.append("created_at_invalid")
+        if manifest.get("spec_hash") != spec_report.get("spec_hash"):
+            violations.append("spec_hash_mismatch")
+        if manifest.get("metric_registry_hash") != metric_registry_hash:
+            violations.append("metric_registry_hash_mismatch")
+        if manifest.get("threshold_catalog_hash") != threshold_catalog_hash:
+            violations.append("threshold_catalog_hash_mismatch")
+        observation_weights = manifest.get("observation_weights") if isinstance(manifest.get("observation_weights"), dict) else {}
+        if manifest.get("observation_weights_hash") != _sha256_json(observation_weights):
+            violations.append("observation_weights_hash_mismatch")
+        expected_hash = _hash_record_without(manifest, "manifest_hash")
+        if manifest.get("manifest_hash") != expected_hash:
+            violations.append("manifest_hash_mismatch")
+        if missing or violations:
+            malformed_manifests.append({"index": index, "dataset_id": dataset_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    passed = (
+        policy.get("schema_version") == "v2.7.0.training_dataset_manifest_policy.v1"
+        and policy.get("failure_action") == "model_promotion_blocked"
+        and bool(manifests)
+        and not duplicate_dataset_ids
+        and not malformed_manifests
+        and not source_errors
+        and not spec_error
+    )
+    return _contract(
+        "TrainingDatasetManifestContract",
+        passed,
+        "training_dataset_manifest_missing_malformed_or_unlinked",
+        {
+            "policy_path": str(policy_path),
+            "schema_version": policy.get("schema_version"),
+            "scope": policy.get("scope"),
+            "failure_action": policy.get("failure_action"),
+            "manifest_count": len(manifests),
+            "duplicate_dataset_ids": sorted(str(item) for item in duplicate_dataset_ids),
+            "malformed_manifests": malformed_manifests,
+            "spec_hash": spec_report.get("spec_hash"),
+            "metric_registry_hash": metric_registry_hash,
+            "threshold_catalog_hash": threshold_catalog_hash,
+            "source_checks": source_checks,
+            "source_errors": source_errors,
+        },
+    )
+
+
+def _detector_threshold_passes(observed_value, operator, threshold_value):
+    try:
+        observed = Decimal(str(observed_value))
+        threshold = Decimal(str(threshold_value))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    if operator == ">=":
+        return observed >= threshold
+    if operator == ">":
+        return observed > threshold
+    if operator == "<=":
+        return observed <= threshold
+    if operator == "<":
+        return observed < threshold
+    if operator == "==":
+        return observed == threshold
+    if operator == "!=":
+        return observed != threshold
+    return False
+
+
+def _failed_detector_shadow_contracts(reason, evidence):
+    return [
+        _contract("ReclaimDetector", False, reason, evidence),
+        _contract("OverextensionDetector", False, reason, evidence),
+        _contract("DetectorCalibrationContract", False, reason, evidence),
+    ]
+
+
+def verify_detector_shadow_calibration_contracts(
+    policy_path=DEFAULT_DETECTOR_SHADOW_CALIBRATION_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        return _failed_detector_shadow_contracts(
+            "detector_shadow_calibration_policy_missing_or_invalid",
+            {"policy_path": str(policy_path), "error": str(exc)},
+        )
+    if not isinstance(policy, dict):
+        return _failed_detector_shadow_contracts(
+            "detector_shadow_calibration_policy_not_object",
+            {"policy_path": str(policy_path)},
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        return _failed_detector_shadow_contracts(
+            "detector_shadow_calibration_policy_missing_or_invalid",
+            {
+                "policy_path": str(policy_path),
+                "metric_registry_path": str(metric_registry_path),
+                "threshold_catalog_path": str(threshold_catalog_path),
+                "error": "metric_or_threshold_registry_not_object",
+            },
+        )
+
+    metric_records = {
+        str(metric.get("metric_id")): metric
+        for metric in metric_registry.get("metrics", [])
+        if isinstance(metric, dict) and metric.get("metric_id")
+    }
+    threshold_records = {
+        str(threshold.get("threshold_id")): threshold
+        for threshold in threshold_catalog.get("thresholds", [])
+        if isinstance(threshold, dict) and threshold.get("threshold_id")
+    }
+
+    detectors = policy.get("detectors") if isinstance(policy.get("detectors"), list) else []
+    calibrations = policy.get("calibrations") if isinstance(policy.get("calibrations"), list) else []
+    detectors_by_id = {}
+    malformed_detectors = []
+    duplicate_detector_ids = []
+    seen_detector_ids = set()
+    for index, detector in enumerate(detectors):
+        if not isinstance(detector, dict):
+            malformed_detectors.append(
+                {
+                    "index": index,
+                    "detector_id": None,
+                    "contract_id": None,
+                    "missing_fields": list(DETECTOR_SHADOW_REQUIRED_FIELDS),
+                    "violations": ["detector_not_object"],
+                }
+            )
+            continue
+        detector_id = str(detector.get("detector_id") or "")
+        contract_id = str(detector.get("contract_id") or "")
+        if detector_id in seen_detector_ids:
+            duplicate_detector_ids.append(detector_id)
+        if detector_id:
+            seen_detector_ids.add(detector_id)
+            detectors_by_id[detector_id] = detector
+        missing = _missing_required_fields(detector, DETECTOR_SHADOW_REQUIRED_FIELDS)
+        violations = []
+        spec = DETECTOR_SHADOW_CONTRACTS.get(detector_id)
+        if not spec:
+            violations.append("detector_id_not_registered_for_shadow_calibration")
+        elif contract_id != spec["contract_id"]:
+            violations.append("contract_id_mismatch")
+        outputs = set(str(item) for item in detector.get("detector_output_states", []) if item)
+        if spec and not spec["required_outputs"].issubset(outputs):
+            violations.append("required_detector_outputs_missing")
+        allowed_modes = set(str(item) for item in detector.get("allowed_modes", []) if item)
+        if not {"observe_only", "shadow"}.issubset(allowed_modes):
+            violations.append("allowed_modes_must_include_observe_only_and_shadow")
+        if {"ultra_tiny", "normal_tiny"} & allowed_modes:
+            violations.append("shadow_detector_cannot_allow_entry_modes")
+        if detector.get("gate_allowed") is not False:
+            violations.append("gate_allowed_must_be_false")
+        if detector.get("feature_available_at_required") is not True:
+            violations.append("feature_available_at_required_must_be_true")
+        required_available_at = detector.get("required_feature_available_at_fields")
+        if not isinstance(required_available_at, list) or not required_available_at:
+            violations.append("required_feature_available_at_fields_required")
+        if str(detector.get("source_event_type") or "") != "detector_shadow_event":
+            violations.append("source_event_type_must_be_detector_shadow_event")
+        if str(detector.get("failure_action") or "") != "cannot_be_normal_tiny_gate":
+            violations.append("failure_action_must_prevent_normal_tiny_gate")
+        threshold_ids = [str(item) for item in detector.get("threshold_ids", []) if item]
+        metric_ids = [str(item) for item in detector.get("metric_ids", []) if item]
+        if not threshold_ids:
+            violations.append("threshold_ids_required")
+        if not metric_ids:
+            violations.append("metric_ids_required")
+        for threshold_id in threshold_ids:
+            if threshold_id not in threshold_records:
+                violations.append("threshold_id_unknown")
+                break
+        for metric_id in metric_ids:
+            if metric_id not in metric_records:
+                violations.append("metric_id_unknown")
+                break
+        detector_hash = str(detector.get("detector_hash") or "")
+        expected_detector_hash = _hash_record_without(detector, "detector_hash") if detector_id else None
+        if detector_hash and expected_detector_hash and detector_hash != expected_detector_hash:
+            violations.append("detector_hash_mismatch")
+        if missing or violations:
+            malformed_detectors.append(
+                {
+                    "index": index,
+                    "detector_id": detector_id or None,
+                    "contract_id": contract_id or None,
+                    "missing_fields": missing,
+                    "violations": sorted(set(violations)),
+                }
+            )
+
+    calibrations_by_detector = {}
+    malformed_calibrations = []
+    duplicate_calibration_ids = []
+    seen_calibration_ids = set()
+    for index, calibration in enumerate(calibrations):
+        if not isinstance(calibration, dict):
+            malformed_calibrations.append(
+                {
+                    "index": index,
+                    "calibration_id": None,
+                    "detector_id": None,
+                    "missing_fields": list(DETECTOR_CALIBRATION_REQUIRED_FIELDS),
+                    "violations": ["calibration_not_object"],
+                }
+            )
+            continue
+        calibration_id = str(calibration.get("calibration_id") or "")
+        detector_id = str(calibration.get("detector_id") or "")
+        metric_id = str(calibration.get("metric_id") or "")
+        threshold_id = str(calibration.get("threshold_id") or "")
+        if calibration_id in seen_calibration_ids:
+            duplicate_calibration_ids.append(calibration_id)
+        if calibration_id:
+            seen_calibration_ids.add(calibration_id)
+        if detector_id:
+            calibrations_by_detector.setdefault(detector_id, []).append(calibration)
+        missing = _missing_required_fields(calibration, DETECTOR_CALIBRATION_REQUIRED_FIELDS)
+        violations = []
+        if detector_id not in DETECTOR_SHADOW_CONTRACTS:
+            violations.append("detector_id_not_registered_for_calibration")
+        if detector_id not in detectors_by_id:
+            violations.append("detector_record_missing")
+        metric = metric_records.get(metric_id)
+        threshold = threshold_records.get(threshold_id)
+        if not metric:
+            violations.append("metric_id_unknown")
+        if not threshold:
+            violations.append("threshold_id_unknown")
+        if threshold and str(threshold.get("applies_to_metric") or "") != metric_id:
+            violations.append("threshold_metric_mismatch")
+        operator = str(calibration.get("comparison_operator") or "")
+        threshold_operator = str(threshold.get("comparison_operator") or "") if threshold else ""
+        if operator not in THRESHOLD_COMPARISON_OPERATORS:
+            violations.append("comparison_operator_not_allowed")
+        if threshold and operator != threshold_operator:
+            violations.append("comparison_operator_mismatch")
+        if threshold and str(calibration.get("threshold_value")) != str(threshold.get("threshold_value")):
+            violations.append("threshold_value_mismatch")
+        if not _detector_threshold_passes(calibration.get("observed_value"), operator, calibration.get("threshold_value")):
+            violations.append("observed_value_fails_threshold")
+        try:
+            if int(calibration.get("sample_n")) <= 0:
+                violations.append("sample_n_must_be_positive")
+        except (TypeError, ValueError):
+            violations.append("sample_n_must_be_positive")
+        try:
+            if int(calibration.get("contaminated_sample_count")) != 0:
+                violations.append("contaminated_samples_not_allowed")
+        except (TypeError, ValueError):
+            violations.append("contaminated_samples_not_allowed")
+        if calibration.get("promotion_allowed") is not False:
+            violations.append("promotion_allowed_must_be_false_for_seed_shadow_policy")
+        if str(calibration.get("calibration_status") or "") not in DETECTOR_CALIBRATION_STATUSES:
+            violations.append("calibration_status_not_allowed")
+        if not _parse_iso_ts(calibration.get("checked_at")):
+            violations.append("checked_at_invalid")
+        calibration_hash = str(calibration.get("calibration_hash") or "")
+        expected_calibration_hash = _hash_record_without(calibration, "calibration_hash") if calibration_id else None
+        if calibration_hash and expected_calibration_hash and calibration_hash != expected_calibration_hash:
+            violations.append("calibration_hash_mismatch")
+        if missing or violations:
+            malformed_calibrations.append(
+                {
+                    "index": index,
+                    "calibration_id": calibration_id or None,
+                    "detector_id": detector_id or None,
+                    "metric_id": metric_id or None,
+                    "threshold_id": threshold_id or None,
+                    "missing_fields": missing,
+                    "violations": sorted(set(violations)),
+                }
+            )
+
+    missing_required_detectors = sorted(set(DETECTOR_SHADOW_CONTRACTS) - set(detectors_by_id))
+    missing_calibration_detector_ids = sorted(
+        detector_id for detector_id in DETECTOR_SHADOW_CONTRACTS if detector_id not in calibrations_by_detector
+    )
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.detector_shadow_calibration_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "detector_shadow_only":
+        policy_errors.append("failure_action_must_be_detector_shadow_only")
+    if duplicate_detector_ids:
+        policy_errors.append("duplicate_detector_ids")
+    if duplicate_calibration_ids:
+        policy_errors.append("duplicate_calibration_ids")
+    if missing_required_detectors:
+        policy_errors.append("required_detectors_missing")
+    if missing_calibration_detector_ids:
+        policy_errors.append("required_calibrations_missing")
+    if source_errors:
+        policy_errors.append("source_file_check_failed")
+
+    detector_evidence_base = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "detector_count": len(detectors),
+        "calibration_count": len(calibrations),
+        "missing_required_detectors": missing_required_detectors,
+        "duplicate_detector_ids": sorted(str(item) for item in duplicate_detector_ids),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    reports = []
+    for detector_id, spec in DETECTOR_SHADOW_CONTRACTS.items():
+        detector_errors = [
+            item
+            for item in malformed_detectors
+            if item.get("detector_id") in {None, detector_id} or item.get("contract_id") == spec["contract_id"]
+        ]
+        passed = (
+            detector_id in detectors_by_id
+            and not detector_errors
+            and not policy_errors
+            and not source_errors
+        )
+        evidence = {
+            **detector_evidence_base,
+            "detector_id": detector_id,
+            "contract_id": spec["contract_id"],
+            "detector": detectors_by_id.get(detector_id),
+            "malformed_detector_records": detector_errors,
+        }
+        reports.append(_contract(spec["contract_id"], passed, spec["blocking_reason"], evidence))
+
+    calibration_policy_errors = [
+        error
+        for error in policy_errors
+        if error not in {"required_detectors_missing"}
+    ]
+    calibration_passed = (
+        bool(calibrations)
+        and not malformed_calibrations
+        and not missing_calibration_detector_ids
+        and not duplicate_calibration_ids
+        and not calibration_policy_errors
+        and not source_errors
+    )
+    reports.append(
+        _contract(
+            "DetectorCalibrationContract",
+            calibration_passed,
+            "detector_calibration_missing_malformed_or_contaminated",
+            {
+                **detector_evidence_base,
+                "duplicate_calibration_ids": sorted(str(item) for item in duplicate_calibration_ids),
+                "missing_calibration_detector_ids": missing_calibration_detector_ids,
+                "malformed_calibrations": malformed_calibrations,
+            },
+        )
+    )
+    return reports
+
+
+def _metric_threshold_maps(metric_registry, threshold_catalog):
+    metrics = {
+        str(metric.get("metric_id")): metric
+        for metric in metric_registry.get("metrics", [])
+        if isinstance(metric, dict) and metric.get("metric_id")
+    }
+    thresholds = {
+        str(threshold.get("threshold_id")): threshold
+        for threshold in threshold_catalog.get("thresholds", [])
+        if isinstance(threshold, dict) and threshold.get("threshold_id")
+    }
+    return metrics, thresholds
+
+
+def _policy_threshold_violation(record, metric_records, threshold_records, value_field):
+    violations = []
+    metric_id = str(record.get("metric_id") or "")
+    threshold_id = str(record.get("threshold_id") or "")
+    metric = metric_records.get(metric_id)
+    threshold = threshold_records.get(threshold_id)
+    if not metric:
+        violations.append("metric_id_unknown")
+    if not threshold:
+        violations.append("threshold_id_unknown")
+    if threshold and str(threshold.get("applies_to_metric") or "") != metric_id:
+        violations.append("threshold_metric_mismatch")
+    if threshold and not _detector_threshold_passes(record.get(value_field), threshold.get("comparison_operator"), threshold.get("threshold_value")):
+        violations.append("record_value_fails_threshold")
+    return violations
+
+
+def _policy_metric_threshold_binding_violations(record, metric_records, threshold_records):
+    violations = []
+    metric_id = str(record.get("metric_id") or "")
+    threshold_id = str(record.get("threshold_id") or "")
+    metric = metric_records.get(metric_id)
+    threshold = threshold_records.get(threshold_id)
+    if not metric:
+        violations.append("metric_id_unknown")
+    if not threshold:
+        violations.append("threshold_id_unknown")
+    if threshold and str(threshold.get("applies_to_metric") or "") != metric_id:
+        violations.append("threshold_metric_mismatch")
+    return violations
+
+
+def verify_capacity_load_latency_contracts(
+    policy_path=DEFAULT_CAPACITY_LOAD_LATENCY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return [
+            _contract("CapacityPlanningContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("LoadTestReplayContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("LatencyAttributionContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("ProviderQuotaIsolationContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("EconomicCostBudgetContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+        ]
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return [
+            _contract("CapacityPlanningContract", False, "capacity_load_latency_policy_not_object", evidence),
+            _contract("LoadTestReplayContract", False, "capacity_load_latency_policy_not_object", evidence),
+            _contract("LatencyAttributionContract", False, "capacity_load_latency_policy_not_object", evidence),
+            _contract("ProviderQuotaIsolationContract", False, "capacity_load_latency_policy_not_object", evidence),
+            _contract("EconomicCostBudgetContract", False, "capacity_load_latency_policy_not_object", evidence),
+        ]
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return [
+            _contract("CapacityPlanningContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("LoadTestReplayContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("LatencyAttributionContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("ProviderQuotaIsolationContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+            _contract("EconomicCostBudgetContract", False, "capacity_load_latency_policy_missing_or_invalid", evidence),
+        ]
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.capacity_load_latency_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "capacity_or_latency_degraded":
+        policy_errors.append("failure_action_must_be_capacity_or_latency_degraded")
+
+    capacity_plans = policy.get("capacity_plans") if isinstance(policy.get("capacity_plans"), list) else []
+    malformed_capacity = []
+    duplicate_capacity_ids = []
+    capacity_components = set()
+    seen_capacity_ids = set()
+    for index, row in enumerate(capacity_plans):
+        if not isinstance(row, dict):
+            malformed_capacity.append({"index": index, "capacity_plan_id": None, "missing_fields": list(CAPACITY_PLAN_REQUIRED_FIELDS), "violations": ["capacity_plan_not_object"]})
+            continue
+        plan_id = str(row.get("capacity_plan_id") or "")
+        component = str(row.get("component") or "")
+        if plan_id in seen_capacity_ids:
+            duplicate_capacity_ids.append(plan_id)
+        if plan_id:
+            seen_capacity_ids.add(plan_id)
+        if component:
+            capacity_components.add(component)
+        missing = _missing_required_fields(row, CAPACITY_PLAN_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "headroom_pct")
+        for field in ("expected_peak_qps", "measured_peak_qps", "p95_latency_budget_ms", "p99_latency_budget_ms", "queue_depth_limit", "headroom_pct", "degradation_threshold"):
+            try:
+                value = Decimal(str(row.get(field)))
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+                continue
+            if value < 0:
+                violations.append(f"{field}_nonnegative_required")
+        try:
+            if Decimal(str(row.get("p99_latency_budget_ms"))) < Decimal(str(row.get("p95_latency_budget_ms"))):
+                violations.append("p99_latency_budget_lt_p95")
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+        try:
+            if Decimal(str(row.get("headroom_pct"))) < Decimal(str(row.get("degradation_threshold"))):
+                violations.append("headroom_below_degradation_threshold")
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+        priorities = set(str(item) for item in row.get("protects_priorities", []) if item)
+        if not {"P0", "P1"}.issubset(priorities):
+            violations.append("p0_p1_capacity_not_protected")
+        if row.get("exit_safety_reserved") is not True:
+            violations.append("exit_safety_reserved_required")
+        if _parse_iso_ts(row.get("last_verified_at")) is None:
+            violations.append("last_verified_at_invalid")
+        expected_hash = _hash_record_without(row, "capacity_hash") if plan_id else None
+        if row.get("capacity_hash") and expected_hash and row.get("capacity_hash") != expected_hash:
+            violations.append("capacity_hash_mismatch")
+        if missing or violations:
+            malformed_capacity.append({"index": index, "capacity_plan_id": plan_id or None, "component": component or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_capacity_components = sorted(REQUIRED_CAPACITY_COMPONENTS - capacity_components)
+
+    load_tests = policy.get("load_tests") if isinstance(policy.get("load_tests"), list) else []
+    malformed_load_tests = []
+    load_scenarios = set()
+    for index, row in enumerate(load_tests):
+        if not isinstance(row, dict):
+            malformed_load_tests.append({"index": index, "load_test_id": None, "missing_fields": list(LOAD_TEST_REPLAY_REQUIRED_FIELDS), "violations": ["load_test_not_object"]})
+            continue
+        load_test_id = str(row.get("load_test_id") or "")
+        missing = _missing_required_fields(row, LOAD_TEST_REPLAY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "pass_rate")
+        scenarios = set(str(item) for item in row.get("synthetic_burst_profile", []) if item)
+        load_scenarios.update(scenarios)
+        if row.get("pass_fail") != "pass":
+            violations.append("load_test_not_pass")
+        expected = set(str(item) for item in row.get("expected_invariants", []) if item)
+        observed = set(str(item) for item in row.get("observed_invariants", []) if item)
+        if expected and not expected.issubset(observed):
+            violations.append("expected_invariants_not_observed")
+        if not isinstance(row.get("components_under_test"), list) or not row.get("components_under_test"):
+            violations.append("components_under_test_required")
+        try:
+            if Decimal(str(row.get("replay_speed_multiplier"))) <= 0:
+                violations.append("replay_speed_multiplier_positive_required")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("replay_speed_multiplier_positive_required")
+        if _parse_iso_ts(row.get("run_at")) is None:
+            violations.append("run_at_invalid")
+        expected_hash = _hash_record_without(row, "load_test_hash") if load_test_id else None
+        if row.get("load_test_hash") and expected_hash and row.get("load_test_hash") != expected_hash:
+            violations.append("load_test_hash_mismatch")
+        if missing or violations:
+            malformed_load_tests.append({"index": index, "load_test_id": load_test_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_load_scenarios = sorted(REQUIRED_LOAD_TEST_SCENARIOS - load_scenarios)
+
+    latencies = policy.get("latency_attributions") if isinstance(policy.get("latency_attributions"), list) else []
+    malformed_latency = []
+    latency_classes = set()
+    for index, row in enumerate(latencies):
+        if not isinstance(row, dict):
+            malformed_latency.append({"index": index, "token_lifecycle_key": None, "missing_fields": list(LATENCY_ATTRIBUTION_REQUIRED_FIELDS), "violations": ["latency_attribution_not_object"]})
+            continue
+        token_key = str(row.get("token_lifecycle_key") or "")
+        missing = _missing_required_fields(row, LATENCY_ATTRIBUTION_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "sla_breach_rate")
+        latency_class = str(row.get("latency_class") or "")
+        latency_classes.add(latency_class)
+        if latency_class not in LATENCY_CLASSES:
+            violations.append("latency_class_not_allowed")
+        try:
+            if int(row.get("latency_ms")) < 0:
+                violations.append("latency_ms_nonnegative_required")
+        except (TypeError, ValueError):
+            violations.append("latency_ms_nonnegative_required")
+        chronological_fields = [
+            "signal_seen_at",
+            "signal_available_at",
+            "pool_resolved_available_at",
+            "quote_available_at",
+            "risk_available_at",
+            "reclaim_available_at",
+            "decision_started_at",
+            "decision_available_at",
+            "queued_at",
+            "claimed_at",
+            "quote_refreshed_at",
+            "simulated_fill_ts",
+            "peak_ts",
+        ]
+        parsed = [(_parse_iso_ts(row.get(field)), field) for field in chronological_fields]
+        if any(ts is None for ts, _field in parsed):
+            violations.append("latency_timestamp_invalid")
+        else:
+            for (left_ts, left_field), (right_ts, right_field) in zip(parsed, parsed[1:]):
+                if left_ts > right_ts:
+                    violations.append(f"{left_field}_after_{right_field}")
+                    break
+        expected_hash = _hash_record_without(row, "latency_hash") if token_key else None
+        if row.get("latency_hash") and expected_hash and row.get("latency_hash") != expected_hash:
+            violations.append("latency_hash_mismatch")
+        if missing or violations:
+            malformed_latency.append({"index": index, "token_lifecycle_key": token_key or None, "latency_class": latency_class or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    quota_rows = policy.get("provider_quota_isolation") if isinstance(policy.get("provider_quota_isolation"), list) else []
+    malformed_quota = []
+    exit_first_quota_count = 0
+    for index, row in enumerate(quota_rows):
+        if not isinstance(row, dict):
+            malformed_quota.append({"index": index, "provider": None, "missing_fields": list(PROVIDER_QUOTA_ISOLATION_REQUIRED_FIELDS), "violations": ["quota_record_not_object"]})
+            continue
+        provider = str(row.get("provider") or "")
+        missing = _missing_required_fields(row, PROVIDER_QUOTA_ISOLATION_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "exit_safety_reserved_pct")
+        priority_order = [str(item) for item in row.get("priority_order", []) if item]
+        if priority_order[:2] != ["open_position_exit", "pending_entry_quote"]:
+            violations.append("exit_and_entry_priorities_not_first")
+        else:
+            exit_first_quota_count += 1
+        for field in ("quota_limit_per_min", "current_usage_per_min", "shadow_polling_limit_per_min"):
+            try:
+                if Decimal(str(row.get(field))) < 0:
+                    violations.append(f"{field}_nonnegative_required")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        try:
+            if Decimal(str(row.get("current_usage_per_min"))) > Decimal(str(row.get("quota_limit_per_min"))):
+                violations.append("current_usage_exceeds_quota_limit")
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+        if str(row.get("quota_isolation_status") or "") != "healthy":
+            violations.append("quota_isolation_status_not_healthy")
+        expected_hash = _hash_record_without(row, "quota_hash") if provider else None
+        if row.get("quota_hash") and expected_hash and row.get("quota_hash") != expected_hash:
+            violations.append("quota_hash_mismatch")
+        if missing or violations:
+            malformed_quota.append({"index": index, "provider": provider or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    budgets = policy.get("economic_cost_budgets") if isinstance(policy.get("economic_cost_budgets"), list) else []
+    malformed_budgets = []
+    budget_pools = set()
+    for index, row in enumerate(budgets):
+        if not isinstance(row, dict):
+            malformed_budgets.append({"index": index, "budget_id": None, "missing_fields": list(ECONOMIC_COST_BUDGET_REQUIRED_FIELDS), "violations": ["budget_record_not_object"]})
+            continue
+        budget_id = str(row.get("budget_id") or "")
+        budget_pools.add(str(row.get("budget_pool") or ""))
+        missing = _missing_required_fields(row, ECONOMIC_COST_BUDGET_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "utilization")
+        for field in ("soft_limit", "hard_limit", "current_usage", "measurement_window_ms"):
+            try:
+                if Decimal(str(row.get(field))) < 0:
+                    violations.append(f"{field}_nonnegative_required")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        try:
+            if Decimal(str(row.get("soft_limit"))) > Decimal(str(row.get("hard_limit"))):
+                violations.append("soft_limit_exceeds_hard_limit")
+            if Decimal(str(row.get("current_usage"))) > Decimal(str(row.get("hard_limit"))):
+                violations.append("current_usage_exceeds_hard_limit")
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+        if row.get("exit_safety_reserved") is not True and str(row.get("budget_pool") or "") == "exit_safety_budget":
+            violations.append("exit_safety_budget_must_be_reserved")
+        if str(row.get("budget_pool") or "") == "exploration_budget" and "exit_safety" in set(str(item) for item in row.get("reserved_for", []) if item):
+            violations.append("exploration_budget_cannot_reserve_exit_safety")
+        expected_hash = _hash_record_without(row, "budget_hash") if budget_id else None
+        if row.get("budget_hash") and expected_hash and row.get("budget_hash") != expected_hash:
+            violations.append("budget_hash_mismatch")
+        if missing or violations:
+            malformed_budgets.append({"index": index, "budget_id": budget_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    capacity_passed = (
+        bool(capacity_plans)
+        and not policy_errors
+        and not source_errors
+        and not malformed_capacity
+        and not duplicate_capacity_ids
+        and not missing_capacity_components
+    )
+    load_passed = (
+        bool(load_tests)
+        and not policy_errors
+        and not source_errors
+        and not malformed_load_tests
+        and not missing_load_scenarios
+    )
+    latency_passed = bool(latencies) and not policy_errors and not source_errors and not malformed_latency
+    quota_passed = bool(quota_rows) and exit_first_quota_count == len(quota_rows) and not policy_errors and not source_errors and not malformed_quota
+    budget_passed = bool(budgets) and {"exit_safety_budget", "exploration_budget"}.issubset(budget_pools) and not policy_errors and not source_errors and not malformed_budgets
+    return [
+        _contract(
+            "CapacityPlanningContract",
+            capacity_passed,
+            "capacity_planning_missing_malformed_or_insufficient",
+            {
+                **common,
+                "capacity_plan_count": len(capacity_plans),
+                "missing_capacity_components": missing_capacity_components,
+                "duplicate_capacity_ids": sorted(str(item) for item in duplicate_capacity_ids),
+                "malformed_capacity_plans": malformed_capacity,
+            },
+        ),
+        _contract(
+            "LoadTestReplayContract",
+            load_passed,
+            "load_test_replay_missing_malformed_or_failed",
+            {
+                **common,
+                "load_test_count": len(load_tests),
+                "missing_load_scenarios": missing_load_scenarios,
+                "malformed_load_tests": malformed_load_tests,
+            },
+        ),
+        _contract(
+            "LatencyAttributionContract",
+            latency_passed,
+            "latency_attribution_missing_malformed_or_late",
+            {
+                **common,
+                "latency_attribution_count": len(latencies),
+                "latency_classes": sorted(item for item in latency_classes if item),
+                "malformed_latency_attributions": malformed_latency,
+            },
+        ),
+        _contract(
+            "ProviderQuotaIsolationContract",
+            quota_passed,
+            "provider_quota_isolation_missing_malformed_or_unreserved",
+            {
+                **common,
+                "quota_record_count": len(quota_rows),
+                "exit_first_quota_count": exit_first_quota_count,
+                "malformed_quota_records": malformed_quota,
+            },
+        ),
+        _contract(
+            "EconomicCostBudgetContract",
+            budget_passed,
+            "economic_cost_budget_missing_malformed_or_overrun",
+            {
+                **common,
+                "budget_count": len(budgets),
+                "budget_pools": sorted(item for item in budget_pools if item),
+                "malformed_budgets": malformed_budgets,
+            },
+        ),
+    ]
+
+
+def verify_operator_runtime_safety_contracts(
+    policy_path=DEFAULT_OPERATOR_RUNTIME_SAFETY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return [
+            _contract("OperatorAudit", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("OperatorSafetyContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("OwnershipOnCallContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("AlertPolicy", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("AlertAckEscalationPolicy", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("KillSwitchDrillContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+        ]
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return [
+            _contract("OperatorAudit", False, "operator_runtime_safety_policy_not_object", evidence),
+            _contract("OperatorSafetyContract", False, "operator_runtime_safety_policy_not_object", evidence),
+            _contract("OwnershipOnCallContract", False, "operator_runtime_safety_policy_not_object", evidence),
+            _contract("AlertPolicy", False, "operator_runtime_safety_policy_not_object", evidence),
+            _contract("AlertAckEscalationPolicy", False, "operator_runtime_safety_policy_not_object", evidence),
+            _contract("KillSwitchDrillContract", False, "operator_runtime_safety_policy_not_object", evidence),
+        ]
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return [
+            _contract("OperatorAudit", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("OperatorSafetyContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("OwnershipOnCallContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("AlertPolicy", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("AlertAckEscalationPolicy", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+            _contract("KillSwitchDrillContract", False, "operator_runtime_safety_policy_missing_or_invalid", evidence),
+        ]
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.operator_runtime_safety_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "operator_or_kill_switch_safety_degraded":
+        policy_errors.append("failure_action_must_be_operator_or_kill_switch_safety_degraded")
+
+    operator_audits = policy.get("operator_audits") if isinstance(policy.get("operator_audits"), list) else []
+    malformed_operator_audits = []
+    duplicate_audit_event_ids = []
+    audit_event_ids = set()
+    for index, row in enumerate(operator_audits):
+        if not isinstance(row, dict):
+            malformed_operator_audits.append({"index": index, "audit_event_id": None, "missing_fields": list(OPERATOR_AUDIT_REQUIRED_FIELDS), "violations": ["operator_audit_not_object"]})
+            continue
+        audit_event_id = str(row.get("audit_event_id") or "")
+        if audit_event_id in audit_event_ids:
+            duplicate_audit_event_ids.append(audit_event_id)
+        if audit_event_id:
+            audit_event_ids.add(audit_event_id)
+        missing = _missing_required_fields(row, OPERATOR_AUDIT_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if _parse_iso_ts(row.get("timestamp")) is None:
+            violations.append("timestamp_invalid")
+        if row.get("approval_required") is not True:
+            violations.append("approval_required_must_be_true_for_operator_runtime_safety")
+        if str(row.get("approval_status") or "") != "approved":
+            violations.append("approval_status_not_approved")
+        if not str(row.get("environment_id") or "").strip():
+            violations.append("environment_id_required")
+        expected_hash = _hash_record_without(row, "operator_audit_hash") if audit_event_id else None
+        if row.get("operator_audit_hash") and expected_hash and row.get("operator_audit_hash") != expected_hash:
+            violations.append("operator_audit_hash_mismatch")
+        if missing or violations:
+            malformed_operator_audits.append({"index": index, "audit_event_id": audit_event_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    safety_checks = policy.get("operator_safety_checks") if isinstance(policy.get("operator_safety_checks"), list) else []
+    malformed_safety_checks = []
+    unsafe_allowed_count = 0
+    for index, row in enumerate(safety_checks):
+        if not isinstance(row, dict):
+            malformed_safety_checks.append({"index": index, "safety_check_id": None, "missing_fields": list(OPERATOR_SAFETY_REQUIRED_FIELDS), "violations": ["operator_safety_check_not_object"]})
+            continue
+        safety_check_id = str(row.get("safety_check_id") or "")
+        missing = _missing_required_fields(row, OPERATOR_SAFETY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        danger_level = str(row.get("danger_level") or "")
+        status = str(row.get("operator_safety_status") or "")
+        if danger_level not in OPERATOR_DANGER_LEVELS:
+            violations.append("danger_level_not_allowed")
+        if status not in OPERATOR_SAFETY_STATUSES:
+            violations.append("operator_safety_status_not_allowed")
+        if str(row.get("audit_event_id") or "") not in audit_event_ids:
+            violations.append("audit_event_id_missing")
+        high_danger = danger_level in {"admin_mutation", "critical"}
+        if high_danger:
+            if row.get("dashboard_freshness_ok") is not True:
+                violations.append("dashboard_freshness_required_for_high_danger")
+            if row.get("required_runbook_ack") is not True:
+                violations.append("runbook_ack_required_for_high_danger")
+            if row.get("required_second_approval") is not True:
+                violations.append("second_approval_required_for_high_danger")
+            if row.get("confirmation_phrase_required") is not True:
+                violations.append("confirmation_phrase_required_for_high_danger")
+        if row.get("cooldown_ok") is not True:
+            violations.append("cooldown_not_ok")
+        if not isinstance(row.get("blast_radius_preview"), dict) or not row.get("blast_radius_preview"):
+            violations.append("blast_radius_preview_required")
+        if status == "safe" and violations:
+            unsafe_allowed_count += 1
+        expected_hash = _hash_record_without(row, "safety_hash") if safety_check_id else None
+        if row.get("safety_hash") and expected_hash and row.get("safety_hash") != expected_hash:
+            violations.append("safety_hash_mismatch")
+        if missing or violations:
+            malformed_safety_checks.append({"index": index, "safety_check_id": safety_check_id or None, "action": row.get("action"), "missing_fields": missing, "violations": sorted(set(violations))})
+
+    ownership_rows = policy.get("ownership_oncall") if isinstance(policy.get("ownership_oncall"), list) else []
+    malformed_ownership_rows = []
+    ownership_components = set()
+    for index, row in enumerate(ownership_rows):
+        if not isinstance(row, dict):
+            malformed_ownership_rows.append({"index": index, "component": None, "missing_fields": list(OWNERSHIP_ONCALL_REQUIRED_FIELDS), "violations": ["ownership_oncall_not_object"]})
+            continue
+        component = str(row.get("component") or "")
+        if component:
+            ownership_components.add(component)
+        missing = _missing_required_fields(row, OWNERSHIP_ONCALL_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            if int(row.get("ack_sla_minutes")) <= 0:
+                violations.append("ack_sla_minutes_positive_required")
+            if int(row.get("resolution_sla_minutes")) <= 0:
+                violations.append("resolution_sla_minutes_positive_required")
+        except (TypeError, ValueError):
+            violations.append("sla_minutes_numeric_required")
+        if str(row.get("oncall_primary") or "") == str(row.get("oncall_secondary") or ""):
+            violations.append("primary_secondary_oncall_must_differ")
+        if _parse_iso_ts(row.get("last_reviewed_at")) is None:
+            violations.append("last_reviewed_at_invalid")
+        if not str(row.get("runbook_url") or "").strip():
+            violations.append("runbook_url_required")
+        expected_hash = _hash_record_without(row, "ownership_hash") if component else None
+        if row.get("ownership_hash") and expected_hash and row.get("ownership_hash") != expected_hash:
+            violations.append("ownership_hash_mismatch")
+        if missing or violations:
+            malformed_ownership_rows.append({"index": index, "component": component or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_ownership_components = sorted(REQUIRED_OWNERSHIP_COMPONENTS - ownership_components)
+
+    alert_policies = policy.get("alert_policies") if isinstance(policy.get("alert_policies"), list) else []
+    malformed_alert_policies = []
+    duplicate_alert_ids = []
+    alert_ids = set()
+    for index, row in enumerate(alert_policies):
+        if not isinstance(row, dict):
+            malformed_alert_policies.append({"index": index, "alert_id": None, "missing_fields": list(ALERT_POLICY_REQUIRED_FIELDS), "violations": ["alert_policy_not_object"]})
+            continue
+        alert_id = str(row.get("alert_id") or "")
+        if alert_id in alert_ids:
+            duplicate_alert_ids.append(alert_id)
+        if alert_id:
+            alert_ids.add(alert_id)
+        missing = _missing_required_fields(row, ALERT_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        severity = str(row.get("severity") or "")
+        if severity not in {"P0", "P1"}:
+            violations.append("severity_not_allowed")
+        if str(row.get("owner_component") or "") not in ownership_components:
+            violations.append("owner_component_missing_from_oncall")
+        auto_actions = set(str(item) for item in row.get("auto_action", []) if item)
+        if severity == "P0" and "new_entry_disabled" not in auto_actions:
+            violations.append("p0_alert_must_disable_new_entry")
+        if severity == "P0" and "exit_safety_preserved" not in auto_actions:
+            violations.append("p0_alert_must_preserve_exit_safety")
+        expected_hash = _hash_record_without(row, "alert_hash") if alert_id else None
+        if row.get("alert_hash") and expected_hash and row.get("alert_hash") != expected_hash:
+            violations.append("alert_hash_mismatch")
+        if missing or violations:
+            malformed_alert_policies.append({"index": index, "alert_id": alert_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_alert_ids = sorted(REQUIRED_ALERT_IDS - alert_ids)
+
+    alert_acks = policy.get("alert_ack_escalations") if isinstance(policy.get("alert_ack_escalations"), list) else []
+    malformed_alert_acks = []
+    for index, row in enumerate(alert_acks):
+        if not isinstance(row, dict):
+            malformed_alert_acks.append({"index": index, "alert_instance_id": None, "missing_fields": list(ALERT_ACK_ESCALATION_REQUIRED_FIELDS), "violations": ["alert_ack_escalation_not_object"]})
+            continue
+        alert_instance_id = str(row.get("alert_instance_id") or "")
+        missing = _missing_required_fields(row, ALERT_ACK_ESCALATION_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        alert_id = str(row.get("alert_id") or "")
+        if alert_id not in alert_ids:
+            violations.append("alert_id_missing_from_policy")
+        severity = str(row.get("severity") or "")
+        created_at = _parse_iso_ts(row.get("created_at"))
+        required_by = _parse_iso_ts(row.get("ack_required_by"))
+        acked_at = _parse_iso_ts(row.get("acked_at"))
+        resolved_at = _parse_iso_ts(row.get("resolved_at"))
+        if None in {created_at, required_by, acked_at, resolved_at}:
+            violations.append("alert_ack_timestamp_invalid")
+        else:
+            if not (created_at <= acked_at <= required_by <= resolved_at):
+                violations.append("alert_ack_chronology_invalid")
+            max_ack_seconds = 300 if severity == "P0" else 1800 if severity == "P1" else None
+            if max_ack_seconds is None:
+                violations.append("severity_not_allowed")
+            elif (required_by - created_at).total_seconds() > max_ack_seconds:
+                violations.append("ack_required_by_exceeds_sla")
+        if row.get("ack_sla_met") is not True:
+            violations.append("ack_sla_not_met")
+        if not str(row.get("resolution_note") or "").strip():
+            violations.append("resolution_note_required")
+        if not str(row.get("escalation_target") or "").strip():
+            violations.append("escalation_target_required")
+        expected_hash = _hash_record_without(row, "alert_ack_hash") if alert_instance_id else None
+        if row.get("alert_ack_hash") and expected_hash and row.get("alert_ack_hash") != expected_hash:
+            violations.append("alert_ack_hash_mismatch")
+        if missing or violations:
+            malformed_alert_acks.append({"index": index, "alert_instance_id": alert_instance_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    kill_switch_drills = policy.get("kill_switch_drills") if isinstance(policy.get("kill_switch_drills"), list) else []
+    malformed_kill_switch_drills = []
+    kill_switch_types = set()
+    for index, row in enumerate(kill_switch_drills):
+        if not isinstance(row, dict):
+            malformed_kill_switch_drills.append({"index": index, "drill_id": None, "missing_fields": list(KILL_SWITCH_DRILL_REQUIRED_FIELDS), "violations": ["kill_switch_drill_not_object"]})
+            continue
+        drill_id = str(row.get("drill_id") or "")
+        kill_switch_type = str(row.get("kill_switch_type") or "")
+        if kill_switch_type:
+            kill_switch_types.add(kill_switch_type)
+        missing = _missing_required_fields(row, KILL_SWITCH_DRILL_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        started_at = _parse_iso_ts(row.get("started_at"))
+        completed_at = _parse_iso_ts(row.get("completed_at"))
+        if started_at is None or completed_at is None or started_at > completed_at:
+            violations.append("kill_switch_drill_timestamp_invalid")
+        if row.get("pass_fail") != "pass":
+            violations.append("kill_switch_drill_not_pass")
+        if row.get("open_positions_policy_checked") is not True:
+            violations.append("open_positions_policy_not_checked")
+        if row.get("exit_safety_preserved") is not True:
+            violations.append("exit_safety_not_preserved")
+        if row.get("new_entry_blocked") is not True:
+            violations.append("new_entry_not_blocked")
+        if row.get("recovery_steps_verified") is not True:
+            violations.append("recovery_steps_not_verified")
+        expected_effect = set(str(item) for item in row.get("expected_effect", []) if item)
+        observed_effect = set(str(item) for item in row.get("observed_effect", []) if item)
+        if expected_effect and not expected_effect.issubset(observed_effect):
+            violations.append("expected_effect_not_observed")
+        expected_hash = _hash_record_without(row, "evidence_hash") if drill_id else None
+        if row.get("evidence_hash") and expected_hash and row.get("evidence_hash") != expected_hash:
+            violations.append("kill_switch_evidence_hash_mismatch")
+        if missing or violations:
+            malformed_kill_switch_drills.append({"index": index, "drill_id": drill_id or None, "kill_switch_type": kill_switch_type or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_kill_switch_types = sorted(REQUIRED_KILL_SWITCH_TYPES - kill_switch_types)
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    audit_passed = bool(operator_audits) and not policy_errors and not source_errors and not malformed_operator_audits and not duplicate_audit_event_ids
+    safety_passed = bool(safety_checks) and not policy_errors and not source_errors and not malformed_safety_checks and unsafe_allowed_count == 0
+    ownership_passed = bool(ownership_rows) and not policy_errors and not source_errors and not malformed_ownership_rows and not missing_ownership_components
+    alert_policy_passed = bool(alert_policies) and not policy_errors and not source_errors and not malformed_alert_policies and not duplicate_alert_ids and not missing_alert_ids
+    alert_ack_passed = bool(alert_acks) and not policy_errors and not source_errors and not malformed_alert_acks
+    kill_switch_passed = bool(kill_switch_drills) and not policy_errors and not source_errors and not malformed_kill_switch_drills and not missing_kill_switch_types
+    return [
+        _contract(
+            "OperatorAudit",
+            audit_passed,
+            "operator_audit_missing_malformed_or_incomplete",
+            {
+                **common,
+                "operator_audit_count": len(operator_audits),
+                "duplicate_audit_event_ids": sorted(str(item) for item in duplicate_audit_event_ids),
+                "malformed_operator_audits": malformed_operator_audits,
+            },
+        ),
+        _contract(
+            "OperatorSafetyContract",
+            safety_passed,
+            "operator_safety_missing_malformed_or_unsafe",
+            {
+                **common,
+                "operator_safety_check_count": len(safety_checks),
+                "unsafe_allowed_count": unsafe_allowed_count,
+                "malformed_safety_checks": malformed_safety_checks,
+            },
+        ),
+        _contract(
+            "OwnershipOnCallContract",
+            ownership_passed,
+            "ownership_oncall_missing_malformed_or_unowned",
+            {
+                **common,
+                "ownership_component_count": len(ownership_components),
+                "missing_ownership_components": missing_ownership_components,
+                "malformed_ownership_rows": malformed_ownership_rows,
+            },
+        ),
+        _contract(
+            "AlertPolicy",
+            alert_policy_passed,
+            "alert_policy_missing_malformed_or_incomplete",
+            {
+                **common,
+                "alert_policy_count": len(alert_policies),
+                "missing_alert_ids": missing_alert_ids,
+                "duplicate_alert_ids": sorted(str(item) for item in duplicate_alert_ids),
+                "malformed_alert_policies": malformed_alert_policies,
+            },
+        ),
+        _contract(
+            "AlertAckEscalationPolicy",
+            alert_ack_passed,
+            "alert_ack_escalation_missing_malformed_or_unacked",
+            {
+                **common,
+                "alert_ack_count": len(alert_acks),
+                "malformed_alert_acks": malformed_alert_acks,
+            },
+        ),
+        _contract(
+            "KillSwitchDrillContract",
+            kill_switch_passed,
+            "kill_switch_drill_missing_malformed_or_failed",
+            {
+                **common,
+                "kill_switch_drill_count": len(kill_switch_drills),
+                "missing_kill_switch_types": missing_kill_switch_types,
+                "malformed_kill_switch_drills": malformed_kill_switch_drills,
+            },
+        ),
+    ]
+
+
+def verify_replay_build_model_contracts(
+    policy_path=DEFAULT_REPLAY_BUILD_MODEL_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return [
+            _contract("ReplayDeterminismCheck", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ReproducibleBuildContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("SupplyChainSecurityContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("PolicyBundleCompatibilityContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ModelExpiryContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ForecastSanityGuard", False, "replay_build_model_policy_missing_or_invalid", evidence),
+        ]
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return [
+            _contract("ReplayDeterminismCheck", False, "replay_build_model_policy_not_object", evidence),
+            _contract("ReproducibleBuildContract", False, "replay_build_model_policy_not_object", evidence),
+            _contract("SupplyChainSecurityContract", False, "replay_build_model_policy_not_object", evidence),
+            _contract("PolicyBundleCompatibilityContract", False, "replay_build_model_policy_not_object", evidence),
+            _contract("ModelExpiryContract", False, "replay_build_model_policy_not_object", evidence),
+            _contract("ForecastSanityGuard", False, "replay_build_model_policy_not_object", evidence),
+        ]
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return [
+            _contract("ReplayDeterminismCheck", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ReproducibleBuildContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("SupplyChainSecurityContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("PolicyBundleCompatibilityContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ModelExpiryContract", False, "replay_build_model_policy_missing_or_invalid", evidence),
+            _contract("ForecastSanityGuard", False, "replay_build_model_policy_missing_or_invalid", evidence),
+        ]
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.replay_build_model_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "replay_build_model_promotion_blocked":
+        policy_errors.append("failure_action_must_be_replay_build_model_promotion_blocked")
+
+    replay_checks = policy.get("replay_determinism_checks") if isinstance(policy.get("replay_determinism_checks"), list) else []
+    malformed_replay_checks = []
+    replay_model_snapshot_ids = set()
+    for index, row in enumerate(replay_checks):
+        if not isinstance(row, dict):
+            malformed_replay_checks.append({"index": index, "replay_check_id": None, "missing_fields": list(REPLAY_DETERMINISM_REQUIRED_FIELDS), "violations": ["replay_check_not_object"]})
+            continue
+        replay_check_id = str(row.get("replay_check_id") or "")
+        replay_model_snapshot_ids.add(str(row.get("model_snapshot_id") or ""))
+        missing = _missing_required_fields(row, REPLAY_DETERMINISM_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("pass_fail") != "pass":
+            violations.append("replay_check_not_pass")
+        for field in (
+            "event_log_hash",
+            "policy_manifest_hash",
+            "threshold_catalog_hash",
+            "metric_registry_hash",
+            "runtime_config_hash",
+            "build_hash",
+            "spec_hash",
+            "decision_hash",
+            "forecast_hash",
+            "outcome_hash",
+            "ledger_hash",
+            "feature_vector_hash",
+        ):
+            if not _sha256_hex_like(row.get(field)):
+                violations.append(f"{field}_must_be_sha256")
+        expected_hash = _hash_record_without(row, "replay_hash") if replay_check_id else None
+        if row.get("replay_hash") and expected_hash and row.get("replay_hash") != expected_hash:
+            violations.append("replay_hash_mismatch")
+        if missing or violations:
+            malformed_replay_checks.append({"index": index, "replay_check_id": replay_check_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    builds = policy.get("reproducible_builds") if isinstance(policy.get("reproducible_builds"), list) else []
+    malformed_builds = []
+    build_ids = set()
+    build_hashes = set()
+    for index, row in enumerate(builds):
+        if not isinstance(row, dict):
+            malformed_builds.append({"index": index, "build_id": None, "missing_fields": list(REPRODUCIBLE_BUILD_REQUIRED_FIELDS), "violations": ["reproducible_build_not_object"]})
+            continue
+        build_id = str(row.get("build_id") or "")
+        if build_id:
+            build_ids.add(build_id)
+        build_hashes.add(str(row.get("reproducible_build_hash") or ""))
+        missing = _missing_required_fields(row, REPRODUCIBLE_BUILD_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        for field in ("code_commit_hash", "dependency_lock_hash", "container_image_hash", "feature_code_hash", "model_code_hash"):
+            if not _sha256_hex_like(row.get(field)):
+                violations.append(f"{field}_must_be_sha256")
+        if _parse_iso_ts(row.get("build_created_at")) is None:
+            violations.append("build_created_at_invalid")
+        if not str(row.get("runtime_version") or "").strip():
+            violations.append("runtime_version_required")
+        expected_hash = _hash_record_without(row, "reproducible_build_hash") if build_id else None
+        if row.get("reproducible_build_hash") and expected_hash and row.get("reproducible_build_hash") != expected_hash:
+            violations.append("reproducible_build_hash_mismatch")
+        if missing or violations:
+            malformed_builds.append({"index": index, "build_id": build_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    artifacts = policy.get("supply_chain_artifacts") if isinstance(policy.get("supply_chain_artifacts"), list) else []
+    malformed_artifacts = []
+    artifact_types = set()
+    for index, row in enumerate(artifacts):
+        if not isinstance(row, dict):
+            malformed_artifacts.append({"index": index, "artifact_id": None, "missing_fields": list(SUPPLY_CHAIN_ARTIFACT_REQUIRED_FIELDS), "violations": ["supply_chain_artifact_not_object"]})
+            continue
+        artifact_id = str(row.get("artifact_id") or "")
+        artifact_type = str(row.get("artifact_type") or "")
+        artifact_types.add(artifact_type)
+        missing = _missing_required_fields(row, SUPPLY_CHAIN_ARTIFACT_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if artifact_type not in SUPPLY_CHAIN_ARTIFACT_TYPES:
+            violations.append("artifact_type_not_allowed")
+        for field in ("code_commit_hash", "dependency_lock_hash", "container_image_hash", "SBOM_hash"):
+            if not _sha256_hex_like(row.get(field)):
+                violations.append(f"{field}_must_be_sha256")
+        if row.get("signature_status") != "verified":
+            violations.append("signature_not_verified")
+        if row.get("vulnerability_scan_status") != "pass":
+            violations.append("vulnerability_scan_not_pass")
+        if row.get("provenance_attestation") != "verified":
+            violations.append("provenance_attestation_not_verified")
+        if not str(row.get("approved_builder") or "").strip():
+            violations.append("approved_builder_required")
+        if _parse_iso_ts(row.get("created_at")) is None:
+            violations.append("created_at_invalid")
+        expected_hash = _hash_record_without(row, "artifact_hash") if artifact_id else None
+        if row.get("artifact_hash") and expected_hash and row.get("artifact_hash") != expected_hash:
+            violations.append("artifact_hash_mismatch")
+        if missing or violations:
+            malformed_artifacts.append({"index": index, "artifact_id": artifact_id or None, "artifact_type": artifact_type or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_artifact_types = sorted(SUPPLY_CHAIN_ARTIFACT_TYPES - artifact_types)
+
+    bundles = policy.get("policy_bundle_compatibility") if isinstance(policy.get("policy_bundle_compatibility"), list) else []
+    malformed_bundles = []
+    bundle_model_snapshot_ids = set()
+    for index, row in enumerate(bundles):
+        if not isinstance(row, dict):
+            malformed_bundles.append({"index": index, "policy_bundle_id": None, "missing_fields": list(POLICY_BUNDLE_COMPATIBILITY_REQUIRED_FIELDS), "violations": ["policy_bundle_compatibility_not_object"]})
+            continue
+        policy_bundle_id = str(row.get("policy_bundle_id") or "")
+        bundle_model_snapshot_ids.add(str(row.get("model_snapshot_id") or ""))
+        missing = _missing_required_fields(row, POLICY_BUNDLE_COMPATIBILITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("compatibility_status") != "compatible":
+            violations.append("policy_bundle_not_compatible")
+        for field in POLICY_BUNDLE_COMPATIBILITY_REQUIRED_FIELDS:
+            if field.endswith("_version") and not str(row.get(field) or "").strip():
+                violations.append(f"{field}_required")
+        expected_hash = _hash_record_without(row, "compatibility_hash") if policy_bundle_id else None
+        if row.get("compatibility_hash") and expected_hash and row.get("compatibility_hash") != expected_hash:
+            violations.append("compatibility_hash_mismatch")
+        if missing or violations:
+            malformed_bundles.append({"index": index, "policy_bundle_id": policy_bundle_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    model_expiry_rows = policy.get("model_expiry") if isinstance(policy.get("model_expiry"), list) else []
+    malformed_model_expiry = []
+    active_model_snapshot_ids = set()
+    for index, row in enumerate(model_expiry_rows):
+        if not isinstance(row, dict):
+            malformed_model_expiry.append({"index": index, "model_snapshot_id": None, "missing_fields": list(MODEL_EXPIRY_REQUIRED_FIELDS), "violations": ["model_expiry_not_object"]})
+            continue
+        model_snapshot_id = str(row.get("model_snapshot_id") or "")
+        active_model_snapshot_ids.add(model_snapshot_id)
+        missing = _missing_required_fields(row, MODEL_EXPIRY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        trained_until = _parse_iso_ts(row.get("trained_until"))
+        expiry_ts = _parse_iso_ts(row.get("expiry_ts"))
+        checked_at = _parse_iso_ts(row.get("checked_at"))
+        if trained_until is None or expiry_ts is None or checked_at is None:
+            violations.append("model_expiry_timestamp_invalid")
+        elif not (trained_until <= checked_at <= expiry_ts):
+            violations.append("model_expired_or_checked_before_training")
+        try:
+            if int(row.get("max_age_minutes")) <= 0:
+                violations.append("max_age_minutes_positive_required")
+            if int(row.get("recent_sample_count")) < int(row.get("min_recent_samples")):
+                violations.append("recent_sample_count_below_min")
+        except (TypeError, ValueError):
+            violations.append("model_sample_fields_numeric_required")
+        if row.get("model_expiry_status") != "active":
+            violations.append("model_not_active")
+        if str(row.get("expired_action_cap") or "") not in MODEL_EXPIRED_ACTION_CAPS:
+            violations.append("expired_action_cap_not_allowed")
+        expected_hash = _hash_record_without(row, "model_expiry_hash") if model_snapshot_id else None
+        if row.get("model_expiry_hash") and expected_hash and row.get("model_expiry_hash") != expected_hash:
+            violations.append("model_expiry_hash_mismatch")
+        if missing or violations:
+            malformed_model_expiry.append({"index": index, "model_snapshot_id": model_snapshot_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    forecast_rows = policy.get("forecast_sanity_guards") if isinstance(policy.get("forecast_sanity_guards"), list) else []
+    malformed_forecast_rows = []
+    for index, row in enumerate(forecast_rows):
+        if not isinstance(row, dict):
+            malformed_forecast_rows.append({"index": index, "forecast_id": None, "missing_fields": list(FORECAST_SANITY_REQUIRED_FIELDS), "violations": ["forecast_sanity_guard_not_object"]})
+            continue
+        forecast_id = str(row.get("forecast_id") or "")
+        missing = _missing_required_fields(row, FORECAST_SANITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            raw = Decimal(str(row.get("raw_forecast")))
+            sanitized = Decimal(str(row.get("sanitized_forecast")))
+            if raw < 0 or raw > 1 or sanitized < 0 or sanitized > 1:
+                violations.append("forecast_probability_out_of_range")
+            if sanitized > raw:
+                violations.append("sanitized_forecast_exceeds_raw")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("forecast_numeric_required")
+        try:
+            if int(row.get("sample_n")) <= 0:
+                violations.append("sample_n_positive_required")
+        except (TypeError, ValueError):
+            violations.append("sample_n_numeric_required")
+        try:
+            if Decimal(str(row.get("data_quality_score"))) <= 0:
+                violations.append("data_quality_score_positive_required")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("data_quality_score_numeric_required")
+        if row.get("fallback_level") == "global":
+            violations.append("global_fallback_cannot_high_conviction")
+        if row.get("calibration_bucket_status") != "healthy":
+            violations.append("calibration_bucket_not_healthy")
+        if row.get("forecast_sanity_status") != "pass":
+            violations.append("forecast_sanity_not_pass")
+        if not _sha256_hex_like(row.get("feature_vector_hash")):
+            violations.append("feature_vector_hash_must_be_sha256")
+        expected_hash = _hash_record_without(row, "forecast_sanity_hash") if forecast_id else None
+        if row.get("forecast_sanity_hash") and expected_hash and row.get("forecast_sanity_hash") != expected_hash:
+            violations.append("forecast_sanity_hash_mismatch")
+        if missing or violations:
+            malformed_forecast_rows.append({"index": index, "forecast_id": forecast_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    cross_link_violations = []
+    if bundle_model_snapshot_ids - active_model_snapshot_ids:
+        cross_link_violations.append("policy_bundle_model_snapshot_missing_expiry")
+    if replay_model_snapshot_ids - active_model_snapshot_ids:
+        cross_link_violations.append("replay_model_snapshot_missing_expiry")
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "cross_link_violations": cross_link_violations,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    replay_passed = bool(replay_checks) and not policy_errors and not source_errors and not cross_link_violations and not malformed_replay_checks
+    build_passed = bool(builds) and not policy_errors and not source_errors and not malformed_builds
+    supply_passed = bool(artifacts) and not policy_errors and not source_errors and not malformed_artifacts and not missing_artifact_types
+    bundle_passed = bool(bundles) and not policy_errors and not source_errors and not cross_link_violations and not malformed_bundles
+    expiry_passed = bool(model_expiry_rows) and not policy_errors and not source_errors and not malformed_model_expiry
+    forecast_passed = bool(forecast_rows) and not policy_errors and not source_errors and not malformed_forecast_rows
+    return [
+        _contract(
+            "ReplayDeterminismCheck",
+            replay_passed,
+            "replay_determinism_missing_malformed_or_nondeterministic",
+            {
+                **common,
+                "replay_check_count": len(replay_checks),
+                "malformed_replay_checks": malformed_replay_checks,
+            },
+        ),
+        _contract(
+            "ReproducibleBuildContract",
+            build_passed,
+            "reproducible_build_missing_malformed_or_unpinned",
+            {
+                **common,
+                "build_count": len(builds),
+                "build_ids": sorted(build_ids),
+                "malformed_builds": malformed_builds,
+            },
+        ),
+        _contract(
+            "SupplyChainSecurityContract",
+            supply_passed,
+            "supply_chain_security_missing_malformed_or_unverified",
+            {
+                **common,
+                "artifact_count": len(artifacts),
+                "artifact_types": sorted(item for item in artifact_types if item),
+                "missing_artifact_types": missing_artifact_types,
+                "malformed_artifacts": malformed_artifacts,
+            },
+        ),
+        _contract(
+            "PolicyBundleCompatibilityContract",
+            bundle_passed,
+            "policy_bundle_compatibility_missing_malformed_or_incompatible",
+            {
+                **common,
+                "policy_bundle_count": len(bundles),
+                "malformed_bundles": malformed_bundles,
+            },
+        ),
+        _contract(
+            "ModelExpiryContract",
+            expiry_passed,
+            "model_expiry_missing_malformed_or_expired",
+            {
+                **common,
+                "model_expiry_count": len(model_expiry_rows),
+                "active_model_snapshot_ids": sorted(item for item in active_model_snapshot_ids if item),
+                "malformed_model_expiry": malformed_model_expiry,
+            },
+        ),
+        _contract(
+            "ForecastSanityGuard",
+            forecast_passed,
+            "forecast_sanity_guard_missing_malformed_or_bypassed",
+            {
+                **common,
+                "forecast_sanity_count": len(forecast_rows),
+                "malformed_forecast_rows": malformed_forecast_rows,
+            },
+        ),
+    ]
+
+
+def _contracts_from_error(contract_ids, blocking_reason, evidence):
+    return [_contract(contract_id, False, blocking_reason, evidence) for contract_id in contract_ids]
+
+
+MARKOV_LIFECYCLE_FORECAST_CONTRACTS = (
+    "TelegramLifecycleTransitionMatrixContract",
+    "LifecycleNstepForecastContract",
+    "AbsorbingSemiMarkovForecastContract",
+    "CompetingRiskForecastContract",
+    "CensoringPolicyContract",
+    "ForecastWalkForwardValidationContract",
+    "HMMResearchOnlyBoundaryContract",
+)
+
+
+def _probability_value_errors(value, field_name):
+    try:
+        probability = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return [f"{field_name}_probability_numeric_required"]
+    if probability < 0 or probability > 1:
+        return [f"{field_name}_probability_out_of_range"]
+    return []
+
+
+def _probability_distribution_errors(distribution, states, row_name):
+    if not isinstance(distribution, dict):
+        return [f"{row_name}_distribution_not_object"]
+    errors = []
+    total = Decimal("0")
+    for state in states:
+        if state not in distribution:
+            errors.append(f"{row_name}_{state}_missing")
+            continue
+        value_errors = _probability_value_errors(distribution.get(state), f"{row_name}_{state}")
+        errors.extend(value_errors)
+        if not value_errors:
+            total += Decimal(str(distribution.get(state)))
+    if abs(total - Decimal("1")) > Decimal("0.000001"):
+        errors.append(f"{row_name}_probabilities_do_not_sum_to_one")
+    return errors
+
+
+def _failed_markov_lifecycle_forecast_contracts(reason, evidence):
+    return _contracts_from_error(MARKOV_LIFECYCLE_FORECAST_CONTRACTS, reason, evidence)
+
+
+def verify_markov_lifecycle_forecast_contracts(policy_path=DEFAULT_MARKOV_LIFECYCLE_FORECAST_POLICY):
+    try:
+        policy = _load_json(policy_path)
+        from telegram_lifecycle_markov import (  # noqa: PLC0415
+            ABSORBING_STATES,
+            FORECAST_BOUNDARY,
+            STATE_ORDER,
+            build_lifecycle_forecast_snapshot,
+        )
+    except Exception as exc:
+        return _failed_markov_lifecycle_forecast_contracts(
+            "markov_lifecycle_forecast_policy_missing_or_invalid",
+            {"policy_path": str(policy_path), "error": str(exc)},
+        )
+    if not isinstance(policy, dict):
+        return _failed_markov_lifecycle_forecast_contracts(
+            "markov_lifecycle_forecast_policy_not_object",
+            {"policy_path": str(policy_path)},
+        )
+
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.markov_lifecycle_forecast_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "forecast_research_only":
+        policy_errors.append("failure_action_must_be_forecast_research_only")
+
+    config = policy.get("snapshot_config") if isinstance(policy.get("snapshot_config"), dict) else {}
+    events = policy.get("sample_lifecycle_events") if isinstance(policy.get("sample_lifecycle_events"), list) else []
+    try:
+        snapshot = build_lifecycle_forecast_snapshot(
+            events,
+            start_state=config.get("start_state") or "RECLAIM_CONFIRMED",
+            cutoff_seq=int(config.get("cutoff_seq")) if config.get("cutoff_seq") is not None else None,
+            horizons=tuple(config.get("horizons") or (1, 3, 5, 15)),
+            max_absorption_steps=int(config.get("max_absorption_steps") or 60),
+            model_snapshot_id=config.get("model_snapshot_id"),
+        )
+        snapshot_error = None
+    except Exception as exc:  # noqa: BLE001
+        snapshot = {}
+        snapshot_error = str(exc)
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+        "snapshot_error": snapshot_error,
+        "model_snapshot_id": snapshot.get("model_snapshot_id"),
+        "sample_n": snapshot.get("sample_n"),
+        "matrix_build_cutoff_seq": snapshot.get("matrix_build_cutoff_seq"),
+    }
+
+    transition_errors = []
+    if snapshot_error:
+        transition_errors.append("snapshot_build_failed")
+    for field in ("model_snapshot_id", "state_definition_version", "transition_matrix", "matrix_build_cutoff_seq", "sample_n"):
+        if not snapshot.get(field) and field != "matrix_build_cutoff_seq":
+            transition_errors.append(f"{field}_missing")
+    try:
+        if int(snapshot.get("sample_n") or 0) <= 0:
+            transition_errors.append("sample_n_positive_required")
+    except (TypeError, ValueError):
+        transition_errors.append("sample_n_numeric_required")
+    matrix = snapshot.get("transition_matrix")
+    if not isinstance(matrix, dict):
+        transition_errors.append("transition_matrix_not_object")
+    else:
+        for state in STATE_ORDER:
+            row_errors = _probability_distribution_errors(matrix.get(state), STATE_ORDER, f"matrix_{state}")
+            transition_errors.extend(row_errors)
+        for state in ABSORBING_STATES:
+            row = matrix.get(state) if isinstance(matrix.get(state), dict) else {}
+            if row.get(state) != 1.0:
+                transition_errors.append(f"absorbing_state_{state}_not_self_loop")
+    if snapshot.get("absorbing_transition_violation_count") not in {0, None}:
+        transition_errors.append("absorbing_transition_violations_present")
+    boundary = snapshot.get("contract_boundaries") if isinstance(snapshot.get("contract_boundaries"), dict) else {}
+    if boundary.get("mode_target") != "shadow_first":
+        transition_errors.append("boundary_mode_target_not_shadow_first")
+    if boundary.get("entry_gate_allowed") is not False:
+        transition_errors.append("entry_gate_allowed_must_be_false")
+    if boundary.get("ordinary_stationary_distribution_allowed_as_entry_gate") is not False:
+        transition_errors.append("stationary_distribution_entry_gate_must_be_false")
+    if boundary != dict(FORECAST_BOUNDARY):
+        transition_errors.append("forecast_boundary_drift")
+
+    n_step_errors = []
+    n_step = snapshot.get("n_step_forecasts") if isinstance(snapshot.get("n_step_forecasts"), dict) else {}
+    for field in ("model_snapshot_id", "start_state", "matrix_build_cutoff_seq"):
+        if not snapshot.get(field) and field != "matrix_build_cutoff_seq":
+            n_step_errors.append(f"{field}_missing")
+    for horizon in sorted({int(item) for item in (config.get("horizons") or [])}):
+        key = str(horizon)
+        if key not in n_step:
+            n_step_errors.append(f"horizon_{key}_missing")
+        else:
+            n_step_errors.extend(_probability_distribution_errors(n_step.get(key), STATE_ORDER, f"n_step_{key}"))
+
+    absorption_errors = []
+    absorbing_definition = set(str(item) for item in (policy.get("absorbing_state_definition") or []) if item)
+    if set(ABSORBING_STATES) - absorbing_definition:
+        absorption_errors.append("absorbing_state_definition_incomplete")
+    state_duration_sec = policy.get("state_duration_sec")
+    if not isinstance(state_duration_sec, dict) or not state_duration_sec:
+        absorption_errors.append("state_duration_sec_missing")
+    absorption = snapshot.get("absorption_forecast") if isinstance(snapshot.get("absorption_forecast"), dict) else {}
+    absorbing_probabilities = absorption.get("absorbing_state_probabilities")
+    if not isinstance(absorbing_probabilities, dict):
+        absorption_errors.append("absorption_probabilities_missing")
+    else:
+        for state in ABSORBING_STATES:
+            absorption_errors.extend(_probability_value_errors(absorbing_probabilities.get(state), f"absorb_{state}"))
+    if absorption.get("expected_time_to_absorption_lower_bound_steps") is None:
+        absorption_errors.append("expected_time_to_absorption_missing")
+
+    censoring_rows = policy.get("censoring_policies") if isinstance(policy.get("censoring_policies"), list) else []
+    malformed_censoring = []
+    censoring_versions = set()
+    for index, row in enumerate(censoring_rows):
+        if not isinstance(row, dict):
+            malformed_censoring.append({"index": index, "violations": ["censoring_policy_not_object"]})
+            continue
+        censoring_versions.add(str(row.get("censoring_policy_version") or ""))
+        missing = _missing_required_fields(row, MARKOV_CENSORING_POLICY_REQUIRED_FIELDS)
+        violations = []
+        if not str(row.get("training_weight_policy") or "").strip():
+            violations.append("training_weight_policy_required")
+        if missing or violations:
+            malformed_censoring.append({"index": index, "missing_fields": missing, "violations": violations})
+    if not censoring_rows:
+        malformed_censoring.append({"index": None, "violations": ["censoring_policy_required"]})
+
+    competing_errors = []
+    for field in ("p_absorb_peak30", "p_absorb_stop_before_peak"):
+        competing_errors.extend(_probability_value_errors(absorption.get(field), field))
+    competing_censoring_version = str(policy.get("competing_risk_censoring_policy_version") or "")
+    if competing_censoring_version not in censoring_versions:
+        competing_errors.append("censoring_policy_version_missing_or_unknown")
+
+    walk_forward_rows = policy.get("walk_forward_validations") if isinstance(policy.get("walk_forward_validations"), list) else []
+    malformed_walk_forward = []
+    for index, row in enumerate(walk_forward_rows):
+        if not isinstance(row, dict):
+            malformed_walk_forward.append({"index": index, "validation_id": None, "violations": ["walk_forward_validation_not_object"]})
+            continue
+        missing = _missing_required_fields(row, MARKOV_WALK_FORWARD_REQUIRED_FIELDS)
+        violations = []
+        if "cutoff" not in str(row.get("no_lookahead_proof") or "").lower():
+            violations.append("no_lookahead_proof_must_reference_cutoff")
+        if row.get("promotion_allowed") is not False:
+            violations.append("promotion_allowed_must_be_false")
+        try:
+            if int(row.get("cutoff_seq")) != int(snapshot.get("matrix_build_cutoff_seq")):
+                violations.append("cutoff_seq_mismatch")
+        except (TypeError, ValueError):
+            violations.append("cutoff_seq_numeric_required")
+        if missing or violations:
+            malformed_walk_forward.append(
+                {
+                    "index": index,
+                    "validation_id": row.get("validation_id"),
+                    "missing_fields": missing,
+                    "violations": sorted(set(violations)),
+                }
+            )
+    if not walk_forward_rows:
+        malformed_walk_forward.append({"index": None, "validation_id": None, "violations": ["walk_forward_validation_required"]})
+
+    hmm_rows = policy.get("hmm_research_only_boundaries") if isinstance(policy.get("hmm_research_only_boundaries"), list) else []
+    malformed_hmm = []
+    for index, row in enumerate(hmm_rows):
+        if not isinstance(row, dict):
+            malformed_hmm.append({"index": index, "artifact_id": None, "violations": ["hmm_boundary_not_object"]})
+            continue
+        missing = _missing_required_fields(row, MARKOV_HMM_BOUNDARY_REQUIRED_FIELDS)
+        violations = []
+        if row.get("research_only") is not True:
+            violations.append("research_only_must_be_true")
+        if row.get("online_filtering_only") is not True:
+            violations.append("online_filtering_only_must_be_true")
+        if row.get("full_sequence_viterbi_allowed") is not False:
+            violations.append("full_sequence_viterbi_must_be_false")
+        if row.get("entry_gate_allowed") is not False:
+            violations.append("entry_gate_allowed_must_be_false")
+        if missing or violations:
+            malformed_hmm.append(
+                {
+                    "index": index,
+                    "artifact_id": row.get("artifact_id"),
+                    "missing_fields": missing,
+                    "violations": sorted(set(violations)),
+                }
+            )
+    if not hmm_rows:
+        malformed_hmm.append({"index": None, "artifact_id": None, "violations": ["hmm_boundary_required"]})
+
+    base_ok = not policy_errors and not source_errors and snapshot_error is None
+    return [
+        _contract(
+            "TelegramLifecycleTransitionMatrixContract",
+            base_ok and not transition_errors,
+            "telegram_lifecycle_transition_matrix_missing_malformed_or_leaky",
+            {**common, "transition_matrix_errors": sorted(set(transition_errors))},
+        ),
+        _contract(
+            "LifecycleNstepForecastContract",
+            base_ok and not transition_errors and not n_step_errors,
+            "lifecycle_nstep_forecast_missing_malformed_or_leaky",
+            {**common, "n_step_errors": sorted(set(n_step_errors))},
+        ),
+        _contract(
+            "AbsorbingSemiMarkovForecastContract",
+            base_ok and not transition_errors and not absorption_errors,
+            "absorbing_semimarkov_forecast_missing_malformed_or_leaky",
+            {**common, "absorbing_errors": sorted(set(absorption_errors))},
+        ),
+        _contract(
+            "CompetingRiskForecastContract",
+            base_ok and not transition_errors and not competing_errors and not malformed_censoring,
+            "competing_risk_forecast_missing_malformed_or_uncensored",
+            {**common, "competing_risk_errors": sorted(set(competing_errors)), "malformed_censoring": malformed_censoring},
+        ),
+        _contract(
+            "CensoringPolicyContract",
+            base_ok and not malformed_censoring,
+            "censoring_policy_missing_malformed_or_promotion_leaky",
+            {**common, "malformed_censoring": malformed_censoring},
+        ),
+        _contract(
+            "ForecastWalkForwardValidationContract",
+            base_ok and not malformed_walk_forward,
+            "forecast_walk_forward_validation_missing_or_lookahead_leaky",
+            {**common, "malformed_walk_forward_validations": malformed_walk_forward},
+        ),
+        _contract(
+            "HMMResearchOnlyBoundaryContract",
+            base_ok and not malformed_hmm,
+            "hmm_research_only_boundary_missing_or_entry_leaky",
+            {**common, "malformed_hmm_boundaries": malformed_hmm},
+        ),
+    ]
+
+
+def _rendered_doc_hash_from_manifest(manifest_path=MANIFEST_PATH):
+    manifest = _load_json(manifest_path)
+    rendered_files = manifest.get("rendered_views") if isinstance(manifest, dict) else []
+    rendered_hashes = {}
+    for item in rendered_files if isinstance(rendered_files, list) else []:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("file")
+        if not filename:
+            continue
+        rendered_hashes[str(filename)] = str(item.get("sha256") or "")
+    return _sha256_json(rendered_hashes), len(rendered_hashes)
+
+
+def verify_spec_governance_feasibility_contracts(
+    policy_path=DEFAULT_SPEC_GOVERNANCE_FEASIBILITY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+    manifest_path=MANIFEST_PATH,
+    catalog_path=CATALOG_PATH,
+    registry_path=ENTRY_MODE_REGISTRY_PATH,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+        spec_report = validate_all(manifest_path=manifest_path, catalog_path=catalog_path, registry_path=registry_path)
+        rendered_doc_hash, rendered_file_count = _rendered_doc_hash_from_manifest(manifest_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return _contracts_from_error(
+            sorted(SPEC_GOVERNANCE_FEASIBILITY_CONTRACTS),
+            "spec_governance_feasibility_policy_missing_or_invalid",
+            evidence,
+        )
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return _contracts_from_error(
+            sorted(SPEC_GOVERNANCE_FEASIBILITY_CONTRACTS),
+            "spec_governance_feasibility_policy_not_object",
+            evidence,
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return _contracts_from_error(
+            sorted(SPEC_GOVERNANCE_FEASIBILITY_CONTRACTS),
+            "spec_governance_feasibility_policy_missing_or_invalid",
+            evidence,
+        )
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.spec_governance_feasibility_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "spec_governance_or_feasibility_blocked":
+        policy_errors.append("failure_action_must_block_spec_governance_or_feasibility")
+
+    rendered_views = policy.get("rendered_spec_views") if isinstance(policy.get("rendered_spec_views"), list) else []
+    malformed_rendered_views = []
+    for index, row in enumerate(rendered_views):
+        if not isinstance(row, dict):
+            malformed_rendered_views.append({"index": index, "rendered_view_id": None, "missing_fields": list(RENDERED_SPEC_VIEW_REQUIRED_FIELDS), "violations": ["rendered_view_not_object"]})
+            continue
+        view_id = str(row.get("rendered_view_id") or "")
+        missing = [
+            field
+            for field in _missing_required_fields(row, RENDERED_SPEC_VIEW_REQUIRED_FIELDS)
+            if field not in {"missing_section_ids", "extra_section_ids"} or field not in row
+        ]
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("source_spec_hash") != spec_report.get("spec_hash"):
+            violations.append("source_spec_hash_mismatch")
+        if row.get("rendered_doc_hash") != rendered_doc_hash:
+            violations.append("rendered_doc_hash_mismatch")
+        try:
+            if int(row.get("section_count")) != int(spec_report.get("section_count")):
+                violations.append("section_count_mismatch")
+        except (TypeError, ValueError):
+            violations.append("section_count_numeric_required")
+        if row.get("missing_section_ids") not in ([], None):
+            violations.append("missing_sections_not_allowed")
+        if row.get("extra_section_ids") not in ([], None):
+            violations.append("extra_sections_not_allowed")
+        if row.get("render_validation_status") != "valid":
+            violations.append("render_validation_not_valid")
+        if _parse_iso_ts(row.get("rendered_at")) is None:
+            violations.append("rendered_at_invalid")
+        expected_hash = _hash_record_without(row, "view_hash") if view_id else None
+        if row.get("view_hash") and expected_hash and row.get("view_hash") != expected_hash:
+            violations.append("view_hash_mismatch")
+        if missing or violations:
+            malformed_rendered_views.append({"index": index, "rendered_view_id": view_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    health_states = policy.get("health_states") if isinstance(policy.get("health_states"), list) else []
+    malformed_health_states = []
+    for index, row in enumerate(health_states):
+        if not isinstance(row, dict):
+            malformed_health_states.append({"index": index, "health_component": None, "missing_fields": list(HEALTH_STATE_REQUIRED_FIELDS), "violations": ["health_state_not_object"]})
+            continue
+        component = str(row.get("health_component") or "")
+        missing = [
+            field
+            for field in _missing_required_fields(row, HEALTH_STATE_REQUIRED_FIELDS)
+            if field != "blocking_modes" or field not in row
+        ]
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        health_state = str(row.get("health_state") or "")
+        if health_state not in HEALTH_STATE_ENUM_VALUES:
+            violations.append("health_state_not_allowed")
+        if health_state == "UNKNOWN":
+            violations.append("unknown_state_cannot_pass_readiness")
+        if health_state == "FATAL" and "normal_tiny" not in set(row.get("blocking_modes") or []):
+            violations.append("fatal_state_must_block_normal_tiny")
+        first_seen = _parse_iso_ts(row.get("first_seen_at"))
+        last_seen = _parse_iso_ts(row.get("last_seen_at"))
+        if first_seen is None or last_seen is None:
+            violations.append("health_timestamp_invalid")
+        elif first_seen > last_seen:
+            violations.append("health_timestamp_order_invalid")
+        if not isinstance(row.get("blocking_modes"), list):
+            violations.append("blocking_modes_must_be_list")
+        expected_hash = _hash_record_without(row, "health_hash") if component else None
+        if row.get("health_hash") and expected_hash and row.get("health_hash") != expected_hash:
+            violations.append("health_hash_mismatch")
+        if missing or violations:
+            malformed_health_states.append({"index": index, "health_component": component or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    lifecycles = policy.get("contract_lifecycle") if isinstance(policy.get("contract_lifecycle"), list) else []
+    lifecycle_contract_ids = set()
+    malformed_lifecycles = []
+    for index, row in enumerate(lifecycles):
+        if not isinstance(row, dict):
+            malformed_lifecycles.append({"index": index, "contract_id": None, "missing_fields": list(CONTRACT_LIFECYCLE_REQUIRED_FIELDS), "violations": ["contract_lifecycle_not_object"]})
+            continue
+        contract_id = str(row.get("contract_id") or "")
+        lifecycle_contract_ids.add(contract_id)
+        missing = _missing_required_fields(row, CONTRACT_LIFECYCLE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        status = str(row.get("status") or "")
+        if status not in CONTRACT_LIFECYCLE_STATUSES:
+            violations.append("contract_lifecycle_status_not_allowed")
+        if status != "active_gate":
+            violations.append("contract_not_active_gate_for_readiness")
+        if row.get("contract_tests_status") != "pass":
+            violations.append("contract_tests_not_pass")
+        allowed_modes = set(str(item) for item in row.get("allowed_modes", []) if item)
+        if "normal_tiny" not in allowed_modes:
+            violations.append("normal_tiny_mode_not_allowed")
+        if str(row.get("deprecated_in_version") or "") != "none":
+            violations.append("active_contract_cannot_be_deprecated")
+        if str(row.get("superseded_by") or "") != "none":
+            violations.append("active_contract_cannot_be_superseded")
+        if str(row.get("sunset_deadline") or "") != "none":
+            violations.append("active_contract_cannot_have_sunset_deadline")
+        expected_hash = _hash_record_without(row, "lifecycle_hash") if contract_id else None
+        if row.get("lifecycle_hash") and expected_hash and row.get("lifecycle_hash") != expected_hash:
+            violations.append("lifecycle_hash_mismatch")
+        if missing or violations:
+            malformed_lifecycles.append({"index": index, "contract_id": contract_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_lifecycle_contracts = sorted(SPEC_GOVERNANCE_FEASIBILITY_CONTRACTS - lifecycle_contract_ids)
+
+    objective_conflicts = policy.get("objective_conflicts") if isinstance(policy.get("objective_conflicts"), list) else []
+    malformed_objective_conflicts = []
+    for index, row in enumerate(objective_conflicts):
+        if not isinstance(row, dict):
+            malformed_objective_conflicts.append({"index": index, "objective_conflict_id": None, "missing_fields": list(OBJECTIVE_PRIORITY_REQUIRED_FIELDS), "violations": ["objective_conflict_not_object"]})
+            continue
+        conflict_id = str(row.get("objective_conflict_id") or "")
+        missing = _missing_required_fields(row, OBJECTIVE_PRIORITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        conflicts = [str(item) for item in row.get("conflicting_objectives", []) if item]
+        chosen = str(row.get("chosen_objective") or "")
+        unknown = sorted(set(conflicts + [chosen]) - set(OBJECTIVE_PRIORITY_RANKS))
+        if unknown:
+            violations.append("objective_name_not_registered")
+        if chosen not in conflicts:
+            violations.append("chosen_objective_not_in_conflict_set")
+        if conflicts and not unknown:
+            expected_choice = min(conflicts, key=lambda item: OBJECTIVE_PRIORITY_RANKS[item])
+            if chosen != expected_choice:
+                violations.append("chosen_objective_not_highest_priority")
+            try:
+                if int(row.get("priority_rank")) != OBJECTIVE_PRIORITY_RANKS[chosen]:
+                    violations.append("priority_rank_mismatch")
+            except (TypeError, ValueError):
+                violations.append("priority_rank_numeric_required")
+        if row.get("operator_override_allowed") is not False and chosen in {"paper_live_safety", "exit_safety", "ledger_capital_correctness", "data_spec_truth"}:
+            violations.append("safety_or_truth_override_forbidden")
+        expected_hash = _hash_record_without(row, "conflict_hash") if conflict_id else None
+        if row.get("conflict_hash") and expected_hash and row.get("conflict_hash") != expected_hash:
+            violations.append("conflict_hash_mismatch")
+        if missing or violations:
+            malformed_objective_conflicts.append({"index": index, "objective_conflict_id": conflict_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    goal_confidence = policy.get("goal_confidence") if isinstance(policy.get("goal_confidence"), list) else []
+    malformed_goal_confidence = []
+    for index, row in enumerate(goal_confidence):
+        if not isinstance(row, dict):
+            malformed_goal_confidence.append({"index": index, "metric_id": None, "missing_fields": list(GOAL_CONFIDENCE_REQUIRED_FIELDS), "violations": ["goal_confidence_not_object"]})
+            continue
+        metric_id = str(row.get("metric_id") or "")
+        missing = _missing_required_fields(row, GOAL_CONFIDENCE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            numerator = Decimal(str(row.get("numerator")))
+            denominator = Decimal(str(row.get("denominator")))
+            min_denominator = Decimal(str(row.get("min_denominator")))
+            point = Decimal(str(row.get("point_estimate")))
+            wilson = Decimal(str(row.get("wilson_lower_bound")))
+            beta = Decimal(str(row.get("beta_posterior_lower_bound")))
+            if denominator <= 0 or numerator < 0 or numerator > denominator:
+                violations.append("goal_confidence_counts_invalid")
+            if denominator < min_denominator:
+                violations.append("denominator_below_min")
+            if denominator > 0 and abs((numerator / denominator) - point) > Decimal("0.0001"):
+                violations.append("point_estimate_mismatch")
+            if min(wilson, beta) < Decimal(str(row.get("observed_value"))):
+                violations.append("observed_value_exceeds_lower_bound")
+        except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
+            violations.append("goal_confidence_numeric_required")
+        if row.get("status") != "pass":
+            violations.append("goal_confidence_not_pass")
+        expected_hash = _hash_record_without(row, "confidence_hash") if metric_id else None
+        if row.get("confidence_hash") and expected_hash and row.get("confidence_hash") != expected_hash:
+            violations.append("confidence_hash_mismatch")
+        if missing or violations:
+            malformed_goal_confidence.append({"index": index, "metric_id": metric_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    fill_time_anchors = policy.get("fill_time_anchors") if isinstance(policy.get("fill_time_anchors"), list) else []
+    malformed_fill_time_anchors = []
+    for index, row in enumerate(fill_time_anchors):
+        if not isinstance(row, dict):
+            malformed_fill_time_anchors.append({"index": index, "anchor_id": None, "missing_fields": list(FILL_TIME_ANCHOR_REQUIRED_FIELDS), "violations": ["fill_time_anchor_not_object"]})
+            continue
+        anchor_id = str(row.get("anchor_id") or "")
+        missing = _missing_required_fields(row, FILL_TIME_ANCHOR_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        decision_ts = _parse_iso_ts(row.get("decision_ts"))
+        decision_available_at = _parse_iso_ts(row.get("decision_available_at"))
+        quote_ts = _parse_iso_ts(row.get("quote_ts"))
+        entry_quote_ts = _parse_iso_ts(row.get("entry_quote_at_decision_ts"))
+        simulated_fill_ts = _parse_iso_ts(row.get("simulated_fill_ts"))
+        open_confirmed_ts = _parse_iso_ts(row.get("position_open_confirmed_ts"))
+        if None in {decision_ts, decision_available_at, quote_ts, entry_quote_ts, simulated_fill_ts, open_confirmed_ts}:
+            violations.append("fill_anchor_timestamp_invalid")
+        elif not (decision_ts <= decision_available_at <= simulated_fill_ts <= open_confirmed_ts):
+            violations.append("fill_anchor_chronology_invalid")
+        if row.get("fill_time_anchor_type") != "simulated_fill_ts":
+            violations.append("fill_time_anchor_type_must_be_simulated_fill_ts")
+        latency_components = row.get("latency_components")
+        required_latency = {"decision_latency_ms", "queue_latency_ms", "quote_latency_ms", "fill_simulation_latency_ms"}
+        if not isinstance(latency_components, dict) or not required_latency.issubset(set(latency_components)):
+            violations.append("latency_components_missing")
+        else:
+            for key in required_latency:
+                try:
+                    if Decimal(str(latency_components.get(key))) < 0:
+                        violations.append(f"{key}_negative")
+                except (InvalidOperation, ValueError, TypeError):
+                    violations.append(f"{key}_numeric_required")
+        expected_hash = _hash_record_without(row, "anchor_hash") if anchor_id else None
+        if row.get("anchor_hash") and expected_hash and row.get("anchor_hash") != expected_hash:
+            violations.append("anchor_hash_mismatch")
+        if missing or violations:
+            malformed_fill_time_anchors.append({"index": index, "anchor_id": anchor_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    feasibilities = policy.get("ex_ante_posthoc_feasibility") if isinstance(policy.get("ex_ante_posthoc_feasibility"), list) else []
+    malformed_feasibility = []
+    for index, row in enumerate(feasibilities):
+        if not isinstance(row, dict):
+            malformed_feasibility.append({"index": index, "feasibility_id": None, "missing_fields": list(EX_ANTE_POSTHOC_FEASIBILITY_REQUIRED_FIELDS), "violations": ["feasibility_not_object"]})
+            continue
+        feasibility_id = str(row.get("feasibility_id") or "")
+        missing = _missing_required_fields(row, EX_ANTE_POSTHOC_FEASIBILITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        decision_ts = _parse_iso_ts(row.get("decision_ts"))
+        feature_available_at = _parse_iso_ts(row.get("feature_available_at"))
+        earliest_actionable_ts = _parse_iso_ts(row.get("earliest_actionable_ts"))
+        peak_ts = _parse_iso_ts(row.get("peak_ts"))
+        if None in {decision_ts, feature_available_at, earliest_actionable_ts, peak_ts}:
+            violations.append("feasibility_timestamp_invalid")
+        else:
+            if feature_available_at > decision_ts:
+                violations.append("feature_available_after_decision")
+            if earliest_actionable_ts > peak_ts:
+                violations.append("earliest_actionable_after_peak")
+        if row.get("used_future_peak_in_ex_ante") is not False:
+            violations.append("future_peak_used_in_ex_ante")
+        if row.get("feasibility_class") not in FEASIBILITY_CLASSES:
+            violations.append("feasibility_class_not_allowed")
+        if row.get("ex_ante_feasible") is not True:
+            violations.append("seed_ex_ante_must_be_feasible")
+        if row.get("posthoc_feasible") is not True:
+            violations.append("seed_posthoc_must_be_feasible")
+        source_fields = set(str(item) for item in row.get("ex_ante_source_fields", []) if item)
+        if not source_fields:
+            violations.append("ex_ante_source_fields_required")
+        if source_fields & FORBIDDEN_EX_ANTE_FIELDS:
+            violations.append("forbidden_ex_ante_source_field")
+        required_inputs = row.get("required_inputs_available_at")
+        if not isinstance(required_inputs, dict) or not required_inputs:
+            violations.append("required_inputs_available_at_required")
+        else:
+            for field, value in required_inputs.items():
+                parsed = _parse_iso_ts(value)
+                if parsed is None:
+                    violations.append(f"{field}_available_at_invalid")
+                elif decision_ts is not None and parsed > decision_ts:
+                    violations.append(f"{field}_available_after_decision")
+        try:
+            if Decimal(str(row.get("system_min_decision_latency_sec"))) < 0:
+                violations.append("system_min_decision_latency_negative")
+            if Decimal(str(row.get("system_min_entry_latency_sec"))) < 0:
+                violations.append("system_min_entry_latency_negative")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("system_latency_numeric_required")
+        expected_hash = _hash_record_without(row, "feasibility_hash") if feasibility_id else None
+        if row.get("feasibility_hash") and expected_hash and row.get("feasibility_hash") != expected_hash:
+            violations.append("feasibility_hash_mismatch")
+        if missing or violations:
+            malformed_feasibility.append({"index": index, "feasibility_id": feasibility_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+        "spec_hash": spec_report.get("spec_hash"),
+        "rendered_doc_hash": rendered_doc_hash,
+        "rendered_file_count": rendered_file_count,
+    }
+    return [
+        _contract(
+            "RenderedSpecViewContract",
+            bool(rendered_views) and not policy_errors and not source_errors and not malformed_rendered_views,
+            "rendered_spec_view_missing_malformed_or_stale",
+            {**common, "rendered_view_count": len(rendered_views), "malformed_rendered_views": malformed_rendered_views},
+        ),
+        _contract(
+            "HealthStateEnumContract",
+            bool(health_states) and not policy_errors and not source_errors and not malformed_health_states,
+            "health_state_enum_missing_malformed_or_unsafe",
+            {**common, "health_state_count": len(health_states), "malformed_health_states": malformed_health_states},
+        ),
+        _contract(
+            "ContractLifecycleContract",
+            bool(lifecycles) and not policy_errors and not source_errors and not malformed_lifecycles and not missing_lifecycle_contracts,
+            "contract_lifecycle_missing_malformed_or_ungated",
+            {**common, "contract_lifecycle_count": len(lifecycles), "missing_lifecycle_contracts": missing_lifecycle_contracts, "malformed_lifecycles": malformed_lifecycles},
+        ),
+        _contract(
+            "ObjectivePriorityContract",
+            bool(objective_conflicts) and not policy_errors and not source_errors and not malformed_objective_conflicts,
+            "objective_priority_missing_malformed_or_unsafe",
+            {**common, "objective_conflict_count": len(objective_conflicts), "malformed_objective_conflicts": malformed_objective_conflicts},
+        ),
+        _contract(
+            "GoalConfidenceContract",
+            bool(goal_confidence) and not policy_errors and not source_errors and not malformed_goal_confidence,
+            "goal_confidence_missing_malformed_or_inconclusive",
+            {**common, "goal_confidence_count": len(goal_confidence), "malformed_goal_confidence": malformed_goal_confidence},
+        ),
+        _contract(
+            "FillTimeAnchorContract",
+            bool(fill_time_anchors) and not policy_errors and not source_errors and not malformed_fill_time_anchors,
+            "fill_time_anchor_missing_malformed_or_unpinned",
+            {**common, "fill_time_anchor_count": len(fill_time_anchors), "malformed_fill_time_anchors": malformed_fill_time_anchors},
+        ),
+        _contract(
+            "ExAnteVsPosthocFeasibilityContract",
+            bool(feasibilities) and not policy_errors and not source_errors and not malformed_feasibility,
+            "ex_ante_posthoc_feasibility_missing_malformed_or_leaky",
+            {**common, "feasibility_count": len(feasibilities), "malformed_feasibility": malformed_feasibility},
+        ),
+    ]
+
+
+def verify_identity_unit_provider_finality_contracts(
+    policy_path=DEFAULT_IDENTITY_UNIT_PROVIDER_FINALITY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return _contracts_from_error(
+            sorted(IDENTITY_UNIT_PROVIDER_FINALITY_CONTRACTS),
+            "identity_unit_provider_finality_policy_missing_or_invalid",
+            evidence,
+        )
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return _contracts_from_error(
+            sorted(IDENTITY_UNIT_PROVIDER_FINALITY_CONTRACTS),
+            "identity_unit_provider_finality_policy_not_object",
+            evidence,
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return _contracts_from_error(
+            sorted(IDENTITY_UNIT_PROVIDER_FINALITY_CONTRACTS),
+            "identity_unit_provider_finality_policy_missing_or_invalid",
+            evidence,
+        )
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.identity_unit_provider_finality_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "identity_unit_provider_finality_blocked":
+        policy_errors.append("failure_action_must_block_identity_unit_provider_finality")
+
+    identities = policy.get("token_identities") if isinstance(policy.get("token_identities"), list) else []
+    malformed_identities = []
+    for index, row in enumerate(identities):
+        if not isinstance(row, dict):
+            malformed_identities.append({"index": index, "identity_id": None, "missing_fields": list(TOKEN_IDENTITY_REQUIRED_FIELDS), "violations": ["token_identity_not_object"]})
+            continue
+        identity_id = str(row.get("identity_id") or "")
+        missing = _missing_required_fields(row, TOKEN_IDENTITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if not str(row.get("chain") or "").strip():
+            violations.append("chain_required")
+        token_ca = str(row.get("token_ca") or "")
+        normalized_ca = str(row.get("normalized_ca") or "")
+        if len(token_ca) < 32:
+            violations.append("token_ca_too_short")
+        if len(normalized_ca) < 32:
+            violations.append("normalized_ca_too_short")
+        if not str(row.get("checksum") or "").strip():
+            violations.append("checksum_required")
+        if str(row.get("symbol") or "") == token_ca:
+            violations.append("symbol_cannot_be_primary_key")
+        try:
+            if Decimal(str(row.get("symbol_conflict_count"))) < 0:
+                violations.append("symbol_conflict_count_negative")
+            confidence = Decimal(str(row.get("identity_confidence")))
+            observed = Decimal(str(row.get("observed_value")))
+            if confidence <= 0 or confidence > 1:
+                violations.append("identity_confidence_out_of_range")
+            if observed != confidence:
+                violations.append("observed_value_must_match_identity_confidence")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("identity_numeric_required")
+        if row.get("liquidity_pair_valid") is not True:
+            violations.append("liquidity_pair_must_be_valid")
+        expected_hash = _hash_record_without(row, "identity_hash") if identity_id else None
+        if row.get("identity_hash") and expected_hash and row.get("identity_hash") != expected_hash:
+            violations.append("identity_hash_mismatch")
+        if missing or violations:
+            malformed_identities.append({"index": index, "identity_id": identity_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    data_units = policy.get("data_units") if isinstance(policy.get("data_units"), list) else []
+    malformed_data_units = []
+    for index, row in enumerate(data_units):
+        if not isinstance(row, dict):
+            malformed_data_units.append({"index": index, "unit_id": None, "missing_fields": list(DATA_UNIT_REQUIRED_FIELDS), "violations": ["data_unit_not_object"]})
+            continue
+        unit_id = str(row.get("unit_id") or "")
+        missing = _missing_required_fields(row, DATA_UNIT_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        for field in ("token_decimals", "quote_decimals"):
+            try:
+                value = Decimal(str(row.get(field)))
+                if value < 0 or value != value.to_integral_value():
+                    violations.append(f"{field}_invalid")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        for field in ("quote_size_sol", "normalized_price"):
+            try:
+                if Decimal(str(row.get(field))) <= 0:
+                    violations.append(f"{field}_must_be_positive")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        if row.get("unit_validation_status") != "valid":
+            violations.append("unit_validation_status_not_valid")
+        for field in ("price_unit", "liquidity_unit", "market_cap_unit", "quote_mint", "unit_conversion_version"):
+            if not str(row.get(field) or "").strip():
+                violations.append(f"{field}_required")
+        expected_hash = _hash_record_without(row, "unit_hash") if unit_id else None
+        if row.get("unit_hash") and expected_hash and row.get("unit_hash") != expected_hash:
+            violations.append("unit_hash_mismatch")
+        if missing or violations:
+            malformed_data_units.append({"index": index, "unit_id": unit_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    finalities = policy.get("chain_finality") if isinstance(policy.get("chain_finality"), list) else []
+    malformed_finalities = []
+    min_commitment = str(policy.get("min_commitment_level") or "finalized")
+    max_indexer_lag = Decimal(str(policy.get("max_indexer_lag_sec", "5")))
+    for index, row in enumerate(finalities):
+        if not isinstance(row, dict):
+            malformed_finalities.append({"index": index, "finality_id": None, "missing_fields": list(CHAIN_FINALITY_REQUIRED_FIELDS), "violations": ["chain_finality_not_object"]})
+            continue
+        finality_id = str(row.get("finality_id") or "")
+        missing = _missing_required_fields(row, CHAIN_FINALITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        commitment = str(row.get("commitment_level") or "")
+        if commitment not in FINALITY_COMMITMENT_ORDER:
+            violations.append("commitment_level_unknown")
+        elif FINALITY_COMMITMENT_ORDER[commitment] < FINALITY_COMMITMENT_ORDER.get(min_commitment, 3):
+            violations.append("commitment_level_below_minimum")
+        if _parse_iso_ts(row.get("block_time")) is None or _parse_iso_ts(row.get("finalized_at")) is None:
+            violations.append("finality_timestamp_invalid")
+        try:
+            if Decimal(str(row.get("slot"))) < 0:
+                violations.append("slot_negative")
+            if Decimal(str(row.get("indexer_lag_sec"))) > max_indexer_lag:
+                violations.append("indexer_lag_above_policy")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("finality_numeric_required")
+        if row.get("rpc_consistency_check") != "pass":
+            violations.append("rpc_consistency_check_not_pass")
+        if row.get("chain_reorg_detected") is not False:
+            violations.append("chain_reorg_detected")
+        expected_hash = _hash_record_without(row, "finality_hash") if finality_id else None
+        if row.get("finality_hash") and expected_hash and row.get("finality_hash") != expected_hash:
+            violations.append("finality_hash_mismatch")
+        if missing or violations:
+            malformed_finalities.append({"index": index, "finality_id": finality_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    provider_schemas = policy.get("provider_schemas") if isinstance(policy.get("provider_schemas"), list) else []
+    malformed_provider_schemas = []
+    for index, row in enumerate(provider_schemas):
+        if not isinstance(row, dict):
+            malformed_provider_schemas.append({"index": index, "provider_name": None, "missing_fields": list(PROVIDER_SCHEMA_REQUIRED_FIELDS), "violations": ["provider_schema_not_object"]})
+            continue
+        provider_name = str(row.get("provider_name") or "")
+        missing = _missing_required_fields(row, PROVIDER_SCHEMA_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if not isinstance(row.get("required_fields"), list) or not row.get("required_fields"):
+            violations.append("required_fields_required")
+        if not isinstance(row.get("optional_fields"), list):
+            violations.append("optional_fields_must_be_list")
+        if not isinstance(row.get("field_type_contract"), dict) or not row.get("field_type_contract"):
+            violations.append("field_type_contract_required")
+        if row.get("canary_parse_result") != "pass":
+            violations.append("canary_parse_result_not_pass")
+        if row.get("schema_drift_detected") is not False:
+            violations.append("schema_drift_detected")
+        if _parse_iso_ts(row.get("last_schema_check_at")) is None:
+            violations.append("last_schema_check_at_invalid")
+        for field in ("missing_required_field_rate", "field_type_error_rate", "unexpected_enum_rate", "null_spike_rate"):
+            try:
+                value = Decimal(str(row.get(field)))
+                if value < 0 or value > 1:
+                    violations.append(f"{field}_out_of_range")
+                elif value != 0:
+                    violations.append(f"{field}_must_be_zero_for_seed")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        if row.get("value_range_anomaly") not in (False, 0, "none"):
+            violations.append("value_range_anomaly_detected")
+        expected_hash = _hash_record_without(row, "schema_hash") if provider_name else None
+        if row.get("schema_hash") and expected_hash and row.get("schema_hash") != expected_hash:
+            violations.append("provider_schema_hash_mismatch")
+        if missing or violations:
+            malformed_provider_schemas.append({"index": index, "provider_name": provider_name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    return [
+        _contract(
+            "TokenIdentityContract",
+            bool(identities) and not policy_errors and not source_errors and not malformed_identities,
+            "token_identity_missing_malformed_or_low_confidence",
+            {**common, "identity_count": len(identities), "malformed_identities": malformed_identities},
+        ),
+        _contract(
+            "DataUnitContract",
+            bool(data_units) and not policy_errors and not source_errors and not malformed_data_units,
+            "data_unit_missing_malformed_or_invalid",
+            {**common, "data_unit_count": len(data_units), "malformed_data_units": malformed_data_units},
+        ),
+        _contract(
+            "ChainFinalityContract",
+            bool(finalities) and not policy_errors and not source_errors and not malformed_finalities,
+            "chain_finality_missing_malformed_or_dirty",
+            {**common, "finality_count": len(finalities), "malformed_finalities": malformed_finalities},
+        ),
+        _contract(
+            "ProviderSchemaContract",
+            bool(provider_schemas) and not policy_errors and not source_errors and not malformed_provider_schemas,
+            "provider_schema_missing_malformed_or_drifted",
+            {**common, "provider_schema_count": len(provider_schemas), "malformed_provider_schemas": malformed_provider_schemas},
+        ),
+    ]
+
+
+def _transition_violations(row, *, states, terminal_states):
+    violations = []
+    transitions = row.get("allowed_transitions")
+    if not isinstance(transitions, list) or not transitions:
+        return ["allowed_transitions_required"]
+    for index, transition in enumerate(transitions):
+        if not isinstance(transition, dict):
+            violations.append(f"transition_{index}_not_object")
+            continue
+        from_state = str(transition.get("from") or "")
+        to_state = str(transition.get("to") or "")
+        if from_state not in states:
+            violations.append(f"transition_{index}_from_state_unknown")
+        if to_state not in states:
+            violations.append(f"transition_{index}_to_state_unknown")
+        if from_state in terminal_states and to_state not in terminal_states:
+            violations.append(f"transition_{index}_terminal_state_cannot_reopen")
+    return violations
+
+
+def verify_execution_exit_safety_contracts(
+    policy_path=DEFAULT_EXECUTION_EXIT_SAFETY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return _contracts_from_error(
+            sorted(EXECUTION_EXIT_SAFETY_CONTRACTS),
+            "execution_exit_safety_policy_missing_or_invalid",
+            evidence,
+        )
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return _contracts_from_error(
+            sorted(EXECUTION_EXIT_SAFETY_CONTRACTS),
+            "execution_exit_safety_policy_not_object",
+            evidence,
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return _contracts_from_error(
+            sorted(EXECUTION_EXIT_SAFETY_CONTRACTS),
+            "execution_exit_safety_policy_missing_or_invalid",
+            evidence,
+        )
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.execution_exit_safety_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "execution_exit_safety_blocked":
+        policy_errors.append("failure_action_must_block_execution_exit_safety")
+
+    lifecycle_machines = policy.get("lifecycle_state_machines") if isinstance(policy.get("lifecycle_state_machines"), list) else []
+    malformed_lifecycle_machines = []
+    for index, row in enumerate(lifecycle_machines):
+        if not isinstance(row, dict):
+            malformed_lifecycle_machines.append({"index": index, "state_machine_id": None, "missing_fields": list(LIFECYCLE_STATE_MACHINE_REQUIRED_FIELDS), "violations": ["lifecycle_state_machine_not_object"]})
+            continue
+        machine_id = str(row.get("state_machine_id") or "")
+        missing = _missing_required_fields(row, LIFECYCLE_STATE_MACHINE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        states = set(str(item) for item in row.get("states", []) if item)
+        terminal_states = set(str(item) for item in row.get("terminal_states", []) if item)
+        if not states:
+            violations.append("states_required")
+        if not terminal_states or not terminal_states.issubset(states):
+            violations.append("terminal_states_must_be_subset")
+        if str(row.get("current_state") or "") not in states:
+            violations.append("current_state_unknown")
+        if row.get("state_version_fencing_required") is not True:
+            violations.append("state_version_fencing_required")
+        if row.get("entry_gate_requires_module_closure") is not True:
+            violations.append("module_closure_required_for_entry_gate")
+        if row.get("invalid_transition_action") != "reject_and_audit":
+            violations.append("invalid_transition_action_must_reject_and_audit")
+        violations.extend(_transition_violations(row, states=states, terminal_states=terminal_states))
+        expected_hash = _hash_record_without(row, "state_machine_hash") if machine_id else None
+        if row.get("state_machine_hash") and expected_hash and row.get("state_machine_hash") != expected_hash:
+            violations.append("state_machine_hash_mismatch")
+        if missing or violations:
+            malformed_lifecycle_machines.append({"index": index, "state_machine_id": machine_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    exit_state_machines = policy.get("exit_execution_state_machines") if isinstance(policy.get("exit_execution_state_machines"), list) else []
+    malformed_exit_state_machines = []
+    for index, row in enumerate(exit_state_machines):
+        if not isinstance(row, dict):
+            malformed_exit_state_machines.append({"index": index, "exit_state_machine_id": None, "missing_fields": list(EXIT_EXECUTION_STATE_MACHINE_REQUIRED_FIELDS), "violations": ["exit_state_machine_not_object"]})
+            continue
+        machine_id = str(row.get("exit_state_machine_id") or "")
+        missing = _missing_required_fields(row, EXIT_EXECUTION_STATE_MACHINE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        states = set(str(item) for item in row.get("states", []) if item)
+        terminal_states = set(str(item) for item in row.get("terminal_states", []) if item)
+        if str(row.get("open_position_state") or "") not in states:
+            violations.append("open_position_state_unknown")
+        if not terminal_states or not terminal_states.issubset(states):
+            violations.append("terminal_states_must_be_subset")
+        if row.get("exit_quote_required") is not True:
+            violations.append("exit_quote_required")
+        if row.get("lease_fencing_required") is not True:
+            violations.append("lease_fencing_required")
+        if row.get("state_revalidation_required") is not True:
+            violations.append("state_revalidation_required")
+        if row.get("exit_safety_preserved") is not True:
+            violations.append("exit_safety_must_be_preserved")
+        if not isinstance(row.get("failure_events"), list) or not row.get("failure_events"):
+            violations.append("failure_events_required")
+        violations.extend(_transition_violations(row, states=states, terminal_states=terminal_states))
+        expected_hash = _hash_record_without(row, "exit_state_machine_hash") if machine_id else None
+        if row.get("exit_state_machine_hash") and expected_hash and row.get("exit_state_machine_hash") != expected_hash:
+            violations.append("exit_state_machine_hash_mismatch")
+        if missing or violations:
+            malformed_exit_state_machines.append({"index": index, "exit_state_machine_id": machine_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    exit_policies = policy.get("exit_policies") if isinstance(policy.get("exit_policies"), list) else []
+    malformed_exit_policies = []
+    for index, row in enumerate(exit_policies):
+        if not isinstance(row, dict):
+            malformed_exit_policies.append({"index": index, "exit_policy_id": None, "missing_fields": list(EXIT_POLICY_REQUIRED_FIELDS), "violations": ["exit_policy_not_object"]})
+            continue
+        policy_id = str(row.get("exit_policy_id") or "")
+        missing = _missing_required_fields(row, EXIT_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if not str(row.get("exit_policy_version") or "").startswith("v2.7.0"):
+            violations.append("exit_policy_version_must_be_v2_7")
+        if "normal_tiny" not in set(str(item) for item in row.get("applies_to_modes", []) if item):
+            violations.append("normal_tiny_mode_required")
+        for field in ("take_profit_rules", "stop_loss_rules", "time_stop_rules"):
+            if not isinstance(row.get(field), list) or not row.get(field):
+                violations.append(f"{field}_required")
+        if row.get("entry_outcome_separation") is not True:
+            violations.append("entry_outcome_separation_required")
+        if _parse_iso_ts(row.get("effective_from")) is None:
+            violations.append("effective_from_invalid")
+        expected_hash = _hash_record_without(row, "exit_policy_hash") if policy_id else None
+        if row.get("exit_policy_hash") and expected_hash and row.get("exit_policy_hash") != expected_hash:
+            violations.append("exit_policy_hash_mismatch")
+        if missing or violations:
+            malformed_exit_policies.append({"index": index, "exit_policy_id": policy_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    circuit_breakers = policy.get("circuit_breaker_position_policies") if isinstance(policy.get("circuit_breaker_position_policies"), list) else []
+    malformed_circuit_breakers = []
+    for index, row in enumerate(circuit_breakers):
+        if not isinstance(row, dict):
+            malformed_circuit_breakers.append({"index": index, "policy_id": None, "missing_fields": list(CIRCUIT_BREAKER_POSITION_POLICY_REQUIRED_FIELDS), "violations": ["circuit_breaker_position_policy_not_object"]})
+            continue
+        policy_id = str(row.get("policy_id") or "")
+        missing = _missing_required_fields(row, CIRCUIT_BREAKER_POSITION_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if not isinstance(row.get("trigger_events"), list) or not row.get("trigger_events"):
+            violations.append("trigger_events_required")
+        if row.get("new_entry_disabled") is not True:
+            violations.append("new_entry_must_be_disabled")
+        if row.get("exit_safety_remains_active") is not True:
+            violations.append("exit_safety_must_remain_active")
+        if str(row.get("open_position_policy") or "") not in {"exit_only", "emergency_exit_allowed"}:
+            violations.append("open_position_policy_not_safe")
+        if row.get("operator_ack_required") is not True:
+            violations.append("operator_ack_required")
+        if not str(row.get("resume_condition") or "").strip():
+            violations.append("resume_condition_required")
+        expected_hash = _hash_record_without(row, "circuit_breaker_hash") if policy_id else None
+        if row.get("circuit_breaker_hash") and expected_hash and row.get("circuit_breaker_hash") != expected_hash:
+            violations.append("circuit_breaker_hash_mismatch")
+        if missing or violations:
+            malformed_circuit_breakers.append({"index": index, "policy_id": policy_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    emergency_journals = policy.get("emergency_exit_journals") if isinstance(policy.get("emergency_exit_journals"), list) else []
+    malformed_emergency_journals = []
+    for index, row in enumerate(emergency_journals):
+        if not isinstance(row, dict):
+            malformed_emergency_journals.append({"index": index, "journal_id": None, "missing_fields": list(EMERGENCY_EXIT_JOURNAL_REQUIRED_FIELDS), "violations": ["emergency_exit_journal_not_object"]})
+            continue
+        journal_id = str(row.get("journal_id") or "")
+        missing = _missing_required_fields(row, EMERGENCY_EXIT_JOURNAL_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        initiated_at = _parse_iso_ts(row.get("initiated_at"))
+        completed_at = _parse_iso_ts(row.get("completed_at"))
+        if initiated_at is None or completed_at is None:
+            violations.append("journal_timestamp_invalid")
+        elif completed_at < initiated_at:
+            violations.append("journal_timestamp_order_invalid")
+        for field in ("journal_event_id", "position_id", "reason", "outcome"):
+            if not str(row.get(field) or "").strip():
+                violations.append(f"{field}_required")
+        if row.get("reconciled_to_ledger") is not True:
+            violations.append("journal_must_reconcile_to_ledger")
+        if row.get("journal_append_only") is not True:
+            violations.append("journal_must_be_append_only")
+        if row.get("operator_audit_required") is not True:
+            violations.append("operator_audit_required")
+        expected_hash = _hash_record_without(row, "journal_hash") if journal_id else None
+        if row.get("journal_hash") and expected_hash and row.get("journal_hash") != expected_hash:
+            violations.append("journal_hash_mismatch")
+        if missing or violations:
+            malformed_emergency_journals.append({"index": index, "journal_id": journal_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    exit_queue_health = policy.get("exit_queue_health") if isinstance(policy.get("exit_queue_health"), list) else []
+    malformed_exit_queue_health = []
+    for index, row in enumerate(exit_queue_health):
+        if not isinstance(row, dict):
+            malformed_exit_queue_health.append({"index": index, "queue_id": None, "missing_fields": list(EXIT_QUEUE_HEALTH_REQUIRED_FIELDS), "violations": ["exit_queue_health_not_object"]})
+            continue
+        queue_id = str(row.get("queue_id") or "")
+        missing = _missing_required_fields(row, EXIT_QUEUE_HEALTH_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("exit_queue_status") != "healthy":
+            violations.append("exit_queue_status_not_healthy")
+        try:
+            oldest = Decimal(str(row.get("oldest_open_exit_age_sec")))
+            max_allowed = Decimal(str(row.get("max_allowed_open_exit_age_sec")))
+            if oldest < 0 or max_allowed < 0:
+                violations.append("exit_queue_age_negative")
+            elif oldest > max_allowed:
+                violations.append("oldest_exit_age_above_policy")
+            for field in ("stuck_open_position_count", "exit_quote_failure_count", "exit_state_machine_failure_count"):
+                if Decimal(str(row.get(field))) != 0:
+                    violations.append(f"{field}_must_be_zero")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("exit_queue_numeric_required")
+        if row.get("exit_safety_budget_reserved") is not True:
+            violations.append("exit_safety_budget_must_be_reserved")
+        expected_hash = _hash_record_without(row, "queue_health_hash") if queue_id else None
+        if row.get("queue_health_hash") and expected_hash and row.get("queue_health_hash") != expected_hash:
+            violations.append("queue_health_hash_mismatch")
+        if missing or violations:
+            malformed_exit_queue_health.append({"index": index, "queue_id": queue_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    return [
+        _contract(
+            "LifecycleStateMachineContract",
+            bool(lifecycle_machines) and not policy_errors and not source_errors and not malformed_lifecycle_machines,
+            "lifecycle_state_machine_missing_malformed_or_unsafe",
+            {**common, "lifecycle_state_machine_count": len(lifecycle_machines), "malformed_lifecycle_machines": malformed_lifecycle_machines},
+        ),
+        _contract(
+            "ExitExecutionStateMachine",
+            bool(exit_state_machines) and not policy_errors and not source_errors and not malformed_exit_state_machines,
+            "exit_execution_state_machine_missing_malformed_or_unsafe",
+            {**common, "exit_state_machine_count": len(exit_state_machines), "malformed_exit_state_machines": malformed_exit_state_machines},
+        ),
+        _contract(
+            "ExitPolicyContract",
+            bool(exit_policies) and not policy_errors and not source_errors and not malformed_exit_policies,
+            "exit_policy_missing_malformed_or_unversioned",
+            {**common, "exit_policy_count": len(exit_policies), "malformed_exit_policies": malformed_exit_policies},
+        ),
+        _contract(
+            "CircuitBreakerPositionPolicy",
+            bool(circuit_breakers) and not policy_errors and not source_errors and not malformed_circuit_breakers,
+            "circuit_breaker_position_policy_missing_malformed_or_unsafe",
+            {**common, "circuit_breaker_policy_count": len(circuit_breakers), "malformed_circuit_breakers": malformed_circuit_breakers},
+        ),
+        _contract(
+            "EmergencyExitJournal",
+            bool(emergency_journals) and not policy_errors and not source_errors and not malformed_emergency_journals,
+            "emergency_exit_journal_missing_malformed_or_unreconciled",
+            {**common, "emergency_exit_journal_count": len(emergency_journals), "malformed_emergency_journals": malformed_emergency_journals},
+        ),
+        _contract(
+            "ExitQueueHealthContract",
+            bool(exit_queue_health) and not policy_errors and not source_errors and not malformed_exit_queue_health,
+            "exit_queue_health_missing_malformed_or_unhealthy",
+            {**common, "exit_queue_health_count": len(exit_queue_health), "malformed_exit_queue_health": malformed_exit_queue_health},
+        ),
+    ]
+
+
+def _list_metric_threshold_violations(row, metric_records, threshold_records):
+    violations = []
+    metric_ids = row.get("metric_ids") if isinstance(row.get("metric_ids"), list) else []
+    threshold_ids = row.get("threshold_ids") if isinstance(row.get("threshold_ids"), list) else []
+    if not metric_ids:
+        violations.append("metric_ids_required")
+    if not threshold_ids:
+        violations.append("threshold_ids_required")
+    for metric_id in metric_ids:
+        if str(metric_id) not in metric_records:
+            violations.append(f"metric_id_unknown:{metric_id}")
+    for threshold_id in threshold_ids:
+        threshold = threshold_records.get(str(threshold_id))
+        if not threshold:
+            violations.append(f"threshold_id_unknown:{threshold_id}")
+            continue
+        applies_to = str(threshold.get("applies_to_metric") or "")
+        if applies_to and applies_to not in {str(metric_id) for metric_id in metric_ids}:
+            violations.append(f"threshold_metric_mismatch:{threshold_id}")
+    return violations
+
+
+def verify_delivery_traceability_contracts(
+    policy_path=DEFAULT_DELIVERY_TRACEABILITY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return _contracts_from_error(
+            sorted(DELIVERY_TRACEABILITY_CONTRACTS),
+            "delivery_traceability_policy_missing_or_invalid",
+            evidence,
+        )
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return _contracts_from_error(
+            sorted(DELIVERY_TRACEABILITY_CONTRACTS),
+            "delivery_traceability_policy_not_object",
+            evidence,
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return _contracts_from_error(
+            sorted(DELIVERY_TRACEABILITY_CONTRACTS),
+            "delivery_traceability_policy_missing_or_invalid",
+            evidence,
+        )
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.delivery_traceability_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "delivery_traceability_blocked":
+        policy_errors.append("failure_action_must_block_delivery_traceability")
+
+    repair_classes_required = {
+        "auto_repair_allowed",
+        "manual_review_required",
+        "repair_forbidden",
+        "rebuild_projection_only",
+        "quarantine_trade",
+    }
+    reconciliation_rows = policy.get("reconciliation_policies") if isinstance(policy.get("reconciliation_policies"), list) else []
+    malformed_reconciliation = []
+    repair_classes_seen = set()
+    for index, row in enumerate(reconciliation_rows):
+        if not isinstance(row, dict):
+            malformed_reconciliation.append({"index": index, "reconciliation_policy_id": None, "missing_fields": list(RECONCILIATION_POLICY_REQUIRED_FIELDS), "violations": ["reconciliation_policy_not_object"]})
+            continue
+        policy_id = str(row.get("reconciliation_policy_id") or "")
+        mismatch_class = str(row.get("mismatch_class") or "")
+        repair_class = str(row.get("repair_class") or "")
+        repair_classes_seen.add(repair_class)
+        missing = _missing_required_fields(row, RECONCILIATION_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if repair_class not in repair_classes_required:
+            violations.append("repair_class_unknown")
+        if row.get("audit_required") is not True:
+            violations.append("audit_required")
+        if "ledger" in mismatch_class and row.get("auto_repair_allowed") is True:
+            violations.append("ledger_mismatch_cannot_auto_repair")
+        if mismatch_class == "materialized_view_mismatch" and repair_class != "rebuild_projection_only":
+            violations.append("materialized_view_mismatch_must_rebuild_projection_only")
+        if mismatch_class == "paper_trade_vs_ledger_mismatch" and repair_class != "quarantine_trade":
+            violations.append("paper_trade_ledger_mismatch_must_quarantine_trade")
+        if repair_class == "quarantine_trade" and row.get("promotion_evidence_allowed") is not False:
+            violations.append("quarantined_trade_must_be_excluded_from_promotion")
+        if repair_class in {"manual_review_required", "repair_forbidden"} and row.get("manual_review_required") is not True:
+            violations.append("manual_review_required")
+        if not str(row.get("dashboard_surface") or "").strip():
+            violations.append("dashboard_surface_required")
+        expected_hash = _hash_record_without(row, "reconciliation_hash") if policy_id else None
+        if row.get("reconciliation_hash") and expected_hash and row.get("reconciliation_hash") != expected_hash:
+            violations.append("reconciliation_hash_mismatch")
+        if missing or violations:
+            malformed_reconciliation.append({"index": index, "reconciliation_policy_id": policy_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_repair_classes = sorted(repair_classes_required - repair_classes_seen)
+
+    dashboard_rows = policy.get("dashboard_staleness_panels") if isinstance(policy.get("dashboard_staleness_panels"), list) else []
+    malformed_dashboard = []
+    for index, row in enumerate(dashboard_rows):
+        if not isinstance(row, dict):
+            malformed_dashboard.append({"index": index, "panel_name": None, "missing_fields": list(DASHBOARD_STALENESS_REQUIRED_FIELDS), "violations": ["dashboard_staleness_panel_not_object"]})
+            continue
+        panel_name = str(row.get("panel_name") or "")
+        missing = _missing_required_fields(row, DASHBOARD_STALENESS_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        staleness_threshold_id = str(row.get("staleness_threshold_id") or "")
+        if staleness_threshold_id != str(row.get("threshold_id") or ""):
+            violations.append("staleness_threshold_id_must_match_threshold_id")
+        try:
+            data_seq = int(row.get("data_seq"))
+            latest_seq = int(row.get("event_log_latest_seq"))
+            if data_seq > latest_seq:
+                violations.append("data_seq_cannot_exceed_event_log_latest_seq")
+        except (TypeError, ValueError):
+            violations.append("dashboard_seq_numeric_required")
+        try:
+            lag = Decimal(str(row.get("panel_lag_sec")))
+            max_lag = Decimal(str(row.get("max_allowed_panel_lag_sec")))
+            if lag < 0 or max_lag < 0:
+                violations.append("dashboard_lag_negative")
+            elif lag > max_lag:
+                violations.append("panel_lag_above_threshold")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("dashboard_lag_numeric_required")
+        if row.get("stale_banner_required") is not True:
+            violations.append("stale_banner_required")
+        if row.get("operator_override_allowed") is not False:
+            violations.append("operator_override_must_be_disabled_on_dashboard_panel")
+        if _parse_iso_ts(row.get("last_refresh_at")) is None:
+            violations.append("last_refresh_at_invalid")
+        expected_hash = _hash_record_without(row, "panel_hash") if panel_name else None
+        if row.get("panel_hash") and expected_hash and row.get("panel_hash") != expected_hash:
+            violations.append("panel_hash_mismatch")
+        if missing or violations:
+            malformed_dashboard.append({"index": index, "panel_name": panel_name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    required_contracts = set(DELIVERY_TRACEABILITY_CONTRACTS)
+    traceability_rows = policy.get("spec_traceability_matrix") if isinstance(policy.get("spec_traceability_matrix"), list) else []
+    malformed_traceability = []
+    traced_contracts = set()
+    allowed_trace_status = {"tested", "deployed", "validated"}
+    for index, row in enumerate(traceability_rows):
+        if not isinstance(row, dict):
+            malformed_traceability.append({"index": index, "traceability_id": None, "missing_fields": list(SPEC_TRACEABILITY_MATRIX_REQUIRED_FIELDS), "violations": ["traceability_row_not_object"]})
+            continue
+        traceability_id = str(row.get("traceability_id") or "")
+        contract_id = str(row.get("contract_id") or "")
+        if contract_id:
+            traced_contracts.add(contract_id)
+        missing = _missing_required_fields(row, SPEC_TRACEABILITY_MATRIX_REQUIRED_FIELDS)
+        violations = _list_metric_threshold_violations(row, metric_records, threshold_records)
+        if str(row.get("status") or "") not in allowed_trace_status:
+            violations.append("traceability_status_not_tested_deployed_or_validated")
+        for field in ("spec_section_id", "requirement", "implementation_module", "test_file", "dashboard_surface", "rollout_flag", "issue_id", "owner"):
+            if not str(row.get(field) or "").strip():
+                violations.append(f"{field}_required")
+        expected_hash = _hash_record_without(row, "traceability_hash") if traceability_id else None
+        if row.get("traceability_hash") and expected_hash and row.get("traceability_hash") != expected_hash:
+            violations.append("traceability_hash_mismatch")
+        if missing or violations:
+            malformed_traceability.append({"index": index, "traceability_id": traceability_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_traceability_contracts = sorted(required_contracts - traced_contracts)
+
+    issue_rows = policy.get("implementation_issue_graph") if isinstance(policy.get("implementation_issue_graph"), list) else []
+    issue_ids = {
+        str(row.get("issue_id"))
+        for row in issue_rows
+        if isinstance(row, dict) and row.get("issue_id")
+    }
+    malformed_issues = []
+    allowed_issue_status = {"done", "validated"}
+    for index, row in enumerate(issue_rows):
+        if not isinstance(row, dict):
+            malformed_issues.append({"index": index, "issue_id": None, "missing_fields": list(IMPLEMENTATION_ISSUE_GRAPH_REQUIRED_FIELDS), "violations": ["issue_graph_row_not_object"]})
+            continue
+        issue_id = str(row.get("issue_id") or "")
+        missing = _missing_required_fields(row, IMPLEMENTATION_ISSUE_GRAPH_REQUIRED_FIELDS)
+        if "dependency_ids" in missing and isinstance(row.get("dependency_ids"), list):
+            missing.remove("dependency_ids")
+        violations = _list_metric_threshold_violations(row, metric_records, threshold_records)
+        if str(row.get("status") or "") not in allowed_issue_status:
+            violations.append("issue_status_not_done_or_validated")
+        if row.get("status") in allowed_issue_status and not row.get("acceptance_tests"):
+            violations.append("acceptance_tests_required_for_done")
+        if not isinstance(row.get("dependency_ids"), list):
+            violations.append("dependency_ids_must_be_list")
+        for dependency_id in row.get("dependency_ids", []) if isinstance(row.get("dependency_ids"), list) else []:
+            if str(dependency_id) not in issue_ids:
+                violations.append(f"dependency_id_unknown:{dependency_id}")
+        if not isinstance(row.get("spec_section_ids"), list) or not row.get("spec_section_ids"):
+            violations.append("spec_section_ids_required")
+        expected_hash = _hash_record_without(row, "issue_hash") if issue_id else None
+        if row.get("issue_hash") and expected_hash and row.get("issue_hash") != expected_hash:
+            violations.append("issue_hash_mismatch")
+        if missing or violations:
+            malformed_issues.append({"index": index, "issue_id": issue_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    module_rows = policy.get("module_closures") if isinstance(policy.get("module_closures"), list) else []
+    malformed_modules = []
+    module_contracts_seen = set()
+    for index, row in enumerate(module_rows):
+        if not isinstance(row, dict):
+            malformed_modules.append({"index": index, "module_name": None, "missing_fields": list(MODULE_CLOSURE_REQUIRED_FIELDS), "violations": ["module_closure_row_not_object"]})
+            continue
+        module_name = str(row.get("module_name") or "")
+        for contract_id in row.get("contract_ids", []) if isinstance(row.get("contract_ids"), list) else []:
+            module_contracts_seen.add(str(contract_id))
+        missing = _missing_required_fields(row, MODULE_CLOSURE_REQUIRED_FIELDS)
+        violations = _list_metric_threshold_violations(row, metric_records, threshold_records)
+        contract_tests = row.get("contract_tests") if isinstance(row.get("contract_tests"), list) else []
+        if not contract_tests:
+            violations.append("contract_tests_required")
+        for test_index, test in enumerate(contract_tests):
+            if not isinstance(test, dict):
+                violations.append(f"contract_test_{test_index}_not_object")
+                continue
+            if test.get("status") != "pass":
+                violations.append("contract_tests_must_pass")
+        for field in ("input_events", "output_events", "decision_fields", "failure_events", "outcome_metrics", "governance_rules", "spec_section_ids", "runtime_config_keys"):
+            if not isinstance(row.get(field), list) or not row.get(field):
+                violations.append(f"{field}_required")
+        if not str(row.get("kill_condition") or "").strip():
+            violations.append("kill_condition_required")
+        if not str(row.get("dashboard_surface") or "").strip():
+            violations.append("dashboard_surface_required")
+        if not str(row.get("mode_readiness_target") or "").strip():
+            violations.append("mode_readiness_target_required")
+        expected_hash = _hash_record_without(row, "module_closure_hash") if module_name else None
+        if row.get("module_closure_hash") and expected_hash and row.get("module_closure_hash") != expected_hash:
+            violations.append("module_closure_hash_mismatch")
+        if missing or violations:
+            malformed_modules.append({"index": index, "module_name": module_name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_module_closure_contracts = sorted(required_contracts - module_contracts_seen)
+
+    decommission_rows = policy.get("decommission_policies") if isinstance(policy.get("decommission_policies"), list) else []
+    malformed_decommission = []
+    for index, row in enumerate(decommission_rows):
+        if not isinstance(row, dict):
+            malformed_decommission.append({"index": index, "artifact_id": None, "missing_fields": list(DECOMMISSION_POLICY_REQUIRED_FIELDS), "violations": ["decommission_policy_row_not_object"]})
+            continue
+        artifact_id = str(row.get("artifact_id") or "")
+        status = str(row.get("status") or "")
+        missing = _missing_required_fields(row, DECOMMISSION_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if status not in {"deprecated", "retired"}:
+            violations.append("decommission_status_not_deprecated_or_retired")
+        if status == "retired":
+            if row.get("runtime_reference_allowed") is not False:
+                violations.append("retired_artifact_runtime_reference_forbidden")
+            if row.get("training_reference_allowed") is not False:
+                violations.append("retired_artifact_training_reference_forbidden")
+        if status == "deprecated" and row.get("new_promotion_evidence_allowed") is not False:
+            violations.append("deprecated_artifact_cannot_support_new_promotion")
+        if row.get("operator_audit_required") is not True:
+            violations.append("operator_audit_required")
+        if row.get("direct_entry_allowed") is not False:
+            violations.append("direct_entry_must_be_false")
+        if row.get("artifact_type") == "route" and ("hard_gate" in artifact_id or "source_resonance" in artifact_id) and row.get("runtime_reference_allowed") is not False:
+            violations.append("old_direct_entry_route_alias_runtime_reference_forbidden")
+        retired_at = str(row.get("retired_at") or "")
+        if retired_at != "open" and _parse_iso_ts(retired_at) is None:
+            violations.append("retired_at_invalid")
+        if _parse_iso_ts(row.get("deprecated_at")) is None:
+            violations.append("deprecated_at_invalid")
+        expected_hash = _hash_record_without(row, "decommission_hash") if artifact_id else None
+        if row.get("decommission_hash") and expected_hash and row.get("decommission_hash") != expected_hash:
+            violations.append("decommission_hash_mismatch")
+        if missing or violations:
+            malformed_decommission.append({"index": index, "artifact_id": artifact_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    return [
+        _contract(
+            "ReconciliationPolicyContract",
+            bool(reconciliation_rows) and not policy_errors and not source_errors and not missing_repair_classes and not malformed_reconciliation,
+            "reconciliation_policy_missing_malformed_or_unsafe",
+            {
+                **common,
+                "reconciliation_policy_count": len(reconciliation_rows),
+                "missing_repair_classes": missing_repair_classes,
+                "malformed_reconciliation_policies": malformed_reconciliation,
+            },
+        ),
+        _contract(
+            "DashboardStalenessContract",
+            bool(dashboard_rows) and not policy_errors and not source_errors and not malformed_dashboard,
+            "dashboard_staleness_missing_malformed_or_unsafe",
+            {
+                **common,
+                "dashboard_panel_count": len(dashboard_rows),
+                "malformed_dashboard_staleness_panels": malformed_dashboard,
+            },
+        ),
+        _contract(
+            "SpecTraceabilityMatrix",
+            bool(traceability_rows) and not policy_errors and not source_errors and not missing_traceability_contracts and not malformed_traceability,
+            "spec_traceability_matrix_missing_malformed_or_incomplete",
+            {
+                **common,
+                "traceability_row_count": len(traceability_rows),
+                "missing_traceability_contracts": missing_traceability_contracts,
+                "malformed_traceability_rows": malformed_traceability,
+            },
+        ),
+        _contract(
+            "ImplementationIssueGraphContract",
+            bool(issue_rows) and not policy_errors and not source_errors and not malformed_issues,
+            "implementation_issue_graph_missing_malformed_or_incomplete",
+            {
+                **common,
+                "issue_count": len(issue_rows),
+                "malformed_issues": malformed_issues,
+            },
+        ),
+        _contract(
+            "ModuleClosureContract",
+            bool(module_rows) and not policy_errors and not source_errors and not missing_module_closure_contracts and not malformed_modules,
+            "module_closure_missing_malformed_or_ungated",
+            {
+                **common,
+                "module_closure_count": len(module_rows),
+                "missing_module_closure_contracts": missing_module_closure_contracts,
+                "malformed_module_closures": malformed_modules,
+            },
+        ),
+        _contract(
+            "DecommissionPolicyContract",
+            bool(decommission_rows) and not policy_errors and not source_errors and not malformed_decommission,
+            "decommission_policy_missing_malformed_or_unsafe",
+            {
+                **common,
+                "decommission_policy_count": len(decommission_rows),
+                "malformed_decommission_policies": malformed_decommission,
+            },
+        ),
+    ]
+
+
+def _release_row_hash_violation(row, hash_field, identity_field):
+    identity = str(row.get(identity_field) or "")
+    expected_hash = _hash_record_without(row, hash_field) if identity else None
+    if row.get(hash_field) and expected_hash and row.get(hash_field) != expected_hash:
+        return f"{hash_field}_mismatch"
+    return None
+
+
+def verify_release_experiment_safety_contracts(
+    policy_path=DEFAULT_RELEASE_EXPERIMENT_SAFETY_POLICY,
+    metric_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+):
+    try:
+        policy = _load_json(policy_path)
+        metric_registry = _load_json(metric_registry_path)
+        threshold_catalog = _load_json(threshold_catalog_path)
+    except Exception as exc:
+        evidence = {"policy_path": str(policy_path), "error": str(exc)}
+        return _contracts_from_error(
+            sorted(RELEASE_EXPERIMENT_SAFETY_CONTRACTS),
+            "release_experiment_safety_policy_missing_or_invalid",
+            evidence,
+        )
+    if not isinstance(policy, dict):
+        evidence = {"policy_path": str(policy_path)}
+        return _contracts_from_error(
+            sorted(RELEASE_EXPERIMENT_SAFETY_CONTRACTS),
+            "release_experiment_safety_policy_not_object",
+            evidence,
+        )
+    if not isinstance(metric_registry, dict) or not isinstance(threshold_catalog, dict):
+        evidence = {"policy_path": str(policy_path), "error": "metric_or_threshold_registry_not_object"}
+        return _contracts_from_error(
+            sorted(RELEASE_EXPERIMENT_SAFETY_CONTRACTS),
+            "release_experiment_safety_policy_missing_or_invalid",
+            evidence,
+        )
+
+    metric_records, threshold_records = _metric_threshold_maps(metric_registry, threshold_catalog)
+    policy_errors = []
+    if policy.get("schema_version") != "v2.7.0.release_experiment_safety_policy.v1":
+        policy_errors.append("schema_version_mismatch")
+    if policy.get("failure_action") != "release_experiment_safety_blocked":
+        policy_errors.append("failure_action_must_block_release_experiment_safety")
+
+    secrets = policy.get("secrets_management") if isinstance(policy.get("secrets_management"), list) else []
+    malformed_secrets = []
+    for index, row in enumerate(secrets):
+        if not isinstance(row, dict):
+            malformed_secrets.append({"index": index, "secret_name": None, "missing_fields": list(SECRETS_MANAGEMENT_REQUIRED_FIELDS), "violations": ["secret_row_not_object"]})
+            continue
+        name = str(row.get("secret_name") or "")
+        scope = str(row.get("scope") or "")
+        environments = set(str(item) for item in row.get("environment_allowed", []) if item) if isinstance(row.get("environment_allowed"), list) else set()
+        missing = _missing_required_fields(row, SECRETS_MANAGEMENT_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            if int(row.get("rotation_interval_days")) <= 0:
+                violations.append("rotation_interval_days_positive_required")
+        except (TypeError, ValueError):
+            violations.append("rotation_interval_days_positive_required")
+        if _parse_iso_ts(row.get("last_rotated_at")) is None:
+            violations.append("last_rotated_at_invalid")
+        if row.get("leak_detected") is not False:
+            violations.append("leak_detected_must_be_false")
+        if str(row.get("revocation_status") or "") not in {"active", "revoked_with_rotation_complete"}:
+            violations.append("revocation_status_invalid")
+        if not environments:
+            violations.append("environment_allowed_required")
+        if scope == "dashboard_token" and row.get("mutation_scope_allowed") is not False:
+            violations.append("dashboard_token_mutation_scope_forbidden")
+        if scope == "live_signing_secret" and environments != {"live"}:
+            violations.append("live_signing_secret_must_be_live_only")
+        if "paper" in environments and "live" in environments:
+            violations.append("paper_and_live_secret_environment_must_not_mix")
+        hash_violation = _release_row_hash_violation(row, "secret_hash", "secret_name")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_secrets.append({"index": index, "secret_name": name or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    slos = policy.get("system_slos") if isinstance(policy.get("system_slos"), list) else []
+    malformed_slos = []
+    for index, row in enumerate(slos):
+        if not isinstance(row, dict):
+            malformed_slos.append({"index": index, "slo_id": None, "missing_fields": list(SYSTEM_SLO_REQUIRED_FIELDS), "violations": ["slo_row_not_object"]})
+            continue
+        slo_id = str(row.get("slo_id") or "")
+        missing = _missing_required_fields(row, SYSTEM_SLO_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "measured_value")
+        if str(row.get("status") or "") != "healthy":
+            violations.append("slo_status_not_healthy")
+        if str(row.get("severity") or "") in {"P0", "P1", "critical"}:
+            violations.append("critical_slo_unresolved")
+        if str(row.get("new_entry_action") or "") not in {"allow", "shadow_only", "circuit_breaker"}:
+            violations.append("new_entry_action_invalid")
+        if str(row.get("exit_safety_action") or "") != "preserve_exit_safety":
+            violations.append("exit_safety_must_be_preserved")
+        if str(row.get("new_entry_action") or "") == "allow" and str(row.get("status") or "") != "healthy":
+            violations.append("new_entry_allow_requires_healthy_slo")
+        hash_violation = _release_row_hash_violation(row, "slo_hash", "slo_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_slos.append({"index": index, "slo_id": slo_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    no_trade_rows = policy.get("no_trade_root_causes") if isinstance(policy.get("no_trade_root_causes"), list) else []
+    malformed_no_trade = []
+    no_trade_codes = set()
+    for index, row in enumerate(no_trade_rows):
+        if not isinstance(row, dict):
+            malformed_no_trade.append({"index": index, "root_cause_id": None, "missing_fields": list(NO_TRADE_ROOT_CAUSE_REQUIRED_FIELDS), "violations": ["no_trade_row_not_object"]})
+            continue
+        root_cause_id = str(row.get("root_cause_id") or "")
+        code = str(row.get("root_cause_code") or "")
+        no_trade_codes.add(code)
+        missing = _missing_required_fields(row, NO_TRADE_ROOT_CAUSE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            d3a_count = int(row.get("d3a_candidate_count"))
+            fill_count = int(row.get("fill_count"))
+            if d3a_count < 0 or fill_count < 0:
+                violations.append("candidate_and_fill_counts_nonnegative_required")
+            if d3a_count > 0 and fill_count == 0 and str(row.get("category") or "") in {"", "unknown"}:
+                violations.append("d3a_zero_fill_requires_known_root_cause")
+        except (TypeError, ValueError):
+            violations.append("candidate_and_fill_counts_numeric_required")
+        if not str(row.get("remediation_action") or "").strip():
+            violations.append("remediation_action_required")
+        hash_violation = _release_row_hash_violation(row, "root_cause_hash", "root_cause_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_no_trade.append({"index": index, "root_cause_id": root_cause_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    complexity_rows = policy.get("release_complexity_budgets") if isinstance(policy.get("release_complexity_budgets"), list) else []
+    malformed_complexity = []
+    for index, row in enumerate(complexity_rows):
+        if not isinstance(row, dict):
+            malformed_complexity.append({"index": index, "release_id": None, "missing_fields": list(RELEASE_COMPLEXITY_REQUIRED_FIELDS), "violations": ["complexity_row_not_object"]})
+            continue
+        release_id = str(row.get("release_id") or "")
+        missing = _missing_required_fields(row, RELEASE_COMPLEXITY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        numeric_fields = ("max_new_gates_per_release", "new_gates", "max_new_detectors_per_release", "new_detectors", "required_shadow_hours_before_gate", "observed_shadow_hours")
+        values = {}
+        for field in numeric_fields:
+            try:
+                values[field] = Decimal(str(row.get(field)))
+                if values[field] < 0:
+                    violations.append(f"{field}_nonnegative_required")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        if not violations:
+            if values["new_gates"] > values["max_new_gates_per_release"]:
+                violations.append("new_gates_exceed_release_budget")
+            if values["new_detectors"] > values["max_new_detectors_per_release"]:
+                violations.append("new_detectors_exceed_release_budget")
+            if values["observed_shadow_hours"] < values["required_shadow_hours_before_gate"]:
+                violations.append("required_shadow_hours_not_met")
+        if str(row.get("status") or "") != "within_budget":
+            violations.append("release_complexity_status_not_within_budget")
+        if not str(row.get("rollback_metric") or "").strip():
+            violations.append("rollback_metric_required")
+        hash_violation = _release_row_hash_violation(row, "complexity_hash", "release_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_complexity.append({"index": index, "release_id": release_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    backpressure_rows = policy.get("backpressure_policies") if isinstance(policy.get("backpressure_policies"), list) else []
+    malformed_backpressure = []
+    for index, row in enumerate(backpressure_rows):
+        if not isinstance(row, dict):
+            malformed_backpressure.append({"index": index, "component": None, "missing_fields": list(BACKPRESSURE_POLICY_REQUIRED_FIELDS), "violations": ["backpressure_row_not_object"]})
+            continue
+        component = str(row.get("component") or "")
+        missing = _missing_required_fields(row, BACKPRESSURE_POLICY_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        try:
+            queue_depth = Decimal(str(row.get("queue_depth")))
+            max_queue_depth = Decimal(str(row.get("max_queue_depth")))
+            if queue_depth < 0 or max_queue_depth < 0:
+                violations.append("queue_depth_nonnegative_required")
+            if queue_depth > max_queue_depth:
+                violations.append("queue_depth_exceeds_max")
+        except (InvalidOperation, ValueError, TypeError):
+            violations.append("queue_depth_numeric_required")
+        if row.get("drops_p0_p1_allowed") is not False:
+            violations.append("p0_p1_drop_forbidden")
+        if str(row.get("exit_safety_priority") or "") != "reserved_first":
+            violations.append("exit_safety_priority_must_be_reserved_first")
+        if str(row.get("backpressure_action") or "") in {"drop_p0", "drop_p1", "drop_exit"}:
+            violations.append("critical_backpressure_action_forbidden")
+        hash_violation = _release_row_hash_violation(row, "backpressure_hash", "component")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_backpressure.append({"index": index, "component": component or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    reserve_rows = policy.get("budget_reserves") if isinstance(policy.get("budget_reserves"), list) else []
+    malformed_reserves = []
+    reserve_priorities = set()
+    for index, row in enumerate(reserve_rows):
+        if not isinstance(row, dict):
+            malformed_reserves.append({"index": index, "reserve_id": None, "missing_fields": list(BUDGET_RESERVE_REQUIRED_FIELDS), "violations": ["budget_reserve_row_not_object"]})
+            continue
+        reserve_id = str(row.get("reserve_id") or "")
+        priority = str(row.get("priority_class") or "")
+        reserve_priorities.add(priority)
+        missing = _missing_required_fields(row, BUDGET_RESERVE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        for field in ("reserved_amount", "current_usage", "hard_limit"):
+            try:
+                if Decimal(str(row.get(field))) < 0:
+                    violations.append(f"{field}_nonnegative_required")
+            except (InvalidOperation, ValueError, TypeError):
+                violations.append(f"{field}_numeric_required")
+        try:
+            if Decimal(str(row.get("current_usage"))) > Decimal(str(row.get("hard_limit"))):
+                violations.append("current_usage_exceeds_hard_limit")
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+        if priority in {"P0", "P1"} and row.get("borrow_allowed") is not False:
+            violations.append("p0_p1_reserve_borrow_forbidden")
+        if not isinstance(row.get("reserved_for"), list) or not row.get("reserved_for"):
+            violations.append("reserved_for_required")
+        hash_violation = _release_row_hash_violation(row, "reserve_hash", "reserve_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_reserves.append({"index": index, "reserve_id": reserve_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_reserve_priorities = sorted({"P0", "P1"} - reserve_priorities)
+
+    holdout_rows = policy.get("blinded_holdouts") if isinstance(policy.get("blinded_holdouts"), list) else []
+    malformed_holdouts = []
+    for index, row in enumerate(holdout_rows):
+        if not isinstance(row, dict):
+            malformed_holdouts.append({"index": index, "holdout_id": None, "missing_fields": list(BLINDED_HOLDOUT_REQUIRED_FIELDS), "violations": ["holdout_row_not_object"]})
+            continue
+        holdout_id = str(row.get("holdout_id") or "")
+        missing = _missing_required_fields(row, BLINDED_HOLDOUT_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("blinded") is not True:
+            violations.append("holdout_must_be_blinded")
+        try:
+            if int(row.get("access_count")) != 0:
+                violations.append("holdout_access_count_must_be_zero")
+        except (TypeError, ValueError):
+            violations.append("holdout_access_count_numeric_required")
+        if row.get("no_retune_enforced") is not True:
+            violations.append("no_retune_must_be_enforced")
+        if str(row.get("contamination_status") or "") != "clean":
+            violations.append("holdout_contamination_not_clean")
+        if row.get("promotion_evidence_allowed") is not True:
+            violations.append("clean_blinded_holdout_must_be_available_for_promotion_evidence")
+        hash_violation = _release_row_hash_violation(row, "holdout_hash", "holdout_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_holdouts.append({"index": index, "holdout_id": holdout_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    override_rows = policy.get("manual_overrides") if isinstance(policy.get("manual_overrides"), list) else []
+    malformed_overrides = []
+    for index, row in enumerate(override_rows):
+        if not isinstance(row, dict):
+            malformed_overrides.append({"index": index, "override_id": None, "missing_fields": list(MANUAL_OVERRIDE_REQUIRED_FIELDS), "violations": ["manual_override_row_not_object"]})
+            continue
+        override_id = str(row.get("override_id") or "")
+        missing = _missing_required_fields(row, MANUAL_OVERRIDE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("quarantine_required") is not True:
+            violations.append("manual_override_must_quarantine")
+        if row.get("promotion_evidence_allowed") is not False:
+            violations.append("manual_override_cannot_be_promotion_evidence")
+        if row.get("training_allowed") is not False:
+            violations.append("manual_override_training_forbidden")
+        if str(row.get("approval_status") or "") not in {"approved", "quarantined"}:
+            violations.append("approval_status_invalid")
+        if not str(row.get("audit_event_id") or "").strip():
+            violations.append("audit_event_id_required")
+        hash_violation = _release_row_hash_violation(row, "override_hash", "override_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_overrides.append({"index": index, "override_id": override_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    test_rows = policy.get("contract_test_suite") if isinstance(policy.get("contract_test_suite"), list) else []
+    malformed_tests = []
+    tested_contracts = set()
+    for index, row in enumerate(test_rows):
+        if not isinstance(row, dict):
+            malformed_tests.append({"index": index, "suite_id": None, "missing_fields": list(CONTRACT_TEST_SUITE_REQUIRED_FIELDS), "violations": ["contract_test_row_not_object"]})
+            continue
+        suite_id = str(row.get("suite_id") or "")
+        contract_id = str(row.get("contract_id") or "")
+        tested_contracts.add(contract_id)
+        missing = _missing_required_fields(row, CONTRACT_TEST_SUITE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("pass_fail") != "pass":
+            violations.append("contract_test_not_pass")
+        if str(row.get("coverage_class") or "") not in {"mvp_blocking", "normal_tiny_blocking", "non_negotiable_core"}:
+            violations.append("coverage_class_invalid")
+        if not str(row.get("test_command") or "").strip():
+            violations.append("test_command_required")
+        hash_violation = _release_row_hash_violation(row, "test_hash", "suite_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_tests.append({"index": index, "suite_id": suite_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+    missing_contract_tests = sorted(RELEASE_EXPERIMENT_SAFETY_CONTRACTS - tested_contracts)
+
+    replay_rows = policy.get("adversarial_replay_suite") if isinstance(policy.get("adversarial_replay_suite"), list) else []
+    malformed_replays = []
+    critical_replay_count = 0
+    for index, row in enumerate(replay_rows):
+        if not isinstance(row, dict):
+            malformed_replays.append({"index": index, "replay_id": None, "missing_fields": list(ADVERSARIAL_REPLAY_SUITE_REQUIRED_FIELDS), "violations": ["adversarial_replay_row_not_object"]})
+            continue
+        replay_id = str(row.get("replay_id") or "")
+        missing = _missing_required_fields(row, ADVERSARIAL_REPLAY_SUITE_REQUIRED_FIELDS)
+        violations = _policy_threshold_violation(row, metric_records, threshold_records, "observed_value")
+        if row.get("machine_checked") is not True:
+            violations.append("adversarial_replay_must_be_machine_checked")
+        if row.get("pass_fail") != "pass":
+            violations.append("adversarial_replay_not_pass")
+        if row.get("observed_action") != row.get("expected_action"):
+            violations.append("observed_action_must_match_expected_action")
+        if str(row.get("criticality") or "") == "critical":
+            critical_replay_count += 1
+        hash_violation = _release_row_hash_violation(row, "replay_hash", "replay_id")
+        if hash_violation:
+            violations.append(hash_violation)
+        if missing or violations:
+            malformed_replays.append({"index": index, "replay_id": replay_id or None, "missing_fields": missing, "violations": sorted(set(violations))})
+
+    source_checks, source_errors = _validate_registry_source_files(policy.get("source_files"))
+    common = {
+        "policy_path": str(policy_path),
+        "schema_version": policy.get("schema_version"),
+        "scope": policy.get("scope"),
+        "failure_action": policy.get("failure_action"),
+        "policy_errors": policy_errors,
+        "source_checks": source_checks,
+        "source_errors": source_errors,
+    }
+    return [
+        _contract(
+            "SecretsManagementContract",
+            bool(secrets) and not policy_errors and not source_errors and not malformed_secrets,
+            "secrets_management_missing_malformed_or_unsafe",
+            {**common, "secret_count": len(secrets), "malformed_secrets": malformed_secrets},
+        ),
+        _contract(
+            "SystemSLO",
+            bool(slos) and not policy_errors and not source_errors and not malformed_slos,
+            "system_slo_missing_malformed_or_unhealthy",
+            {**common, "slo_count": len(slos), "malformed_slos": malformed_slos},
+        ),
+        _contract(
+            "NoTradeRootCause",
+            bool(no_trade_rows) and not policy_errors and not source_errors and not malformed_no_trade,
+            "no_trade_root_cause_missing_malformed_or_unknown",
+            {
+                **common,
+                "root_cause_count": len(no_trade_rows),
+                "root_cause_codes": sorted(code for code in no_trade_codes if code),
+                "malformed_no_trade_root_causes": malformed_no_trade,
+            },
+        ),
+        _contract(
+            "ReleaseComplexityBudget",
+            bool(complexity_rows) and not policy_errors and not source_errors and not malformed_complexity,
+            "release_complexity_budget_missing_malformed_or_exceeded",
+            {**common, "release_complexity_count": len(complexity_rows), "malformed_release_complexity": malformed_complexity},
+        ),
+        _contract(
+            "BackpressurePolicy",
+            bool(backpressure_rows) and not policy_errors and not source_errors and not malformed_backpressure,
+            "backpressure_policy_missing_malformed_or_unsafe",
+            {**common, "backpressure_policy_count": len(backpressure_rows), "malformed_backpressure_policies": malformed_backpressure},
+        ),
+        _contract(
+            "BudgetReserveContract",
+            bool(reserve_rows) and not policy_errors and not source_errors and not missing_reserve_priorities and not malformed_reserves,
+            "budget_reserve_missing_malformed_or_unprotected",
+            {
+                **common,
+                "budget_reserve_count": len(reserve_rows),
+                "missing_reserve_priorities": missing_reserve_priorities,
+                "malformed_budget_reserves": malformed_reserves,
+            },
+        ),
+        _contract(
+            "BlindedHoldoutContract",
+            bool(holdout_rows) and not policy_errors and not source_errors and not malformed_holdouts,
+            "blinded_holdout_missing_malformed_or_contaminated",
+            {**common, "holdout_count": len(holdout_rows), "malformed_holdouts": malformed_holdouts},
+        ),
+        _contract(
+            "ManualOverrideContract",
+            bool(override_rows) and not policy_errors and not source_errors and not malformed_overrides,
+            "manual_override_missing_malformed_or_unquarantined",
+            {**common, "manual_override_count": len(override_rows), "malformed_manual_overrides": malformed_overrides},
+        ),
+        _contract(
+            "ContractTestSuite",
+            bool(test_rows) and not policy_errors and not source_errors and not missing_contract_tests and not malformed_tests,
+            "contract_test_suite_missing_malformed_or_failing",
+            {
+                **common,
+                "contract_test_count": len(test_rows),
+                "missing_contract_tests": missing_contract_tests,
+                "malformed_contract_tests": malformed_tests,
+            },
+        ),
+        _contract(
+            "AdversarialReplaySuite",
+            bool(replay_rows) and critical_replay_count >= 3 and not policy_errors and not source_errors and not malformed_replays,
+            "adversarial_replay_suite_missing_malformed_or_failing",
+            {
+                **common,
+                "adversarial_replay_count": len(replay_rows),
+                "critical_replay_count": critical_replay_count,
+                "malformed_adversarial_replays": malformed_replays,
+            },
+        ),
+    ]
 
 
 def _parse_iso_ts(value):
@@ -3636,6 +9323,9 @@ def _extract_basic_readiness_error_codes(source_text):
         )
     )
     codes.update(re.findall(r"reason\s+or\s+['\"]([^'\"]+)['\"]", source_text))
+    codes.update(re.findall(r"_contracts_from_error\(\s*[^,]+,\s*['\"]([^'\"]+)['\"]", source_text, flags=re.S))
+    codes.update(re.findall(r"_failed_detector_shadow_contracts\(\s*['\"]([^'\"]+)['\"]", source_text, flags=re.S))
+    codes.update(re.findall(r"['\"]blocking_reason['\"]\s*:\s*['\"]([^'\"]+)['\"]", source_text))
     return codes
 
 
@@ -6438,6 +12128,24 @@ def build_basic_contract_readiness(
     service_readiness_policy_path=DEFAULT_SERVICE_READINESS_PROBES,
     dashboard_action_separation_policy_path=DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY,
     numeric_precision_policy_path=DEFAULT_NUMERIC_PRECISION_POLICY,
+    metric_definition_registry_path=DEFAULT_METRIC_DEFINITION_REGISTRY,
+    threshold_catalog_path=DEFAULT_THRESHOLD_CATALOG,
+    runtime_config_drift_policy_path=DEFAULT_RUNTIME_CONFIG_DRIFT_POLICY,
+    environment_separation_policy_path=DEFAULT_ENVIRONMENT_SEPARATION_POLICY,
+    null_value_policy_path=DEFAULT_NULL_VALUE_POLICY,
+    feature_vector_snapshot_policy_path=DEFAULT_FEATURE_VECTOR_SNAPSHOT_POLICY,
+    training_dataset_manifest_policy_path=DEFAULT_TRAINING_DATASET_MANIFEST_POLICY,
+    data_lineage_graph_policy_path=DEFAULT_DATA_LINEAGE_GRAPH_POLICY,
+    detector_shadow_calibration_policy_path=DEFAULT_DETECTOR_SHADOW_CALIBRATION_POLICY,
+    capacity_load_latency_policy_path=DEFAULT_CAPACITY_LOAD_LATENCY_POLICY,
+    operator_runtime_safety_policy_path=DEFAULT_OPERATOR_RUNTIME_SAFETY_POLICY,
+    replay_build_model_policy_path=DEFAULT_REPLAY_BUILD_MODEL_POLICY,
+    spec_governance_feasibility_policy_path=DEFAULT_SPEC_GOVERNANCE_FEASIBILITY_POLICY,
+    identity_unit_provider_finality_policy_path=DEFAULT_IDENTITY_UNIT_PROVIDER_FINALITY_POLICY,
+    execution_exit_safety_policy_path=DEFAULT_EXECUTION_EXIT_SAFETY_POLICY,
+    delivery_traceability_policy_path=DEFAULT_DELIVERY_TRACEABILITY_POLICY,
+    release_experiment_safety_policy_path=DEFAULT_RELEASE_EXPERIMENT_SAFETY_POLICY,
+    markov_lifecycle_forecast_policy_path=DEFAULT_MARKOV_LIFECYCLE_FORECAST_POLICY,
     reason_taxonomy_policy_path=DEFAULT_REASON_TAXONOMY_POLICY,
     security_session_policy_path=DEFAULT_SECURITY_SESSION_POLICY,
     runtime_pipeline_policy_path=DEFAULT_RUNTIME_PIPELINE_POLICY,
@@ -6449,6 +12157,80 @@ def build_basic_contract_readiness(
         for item in [
             verify_spec_consistency(manifest_path, catalog_path, registry_path),
             verify_numeric_precision_policy(policy_path=numeric_precision_policy_path),
+            verify_metric_definition_registry(registry_path=metric_definition_registry_path),
+            verify_threshold_catalog(
+                threshold_catalog_path=threshold_catalog_path,
+                metric_registry_path=metric_definition_registry_path,
+            ),
+            verify_runtime_config_drift_contract(policy_path=runtime_config_drift_policy_path, env=env),
+            verify_environment_separation_contract(policy_path=environment_separation_policy_path, env=env),
+            verify_null_value_policy_contract(policy_path=null_value_policy_path),
+            verify_feature_availability_contract(
+                policy_path=feature_vector_snapshot_policy_path,
+                null_policy_path=null_value_policy_path,
+            ),
+            verify_feature_vector_snapshot_contract(
+                policy_path=feature_vector_snapshot_policy_path,
+                null_policy_path=null_value_policy_path,
+            ),
+            verify_data_lineage_graph_contract(policy_path=data_lineage_graph_policy_path),
+            verify_training_dataset_manifest_contract(
+                policy_path=training_dataset_manifest_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+                manifest_path=manifest_path,
+                catalog_path=catalog_path,
+                registry_path=registry_path,
+            ),
+            *verify_detector_shadow_calibration_contracts(
+                policy_path=detector_shadow_calibration_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_capacity_load_latency_contracts(
+                policy_path=capacity_load_latency_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_operator_runtime_safety_contracts(
+                policy_path=operator_runtime_safety_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_replay_build_model_contracts(
+                policy_path=replay_build_model_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_spec_governance_feasibility_contracts(
+                policy_path=spec_governance_feasibility_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+                manifest_path=manifest_path,
+                catalog_path=catalog_path,
+                registry_path=registry_path,
+            ),
+            *verify_identity_unit_provider_finality_contracts(
+                policy_path=identity_unit_provider_finality_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_execution_exit_safety_contracts(
+                policy_path=execution_exit_safety_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_delivery_traceability_contracts(
+                policy_path=delivery_traceability_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_release_experiment_safety_contracts(
+                policy_path=release_experiment_safety_policy_path,
+                metric_registry_path=metric_definition_registry_path,
+                threshold_catalog_path=threshold_catalog_path,
+            ),
+            *verify_markov_lifecycle_forecast_contracts(policy_path=markov_lifecycle_forecast_policy_path),
             verify_human_readable_reason_contract(policy_path=reason_taxonomy_policy_path),
             verify_machine_readable_reason_contract(policy_path=reason_taxonomy_policy_path),
             verify_paper_mode_safety(env=env),
@@ -6584,6 +12366,24 @@ def main():
     parser.add_argument("--service-readiness-policy", default=str(DEFAULT_SERVICE_READINESS_PROBES))
     parser.add_argument("--dashboard-action-separation-policy", default=str(DEFAULT_DASHBOARD_ACTION_SEPARATION_POLICY))
     parser.add_argument("--numeric-precision-policy", default=str(DEFAULT_NUMERIC_PRECISION_POLICY))
+    parser.add_argument("--metric-definition-registry", default=str(DEFAULT_METRIC_DEFINITION_REGISTRY))
+    parser.add_argument("--threshold-catalog", default=str(DEFAULT_THRESHOLD_CATALOG))
+    parser.add_argument("--runtime-config-drift-policy", default=str(DEFAULT_RUNTIME_CONFIG_DRIFT_POLICY))
+    parser.add_argument("--environment-separation-policy", default=str(DEFAULT_ENVIRONMENT_SEPARATION_POLICY))
+    parser.add_argument("--null-value-policy", default=str(DEFAULT_NULL_VALUE_POLICY))
+    parser.add_argument("--feature-vector-snapshot-policy", default=str(DEFAULT_FEATURE_VECTOR_SNAPSHOT_POLICY))
+    parser.add_argument("--training-dataset-manifest-policy", default=str(DEFAULT_TRAINING_DATASET_MANIFEST_POLICY))
+    parser.add_argument("--data-lineage-graph-policy", default=str(DEFAULT_DATA_LINEAGE_GRAPH_POLICY))
+    parser.add_argument("--detector-shadow-calibration-policy", default=str(DEFAULT_DETECTOR_SHADOW_CALIBRATION_POLICY))
+    parser.add_argument("--capacity-load-latency-policy", default=str(DEFAULT_CAPACITY_LOAD_LATENCY_POLICY))
+    parser.add_argument("--operator-runtime-safety-policy", default=str(DEFAULT_OPERATOR_RUNTIME_SAFETY_POLICY))
+    parser.add_argument("--replay-build-model-policy", default=str(DEFAULT_REPLAY_BUILD_MODEL_POLICY))
+    parser.add_argument("--spec-governance-feasibility-policy", default=str(DEFAULT_SPEC_GOVERNANCE_FEASIBILITY_POLICY))
+    parser.add_argument("--identity-unit-provider-finality-policy", default=str(DEFAULT_IDENTITY_UNIT_PROVIDER_FINALITY_POLICY))
+    parser.add_argument("--execution-exit-safety-policy", default=str(DEFAULT_EXECUTION_EXIT_SAFETY_POLICY))
+    parser.add_argument("--delivery-traceability-policy", default=str(DEFAULT_DELIVERY_TRACEABILITY_POLICY))
+    parser.add_argument("--release-experiment-safety-policy", default=str(DEFAULT_RELEASE_EXPERIMENT_SAFETY_POLICY))
+    parser.add_argument("--markov-lifecycle-forecast-policy", default=str(DEFAULT_MARKOV_LIFECYCLE_FORECAST_POLICY))
     parser.add_argument("--reason-taxonomy-policy", default=str(DEFAULT_REASON_TAXONOMY_POLICY))
     parser.add_argument("--security-session-policy", default=str(DEFAULT_SECURITY_SESSION_POLICY))
     parser.add_argument("--runtime-pipeline-policy", default=str(DEFAULT_RUNTIME_PIPELINE_POLICY))
@@ -6622,6 +12422,24 @@ def main():
         service_readiness_policy_path=Path(args.service_readiness_policy),
         dashboard_action_separation_policy_path=Path(args.dashboard_action_separation_policy),
         numeric_precision_policy_path=Path(args.numeric_precision_policy),
+        metric_definition_registry_path=Path(args.metric_definition_registry),
+        threshold_catalog_path=Path(args.threshold_catalog),
+        runtime_config_drift_policy_path=Path(args.runtime_config_drift_policy),
+        environment_separation_policy_path=Path(args.environment_separation_policy),
+        null_value_policy_path=Path(args.null_value_policy),
+        feature_vector_snapshot_policy_path=Path(args.feature_vector_snapshot_policy),
+        training_dataset_manifest_policy_path=Path(args.training_dataset_manifest_policy),
+        data_lineage_graph_policy_path=Path(args.data_lineage_graph_policy),
+        detector_shadow_calibration_policy_path=Path(args.detector_shadow_calibration_policy),
+        capacity_load_latency_policy_path=Path(args.capacity_load_latency_policy),
+        operator_runtime_safety_policy_path=Path(args.operator_runtime_safety_policy),
+        replay_build_model_policy_path=Path(args.replay_build_model_policy),
+        spec_governance_feasibility_policy_path=Path(args.spec_governance_feasibility_policy),
+        identity_unit_provider_finality_policy_path=Path(args.identity_unit_provider_finality_policy),
+        execution_exit_safety_policy_path=Path(args.execution_exit_safety_policy),
+        delivery_traceability_policy_path=Path(args.delivery_traceability_policy),
+        release_experiment_safety_policy_path=Path(args.release_experiment_safety_policy),
+        markov_lifecycle_forecast_policy_path=Path(args.markov_lifecycle_forecast_policy),
         reason_taxonomy_policy_path=Path(args.reason_taxonomy_policy),
         security_session_policy_path=Path(args.security_session_policy),
         runtime_pipeline_policy_path=Path(args.runtime_pipeline_policy),

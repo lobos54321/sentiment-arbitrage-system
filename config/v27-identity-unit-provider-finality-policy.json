@@ -1,0 +1,121 @@
+{
+  "chain_finality": [
+    {
+      "block_time": "2026-05-27T03:00:00Z",
+      "chain": "solana",
+      "chain_reorg_detected": false,
+      "commitment_level": "finalized",
+      "finality_hash": "d188d04fe6d21236a0a1ce7183f50c14e10c358d06c59659c842152247c34774",
+      "finality_id": "finality:solana:seed-finalized",
+      "finalized_at": "2026-05-27T03:00:01Z",
+      "indexer_lag_sec": 1,
+      "metric_id": "chain_finality_health_rate",
+      "observed_value": 1.0,
+      "rpc_consistency_check": "pass",
+      "rpc_provider": "helius",
+      "slot": 1,
+      "threshold_id": "thr_chain_finality_health_rate_min"
+    }
+  ],
+  "data_units": [
+    {
+      "liquidity_unit": "quote_mint_base_units",
+      "market_cap_unit": "usd",
+      "metric_id": "data_unit_validation_rate",
+      "normalized_price": 1e-06,
+      "observed_value": 1.0,
+      "price_unit": "quote_per_token",
+      "quote_decimals": 9,
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "quote_size_sol": 0.05,
+      "threshold_id": "thr_data_unit_validation_rate_min",
+      "token_decimals": 9,
+      "unit_conversion_version": "v2.7.0.unit.seed",
+      "unit_hash": "1e73699495adee0ec5bd8680b309a8b37416962b79f65028ea039d11dfe501c3",
+      "unit_id": "unit:solana:sol-usdc-seed",
+      "unit_validation_status": "valid"
+    }
+  ],
+  "failure_action": "identity_unit_provider_finality_blocked",
+  "max_indexer_lag_sec": 5,
+  "min_commitment_level": "finalized",
+  "provider_schemas": [
+    {
+      "canary_parse_result": "pass",
+      "field_type_contract": {
+        "liquidity": "decimal_string",
+        "price": "decimal_string",
+        "token_ca": "string",
+        "updated_at": "iso_timestamp"
+      },
+      "field_type_error_rate": 0.0,
+      "last_schema_check_at": "2026-05-27T03:00:00Z",
+      "metric_id": "provider_schema_canary_pass_rate",
+      "missing_required_field_rate": 0.0,
+      "null_spike_rate": 0.0,
+      "observed_value": 1.0,
+      "optional_fields": [
+        "holders",
+        "top10",
+        "bundler",
+        "toxic"
+      ],
+      "provider_name": "gmgn",
+      "required_fields": [
+        "token_ca",
+        "price",
+        "liquidity",
+        "updated_at"
+      ],
+      "schema_drift_detected": false,
+      "schema_hash": "7804de65493388aac88bac6313a11c5224a140afaefb779e80b198e4055d8321",
+      "schema_version": "v2.7.0.gmgn.seed",
+      "threshold_id": "thr_provider_schema_canary_pass_rate_min",
+      "unexpected_enum_rate": 0.0,
+      "value_range_anomaly": false
+    }
+  ],
+  "schema_version": "v2.7.0.identity_unit_provider_finality_policy.v1",
+  "scope": "token_identity_data_unit_chain_finality_provider_schema_truth",
+  "source_files": [
+    {
+      "required_patterns": [
+        "TokenIdentityContract",
+        "DataUnitContract",
+        "ChainFinalityContract",
+        "ProviderSchemaContract"
+      ],
+      "source_anchor": "def verify_identity_unit_provider_finality_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"DataUnitContract\"",
+        "\"ChainFinalityContract\"",
+        "\"ProviderSchemaContract\""
+      ],
+      "source_anchor": "\"TokenIdentityContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ],
+  "token_identities": [
+    {
+      "chain": "solana",
+      "checksum": "sha256:4f8c4c6f1fb6c3fe6d309f053f26c4d6bc9560cfa68af1e0fc1e9a72f5366f5b",
+      "identity_confidence": 1.0,
+      "identity_hash": "ac48d5838c4483a29f2f56177dda356631d8c2bd2592d4268bb740ddc6314c26",
+      "identity_id": "identity:solana:so11111111111111111111111111111111111111112",
+      "liquidity_pair_valid": true,
+      "metric_id": "token_identity_confidence_min",
+      "normalized_ca": "So11111111111111111111111111111111111111112",
+      "observed_value": 1.0,
+      "pool_address": "pool:raydium:sol-usdc-seed",
+      "pool_authority": "raydium_cpmm",
+      "quote_mint": "So11111111111111111111111111111111111111112",
+      "symbol": "SOL",
+      "symbol_conflict_count": 0,
+      "threshold_id": "thr_token_identity_confidence_min",
+      "token_ca": "So11111111111111111111111111111111111111112"
+    }
+  ]
+}

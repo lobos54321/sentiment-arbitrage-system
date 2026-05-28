@@ -7,8 +7,8 @@ Generated from repo-local canonical JSON artifacts.
 - Manifest: `spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json`
 - Contract catalog: `spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json`
 - Gap register: `spec/telegram_dog_regime_capture/v2.7.0/gap-register.json`
-- Catalog contracts: `213`
-- Gap register contracts: `175`
+- Catalog contracts: `282`
+- Gap register contracts: `244`
 - Gap contracts missing catalog records: `0`
 
 ## Release Principle
@@ -22,16 +22,24 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 ## S00 - Scope, Boundaries, and Release Objective
 
 - Section mode target: `all_modes`
-- Catalog contract count: `0`
-- Gap batch count: `0`
+- Catalog contract count: `1`
+- Gap batch count: `1`
 
 ### Catalog Contracts
 
-No catalog contracts currently target this section.
+#### RenderedSpecViewContract
+
+- Section: `S00`
+- Mode target: `observe_only_blocking`
+- Failure action: `normal_tiny_disabled`
+- Required fields: `source_spec_hash, rendered_doc_hash, render_validation_status, section_count`
 
 ### Gap Register Coverage
 
-No gap-register contracts currently target this section.
+#### v2.6.13_spec_governance_confidence_fill_feasibility
+
+- Theme: Rendered spec views, health enums, contract lifecycle, objective priority, goal confidence, fill-time anchors, and ex-ante/posthoc feasibility must be machine-checkable before shadow or normal tiny evidence can be trusted.
+- Contracts: `RenderedSpecViewContract`
 
 ## S01 - Canonical Spec and Machine-Checkable Governance
 
@@ -91,10 +99,17 @@ No gap-register contracts currently target this section.
 ## S02 - Metrics, Thresholds, Windows, and Evidence Eligibility
 
 - Section mode target: `normal_tiny_blocking`
-- Catalog contract count: `2`
-- Gap batch count: `1`
+- Catalog contract count: `5`
+- Gap batch count: `3`
 
 ### Catalog Contracts
+
+#### GoalConfidenceContract
+
+- Section: `S02`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `promotion_inconclusive`
+- Required fields: `metric_id, numerator, denominator, wilson_lower_bound, beta_posterior_lower_bound`
 
 #### MetricBackfillImpactContract
 
@@ -103,6 +118,13 @@ No gap-register contracts currently target this section.
 - Failure action: `metric_backfill_blocked`
 - Required fields: `backfill_id, metric_id, impact_scope, impact_report_hash`
 
+#### MetricDefinitionRegistry
+
+- Section: `S02`
+- Mode target: `observe_only_blocking`
+- Failure action: `metric_invalid`
+- Required fields: `metric_id, metric_name, formula, numerator_definition, denominator_definition, window_id, event_time_basis, metric_version, metric_hash`
+
 #### MetricsWindowContract
 
 - Section: `S02`
@@ -110,7 +132,24 @@ No gap-register contracts currently target this section.
 - Failure action: `metric_invalid`
 - Required fields: `metric_id, window_id, window_start, window_end, metric_version`
 
+#### ThresholdCatalogContract
+
+- Section: `S02`
+- Mode target: `observe_only_blocking`
+- Failure action: `policy_bundle_incompatible`
+- Required fields: `threshold_id, threshold_name, threshold_value, unit, comparison_operator, scope, applies_to_metric, applies_to_mode, owner, source_spec_section_id, policy_bundle_id, effective_from, effective_to, change_reason, approval_id, threshold_hash`
+
 ### Gap Register Coverage
+
+#### v2.6.13_metric_threshold_truth_foundation
+
+- Theme: Metric and threshold truth sources required before any mode can trust dashboard, release, or policy evidence.
+- Contracts: `MetricDefinitionRegistry, ThresholdCatalogContract`
+
+#### v2.6.13_spec_governance_confidence_fill_feasibility
+
+- Theme: Rendered spec views, health enums, contract lifecycle, objective priority, goal confidence, fill-time anchors, and ex-ante/posthoc feasibility must be machine-checkable before shadow or normal tiny evidence can be trusted.
+- Contracts: `GoalConfidenceContract`
 
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
@@ -120,8 +159,8 @@ No gap-register contracts currently target this section.
 ## S03 - Runtime, Environment, Build, and Supply Chain
 
 - Section mode target: `normal_tiny_blocking`
-- Catalog contract count: `2`
-- Gap batch count: `1`
+- Catalog contract count: `4`
+- Gap batch count: `2`
 
 ### Catalog Contracts
 
@@ -132,6 +171,13 @@ No gap-register contracts currently target this section.
 - Failure action: `time_dirty`
 - Required fields: `clock_source, wall_clock_ts, monotonic_ts, rollback_detected, guard_action`
 
+#### EnvironmentSeparationContract
+
+- Section: `S03`
+- Mode target: `observe_only_blocking`
+- Failure action: `environment_contamination`
+- Required fields: `environment_id, environment_type, allowed_event_logs, allowed_databases, allowed_provider_keys, allowed_routes, allowed_modes, write_permissions, read_permissions, environment_hash`
+
 #### PaperModeSafetyBoundary
 
 - Section: `S03`
@@ -139,7 +185,19 @@ No gap-register contracts currently target this section.
 - Failure action: `global_circuit_breaker`
 - Required fields: `paper_mode_required, real_order_router_disabled, live_private_key_present, network_transaction_signing_enabled`
 
+#### RuntimeConfigDriftContract
+
+- Section: `S03`
+- Mode target: `observe_only_blocking`
+- Failure action: `runtime_config_drift`
+- Required fields: `runtime_config_hash, env_vars_hash, feature_flags_hash, provider_config_hash, route_registry_hash, source_registry_hash, threshold_catalog_hash, metric_registry_hash, policy_bundle_hash, expected_hash, drift_detected, drift_action`
+
 ### Gap Register Coverage
+
+#### v2.6.13_runtime_environment_truth_foundation
+
+- Theme: Runtime config drift and environment separation must be observe-only blockers before decisions, dashboards, backfills, or paper evidence can be trusted.
+- Contracts: `EnvironmentSeparationContract, RuntimeConfigDriftContract`
 
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
@@ -149,10 +207,24 @@ No gap-register contracts currently target this section.
 ## S04 - Source Registry, Telegram Ingestion, Parser, and Source Authenticity
 
 - Section mode target: `shadow_blocking`
-- Catalog contract count: `12`
-- Gap batch count: `3`
+- Catalog contract count: `15`
+- Gap batch count: `4`
 
 ### Catalog Contracts
+
+#### ContractLifecycleContract
+
+- Section: `S04`
+- Mode target: `observe_only_blocking`
+- Failure action: `shadow_only`
+- Required fields: `contract_id, contract_version, status, allowed_modes, contract_tests_status`
+
+#### HealthStateEnumContract
+
+- Section: `S04`
+- Mode target: `observe_only_blocking`
+- Failure action: `health_state_invalid`
+- Required fields: `health_component, health_state, blocking_modes, recovery_condition`
 
 #### ImageOCRSignalPolicy
 
@@ -167,6 +239,13 @@ No gap-register contracts currently target this section.
 - Mode target: `observe_only_blocking`
 - Failure action: `shadow_only_security_alert`
 - Required fields: `source, raw_value, normalized_value, payload_schema_valid, unsafe_pattern_detected`
+
+#### ObjectivePriorityContract
+
+- Section: `S04`
+- Mode target: `observe_only_blocking`
+- Failure action: `shadow_only`
+- Required fields: `objective_conflict_id, conflicting_objectives, chosen_objective, reason`
 
 #### ParserAmbiguityContract
 
@@ -240,6 +319,11 @@ No gap-register contracts currently target this section.
 
 ### Gap Register Coverage
 
+#### v2.6.13_spec_governance_confidence_fill_feasibility
+
+- Theme: Rendered spec views, health enums, contract lifecycle, objective priority, goal confidence, fill-time anchors, and ex-ante/posthoc feasibility must be machine-checkable before shadow or normal tiny evidence can be trusted.
+- Contracts: `ContractLifecycleContract, HealthStateEnumContract, ObjectivePriorityContract`
+
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
 - Theme: Evidence finality, replay safety, provider proof, ledger invariants, and fleet consistency.
@@ -258,8 +342,8 @@ No gap-register contracts currently target this section.
 ## S05 - Token Identity, Pool Resolution, and Denominator Truth
 
 - Section mode target: `shadow_blocking`
-- Catalog contract count: `7`
-- Gap batch count: `2`
+- Catalog contract count: `9`
+- Gap batch count: `3`
 
 ### Catalog Contracts
 
@@ -269,6 +353,13 @@ No gap-register contracts currently target this section.
 - Mode target: `observe_only_blocking`
 - Failure action: `observe_only`
 - Required fields: `chain, native_unit, quote_mint, finality_rule, address_validator`
+
+#### DataUnitContract
+
+- Section: `S05`
+- Mode target: `observe_only_blocking`
+- Failure action: `shadow_only`
+- Required fields: `token_decimals, quote_decimals, price_unit, normalized_price, unit_validation_status`
 
 #### DenominatorDedupContract
 
@@ -312,7 +403,19 @@ No gap-register contracts currently target this section.
 - Failure action: `backfill_research_only`
 - Required fields: `backfill_id, source_id, gap_window, allowed_fields, backfilled_at`
 
+#### TokenIdentityContract
+
+- Section: `S05`
+- Mode target: `observe_only_blocking`
+- Failure action: `shadow_only`
+- Required fields: `chain, token_ca, normalized_ca, checksum, identity_confidence`
+
 ### Gap Register Coverage
+
+#### v2.6.13_identity_unit_provider_finality
+
+- Theme: Token identity, data unit, chain finality, and provider schema truth must be machine-checkable before denominator, label, or training evidence can be trusted.
+- Contracts: `DataUnitContract, TokenIdentityContract`
 
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
@@ -327,8 +430,8 @@ No gap-register contracts currently target this section.
 ## S06 - Event Log, Sequencing, Outbox, Projection, and Replay Safety
 
 - Section mode target: `mvp_blocking`
-- Catalog contract count: `22`
-- Gap batch count: `3`
+- Catalog contract count: `23`
+- Gap batch count: `4`
 
 ### Catalog Contracts
 
@@ -416,6 +519,13 @@ No gap-register contracts currently target this section.
 - Failure action: `event_log_unhealthy`
 - Required fields: `monotonic_ingest_seq, aggregate_id, aggregate_seq, sequencer_epoch`
 
+#### FillTimeAnchorContract
+
+- Section: `S06`
+- Mode target: `shadow_blocking`
+- Failure action: `trade_outcome_invalid`
+- Required fields: `decision_ts, decision_available_at, simulated_fill_ts, position_open_confirmed_ts`
+
 #### ManualReplaySafetyContract
 
 - Section: `S06`
@@ -487,6 +597,11 @@ No gap-register contracts currently target this section.
 - Required fields: `outbox_id, event_type, aggregate_id, idempotency_key, status`
 
 ### Gap Register Coverage
+
+#### v2.6.13_spec_governance_confidence_fill_feasibility
+
+- Theme: Rendered spec views, health enums, contract lifecycle, objective priority, goal confidence, fill-time anchors, and ex-ante/posthoc feasibility must be machine-checkable before shadow or normal tiny evidence can be trusted.
+- Contracts: `FillTimeAnchorContract`
 
 #### v2.6.14_evidence_finality_replay_safety_fleet
 

@@ -1,0 +1,1435 @@
+{
+  "failure_action": "metric_invalid",
+  "metrics": [
+    {
+      "denominator_definition": "adversarial replay rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "passing adversarial replay rows / adversarial replay rows",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "424b294c2be52927b958732a7a33f604499fbce0803fe228bd11750502af060f",
+      "metric_id": "adversarial_replay_suite_pass_rate",
+      "metric_name": "adversarial_replay_suite_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "passing adversarial replay rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S22",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count P0/P1 alert instances requiring acknowledgement",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "suppressed_alert_without_ack_requirement"
+      ],
+      "formula": "alerts_acked_within_sla / alerts_requiring_ack",
+      "inclusion_criteria": [
+        "alert_severity in P0,P1",
+        "ack_required"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "3e4e808c7fd725b2f5b1d824379505f4869bd38f501dc8e204bd5c0813c0cc07",
+      "metric_id": "alert_ack_sla_rate",
+      "metric_name": "alert_ack_sla_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count P0/P1 alert instances acknowledged inside severity-specific SLA with resolution note",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S14",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count P0/P1 alerts required by v2.6.13/v2.7.0 normal tiny operator safety policy",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "informational_alert"
+      ],
+      "formula": "registered_p0_p1_alerts / required_p0_p1_alerts",
+      "inclusion_criteria": [
+        "p0_or_p1_alert_required"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "7a0f4b07a18adaf58aa6f3ee4de021f2be4df6a8fbc5d0d3ccda250704cadd7a",
+      "metric_id": "alert_policy_coverage_rate",
+      "metric_name": "alert_policy_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count required P0/P1 alerts with owner component, runbook, notification channel, severity, trigger condition, and auto action",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S14",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "backpressure policies",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "safe backpressure policies / backpressure policies",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "353c77ac356c837877971b898bf7d3c0a79c2cf62d66cefd32fb72e11b5cbad4",
+      "metric_id": "backpressure_policy_safe_rate",
+      "metric_name": "backpressure_policy_safe_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "safe backpressure policies",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "holdout rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "clean blinded holdouts / holdouts",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "081f4a2c1151c47e22943be8e649d52e48b4b11ac81162167eb1335e90b5135d",
+      "metric_id": "blinded_holdout_clean_rate",
+      "metric_name": "blinded_holdout_clean_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "clean blinded holdouts",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S10",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "budget reserves",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "protected budget reserves / budget reserves",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "e5508ff8a5cfdd4bc94efaf6a15d0e5b5358e20fbf5f4f34f21e0edd57182d09",
+      "metric_id": "budget_reserve_protected_rate",
+      "metric_name": "budget_reserve_protected_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "protected budget reserves",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "measured peak QPS capacity for the same component",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "capacity_plan_missing",
+        "exit_safety_not_reserved"
+      ],
+      "formula": "(measured_peak_qps - expected_peak_qps) / measured_peak_qps",
+      "inclusion_criteria": [
+        "capacity_plan_component_verified",
+        "p0_p1_capacity_reserved"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "e3d4ab193d658426f7d3ad4d7170ca4bafd52c44978017a621a905e9b8ad91d8",
+      "metric_id": "capacity_headroom_pct",
+      "metric_name": "capacity_headroom_pct",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "measured spare QPS capacity for critical Telegram dog capture components",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count chain finality rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "identity_low_confidence",
+        "unit_dirty",
+        "provider_schema_drift",
+        "chain_finality_dirty"
+      ],
+      "formula": "healthy finality rows / finality rows",
+      "inclusion_criteria": [
+        "v27_identity_unit_provider_finality_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "10055eefc7e79455d6d5d24052fb9a176131354cf6e0f6af1647946183768ad0",
+      "metric_id": "chain_finality_health_rate",
+      "metric_name": "chain_finality_health_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count rows with finalized commitment, RPC consistency pass, low lag, and no reorg",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S08",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "circuit-breaker policies",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "safe circuit-breaker position policies / circuit-breaker policies",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "834ea077cc323caf83de9447eb65f60af0af4cc4e422e5e0ecf7d95f5fae242f",
+      "metric_id": "circuit_breaker_position_policy_coverage_rate",
+      "metric_name": "circuit_breaker_position_policy_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "safe circuit-breaker policies",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count required lifecycle contracts",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "active gate lifecycle rows / required lifecycle rows",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "c4a1d3643e10fa4ed709c74ca0407fcfd4010fe873f956145f65c82f7143d236",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "metric_name": "contract_lifecycle_active_gate_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count required contracts with active_gate lifecycle and passing tests",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S04",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "contract suite rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "passing contract suite rows / contract suite rows",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "18b0cf2c2e40435179ae5fc295ac80ee289315327111485448598807c2c53084",
+      "metric_id": "contract_test_suite_pass_rate",
+      "metric_name": "contract_test_suite_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "passing contract suite rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S22",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "dashboard panels",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "fresh and override-safe dashboard panels / dashboard panels",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "0981927474b14a754f5b680723c5313f6e6974f74b2cb29f2b210a1e221cfc0a",
+      "metric_id": "dashboard_staleness_safe_rate",
+      "metric_name": "dashboard_staleness_safe_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "fresh override-safe dashboard panels",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S14",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count data unit rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "identity_low_confidence",
+        "unit_dirty",
+        "provider_schema_drift",
+        "chain_finality_dirty"
+      ],
+      "formula": "valid data unit rows / data unit rows",
+      "inclusion_criteria": [
+        "v27_identity_unit_provider_finality_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "2201b2750f0f56aa24b7ee9aedfdff7764d0aa7e25edecffca247b024e7dc53b",
+      "metric_id": "data_unit_validation_rate",
+      "metric_name": "data_unit_validation_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count rows with unit_validation_status valid",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S05",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "decommission policies",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "safe decommission policies / decommission policies",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "b6a008647bd0cd546cc22f0563c9a3e2d72681afcb18ec387e0f3d547a312a15",
+      "metric_id": "decommission_policy_safe_rate",
+      "metric_name": "decommission_policy_safe_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "safe decommission policies",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S18",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "hard budget limit for the same pool and measurement window",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "budget_pool_unknown",
+        "hard_limit_missing"
+      ],
+      "formula": "current_usage / hard_limit",
+      "inclusion_criteria": [
+        "budget_pool_registered",
+        "exit_safety_reserved_first"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "d5787ae7dfb8e310f3b321436e37db878426385abcced4605c4b5cbf52d8034d",
+      "metric_id": "economic_cost_budget_utilization",
+      "metric_name": "economic_cost_budget_utilization",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "current usage of the named runtime or exploration budget",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "emergency exit journal rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "reconciled emergency exit journal rows / emergency exit journal rows",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "8d4093a4d40ea25b37b29e95511ff16f3a309560f9e5d237c6edf7ada97d009d",
+      "metric_id": "emergency_exit_journal_reconciliation_rate",
+      "metric_name": "emergency_exit_journal_reconciliation_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "reconciled emergency exit journal rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count entered paper trades with finalized TradeOutcomeLabel in the metrics window",
+      "event_time_basis": "simulated_fill_ts",
+      "exclusion_criteria": [
+        "manual_override_quarantined",
+        "ledger_mismatch",
+        "label_dirty"
+      ],
+      "formula": "entered_trades_with_net_delayed_executable_peak_3s_gte_30_pct / entered_trades_with_final_trade_outcome_label",
+      "inclusion_criteria": [
+        "trade_outcome_label_valid",
+        "reference_price_valid",
+        "standardized_stop_valid"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "f3ee80332faaa10616c6b2f255ab4eeec9ecdf60659401f204b10a99def352f9",
+      "metric_id": "entered_net_delayed_executable_peak30_rate",
+      "metric_name": "entered_net_delayed_executable_peak30_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count entered paper trades where net_delayed_executable_peak_3s >= 0.30 before standardized stop",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S02",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "count feasibility rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "valid ex ante feasibility rows / feasibility rows",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "8734b3c13fa5be85eac3d01dc339016865bca802900c684d6e9e9d05e8e1f748",
+      "metric_id": "ex_ante_feasibility_valid_rate",
+      "metric_name": "ex_ante_feasibility_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count feasibility rows without future leakage and actionable before peak",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S07",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "exit execution state machines",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "valid exit execution machines / exit execution machines",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "f212c48364732c89064cd6097a25d4e25caef7130e05d43acf99efe553ecf9f3",
+      "metric_id": "exit_execution_state_machine_valid_rate",
+      "metric_name": "exit_execution_state_machine_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid exit execution state machines",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "exit policies",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "versioned exit policies / exit policies",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "a02bc9dcb87c162bf15e3dd6256bd27bbffb84fd7795bb9c3e52946feeae6d3f",
+      "metric_id": "exit_policy_version_coverage_rate",
+      "metric_name": "exit_policy_version_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid versioned exit policies",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "exit queue health rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "healthy exit queues / exit queues",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "489aed6206dfa63950bed3f7bc519b5a77ce2808446baadb9f3037d7f5dc9810",
+      "metric_id": "exit_queue_health_rate",
+      "metric_name": "exit_queue_health_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "healthy exit queues",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "not_applicable",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "filesystem_stat_unavailable"
+      ],
+      "formula": "statvfs(data_path).f_bavail * statvfs(data_path).f_frsize",
+      "inclusion_criteria": [
+        "data_path_exists",
+        "filesystem_stat_available"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "10b7e2af5f2b712d629053f0c24f2f7748859d500965e5a1babe77ba02f3ce11",
+      "metric_id": "filesystem_free_bytes",
+      "metric_name": "filesystem_free_bytes",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "available bytes on the data filesystem",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S02",
+      "unit": "bytes",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count fill anchor rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "valid fill anchors / fill anchors",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "10cf04f2f34c4b07078aa045ede400f0c564c1548fa1ea414d69b9d0d10ca834",
+      "metric_id": "fill_time_anchor_valid_rate",
+      "metric_name": "fill_time_anchor_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count fill anchors pinned to simulated_fill_ts with chronology valid",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S06",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "count forecasts checked by ForecastSanityGuard",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "forecasts_passing_sanity_guard / forecasts_checked",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "8018949a8446eaee73210d543aa426f668352ddd76516abe8c915d45b342b8e5",
+      "metric_id": "forecast_sanity_guard_pass_rate",
+      "metric_name": "forecast_sanity_guard_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count forecasts with healthy calibration, no global high-conviction fallback, sane sample count, and clipped probability bounds",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "registered goal confidence sample",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "min Wilson and beta posterior lower bound for registered goal metric",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "2013d3878d084e86e90d76abdb0abbccd89906cf6bd6fcccb202a3d25a70c1be",
+      "metric_id": "goal_confidence_lower_bound",
+      "metric_name": "goal_confidence_lower_bound",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "minimum lower confidence bound",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S02",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "count health state rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "count health states using allowed enum / health states",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "26f056402d29d7d59e6f3245e81c728e9902807f97f5d068089dca01739f64eb",
+      "metric_id": "health_state_enum_valid_rate",
+      "metric_name": "health_state_enum_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count health states with standard enum and safe semantics",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S04",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "implementation issues",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "valid implementation issues / implementation issues",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "a0136528541c78de76659b50e663aaf3d9c1aecdb89f16bf63932dafab606dd3",
+      "metric_id": "implementation_issue_graph_valid_rate",
+      "metric_name": "implementation_issue_graph_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid implementation issues",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S21",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count required critical kill-switch types before normal tiny promotion",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "training_contaminating_drill"
+      ],
+      "formula": "passed_critical_kill_switch_drills / required_critical_kill_switch_drills",
+      "inclusion_criteria": [
+        "critical_kill_switch_type_required"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "f5738884f2eb9fc645e62760f97e1130247901f59208d8667c67c504a0e71ffe",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "metric_name": "kill_switch_drill_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count kill-switch drills proving new entry disabled, exit safety preserved, open-position policy checked, and recovery steps verified",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S15",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count latency attribution samples in the current decision_available_at window",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "missing_required_available_at",
+        "manual_override_quarantined"
+      ],
+      "formula": "latency_attribution_sla_breach_count / latency_attribution_sample_count",
+      "inclusion_criteria": [
+        "latency_attribution_complete",
+        "earliest_actionable_available"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "f1563a400a8b14d09d7cd9425b1f29618d05123ad4673d7d11556716670c2f8b",
+      "metric_id": "latency_sla_breach_rate",
+      "metric_name": "latency_sla_breach_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count latency attribution samples whose blocking component exceeded the registered SLA",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "lifecycle state machines",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "exit_policy_unversioned",
+        "exit_queue_unhealthy",
+        "emergency_exit_unreconciled"
+      ],
+      "formula": "valid lifecycle machines / lifecycle machines",
+      "inclusion_criteria": [
+        "v27_execution_exit_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "92bafd21831b99df33af3784e1d13d39d5572b5a4930a9a479097fe80d0b7847",
+      "metric_id": "lifecycle_state_machine_valid_rate",
+      "metric_name": "lifecycle_state_machine_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid lifecycle state machines",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S10",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count required load replay scenarios for Telegram burst, provider degradation, queue lag, and worker crash",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "load_replay_missing",
+        "prod_event_log_mutated"
+      ],
+      "formula": "passed_critical_load_replay_scenarios / critical_load_replay_scenarios",
+      "inclusion_criteria": [
+        "load_replay_run_at_current_build",
+        "runtime_config_hash_bound"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "d16b7e2f32add339f967d6402c13b4eb2392393a8042b069a2bbaace58569777",
+      "metric_id": "load_test_replay_pass_rate",
+      "metric_name": "load_test_replay_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count critical load replay scenarios with all expected invariants observed",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "manual override rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "quarantined manual overrides / manual overrides",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "1e8d678b5bb0e1ffb1333f18b61322888a1db82f739c0a98c89cf6d30d5eac4a",
+      "metric_id": "manual_override_quarantined_rate",
+      "metric_name": "manual_override_quarantined_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "quarantined manual overrides",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S10",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count active model snapshots checked",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "active_non_expired_models / active_models_checked",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "4f5615377d59f8c99b2f2badbd2d17bad44fbe75f1c5a01575f0561469ce0457",
+      "metric_id": "model_not_expired_rate",
+      "metric_name": "model_not_expired_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count active model snapshots whose checked_at is before expiry and recent sample count meets minimum",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "module closures",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "valid module closures / module closures",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "e662cb148d7a91f5d5836673b9d4d059d200bf38cfe85c4aecf7d2dcfd62930c",
+      "metric_id": "module_closure_valid_rate",
+      "metric_name": "module_closure_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid module closures",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S18",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "no-trade root causes",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "known no-trade root causes / no-trade root causes",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "a9069fb2400c2c8925c2762040eecfb07ac73a47dea20d489ff9662d2baa280f",
+      "metric_id": "no_trade_root_cause_known_rate",
+      "metric_name": "no_trade_root_cause_known_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "known no-trade root causes",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S20",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count objective conflicts",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "resolved conflicts / conflicts",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "3901d8aa15071cf59ac73bc84289a9348fb6fd89d496255d15b07c831b0e4154",
+      "metric_id": "objective_priority_conflict_resolution_rate",
+      "metric_name": "objective_priority_conflict_resolution_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count conflicts resolved to highest priority objective",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S04",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "count critical normal tiny ownership components required by OwnershipOnCallContract",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_component"
+      ],
+      "formula": "critical_components_with_owner_and_oncall / required_critical_components",
+      "inclusion_criteria": [
+        "critical_component_required_for_normal_tiny"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "5d7513c36275e4a9ca3760c49638f4abdb506b4e0fdb0013ce1e8f1b9f50ebd3",
+      "metric_id": "oncall_coverage_rate",
+      "metric_name": "oncall_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count critical contracts/components with owner, primary, secondary, runbook, ack SLA, and escalation path",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S15",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count dangerous operator actions required by normal tiny operator/runtime safety policy",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "read_only_dashboard_view",
+        "unaudited_mutation"
+      ],
+      "formula": "complete_operator_audit_records / required_operator_audit_records",
+      "inclusion_criteria": [
+        "dangerous_operator_action",
+        "approval_required"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "43ec8d75a307069c6e3afaa909ffaf5ae3f06948e0440e97b46a372824629b6b",
+      "metric_id": "operator_audit_completeness_rate",
+      "metric_name": "operator_audit_completeness_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count dangerous operator actions with append-only audit fields, approval status, environment id, and hash verified",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S15",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "not_applicable_count_metric",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "read_only_dashboard_view"
+      ],
+      "formula": "count(operator_safety_status == unsafe_rejected)",
+      "inclusion_criteria": [
+        "operator_safety_check_recorded"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "a77b685363b2d8b83471bd7818705dffabe223d45243d87ec32fd5b6dfbb41e7",
+      "metric_id": "operator_safety_reject_count",
+      "metric_name": "operator_safety_reject_count",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count operator actions rejected by stale dashboard, missing runbook ack, missing second approval, cooldown failure, or environment mismatch",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S15",
+      "unit": "count",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count shadow detector events with NOT_OVEREXTENDED_OBSERVED and finalized TradeOutcomeLabel",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "manual_override_quarantined",
+        "label_dirty",
+        "feature_availability_violation"
+      ],
+      "formula": "not_overextended_but_peak30_missed_count / not_overextended_total",
+      "inclusion_criteria": [
+        "detector_id=overextension_detector",
+        "trial_role in shadow",
+        "trade_outcome_label_valid"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "4a17826f5585479b3dde5c50ccbf400890ac0ed7cc951462a55f2d3e2abbf913",
+      "metric_id": "overextended_false_negative_peak30_rate",
+      "metric_name": "overextended_false_negative_peak30_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count shadow detector events where NOT_OVEREXTENDED_OBSERVED would have allowed an entry but the token reached Peak30 after being missed",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "total absorbing probability mass across PEAK30, STOP_BEFORE_PEAK, STALE_DEAD, TOXIC_DEAD, CRASH_DEAD, TERMINAL_DEAD",
+      "event_time_basis": "matrix_build_cutoff_seq",
+      "exclusion_criteria": [
+        "future_events_after_cutoff_seq",
+        "hmm_full_sequence_viterbi"
+      ],
+      "formula": "absorbing_competing_risk_forecast.probabilities.PEAK30",
+      "inclusion_criteria": [
+        "transition_matrix_no_lookahead",
+        "forecast_boundary_shadow_first"
+      ],
+      "late_event_policy": "new_forecast_snapshot_only",
+      "metric_hash": "3209e54311abe5725c421f7ec512b54e5d477cd3d44093c78fba240ec85765d2",
+      "metric_id": "p_absorb_peak30",
+      "metric_name": "p_absorb_peak30",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "absorbing probability mass assigned to PEAK30 within the forecast horizon",
+      "owner": "system",
+      "partial_window_policy": "sample_n_below_threshold_caps_action",
+      "spec_section_id": "S09",
+      "unit": "probability",
+      "window_id": "forecast_snapshot_cutoff_seq"
+    },
+    {
+      "denominator_definition": "total absorbing probability mass across PEAK30, STOP_BEFORE_PEAK, STALE_DEAD, TOXIC_DEAD, CRASH_DEAD, TERMINAL_DEAD",
+      "event_time_basis": "matrix_build_cutoff_seq",
+      "exclusion_criteria": [
+        "future_events_after_cutoff_seq",
+        "hmm_full_sequence_viterbi"
+      ],
+      "formula": "absorbing_competing_risk_forecast.probabilities.STOP_BEFORE_PEAK",
+      "inclusion_criteria": [
+        "transition_matrix_no_lookahead",
+        "forecast_boundary_shadow_first"
+      ],
+      "late_event_policy": "new_forecast_snapshot_only",
+      "metric_hash": "2903dcc0b6970ceb49e64259f737fefa50852cbdfdced0d41df7d611a479bf82",
+      "metric_id": "p_absorb_stop_before_peak",
+      "metric_name": "p_absorb_stop_before_peak",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "absorbing probability mass assigned to STOP_BEFORE_PEAK within the forecast horizon",
+      "owner": "system",
+      "partial_window_policy": "sample_n_below_threshold_caps_action",
+      "spec_section_id": "S09",
+      "unit": "probability",
+      "window_id": "forecast_snapshot_cutoff_seq"
+    },
+    {
+      "denominator_definition": "count active policy bundles checked",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "compatible_policy_bundles / policy_bundles_checked",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "a1bfe318e617c48afa3702924f10017a8348bc365a89ed2bd828632202ad359e",
+      "metric_id": "policy_bundle_compatibility_rate",
+      "metric_name": "policy_bundle_compatibility_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count policy bundles whose model, feature, label, threshold, metric, exit, and runtime versions are compatible",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "total provider quota budget in the current runtime snapshot",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "provider_quota_unknown",
+        "shadow_polling_steals_exit_budget"
+      ],
+      "formula": "provider_quota_reserved_for_exit / provider_quota_total",
+      "inclusion_criteria": [
+        "provider_quota_isolation_declared",
+        "exit_priority_first"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "fc241a26ab351e74b4d5a191aba5f35d00b82dc6a2647c1c8543873bed436c1c",
+      "metric_id": "provider_quota_exit_reserve_pct",
+      "metric_name": "provider_quota_exit_reserve_pct",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "provider quota reserved for open-position exit safety",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count provider schema rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "identity_low_confidence",
+        "unit_dirty",
+        "provider_schema_drift",
+        "chain_finality_dirty"
+      ],
+      "formula": "provider schema canary pass rows / provider schema rows",
+      "inclusion_criteria": [
+        "v27_identity_unit_provider_finality_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "b52dbb5f5144f7e652b9039c26e72b3db6f6cc80b935735590fa606cf5a63a97",
+      "metric_id": "provider_schema_canary_pass_rate",
+      "metric_name": "provider_schema_canary_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count provider schema rows with canary pass and no schema drift",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S08",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "count shadow detector events with RECLAIM_CONFIRMED_OBSERVED and finalized TradeOutcomeLabel",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "manual_override_quarantined",
+        "label_dirty",
+        "feature_availability_violation"
+      ],
+      "formula": "reclaim_confirmed_peak30_count / reclaim_confirmed_total",
+      "inclusion_criteria": [
+        "detector_id=reclaim_detector",
+        "trial_role in shadow",
+        "trade_outcome_label_valid"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "aba32fc038d088a270598143f56efc2d82aeb447c39c1510b6cd1d6de6bd5824",
+      "metric_id": "reclaim_confirmed_precision_for_peak30",
+      "metric_name": "reclaim_confirmed_precision_for_peak30",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count shadow detector events where RECLAIM_CONFIRMED_OBSERVED is followed by net delayed executable PEAK30 before standardized stop",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "reconciliation policies",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "safe reconciliation policies / reconciliation policies",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "6e84ec3590ec827c04fa888ff872f72c60b1d7cfb5ecffe11f704a94e7fcc1c1",
+      "metric_id": "reconciliation_policy_safe_rate",
+      "metric_name": "reconciliation_policy_safe_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "safe reconciliation policies",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S13",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "release complexity rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "release complexity rows within budget / release complexity rows",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "5ce89a7d24d39d40fb2b84903c330c8b4d6fb763624a9a95e2235f71a6efa7e9",
+      "metric_id": "release_complexity_budget_pass_rate",
+      "metric_name": "release_complexity_budget_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "within-budget release rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S18",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count rendered spec views",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "policy_hash_mismatch",
+        "environment_contaminated"
+      ],
+      "formula": "count valid rendered views / rendered views",
+      "inclusion_criteria": [
+        "v27_spec_governance_feasibility_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "8d0ae600d7897f9a485c41759ffafc43b562b44a9ef9da2a8a7e785f1ee94c19",
+      "metric_id": "rendered_spec_view_valid_rate",
+      "metric_name": "rendered_spec_view_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count rendered views with render_validation_status valid and hash match",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S00",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    },
+    {
+      "denominator_definition": "count replay checks in the active evidence snapshot",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "passed_replay_determinism_checks / replay_determinism_checks",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "4a0895333c952d90656297ae6d0467e448ef45921ba7af866d357ff0cea7feb2",
+      "metric_id": "replay_determinism_pass_rate",
+      "metric_name": "replay_determinism_pass_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count replay checks whose decision, forecast, outcome, ledger, and feature hashes match on repeated event-time replay",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "count required active build records",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "build_artifacts_with_required_hashes / required_build_artifacts",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "9e5cc6346212ca3765706b1cdbbb15a4c2832cf505d021ade147cb73789efdfa",
+      "metric_id": "reproducible_build_hash_coverage_rate",
+      "metric_name": "reproducible_build_hash_coverage_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count build records with commit, lock, runtime, container, feature, and model hashes",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "managed secrets",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "safe secrets / managed secrets",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "b9366f8c7c0cc621430696d685f177e37cc26eaa84494c0e6d3248e802c619a3",
+      "metric_id": "secrets_management_safe_rate",
+      "metric_name": "secrets_management_safe_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "safe managed secrets",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S15",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "traceability rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "stale_dashboard_panel",
+        "traceability_missing",
+        "retired_artifact_runtime_reference"
+      ],
+      "formula": "valid traceability rows / traceability rows",
+      "inclusion_criteria": [
+        "v27_delivery_traceability_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "018d067c99b1c16e717734af0856ec1fc09cc9402209ac215fc947420e636398",
+      "metric_id": "spec_traceability_valid_rate",
+      "metric_name": "spec_traceability_valid_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "valid traceability rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S21",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count required artifact types for code, container, lock, model, policy, feature, dashboard",
+      "event_time_basis": "snapshot_collected_at",
+      "exclusion_criteria": [
+        "research_only_artifact",
+        "manual_override_quarantined"
+      ],
+      "formula": "verified_supply_chain_artifacts / required_supply_chain_artifacts",
+      "inclusion_criteria": [
+        "normal_tiny_replay_build_model_evidence"
+      ],
+      "late_event_policy": "snapshot_replaced_by_newer_runtime_evidence",
+      "metric_hash": "f25f0bc26b9e649e019fb826e3c1750c49742fb94bb2a57366a169ebdb59f606",
+      "metric_id": "supply_chain_artifact_verified_rate",
+      "metric_name": "supply_chain_artifact_verified_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count artifacts with verified signature, SBOM, vulnerability scan, provenance, and approved builder",
+      "owner": "system",
+      "partial_window_policy": "not_applicable",
+      "spec_section_id": "S09",
+      "unit": "ratio",
+      "window_id": "active_runtime_snapshot"
+    },
+    {
+      "denominator_definition": "SLO rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "holdout_contaminated",
+        "manual_override_unquarantined",
+        "critical_slo_unresolved"
+      ],
+      "formula": "healthy SLO rows / SLO rows",
+      "inclusion_criteria": [
+        "v27_release_experiment_safety_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "98f4862255684c057900bfc613ee8d8c65fc14c36cd15f9f53a1460a4159a4c6",
+      "metric_id": "system_slo_healthy_rate",
+      "metric_name": "system_slo_healthy_rate",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "healthy SLO rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S11",
+      "unit": "ratio",
+      "window_id": "window:readiness_seed"
+    },
+    {
+      "denominator_definition": "count unique token_lifecycle_key in externally_actionable_gold_silver D3a",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "denominator_dirty",
+        "label_dirty",
+        "environment_contaminated"
+      ],
+      "formula": "telegram_captured_actionable / telegram_externally_actionable_gold_silver",
+      "inclusion_criteria": [
+        "telegram_primary_lifecycle",
+        "source_dog_label in gold_silver",
+        "denominator_stage_d3a=true"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "c8c00974aa503ec432d17d070ccce925e9b1457e31bc35b186c78d0c8fd3e7ec",
+      "metric_id": "telegram_capture_rate_d3a",
+      "metric_name": "telegram_capture_rate_D3a",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count unique token_lifecycle_key where captured_actionable=true and denominator_stage includes D3a",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S02",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "count unique token_lifecycle_key in policy_actionable_gold_silver D3b",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "denominator_dirty",
+        "label_dirty",
+        "environment_contaminated"
+      ],
+      "formula": "telegram_captured_actionable / telegram_policy_actionable_gold_silver",
+      "inclusion_criteria": [
+        "telegram_primary_lifecycle",
+        "source_dog_label in gold_silver",
+        "denominator_stage_d3b=true"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "1ba4ee0e3f0a0b33f09d278aac021ce052935ee5cb22e2e28b1f588b2ae84599",
+      "metric_id": "telegram_capture_rate_d3b",
+      "metric_name": "telegram_capture_rate_D3b",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "count unique token_lifecycle_key where captured_actionable=true and denominator_stage includes D3b",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S02",
+      "unit": "ratio",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "starting capital snapshot for the 24h metrics window",
+      "event_time_basis": "position_closed_at",
+      "exclusion_criteria": [
+        "capital_ledger_mismatch",
+        "position_ledger_mismatch",
+        "paper_live_boundary_breach"
+      ],
+      "formula": "sum(net_realized_pnl) / starting_capital",
+      "inclusion_criteria": [
+        "position_ledger_consistent",
+        "capital_ledger_consistent",
+        "paper_mode_boundary_ok"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "877b10069de1c9245c563ba3ac0e36a3ff511204318f7cfe8b8662222c3f3873",
+      "metric_id": "telegram_realized_roi_24h",
+      "metric_name": "telegram_realized_roi_24h",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "sum ledger-backed net_realized_pnl for eligible Telegram paper positions",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S02",
+      "unit": "roi_multiple",
+      "window_id": "rolling_24h_decision_available_at"
+    },
+    {
+      "denominator_definition": "token identity readiness rows",
+      "event_time_basis": "decision_available_at",
+      "exclusion_criteria": [
+        "identity_low_confidence",
+        "unit_dirty",
+        "provider_schema_drift",
+        "chain_finality_dirty"
+      ],
+      "formula": "minimum token identity confidence across readiness evidence",
+      "inclusion_criteria": [
+        "v27_identity_unit_provider_finality_readiness_seed"
+      ],
+      "late_event_policy": "append_only_recompute_next_metric_version",
+      "metric_hash": "12cdfafc64e85d7ed20bd6a079a07ebe77d6555514e5529b9d209b648cbaf0a5",
+      "metric_id": "token_identity_confidence_min",
+      "metric_name": "token_identity_confidence_min",
+      "metric_version": "v2.7.0.seed",
+      "numerator_definition": "minimum identity_confidence for valid token identity rows",
+      "owner": "system",
+      "partial_window_policy": "mark_incomplete_no_promotion",
+      "spec_section_id": "S05",
+      "unit": "ratio",
+      "window_id": "readiness_seed_window"
+    }
+  ],
+  "schema_version": "v2.7.0.metric_definition_registry.v1",
+  "scope": "v27_metric_truth_seed",
+  "source_files": [
+    {
+      "required_patterns": [
+        "MetricDefinitionRegistry",
+        "metric_hash_mismatch",
+        "metric_definition_registry_missing_malformed_or_drifted"
+      ],
+      "source_anchor": "def verify_metric_definition_registry",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"observe_only\"",
+        "\"MetricDefinitionRegistry\""
+      ],
+      "source_anchor": "\"MetricDefinitionRegistry\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ]
+}

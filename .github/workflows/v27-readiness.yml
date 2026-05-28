@@ -15,11 +15,31 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile v27 readiness scripts
-        run: python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/v27_denominator_projection.py scripts/generate_v27_contract_client.py
+        run: python3 -m py_compile scripts/v27_basic_contract_readiness.py scripts/v27_mode_readiness.py scripts/v27_denominator_projection.py scripts/generate_v27_contract_client.py scripts/telegram_lifecycle_markov.py scripts/v27_record_markov_shadow_forecasts.py scripts/v27_markov_shadow_calibration_report.py scripts/v27_seed_spec_governance_feasibility.py scripts/v27_seed_identity_unit_provider_finality.py scripts/v27_seed_execution_exit_safety.py scripts/v27_seed_delivery_traceability.py scripts/v27_seed_release_experiment_safety.py
+      - name: Compile v27 runtime mode gate
+        run: python3 -m py_compile scripts/v27_runtime_mode_gate.py scripts/paper_fast_lane.py scripts/paper_trade_monitor.py
       - name: Validate v27 readiness JSON
         run: |
           python3 -m json.tool config/v27-error-taxonomy.json
           python3 -m json.tool config/v27-ci-spec-generated-policy.json
+          python3 -m json.tool config/v27-metric-definition-registry.json
+          python3 -m json.tool config/v27-threshold-catalog.json
+          python3 -m json.tool config/v27-runtime-config-drift-policy.json
+          python3 -m json.tool config/v27-environment-separation-policy.json
+          python3 -m json.tool config/v27-null-value-policy.json
+          python3 -m json.tool config/v27-feature-vector-snapshot-policy.json
+          python3 -m json.tool config/v27-data-lineage-graph-policy.json
+          python3 -m json.tool config/v27-training-dataset-manifest-policy.json
+          python3 -m json.tool config/v27-detector-shadow-calibration-policy.json
+          python3 -m json.tool config/v27-capacity-load-latency-policy.json
+          python3 -m json.tool config/v27-operator-runtime-safety-policy.json
+          python3 -m json.tool config/v27-replay-build-model-policy.json
+          python3 -m json.tool config/v27-spec-governance-feasibility-policy.json
+          python3 -m json.tool config/v27-identity-unit-provider-finality-policy.json
+          python3 -m json.tool config/v27-execution-exit-safety-policy.json
+          python3 -m json.tool config/v27-delivery-traceability-policy.json
+          python3 -m json.tool config/v27-release-experiment-safety-policy.json
+          python3 -m json.tool config/v27-markov-lifecycle-forecast-policy.json
           python3 -m json.tool config/v27-shadow-observation-identity-policy.json
           python3 -m json.tool spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json
       - name: Validate v27 generated client
@@ -31,6 +51,8 @@ jobs:
       - name: Audit v27 mode gate scope
         run: python3 scripts/v27_mode_gate_scope_audit.py
       - name: Run focused v27 readiness tests
-        run: python3 -m pytest test_v27_basic_contract_readiness.py test_v27_mode_readiness.py test_v27_mode_gate_scope_audit.py -q -p no:cacheprovider
+        run: python3 -m pytest test_v27_basic_contract_readiness.py test_v27_mode_readiness.py test_v27_mode_gate_scope_audit.py test_telegram_lifecycle_markov.py test_v27_markov_shadow_forecasts.py test_v27_markov_shadow_calibration_report.py -q -p no:cacheprovider
+      - name: Run v27 runtime mode gate tests
+        run: python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py -q -p no:cacheprovider
       - name: Check whitespace
         run: git diff --check

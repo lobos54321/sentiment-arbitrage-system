@@ -1,0 +1,1111 @@
+{
+  "alert_ack_escalations": [
+    {
+      "ack_required_by": "2026-05-27T01:05:00Z",
+      "ack_sla_met": true,
+      "acked_at": "2026-05-27T01:03:00Z",
+      "acked_by": "oncall_runtime_primary",
+      "alert_ack_hash": "5ea90ef560cf5ff9ba149f1ceec53a4b2bbe13abfa2a92309034b208abbff800",
+      "alert_id": "global_circuit_breaker_triggered",
+      "alert_instance_id": "alert-instance-p0-breaker-seed",
+      "auto_action_taken": [
+        "new_entry_disabled",
+        "exit_safety_preserved"
+      ],
+      "created_at": "2026-05-27T01:00:00Z",
+      "escalation_level": 1,
+      "escalation_target": "incident_commander",
+      "metric_id": "alert_ack_sla_rate",
+      "observed_value": 1.0,
+      "resolution_note": "seed P0 ack proof: breaker blocks new entry and keeps exit safety active",
+      "resolved_at": "2026-05-27T01:20:00Z",
+      "severity": "P0",
+      "threshold_id": "thr_alert_ack_sla_rate_min"
+    },
+    {
+      "ack_required_by": "2026-05-27T02:30:00Z",
+      "ack_sla_met": true,
+      "acked_at": "2026-05-27T02:12:00Z",
+      "acked_by": "oncall_provider_primary",
+      "alert_ack_hash": "40d3419d3e07927f2d4e87015877c94024a6267710bed1afd3c3b7ffcf86fe11",
+      "alert_id": "capacity_headroom_low",
+      "alert_instance_id": "alert-instance-p1-capacity-seed",
+      "auto_action_taken": [
+        "backpressure_low_priority_tasks"
+      ],
+      "created_at": "2026-05-27T02:00:00Z",
+      "escalation_level": 1,
+      "escalation_target": "provider_owner",
+      "metric_id": "alert_ack_sla_rate",
+      "observed_value": 1.0,
+      "resolution_note": "seed P1 ack proof: capacity alert enters backpressure and remains owned",
+      "resolved_at": "2026-05-27T03:00:00Z",
+      "severity": "P1",
+      "threshold_id": "thr_alert_ack_sla_rate_min"
+    }
+  ],
+  "alert_policies": [
+    {
+      "alert_hash": "39150d825743a44110e66db03b91feee7d7710181bc288a6b45d76f5970a65da",
+      "alert_id": "global_circuit_breaker_triggered",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-runtime",
+      "observed_value": 1.0,
+      "owner_component": "runtime_config",
+      "runbook_id": "runbook-global-circuit-breaker",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "global_circuit_breaker_open == true"
+    },
+    {
+      "alert_hash": "75103066d1771fc401ad65236820ec958dc3c443c12364a2920a02b28ab6c5bc",
+      "alert_id": "duplicate_execution_detected",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-execution",
+      "observed_value": 1.0,
+      "owner_component": "entry_executor",
+      "runbook_id": "runbook-duplicate-entry",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "duplicate_execution_count > 0"
+    },
+    {
+      "alert_hash": "5dc076c75da2a00ee5697d66fecdf917c010ac7920f3ea1c8770374d862bc61f",
+      "alert_id": "stale_state_execution_detected",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-execution",
+      "observed_value": 1.0,
+      "owner_component": "entry_executor",
+      "runbook_id": "runbook-stale-state-execution",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "stale_state_execution_count > 0"
+    },
+    {
+      "alert_hash": "db67c9cf95905b0d3bc0185da80502d27ddf65e36a60cca38da7ca69c3126cc5",
+      "alert_id": "paper_live_boundary_breach",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "security_audit_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-security",
+      "observed_value": 1.0,
+      "owner_component": "paper_live_safety",
+      "runbook_id": "runbook-paper-live-boundary",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "live_private_key_present or live_router_enabled"
+    },
+    {
+      "alert_hash": "714dffab308d02a5d50ca898fd6ec0bb3ebe65521c2f58b0ab379e10af9fb072",
+      "alert_id": "outbox_stuck_critical",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-data",
+      "observed_value": 1.0,
+      "owner_component": "outbox",
+      "runbook_id": "runbook-outbox-stuck",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "outbox_unpublished_age_sec > threshold"
+    },
+    {
+      "alert_hash": "15c538617068bb3bbbe94b51501e9ac950177c125be5dcd41952c6f3e2d7a754",
+      "alert_id": "DLQ_critical_unresolved",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-data",
+      "observed_value": 1.0,
+      "owner_component": "dlq",
+      "runbook_id": "runbook-dlq-critical",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "critical_dlq_unresolved_count > 0"
+    },
+    {
+      "alert_hash": "a69ed428a42f4127e6207a49a1f7fe378619c0e5294324070c2add9e1e8de905",
+      "alert_id": "projection_ordering_critical",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "projection_rebuild_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-projection",
+      "observed_value": 1.0,
+      "owner_component": "projection",
+      "runbook_id": "runbook-projection-ordering",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "projection_ordering_violation_count > 0"
+    },
+    {
+      "alert_hash": "5a77943bd82751b78534dda3ee7b1c4df85209320960e1cb4e58b51889b869e3",
+      "alert_id": "read_model_stale_critical",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "direct_event_replay_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-projection",
+      "observed_value": 1.0,
+      "owner_component": "read_model",
+      "runbook_id": "runbook-read-model-stale",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "read_model_lag_ms > critical_threshold"
+    },
+    {
+      "alert_hash": "b9f9f30e984351f1ad70bcbf5d148f9920aa1947ff3739d5e75937ff5a931445",
+      "alert_id": "canonical_spec_hash_mismatch",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "promotion_disabled"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-runtime",
+      "observed_value": 1.0,
+      "owner_component": "runtime_config",
+      "runbook_id": "runbook-canonical-spec-hash",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "active_spec_hash != runtime_spec_hash"
+    },
+    {
+      "alert_hash": "128af5e3107336ed96d65c831d4d0bb8a8d655825c0b3267584ea7a59fe40d09",
+      "alert_id": "metric_registry_critical_mismatch",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "promotion_disabled"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-metric",
+      "observed_value": 1.0,
+      "owner_component": "metric_registry",
+      "runbook_id": "runbook-metric-definition-mismatch",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "metric_registry_hash_mismatch == true"
+    },
+    {
+      "alert_hash": "5718a9c28ae665b4bb5bd0e00d6afc5698473e480f14a62fb3c53197502529fe",
+      "alert_id": "threshold_catalog_critical_mismatch",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "promotion_disabled"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-threshold",
+      "observed_value": 1.0,
+      "owner_component": "threshold_catalog",
+      "runbook_id": "runbook-threshold-catalog-mismatch",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "threshold_catalog_hash_mismatch == true"
+    },
+    {
+      "alert_hash": "1c3f08a363150440c7417aca12de4e076ece135c02ec8a08b746d32db9780b4d",
+      "alert_id": "runtime_config_unauthorized_drift",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-runtime",
+      "observed_value": 1.0,
+      "owner_component": "runtime_config",
+      "runbook_id": "runbook-runtime-config-drift",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "unauthorized_runtime_config_drift == true"
+    },
+    {
+      "alert_hash": "813848da352b12195471f626410eb2aba37d301027f39cd156752710f8d17bfd",
+      "alert_id": "environment_contamination_critical",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "quarantine_samples"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-runtime",
+      "observed_value": 1.0,
+      "owner_component": "runtime_config",
+      "runbook_id": "runbook-environment-contamination",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "environment_contamination == critical"
+    },
+    {
+      "alert_hash": "696f3ae011bd42102e1814cc95da5cb98c0ed8c6ee7d500d41c9d4a95ed6fa05",
+      "alert_id": "operator_unsafe_override_critical",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "operator_session_review_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-security",
+      "observed_value": 1.0,
+      "owner_component": "operator_access",
+      "runbook_id": "runbook-operator-unsafe-override",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "operator_unsafe_override_count > 0"
+    },
+    {
+      "alert_hash": "321f06336c7a77600493a04e14ff8a43a2208dca4d5738fd06aa45997a5246bd",
+      "alert_id": "kill_switch_failed",
+      "auto_action": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "manual_review_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p0-security",
+      "observed_value": 1.0,
+      "owner_component": "operator_access",
+      "runbook_id": "runbook-kill-switch-failure",
+      "severity": "P0",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "kill_switch_command_failed == true"
+    },
+    {
+      "alert_hash": "325156101a05ccd140c9519e86ee9ae7efc2dbad011b423f13c82bb5de8affaa",
+      "alert_id": "no_trade_2h_with_D3a_candidates",
+      "auto_action": [
+        "open_top_fix_issue",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p1-capture",
+      "observed_value": 1.0,
+      "owner_component": "dashboard",
+      "runbook_id": "runbook-no-trades-despite-d3a",
+      "severity": "P1",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "D3a_candidates_count > 0 and captured_count == 0 for 2h"
+    },
+    {
+      "alert_hash": "6d8564062a2061a56cb27dc77ca4facafc206177fd98951cfacfdf2b5394f51a",
+      "alert_id": "fast_lane_p1_sla_breach",
+      "auto_action": [
+        "reduce_low_priority_polling",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p1-execution",
+      "observed_value": 1.0,
+      "owner_component": "entry_executor",
+      "runbook_id": "runbook-fast-lane-sla",
+      "severity": "P1",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "fast_lane_p1_delay_p95 > threshold"
+    },
+    {
+      "alert_hash": "210c8c7b58847fa518b59d113d95627d250672867e4751ebee5be7bdbb76cb1d",
+      "alert_id": "capacity_headroom_low",
+      "auto_action": [
+        "backpressure_low_priority_tasks",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p1-runtime",
+      "observed_value": 1.0,
+      "owner_component": "provider_quota",
+      "runbook_id": "runbook-capacity-overload",
+      "severity": "P1",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "capacity_headroom_pct < threshold"
+    },
+    {
+      "alert_hash": "4f74b40b17ed263b8fd46a1555ee3323bd6e40840e5226b566fe78ef72af71a3",
+      "alert_id": "load_test_replay_failed",
+      "auto_action": [
+        "promotion_disabled",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p1-runtime",
+      "observed_value": 1.0,
+      "owner_component": "provider_quota",
+      "runbook_id": "runbook-load-test-replay-failed",
+      "severity": "P1",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "load_test_replay_pass_rate < threshold"
+    },
+    {
+      "alert_hash": "ffcfe575214d09063af27d40f3d1befd094422cfc4c080e043afaab55c91b5bf",
+      "alert_id": "latency_attribution_spike",
+      "auto_action": [
+        "open_latency_top_fix_issue",
+        "operator_ack_required"
+      ],
+      "metric_id": "alert_policy_coverage_rate",
+      "notification_channel_id": "p1-execution",
+      "observed_value": 1.0,
+      "owner_component": "entry_executor",
+      "runbook_id": "runbook-latency-attribution-spike",
+      "severity": "P1",
+      "threshold_id": "thr_alert_policy_coverage_rate_min",
+      "trigger_condition": "latency_sla_breach_rate > threshold"
+    }
+  ],
+  "failure_action": "operator_or_kill_switch_safety_degraded",
+  "kill_switch_drills": [
+    {
+      "completed_at": "2026-05-27T04:02:00Z",
+      "drill_id": "drill-global-circuit-breaker-seed",
+      "evidence_hash": "7bc9be8bcadb21f5fcf995181b36ef546b085c1c7a7d268b1a7228bb7f10b3f4",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "global_circuit_breaker",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:00:00Z",
+      "target_scope": "all_new_entries",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:07:00Z",
+      "drill_id": "drill-route-kill-switch-seed",
+      "evidence_hash": "2711d79de66967ae0730d1c5b1060fe2641ae57e08a036cfa7d647457f01931e",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "route_kill_switch",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:05:00Z",
+      "target_scope": "clean_missed_dog_reclaim_tiny_probe",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:12:00Z",
+      "drill_id": "drill-source-kill-switch-seed",
+      "evidence_hash": "642e1d20ebf22d3d7c18bd499390319810a4498780ba01a095d73c013efa2a7a",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "source_kill_switch",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:10:00Z",
+      "target_scope": "telegram_source:premium",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:17:00Z",
+      "drill_id": "drill-provider-kill-switch-seed",
+      "evidence_hash": "569226d94877dd76ee73640aea11f9c69a31657e6efcb37a229254aef6e7e7cd",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "provider_kill_switch",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:15:00Z",
+      "target_scope": "quote_provider:jupiter_ultra",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:22:00Z",
+      "drill_id": "drill-model-kill-switch-seed",
+      "evidence_hash": "496d40db34e94e4c2b5598722264fb233efc88b62e60b9c8fa144a07267a4cc6",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "model_kill_switch",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:20:00Z",
+      "target_scope": "telegram_lifecycle_forecast",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:27:00Z",
+      "drill_id": "drill-feature-flag-rollback-seed",
+      "evidence_hash": "36b437a6b50a0a4ce13ee94c4b6bdadb69bd34444f8a05d2e059807b0145df0a",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "feature_flag_rollback",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:25:00Z",
+      "target_scope": "normal_tiny_candidate_flag",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:32:00Z",
+      "drill_id": "drill-paper-live-safety-breaker-seed",
+      "evidence_hash": "431eda883bc4c6c2657ad1fdcfe3580b878d99089748eed29301010713c804af",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "paper_live_safety_breaker",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:30:00Z",
+      "target_scope": "paper_environment",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    },
+    {
+      "completed_at": "2026-05-27T04:37:00Z",
+      "drill_id": "drill-entry-disable-exit-only-seed",
+      "evidence_hash": "ae07a44051d45de54de0d1ad4ea984f5b99be3d1c8826035e9ca2c81a162a6c5",
+      "exit_safety_preserved": true,
+      "expected_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "initiated_by": "operator-admin-seed",
+      "kill_switch_type": "entry_disable_exit_only",
+      "metric_id": "kill_switch_drill_pass_rate",
+      "new_entry_blocked": true,
+      "observed_effect": [
+        "new_entry_disabled",
+        "exit_safety_preserved",
+        "recovery_verified"
+      ],
+      "observed_value": 1.0,
+      "open_positions_policy_checked": true,
+      "pass_fail": "pass",
+      "recovery_steps_verified": true,
+      "started_at": "2026-05-27T04:35:00Z",
+      "target_scope": "all_new_entries_keep_exit",
+      "threshold_id": "thr_kill_switch_drill_pass_rate_min"
+    }
+  ],
+  "operator_audits": [
+    {
+      "action": "change_threshold",
+      "after_value": {
+        "threshold_id": "thr_alert_ack_sla_rate_min",
+        "threshold_value": 1.0
+      },
+      "approval_required": true,
+      "approval_status": "approved",
+      "audit_event_id": "audit-threshold-change-seed",
+      "before_value": {
+        "threshold_id": "thr_alert_ack_sla_rate_min",
+        "threshold_value": 1.0
+      },
+      "environment_id": "operator_admin",
+      "metric_id": "operator_audit_completeness_rate",
+      "observed_value": 1.0,
+      "operator_audit_hash": "0d89c88ef4f47fc0887f060db16f72872aee126602b9876a7cc7d077efe5d702",
+      "operator_id": "operator-admin-seed",
+      "reason": "seed threshold catalog approval evidence for normal tiny operator safety",
+      "threshold_id": "thr_operator_audit_completeness_rate_min",
+      "ticket_or_experiment_id": "canonical_spec_seed",
+      "timestamp": "2026-05-27T00:01:00Z"
+    },
+    {
+      "action": "disable_circuit_breaker",
+      "after_value": {
+        "breaker_state": "closed_after_drill",
+        "normal_tiny_allowed": false
+      },
+      "approval_required": true,
+      "approval_status": "approved",
+      "audit_event_id": "audit-disable-circuit-breaker-seed",
+      "before_value": {
+        "breaker_state": "open",
+        "normal_tiny_allowed": false
+      },
+      "environment_id": "operator_admin",
+      "metric_id": "operator_audit_completeness_rate",
+      "observed_value": 1.0,
+      "operator_audit_hash": "ce6853ffddef71dd5cc5797f4e3b5be10c50f43a2bf086f7ea3ebc93537f84ab",
+      "operator_id": "operator-admin-seed",
+      "reason": "seed circuit breaker recovery requires safety check and drill evidence",
+      "threshold_id": "thr_operator_audit_completeness_rate_min",
+      "ticket_or_experiment_id": "canonical_spec_seed",
+      "timestamp": "2026-05-27T00:02:00Z"
+    },
+    {
+      "action": "manual_replay_dlq",
+      "after_value": {
+        "dlq_unresolved": 0,
+        "projection_status": "rechecked"
+      },
+      "approval_required": true,
+      "approval_status": "approved",
+      "audit_event_id": "audit-manual-replay-dlq-seed",
+      "before_value": {
+        "dlq_unresolved": 1,
+        "projection_status": "blocked"
+      },
+      "environment_id": "operator_admin",
+      "metric_id": "operator_audit_completeness_rate",
+      "observed_value": 1.0,
+      "operator_audit_hash": "e804c3b3aa93a095ae8ec37817b7a53c679011220593e62cc725d7d7cec94333",
+      "operator_id": "operator-admin-seed",
+      "reason": "seed DLQ replay evidence must remain audited and projection-scoped",
+      "threshold_id": "thr_operator_audit_completeness_rate_min",
+      "ticket_or_experiment_id": "canonical_spec_seed",
+      "timestamp": "2026-05-27T00:03:00Z"
+    },
+    {
+      "action": "kill_switch_drill",
+      "after_value": {
+        "exit_safety_active": true,
+        "new_entry_allowed": false
+      },
+      "approval_required": true,
+      "approval_status": "approved",
+      "audit_event_id": "audit-kill-switch-drill-seed",
+      "before_value": {
+        "exit_safety_active": true,
+        "new_entry_allowed": true
+      },
+      "environment_id": "operator_admin",
+      "metric_id": "operator_audit_completeness_rate",
+      "observed_value": 1.0,
+      "operator_audit_hash": "16f2ba915e9bf5d3008c05a57b6cf7c96f08a67c7ca489e5bbc28d2029461dcd",
+      "operator_id": "operator-admin-seed",
+      "reason": "seed critical kill switch drill evidence before normal tiny",
+      "threshold_id": "thr_operator_audit_completeness_rate_min",
+      "ticket_or_experiment_id": "canonical_spec_seed",
+      "timestamp": "2026-05-27T00:04:00Z"
+    }
+  ],
+  "operator_safety_checks": [
+    {
+      "action": "disable_circuit_breaker",
+      "audit_event_id": "audit-disable-circuit-breaker-seed",
+      "blast_radius_preview": {
+        "affected_modes": [
+          "normal_tiny"
+        ],
+        "exit_queue_oldest_age_sec": 0,
+        "open_positions": 0
+      },
+      "confirmation_phrase_required": true,
+      "cooldown_ok": true,
+      "danger_level": "critical",
+      "dashboard_freshness_ok": true,
+      "environment_id": "operator_admin",
+      "metric_id": "operator_safety_reject_count",
+      "observed_value": 0,
+      "operator_id": "operator-admin-seed",
+      "operator_safety_status": "safe",
+      "required_runbook_ack": true,
+      "required_second_approval": true,
+      "safety_check_id": "operator-safety-disable-breaker-seed",
+      "safety_hash": "c041584b8cea74471f5f5f3c091053704ba1d7ec39b5b4a1a181dc06e602f3dd",
+      "threshold_id": "thr_operator_safety_reject_count_max"
+    },
+    {
+      "action": "open_holdout_outcome",
+      "audit_event_id": "audit-threshold-change-seed",
+      "blast_radius_preview": {
+        "affected_modes": [
+          "normal_tiny"
+        ],
+        "contaminates_promotion_evidence": true
+      },
+      "confirmation_phrase_required": true,
+      "cooldown_ok": true,
+      "danger_level": "admin_mutation",
+      "dashboard_freshness_ok": true,
+      "environment_id": "operator_admin",
+      "metric_id": "operator_safety_reject_count",
+      "observed_value": 0,
+      "operator_id": "operator-admin-seed",
+      "operator_safety_status": "safe",
+      "required_runbook_ack": true,
+      "required_second_approval": true,
+      "safety_check_id": "operator-safety-open-holdout-seed",
+      "safety_hash": "cd7d48b11c64fec73f79dd01f903a657f996a595c95fce91a98bec90675227d1",
+      "threshold_id": "thr_operator_safety_reject_count_max"
+    },
+    {
+      "action": "manual_replay_dlq",
+      "audit_event_id": "audit-manual-replay-dlq-seed",
+      "blast_radius_preview": {
+        "affected_modes": [
+          "shadow",
+          "normal_tiny"
+        ],
+        "projection_recheck_required": true
+      },
+      "confirmation_phrase_required": true,
+      "cooldown_ok": true,
+      "danger_level": "admin_mutation",
+      "dashboard_freshness_ok": true,
+      "environment_id": "operator_admin",
+      "metric_id": "operator_safety_reject_count",
+      "observed_value": 0,
+      "operator_id": "operator-admin-seed",
+      "operator_safety_status": "safe",
+      "required_runbook_ack": true,
+      "required_second_approval": true,
+      "safety_check_id": "operator-safety-manual-dlq-replay-seed",
+      "safety_hash": "0b7268c8b104cb9d5bd79b1491c4e168a9c5bba18166659c64408e917baf575c",
+      "threshold_id": "thr_operator_safety_reject_count_max"
+    },
+    {
+      "action": "kill_switch_drill",
+      "audit_event_id": "audit-kill-switch-drill-seed",
+      "blast_radius_preview": {
+        "affected_modes": [
+          "ultra_tiny",
+          "normal_tiny"
+        ],
+        "exit_safety_preserved": true,
+        "new_entry_blocked": true
+      },
+      "confirmation_phrase_required": true,
+      "cooldown_ok": true,
+      "danger_level": "critical",
+      "dashboard_freshness_ok": true,
+      "environment_id": "operator_admin",
+      "metric_id": "operator_safety_reject_count",
+      "observed_value": 0,
+      "operator_id": "operator-admin-seed",
+      "operator_safety_status": "safe",
+      "required_runbook_ack": true,
+      "required_second_approval": true,
+      "safety_check_id": "operator-safety-kill-switch-drill-seed",
+      "safety_hash": "00857c0e72883f9cf6a2f167e69c6d6c1198e73a3dd6b9299571f5ac6dd15bc7",
+      "threshold_id": "thr_operator_safety_reject_count_max"
+    }
+  ],
+  "ownership_oncall": [
+    {
+      "ack_sla_minutes": 5,
+      "component": "event_log",
+      "escalation_path": "P0->runtime_data_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_data_primary",
+      "oncall_secondary": "oncall_data_secondary",
+      "owner": "runtime_data_owner",
+      "ownership_hash": "4058740b678120905878cabb9124e5865a74f56ae2492b78246292303dff5d7a",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/event-log-lag.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "outbox",
+      "escalation_path": "P0->runtime_data_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_data_primary",
+      "oncall_secondary": "oncall_data_secondary",
+      "owner": "runtime_data_owner",
+      "ownership_hash": "eca0abb75ec2683f08071f87430fa68de1d03852a75c38aa4b314ee1a004f42a",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/outbox-stuck.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "dlq",
+      "escalation_path": "P0->runtime_data_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_data_primary",
+      "oncall_secondary": "oncall_data_secondary",
+      "owner": "runtime_data_owner",
+      "ownership_hash": "c33e276841ea02b108084f1da0b923ca054e0432121806472ead2c90e3ae2aaf",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/dlq-critical.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "projection",
+      "escalation_path": "P0->runtime_projection_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_projection_primary",
+      "oncall_secondary": "oncall_projection_secondary",
+      "owner": "runtime_projection_owner",
+      "ownership_hash": "bad2f3980177e9cc9d75b82481ca0bfb3bfc48349194a5479c9065c78c437d43",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/projection-ordering-failure.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "read_model",
+      "escalation_path": "P0->runtime_projection_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_projection_primary",
+      "oncall_secondary": "oncall_projection_secondary",
+      "owner": "runtime_projection_owner",
+      "ownership_hash": "c16309e58628de42c710838c099487629a2258512bbbe256c7840283007358f3",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/read-model-stale.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "dashboard",
+      "escalation_path": "P1->dashboard_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_dashboard_primary",
+      "oncall_secondary": "oncall_dashboard_secondary",
+      "owner": "dashboard_owner",
+      "ownership_hash": "2554231751bb957f76a4289f198cc63741bbcf879208e14a4970db02d25bd1c2",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/dashboard-stale.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "entry_executor",
+      "escalation_path": "P0->execution_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_execution_primary",
+      "oncall_secondary": "oncall_execution_secondary",
+      "owner": "execution_owner",
+      "ownership_hash": "d0935d7ec3b68d0d200a136dcb4d8bc6d90a37a5688d2e699b25aebe65bb910c",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/stale-state-execution.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "exit_executor",
+      "escalation_path": "P0->execution_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_execution_primary",
+      "oncall_secondary": "oncall_execution_secondary",
+      "owner": "execution_owner",
+      "ownership_hash": "821426ee3efc0d18b212ccb3bffa2d40976074997307ac52808ef1d0256d0897",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/exit-stuck.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "position_ledger",
+      "escalation_path": "P0->ledger_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_ledger_primary",
+      "oncall_secondary": "oncall_ledger_secondary",
+      "owner": "ledger_owner",
+      "ownership_hash": "41573d3794f78a023427ccd6a647ee5c82f6317abb20a657276df79ef0484d0b",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/position-ledger-mismatch.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "capital_ledger",
+      "escalation_path": "P0->ledger_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_ledger_primary",
+      "oncall_secondary": "oncall_ledger_secondary",
+      "owner": "ledger_owner",
+      "ownership_hash": "00decbc7de36080c522c110e16397345d637a3c6f84078ee5e3bc1c1110c3740",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/capital-ledger-mismatch.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "provider_quota",
+      "escalation_path": "P1->provider_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_provider_primary",
+      "oncall_secondary": "oncall_provider_secondary",
+      "owner": "provider_owner",
+      "ownership_hash": "97e73c84f20832e9402caac61efc70f18984d9fc0336d2eabd0976e498cc5324",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/provider-429.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "source_registry",
+      "escalation_path": "P1->source_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_source_primary",
+      "oncall_secondary": "oncall_source_secondary",
+      "owner": "source_owner",
+      "ownership_hash": "d61a26fa24fe3033471eef38aef700c4623342a5a9036ea9932527acd3cd1412",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/source-registry-drift.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "route_registry",
+      "escalation_path": "P1->route_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_route_primary",
+      "oncall_secondary": "oncall_route_secondary",
+      "owner": "route_owner",
+      "ownership_hash": "93f8f445515591b93d3a9dd0666b77d5edb0acd2ce1354c3daa9ad44c57844e5",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/route-alias-violation.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "metric_registry",
+      "escalation_path": "P1->metric_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_metric_primary",
+      "oncall_secondary": "oncall_metric_secondary",
+      "owner": "metric_owner",
+      "ownership_hash": "36907f27ab23cbc67c06ef67cb038806854af0a5deaaef22c1a7c5f932cc3282",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/metric-definition-mismatch.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "threshold_catalog",
+      "escalation_path": "P1->threshold_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_threshold_primary",
+      "oncall_secondary": "oncall_threshold_secondary",
+      "owner": "threshold_owner",
+      "ownership_hash": "5084c351cfec72b58083467f263514cdf21c86545d0f2e501473c36f263ed8a6",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/threshold-catalog-mismatch.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "runtime_config",
+      "escalation_path": "P0->runtime_config_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_runtime_primary",
+      "oncall_secondary": "oncall_runtime_secondary",
+      "owner": "runtime_config_owner",
+      "ownership_hash": "43068a0cc85fa3c5265da271967146420f9ac0a810bf905c8baba887a47027a0",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/runtime-config-drift.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "paper_live_safety",
+      "escalation_path": "P0->security_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_security_primary",
+      "oncall_secondary": "oncall_security_secondary",
+      "owner": "security_owner",
+      "ownership_hash": "d5e265814540cf2e187dfcee8430c2a34eeef70dbe133823a67b189ee2bfa342",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/paper-live-boundary-breach.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 30,
+      "component": "holdout",
+      "escalation_path": "P1->experiment_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_experiment_primary",
+      "oncall_secondary": "oncall_experiment_secondary",
+      "owner": "experiment_owner",
+      "ownership_hash": "5b20950cfe307df406c588d13774e7d6997b517388a232d01e1ca6abf60c6677",
+      "resolution_sla_minutes": 120,
+      "runbook_url": "runbooks/holdout-contamination.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    },
+    {
+      "ack_sla_minutes": 5,
+      "component": "operator_access",
+      "escalation_path": "P0->security_owner->incident_commander",
+      "last_reviewed_at": "2026-05-27T00:00:00Z",
+      "metric_id": "oncall_coverage_rate",
+      "observed_value": 1.0,
+      "oncall_primary": "oncall_security_primary",
+      "oncall_secondary": "oncall_security_secondary",
+      "owner": "security_owner",
+      "ownership_hash": "e22f4b2a0263a301a30683c2ed5cfeab06e268368278bc65383f57bfd757582d",
+      "resolution_sla_minutes": 60,
+      "runbook_url": "runbooks/operator-unsafe-override.md",
+      "threshold_id": "thr_oncall_coverage_rate_min"
+    }
+  ],
+  "schema_version": "v2.7.0.operator_runtime_safety_policy.v1",
+  "scope": "normal_tiny_operator_alert_kill_switch_safety",
+  "source_files": [
+    {
+      "required_patterns": [
+        "OperatorSafetyContract",
+        "OwnershipOnCallContract",
+        "AlertAckEscalationPolicy",
+        "KillSwitchDrillContract"
+      ],
+      "source_anchor": "def verify_operator_runtime_safety_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"OperatorAudit\"",
+        "\"OwnershipOnCallContract\"",
+        "\"AlertPolicy\"",
+        "\"AlertAckEscalationPolicy\"",
+        "\"KillSwitchDrillContract\""
+      ],
+      "source_anchor": "\"OperatorSafetyContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ]
+}

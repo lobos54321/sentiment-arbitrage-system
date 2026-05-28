@@ -33,6 +33,7 @@ from entry_readiness_policy import (
     build_entry_execution_eligibility,
 )
 from sqlite_write_coordinator import SQLiteSingleWriterLock
+from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 
 
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
@@ -1693,6 +1694,42 @@ def process_queue_item(db, row, owner):
         mark_queue(db, row["id"], policy.get("status") or "watch_only", policy.get("reason"))
         return
     mode, stage = source_to_mode_and_stage(row)
+    branch = str(row_value(row, "entry_branch", "") or row_value(row, "source_type", "") or "")
+    mode_gate = evaluate_runtime_mode_gate(
+        entry_mode=mode,
+        entry_branch="paper_fast_lane",
+        position_size_sol=FAST_ENTRY_SIZE_SOL,
+    )
+    if not mode_gate.get("pass"):
+        reason = mode_gate.get("reason") or "v27_runtime_mode_not_allowed"
+        mark_queue(db, row["id"], "watch_only", reason)
+        try:
+            token_ca = row["token_ca"]
+            signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
+            ptm.record_decision_event(
+                db,
+                component="v27_runtime_mode_gate",
+                event_type="fast_lane_mode_gate",
+                decision="watch_only",
+                reason=reason,
+                token_ca=token_ca,
+                symbol=row["symbol"],
+                lifecycle_id=ptm.build_lifecycle_id(token_ca, signal_ts),
+                signal_ts=signal_ts,
+                strategy_stage=stage,
+                route=row["source_type"],
+                data_source="v27_mode_readiness+paper_fast_entry_queue",
+                payload={
+                    **mode_gate,
+                    "queue_id": row["id"],
+                    "queue_entry_branch": branch,
+                    "queue_source_type": row["source_type"],
+                },
+            )
+            db.commit()
+        except Exception:
+            pass
+        return
     entry_mode_quality = evaluate_entry_mode_quality(db, mode, now_ts=now_ts)
     if entry_mode_quality.get("decision") == "shadow":
         reason = entry_mode_quality.get("reason") or "entry_mode_quality_shadow"
@@ -1718,7 +1755,6 @@ def process_queue_item(db, row, owner):
         except Exception:
             pass
         return
-    branch = str(row_value(row, "entry_branch", "") or row_value(row, "source_type", "") or "")
     circuit = branch_circuit_detail(
         db,
         branch,

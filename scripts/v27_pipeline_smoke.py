@@ -36,6 +36,7 @@ from v27_mirror_standardized_stops import run_mirror_once as run_standardized_st
 from v27_mirror_trade_outcomes import run_mirror_once as run_trade_outcome_mirror_once  # noqa: E402
 from v27_mirror_source_labels import DEFAULT_DB as DEFAULT_SIGNAL_DB, run_mirror_once as run_source_label_mirror_once  # noqa: E402
 from v27_mirror_telegram_signals import run_mirror_once as run_telegram_signal_mirror_once  # noqa: E402
+from v27_record_decision_audit_evidence import record_decision_audit_evidence  # noqa: E402
 from v27_read_model_refresh import refresh_denominator_read_model  # noqa: E402
 
 
@@ -91,6 +92,7 @@ def run_pipeline_smoke(
     include_earliest_actionable_times=False,
     include_realtime_clean=False,
     include_quote_intent_bindings=False,
+    include_decision_audit=False,
     include_raw_provider_evidence=False,
     include_idempotency_contracts=False,
     include_execution_control=False,
@@ -279,6 +281,16 @@ def run_pipeline_smoke(
                 new_only=True,
             ),
         )
+    if include_decision_audit:
+        steps["decision_audit"] = _run_step(
+            "decision_audit",
+            lambda ns: record_decision_audit_evidence(ns.event_log_dir, dry_run=ns.dry_run, limit=ns.limit),
+            SimpleNamespace(
+                event_log_dir=str(event_log_dir),
+                limit=limit,
+                dry_run=False,
+            ),
+        )
     if include_raw_provider_evidence:
         steps["raw_provider_evidence"] = _run_step(
             "raw_provider_evidence",
@@ -463,6 +475,7 @@ def run_pipeline_smoke(
         "include_earliest_actionable_times": bool(include_earliest_actionable_times),
         "include_realtime_clean": bool(include_realtime_clean),
         "include_quote_intent_bindings": bool(include_quote_intent_bindings),
+        "include_decision_audit": bool(include_decision_audit),
         "include_raw_provider_evidence": bool(include_raw_provider_evidence),
         "include_idempotency_contracts": bool(include_idempotency_contracts),
         "include_execution_control": bool(include_execution_control),
@@ -497,6 +510,7 @@ def main():
     parser.add_argument("--include-earliest-actionable-times", action="store_true")
     parser.add_argument("--include-realtime-clean", action="store_true")
     parser.add_argument("--include-quote-intent-bindings", action="store_true")
+    parser.add_argument("--include-decision-audit", action="store_true")
     parser.add_argument("--include-raw-provider-evidence", action="store_true")
     parser.add_argument("--include-idempotency-contracts", action="store_true")
     parser.add_argument("--include-execution-control", action="store_true")
@@ -522,6 +536,7 @@ def main():
         include_earliest_actionable_times=args.include_earliest_actionable_times,
         include_realtime_clean=args.include_realtime_clean,
         include_quote_intent_bindings=args.include_quote_intent_bindings,
+        include_decision_audit=args.include_decision_audit,
         include_raw_provider_evidence=args.include_raw_provider_evidence,
         include_idempotency_contracts=args.include_idempotency_contracts,
         include_execution_control=args.include_execution_control,

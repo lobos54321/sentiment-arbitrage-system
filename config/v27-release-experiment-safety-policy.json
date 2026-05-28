@@ -1,0 +1,553 @@
+{
+  "adversarial_replay_suite": [
+    {
+      "criticality": "critical",
+      "expected_action": "promotion_evidence_rejected",
+      "machine_checked": true,
+      "metric_id": "adversarial_replay_suite_pass_rate",
+      "observed_action": "promotion_evidence_rejected",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "replay_hash": "d1903674e3e07e87b001087212b66289b468bdb3bf6be2bc2c958cfc68fc3e07",
+      "replay_id": "adv-holdout-unblind-promotion",
+      "scenario": "holdout_unblinded_then_used_for_promotion",
+      "threshold_id": "thr_adversarial_replay_suite_pass_rate_min"
+    },
+    {
+      "criticality": "critical",
+      "expected_action": "sample_quarantined",
+      "machine_checked": true,
+      "metric_id": "adversarial_replay_suite_pass_rate",
+      "observed_action": "sample_quarantined",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "replay_hash": "1bdf7f56c4b14a649cd167022de928eb3de5b1e1423ad586d9069f67e9e88a4d",
+      "replay_id": "adv-manual-override-training",
+      "scenario": "manual_override_trade_used_in_training",
+      "threshold_id": "thr_adversarial_replay_suite_pass_rate_min"
+    },
+    {
+      "criticality": "critical",
+      "expected_action": "normal_tiny_blocked",
+      "machine_checked": true,
+      "metric_id": "adversarial_replay_suite_pass_rate",
+      "observed_action": "normal_tiny_blocked",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "replay_hash": "9ccf8c3fc53e7ec03852485117fb0952f7fc5be5a995524ed631ba4ca3603c16",
+      "replay_id": "adv-backpressure-p1-drop",
+      "scenario": "capacity_load_causes_dropped_p1_event",
+      "threshold_id": "thr_adversarial_replay_suite_pass_rate_min"
+    },
+    {
+      "criticality": "critical",
+      "expected_action": "p0_security_event",
+      "machine_checked": true,
+      "metric_id": "adversarial_replay_suite_pass_rate",
+      "observed_action": "p0_security_event",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "replay_hash": "ac74a1b793a202e34e3489d446268e974bceae6038eabf07f3fd4e0842e3dc80",
+      "replay_id": "adv-secret-leak",
+      "scenario": "secret_leak_detected",
+      "threshold_id": "thr_adversarial_replay_suite_pass_rate_min"
+    }
+  ],
+  "backpressure_policies": [
+    {
+      "backpressure_action": "shed_shadow_polling",
+      "backpressure_hash": "aae9d13e9f6eb1b27adfc4f637089e0b32d6f038eccff08a6074b5d3aff54038",
+      "component": "event_log_writer",
+      "drops_p0_p1_allowed": false,
+      "exit_safety_priority": "reserved_first",
+      "max_queue_depth": 100,
+      "metric_id": "backpressure_policy_safe_rate",
+      "observed_value": 1.0,
+      "queue_depth": 4,
+      "threshold_id": "thr_backpressure_policy_safe_rate_min"
+    },
+    {
+      "backpressure_action": "pause_new_entry",
+      "backpressure_hash": "a2cbbf0ceb644ee5969a8e12e816998c3ea83bf4ea9c6084cfa86cfcce951953",
+      "component": "transactional_outbox",
+      "drops_p0_p1_allowed": false,
+      "exit_safety_priority": "reserved_first",
+      "max_queue_depth": 100,
+      "metric_id": "backpressure_policy_safe_rate",
+      "observed_value": 1.0,
+      "queue_depth": 2,
+      "threshold_id": "thr_backpressure_policy_safe_rate_min"
+    },
+    {
+      "backpressure_action": "shadow_only_until_caught_up",
+      "backpressure_hash": "5041f7dabddffd0a1fcb92d844efeb62000fe6e117dd5b16f29e475e1fc22eb3",
+      "component": "projection_consumer",
+      "drops_p0_p1_allowed": false,
+      "exit_safety_priority": "reserved_first",
+      "max_queue_depth": 100,
+      "metric_id": "backpressure_policy_safe_rate",
+      "observed_value": 1.0,
+      "queue_depth": 5,
+      "threshold_id": "thr_backpressure_policy_safe_rate_min"
+    },
+    {
+      "backpressure_action": "preserve_exit_and_pending_entry_quotes",
+      "backpressure_hash": "731a61db350fe8822ae1b21bb7e6d60084f2023acef8b697bacd6e1cc4bdb277",
+      "component": "provider_quota_lane",
+      "drops_p0_p1_allowed": false,
+      "exit_safety_priority": "reserved_first",
+      "max_queue_depth": 100,
+      "metric_id": "backpressure_policy_safe_rate",
+      "observed_value": 1.0,
+      "queue_depth": 3,
+      "threshold_id": "thr_backpressure_policy_safe_rate_min"
+    }
+  ],
+  "blinded_holdouts": [
+    {
+      "access_count": 0,
+      "blinded": true,
+      "contamination_status": "clean",
+      "holdout_hash": "0e9809a3c28bdfe495cfb7b306edd3338641ddaa2176a218d2d5ad41ec4c40ae",
+      "holdout_id": "telegram-clean-dog-holdout-v27-seed",
+      "metric_id": "blinded_holdout_clean_rate",
+      "no_retune_enforced": true,
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": true,
+      "threshold_id": "thr_blinded_holdout_clean_rate_min",
+      "window_id": "window:holdout_24h_seed"
+    }
+  ],
+  "budget_reserves": [
+    {
+      "borrow_allowed": false,
+      "budget_pool": "exit_safety_budget",
+      "current_usage": 10,
+      "hard_limit": 100,
+      "metric_id": "budget_reserve_protected_rate",
+      "observed_value": 1.0,
+      "priority_class": "P0",
+      "reserve_hash": "2c14b2f406813f9cd54bae1eca1bfbda5ad368579c99de2cdc8a4246f75eb158",
+      "reserve_id": "reserve-exit-safety-p0",
+      "reserved_amount": 100,
+      "reserved_for": [
+        "open_position_exit",
+        "emergency_exit_journal"
+      ],
+      "threshold_id": "thr_budget_reserve_protected_rate_min"
+    },
+    {
+      "borrow_allowed": false,
+      "budget_pool": "entry_execution_budget",
+      "current_usage": 12,
+      "hard_limit": 80,
+      "metric_id": "budget_reserve_protected_rate",
+      "observed_value": 1.0,
+      "priority_class": "P1",
+      "reserve_hash": "698988d0070f1b6ee06d87fab4f718dbed9fff20d971cce629f214df71341a8f",
+      "reserve_id": "reserve-entry-execution-p1",
+      "reserved_amount": 80,
+      "reserved_for": [
+        "pending_entry_quote",
+        "state_revalidation"
+      ],
+      "threshold_id": "thr_budget_reserve_protected_rate_min"
+    },
+    {
+      "borrow_allowed": true,
+      "budget_pool": "exploration_budget",
+      "current_usage": 4,
+      "hard_limit": 20,
+      "metric_id": "budget_reserve_protected_rate",
+      "observed_value": 1.0,
+      "priority_class": "P2",
+      "reserve_hash": "1f7d1422657caf77d110427de65b697f271b3a630468805459be19ed3c06915a",
+      "reserve_id": "reserve-shadow-learning-p2",
+      "reserved_amount": 20,
+      "reserved_for": [
+        "shadow_polling",
+        "detector_calibration"
+      ],
+      "threshold_id": "thr_budget_reserve_protected_rate_min"
+    }
+  ],
+  "contract_test_suite": [
+    {
+      "contract_id": "AdversarialReplaySuite",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "7722756982b44750412a19f495491f03ef89f883514e9756f12ed74e6a3ab553",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-AdversarialReplaySuite",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "5855061e8bb63751bad3c7380d8a7ae52d04311e8f9266ae770f92f5096557f6",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "BackpressurePolicy",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "af450a87544bc7b705e4babc90e375138a9d6e2abbceb7997a74d3bd6205289d",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-BackpressurePolicy",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "0e55b4195b4ae4efddf5b07a8b59c1d2b10cb23517b271db11b166292008c475",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "BlindedHoldoutContract",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "8637f53427fc76ea3fde04dd6a9ab250ee9aa45b4c7b07b2189ed509ddea4735",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-BlindedHoldoutContract",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "104f52d1876172f8872fcb328d29d8dc6ddf35619882d67ab23ff66f3652c8c3",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "BudgetReserveContract",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "f65e72ecc9cdcfdb330b18066c4eaaf788c79eb11ca3f76905170e86b2fbe255",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-BudgetReserveContract",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "f4c9174c58feac7a17f72c435a9ae7c46384bb1ac8f89d12ffef4117955a9599",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "ContractTestSuite",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "aac755b7fe3d7eaf431b217fa1d1244bdceaaaab58416191070655ba94192c5b",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-ContractTestSuite",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "ad4d84c5b61983b833064878c63ad75a3168b1b180959209acd3620f661ece55",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "ManualOverrideContract",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "9868db20d811bad44475da2dc9aded69411b930eebb6acce66ed49ce60df1dfe",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-ManualOverrideContract",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "d94323f6477dbb17bd0e8f1a09e4896006807645f5d9763377299417c447fb20",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "NoTradeRootCause",
+      "coverage_class": "mvp_blocking",
+      "evidence_hash": "7f4ee6de3577c29768a3b2270528ba9b07069c783686b04d9b974bdbd373bd56",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-NoTradeRootCause",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "9eaff0cd2cb16e577da7be04061caf6f4665a05195cab9fd65fe060ea5ec26c0",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "ReleaseComplexityBudget",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "7b71a934a92a1be0e7cc25b81e5faa3141c69f2156ae7515fed3063e15d0e016",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-ReleaseComplexityBudget",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "3db68c0b81251e9408c2e3b211ab16028e4617ecdd806a0a642f6c0599a02153",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "SecretsManagementContract",
+      "coverage_class": "mvp_blocking",
+      "evidence_hash": "87357d0be2910018ac2654b4e9f77487ff63fab511b155e8bc1238312d6263e0",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-SecretsManagementContract",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "6395bad5ec9a1f9c46fbb181222e7f23a4852c3db23fdb749dcdfedb853a722d",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    },
+    {
+      "contract_id": "SystemSLO",
+      "coverage_class": "normal_tiny_blocking",
+      "evidence_hash": "2709991239cd9c8e0cd8b0302621c3601c8135262b7c65501c63c7aa39e0c99f",
+      "metric_id": "contract_test_suite_pass_rate",
+      "observed_value": 1.0,
+      "pass_fail": "pass",
+      "suite_id": "contract-suite-SystemSLO",
+      "test_command": "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider",
+      "test_hash": "ae1cfc4c3fa72075227985e9273be78f4baacac5c8eed3bc458383950e231e2b",
+      "threshold_id": "thr_contract_test_suite_pass_rate_min"
+    }
+  ],
+  "failure_action": "release_experiment_safety_blocked",
+  "manual_overrides": [
+    {
+      "action": "manual_label_correction",
+      "approval_status": "quarantined",
+      "audit_event_id": "audit-manual-label-correction-v27",
+      "metric_id": "manual_override_quarantined_rate",
+      "observed_value": 1.0,
+      "operator_id": "system",
+      "override_hash": "e49adc3f9e29ffb3b39a16febae647c3202945283e33c8380b1fa31476a21928",
+      "override_id": "manual-label-correction-quarantine-v27",
+      "promotion_evidence_allowed": false,
+      "quarantine_required": true,
+      "threshold_id": "thr_manual_override_quarantined_rate_min",
+      "training_allowed": false
+    },
+    {
+      "action": "manual_decision_override",
+      "approval_status": "quarantined",
+      "audit_event_id": "audit-manual-decision-override-v27",
+      "metric_id": "manual_override_quarantined_rate",
+      "observed_value": 1.0,
+      "operator_id": "system",
+      "override_hash": "1397ae013685627849d742c7eb3caf15012c5ac1a54dd8da611cb4b37a98eaab",
+      "override_id": "manual-decision-override-quarantine-v27",
+      "promotion_evidence_allowed": false,
+      "quarantine_required": true,
+      "threshold_id": "thr_manual_override_quarantined_rate_min",
+      "training_allowed": false
+    }
+  ],
+  "no_trade_root_causes": [
+    {
+      "category": "policy_blocker",
+      "d3a_candidate_count": 4,
+      "fill_count": 0,
+      "metric_id": "no_trade_root_cause_known_rate",
+      "observed_value": 1.0,
+      "owner": "system",
+      "remediation_action": "review reclaim/overextension thresholds",
+      "root_cause_code": "D3a_but_D3b_blocked",
+      "root_cause_hash": "240d109eb29b6270563c427f47dc3a1e0900896d6d298f8c8be9a0cd199625cb",
+      "root_cause_id": "ntrc-d3a-d3b-blocked",
+      "threshold_id": "thr_no_trade_root_cause_known_rate_min"
+    },
+    {
+      "category": "queue_latency",
+      "d3a_candidate_count": 2,
+      "fill_count": 0,
+      "metric_id": "no_trade_root_cause_known_rate",
+      "observed_value": 1.0,
+      "owner": "system",
+      "remediation_action": "increase fast-lane priority and capacity reserve",
+      "root_cause_code": "queued_but_expired",
+      "root_cause_hash": "77b17d44490c547c34db0090e92ff9738bff948074f78a38b78d11ac7ba2c7b9",
+      "root_cause_id": "ntrc-queued-expired",
+      "threshold_id": "thr_no_trade_root_cause_known_rate_min"
+    },
+    {
+      "category": "provider_quote_failure",
+      "d3a_candidate_count": 3,
+      "fill_count": 0,
+      "metric_id": "no_trade_root_cause_known_rate",
+      "observed_value": 1.0,
+      "owner": "system",
+      "remediation_action": "route to quota-isolated provider lane",
+      "root_cause_code": "locked_but_quote_failed",
+      "root_cause_hash": "f79df8f788ff52c49338e9a21db33093d5681c1fbd86f9f171eaf95d52fa9c1e",
+      "root_cause_id": "ntrc-quote-failed",
+      "threshold_id": "thr_no_trade_root_cause_known_rate_min"
+    },
+    {
+      "category": "read_model_freshness",
+      "d3a_candidate_count": 1,
+      "fill_count": 0,
+      "metric_id": "no_trade_root_cause_known_rate",
+      "observed_value": 1.0,
+      "owner": "system",
+      "remediation_action": "force shadow-only until freshness recovers",
+      "root_cause_code": "read_model_stale",
+      "root_cause_hash": "2e78007962f0d05ca11660887ea9f574c808eb5a72f353550898f792ada684c9",
+      "root_cause_id": "ntrc-read-model-stale",
+      "threshold_id": "thr_no_trade_root_cause_known_rate_min"
+    }
+  ],
+  "release_complexity_budgets": [
+    {
+      "complexity_hash": "2cc1f33f60d63ae8a3bb6f75e2d9967f2c5323e9876311632cc48393dfc289a1",
+      "max_new_detectors_per_release": 1,
+      "max_new_gates_per_release": 1,
+      "metric_id": "release_complexity_budget_pass_rate",
+      "new_detectors": 1,
+      "new_gates": 1,
+      "observed_shadow_hours": 8,
+      "observed_value": 1.0,
+      "release_id": "v2.7.0-release-experiment-safety-seed",
+      "required_shadow_hours_before_gate": 8,
+      "rollback_metric": "blocked_actionable_increase_or_net_ev_worse",
+      "status": "within_budget",
+      "threshold_id": "thr_release_complexity_budget_pass_rate_min"
+    }
+  ],
+  "schema_version": "v2.7.0.release_experiment_safety_policy.v1",
+  "scope": "secrets_slo_no_trade_complexity_backpressure_budget_holdout_override_tests_replay",
+  "secrets_management": [
+    {
+      "environment_allowed": [
+        "paper"
+      ],
+      "last_rotated_at": "2026-05-28T00:00:00Z",
+      "leak_detected": false,
+      "metric_id": "secrets_management_safe_rate",
+      "mutation_scope_allowed": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "revocation_status": "active",
+      "rotation_interval_days": 30,
+      "scope": "dashboard_token",
+      "secret_hash": "e4a71fc4377faef1b4a096aa11255ec7a43ca8ffbf7042cdbd0c57cc750deb98",
+      "secret_name": "DASHBOARD_TOKEN",
+      "threshold_id": "thr_secrets_management_safe_rate_min"
+    },
+    {
+      "environment_allowed": [
+        "paper"
+      ],
+      "last_rotated_at": "2026-05-28T00:00:00Z",
+      "leak_detected": false,
+      "metric_id": "secrets_management_safe_rate",
+      "mutation_scope_allowed": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "revocation_status": "active",
+      "rotation_interval_days": 30,
+      "scope": "provider_api_key",
+      "secret_hash": "443fb51463bad42e8ab57c1111eeec861309aa99e445bdd4832da55276e92eef",
+      "secret_name": "GMGN_PROVIDER_KEY",
+      "threshold_id": "thr_secrets_management_safe_rate_min"
+    },
+    {
+      "environment_allowed": [
+        "live"
+      ],
+      "last_rotated_at": "2026-05-28T00:00:00Z",
+      "leak_detected": false,
+      "metric_id": "secrets_management_safe_rate",
+      "mutation_scope_allowed": true,
+      "observed_value": 1.0,
+      "owner": "system",
+      "revocation_status": "active",
+      "rotation_interval_days": 7,
+      "scope": "live_signing_secret",
+      "secret_hash": "4bf55371991ff4b53114363046e3a9e5df855b010e82718f9fd04ae36de0113f",
+      "secret_name": "LIVE_SIGNING_KEY",
+      "threshold_id": "thr_secrets_management_safe_rate_min"
+    }
+  ],
+  "source_files": [
+    {
+      "required_patterns": [
+        "SecretsManagementContract",
+        "SystemSLO",
+        "NoTradeRootCause",
+        "ReleaseComplexityBudget",
+        "BackpressurePolicy",
+        "BudgetReserveContract",
+        "BlindedHoldoutContract",
+        "ManualOverrideContract",
+        "ContractTestSuite",
+        "AdversarialReplaySuite"
+      ],
+      "source_anchor": "def verify_release_experiment_safety_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"SystemSLO\"",
+        "\"NoTradeRootCause\"",
+        "\"ReleaseComplexityBudget\"",
+        "\"BackpressurePolicy\"",
+        "\"BudgetReserveContract\"",
+        "\"BlindedHoldoutContract\"",
+        "\"ManualOverrideContract\"",
+        "\"ContractTestSuite\"",
+        "\"AdversarialReplaySuite\""
+      ],
+      "source_anchor": "\"SecretsManagementContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ],
+  "system_slos": [
+    {
+      "exit_safety_action": "preserve_exit_safety",
+      "measured_value": 1.0,
+      "metric_id": "system_slo_healthy_rate",
+      "new_entry_action": "allow",
+      "severity": "P2",
+      "slo_hash": "fab4e07e1c45a579b7060804d02c6b0a93caf511bdbc8471466db678d4ab3d51",
+      "slo_id": "slo_event_write_latency_p95",
+      "slo_window_id": "window:readiness_seed",
+      "source_metric_name": "event_write_latency_p95",
+      "status": "healthy",
+      "threshold_id": "thr_system_slo_healthy_rate_min"
+    },
+    {
+      "exit_safety_action": "preserve_exit_safety",
+      "measured_value": 1.0,
+      "metric_id": "system_slo_healthy_rate",
+      "new_entry_action": "allow",
+      "severity": "P2",
+      "slo_hash": "1d0ad4a2c3feef0e30cb2fb5ab5abde900bafd7aa8d007936137f5fbd0328b9f",
+      "slo_id": "slo_outbox_publish_latency_p95",
+      "slo_window_id": "window:readiness_seed",
+      "source_metric_name": "outbox_publish_latency_p95",
+      "status": "healthy",
+      "threshold_id": "thr_system_slo_healthy_rate_min"
+    },
+    {
+      "exit_safety_action": "preserve_exit_safety",
+      "measured_value": 1.0,
+      "metric_id": "system_slo_healthy_rate",
+      "new_entry_action": "allow",
+      "severity": "P2",
+      "slo_hash": "6e0eb002d1d82d1f0eb129d24dcac638337ea425b7a69bf43f514ee5ee423048",
+      "slo_id": "slo_projection_lag_p95",
+      "slo_window_id": "window:readiness_seed",
+      "source_metric_name": "projection_lag_p95",
+      "status": "healthy",
+      "threshold_id": "thr_system_slo_healthy_rate_min"
+    },
+    {
+      "exit_safety_action": "preserve_exit_safety",
+      "measured_value": 1.0,
+      "metric_id": "system_slo_healthy_rate",
+      "new_entry_action": "allow",
+      "severity": "P2",
+      "slo_hash": "6f858a1d55ec3de3f7da046828fc340f1be945ceaa28904b785ad50832a9f46d",
+      "slo_id": "slo_read_model_lag_p95",
+      "slo_window_id": "window:readiness_seed",
+      "source_metric_name": "read_model_lag_p95",
+      "status": "healthy",
+      "threshold_id": "thr_system_slo_healthy_rate_min"
+    },
+    {
+      "exit_safety_action": "preserve_exit_safety",
+      "measured_value": 1.0,
+      "metric_id": "system_slo_healthy_rate",
+      "new_entry_action": "allow",
+      "severity": "P2",
+      "slo_hash": "1927f352c2902c67200eb90a1a31679aff05da6644cbdfd4ec1c5033593c4d60",
+      "slo_id": "slo_capacity_headroom_pct",
+      "slo_window_id": "window:readiness_seed",
+      "source_metric_name": "capacity_headroom_pct",
+      "status": "healthy",
+      "threshold_id": "thr_system_slo_healthy_rate_min"
+    }
+  ]
+}

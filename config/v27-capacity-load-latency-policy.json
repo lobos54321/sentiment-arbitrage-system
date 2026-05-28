@@ -1,0 +1,465 @@
+{
+  "schema_version": "v2.7.0.capacity_load_latency_policy.v1",
+  "scope": "v27_capacity_load_latency_seed",
+  "failure_action": "capacity_or_latency_degraded",
+  "capacity_plans": [
+    {
+      "capacity_plan_id": "capacity:telegram_ingest:seed",
+      "component": "telegram_ingest",
+      "expected_peak_qps": 8,
+      "measured_peak_qps": 16,
+      "p95_latency_budget_ms": 250,
+      "p99_latency_budget_ms": 500,
+      "queue_depth_limit": 200,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "6ee09c68d8f5b5610ad32af925787e4d1304ce842c0d9420469014a24a183dfb"
+    },
+    {
+      "capacity_plan_id": "capacity:quote_polling:seed",
+      "component": "quote_polling",
+      "expected_peak_qps": 12,
+      "measured_peak_qps": 24,
+      "p95_latency_budget_ms": 350,
+      "p99_latency_budget_ms": 700,
+      "queue_depth_limit": 200,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "efef49358a85e36dacff65081960481e3c6319d27f63d5a8ef8cba3f56cefa5b"
+    },
+    {
+      "capacity_plan_id": "capacity:risk_fetch:seed",
+      "component": "risk_fetch",
+      "expected_peak_qps": 6,
+      "measured_peak_qps": 12,
+      "p95_latency_budget_ms": 500,
+      "p99_latency_budget_ms": 1000,
+      "queue_depth_limit": 120,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "62783d81741b0d2207bfdefef4f9baa2110956c5cdee4c0d0a51fdb24b4d61af"
+    },
+    {
+      "capacity_plan_id": "capacity:event_log_write:seed",
+      "component": "event_log_write",
+      "expected_peak_qps": 20,
+      "measured_peak_qps": 40,
+      "p95_latency_budget_ms": 50,
+      "p99_latency_budget_ms": 100,
+      "queue_depth_limit": 500,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "a404c95731d2c0698ad76b73b69deccb084a1068b11055c4d461ca7e4fcaffed"
+    },
+    {
+      "capacity_plan_id": "capacity:outbox_publish:seed",
+      "component": "outbox_publish",
+      "expected_peak_qps": 20,
+      "measured_peak_qps": 40,
+      "p95_latency_budget_ms": 100,
+      "p99_latency_budget_ms": 250,
+      "queue_depth_limit": 500,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "c415b49f9749fdcdae0785fba4cd53cea345227a60540a8d063338a3d3b51097"
+    },
+    {
+      "capacity_plan_id": "capacity:projection_consumer:seed",
+      "component": "projection_consumer",
+      "expected_peak_qps": 20,
+      "measured_peak_qps": 40,
+      "p95_latency_budget_ms": 150,
+      "p99_latency_budget_ms": 300,
+      "queue_depth_limit": 500,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "ca0ddb47cae62f58c362b77f0f9a0f6f36b4617f29d2f4517dcaad147b926093"
+    },
+    {
+      "capacity_plan_id": "capacity:read_model_update:seed",
+      "component": "read_model_update",
+      "expected_peak_qps": 20,
+      "measured_peak_qps": 40,
+      "p95_latency_budget_ms": 150,
+      "p99_latency_budget_ms": 300,
+      "queue_depth_limit": 500,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "393bec1864c4a7933ff7d2fbe95233cfdd355377dbae1fe95ea84374a1fa77bf"
+    },
+    {
+      "capacity_plan_id": "capacity:forecast_builder:seed",
+      "component": "forecast_builder",
+      "expected_peak_qps": 10,
+      "measured_peak_qps": 20,
+      "p95_latency_budget_ms": 250,
+      "p99_latency_budget_ms": 500,
+      "queue_depth_limit": 200,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "d69443a9686ebd5949db19711df42153d6bb581b6bbdada64030ac85dfd4c515"
+    },
+    {
+      "capacity_plan_id": "capacity:decision_arbiter:seed",
+      "component": "decision_arbiter",
+      "expected_peak_qps": 10,
+      "measured_peak_qps": 20,
+      "p95_latency_budget_ms": 150,
+      "p99_latency_budget_ms": 300,
+      "queue_depth_limit": 200,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "0f101fa1c52fde001489b9f32e0e33e45ed5945d6769497e03c4d5180f7435a9"
+    },
+    {
+      "capacity_plan_id": "capacity:entry_executor:seed",
+      "component": "entry_executor",
+      "expected_peak_qps": 4,
+      "measured_peak_qps": 8,
+      "p95_latency_budget_ms": 500,
+      "p99_latency_budget_ms": 1000,
+      "queue_depth_limit": 80,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "6d7fe735eed94f8b78f6fdf1bfd6b0f29ac03ad22e4a23a453b036f2a7addeda"
+    },
+    {
+      "capacity_plan_id": "capacity:exit_executor:seed",
+      "component": "exit_executor",
+      "expected_peak_qps": 4,
+      "measured_peak_qps": 8,
+      "p95_latency_budget_ms": 300,
+      "p99_latency_budget_ms": 600,
+      "queue_depth_limit": 80,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "0a49198dc661ad7cf4e1bd7aaec293c15b6a2d95cc588c2be1b41e40931fa132"
+    },
+    {
+      "capacity_plan_id": "capacity:dashboard_query:seed",
+      "component": "dashboard_query",
+      "expected_peak_qps": 4,
+      "measured_peak_qps": 8,
+      "p95_latency_budget_ms": 500,
+      "p99_latency_budget_ms": 1000,
+      "queue_depth_limit": 80,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "01fd5718045e7c30d684c7c2aed548efcdf5e0d3f2d351ea4b5ef6aba0ee638f"
+    },
+    {
+      "capacity_plan_id": "capacity:alert_delivery:seed",
+      "component": "alert_delivery",
+      "expected_peak_qps": 2,
+      "measured_peak_qps": 4,
+      "p95_latency_budget_ms": 1000,
+      "p99_latency_budget_ms": 2000,
+      "queue_depth_limit": 50,
+      "headroom_pct": 0.5,
+      "degradation_threshold": 0.3,
+      "owner": "system",
+      "last_verified_at": "2026-05-27T00:00:00Z",
+      "metric_id": "capacity_headroom_pct",
+      "threshold_id": "thr_capacity_headroom_pct_min",
+      "protects_priorities": [
+        "P0",
+        "P1"
+      ],
+      "exit_safety_reserved": true,
+      "capacity_hash": "fd94ff32576d9cd687b063aa5d55e7d76e9f39f1a1e77a3955e253bef86cda7b"
+    }
+  ],
+  "load_tests": [
+    {
+      "load_test_id": "load-replay:telegram-burst-provider-lag-worker-crash:seed",
+      "event_log_hash": "seed_event_log_hash_for_capacity_replay",
+      "replay_speed_multiplier": 10,
+      "synthetic_burst_profile": [
+        "telegram_burst",
+        "quote_provider_slow",
+        "provider_429",
+        "dlq_poison_event",
+        "projection_lag",
+        "read_model_lag",
+        "exit_queue_burst",
+        "outbox_lag",
+        "worker_crash_during_entry",
+        "worker_crash_during_exit"
+      ],
+      "components_under_test": [
+        "telegram_ingest",
+        "quote_polling",
+        "risk_fetch",
+        "event_log_write",
+        "outbox_publish",
+        "projection_consumer",
+        "read_model_update",
+        "forecast_builder",
+        "decision_arbiter",
+        "entry_executor",
+        "exit_executor"
+      ],
+      "expected_invariants": [
+        "p0_never_starved",
+        "exit_safety_preserved",
+        "outbox_drains",
+        "dlq_poison_does_not_block_projection",
+        "read_model_lag_blocks_entry",
+        "worker_crash_reconciles_orphans"
+      ],
+      "observed_invariants": [
+        "p0_never_starved",
+        "exit_safety_preserved",
+        "outbox_drains",
+        "dlq_poison_does_not_block_projection",
+        "read_model_lag_blocks_entry",
+        "worker_crash_reconciles_orphans"
+      ],
+      "pass_fail": "pass",
+      "pass_rate": 1.0,
+      "run_at": "2026-05-27T00:00:00Z",
+      "build_hash": "seed_build_hash",
+      "runtime_config_hash": "seed_runtime_config_hash",
+      "metric_id": "load_test_replay_pass_rate",
+      "threshold_id": "thr_load_test_replay_pass_rate_min",
+      "load_test_hash": "192e4ee33aa0abcd7be3cddeba5f6e2c28d43749adac1ae0efecd88e90989e6a"
+    }
+  ],
+  "latency_attributions": [
+    {
+      "token_lifecycle_key": "sol:seed_token:pool:epoch1",
+      "signal_seen_at": "2026-05-27T00:00:00Z",
+      "signal_available_at": "2026-05-27T00:00:01Z",
+      "pool_resolved_available_at": "2026-05-27T00:00:02Z",
+      "quote_available_at": "2026-05-27T00:00:03Z",
+      "risk_available_at": "2026-05-27T00:00:04Z",
+      "reclaim_available_at": "2026-05-27T00:00:05Z",
+      "decision_started_at": "2026-05-27T00:00:06Z",
+      "decision_available_at": "2026-05-27T00:00:07Z",
+      "queued_at": "2026-05-27T00:00:08Z",
+      "claimed_at": "2026-05-27T00:00:09Z",
+      "quote_refreshed_at": "2026-05-27T00:00:10Z",
+      "simulated_fill_ts": "2026-05-27T00:00:11Z",
+      "peak_ts": "2026-05-27T00:00:30Z",
+      "latency_class": "queue_latency",
+      "latency_ms": 1000,
+      "blocking_component": "paper_fast_lane_queue",
+      "owner": "system",
+      "sla_breach_rate": 0.0,
+      "metric_id": "latency_sla_breach_rate",
+      "threshold_id": "thr_latency_sla_breach_rate_max",
+      "latency_hash": "839eabdc2d7c1a95be6bcb6ebdc36df55674c2f8e94343dcb6be52a52ca40787"
+    }
+  ],
+  "provider_quota_isolation": [
+    {
+      "provider": "quote_provider",
+      "budget_pool": "quote_polling_budget",
+      "priority_order": [
+        "open_position_exit",
+        "pending_entry_quote",
+        "active_high_score_shadow_quote",
+        "telegram_reclaim_refresh",
+        "gmgn_enrichment",
+        "random_control_polling"
+      ],
+      "quota_limit_per_min": 120,
+      "current_usage_per_min": 60,
+      "exit_safety_reserved_pct": 0.25,
+      "shadow_polling_limit_per_min": 20,
+      "quota_isolation_status": "healthy",
+      "metric_id": "provider_quota_exit_reserve_pct",
+      "threshold_id": "thr_provider_quota_exit_reserve_pct_min",
+      "quota_hash": "778c7bf2005727a6efb9fb9b12c60690ec6f1d539f3dc04c52a6e2f80cb8dcea"
+    },
+    {
+      "provider": "gmgn_enrichment",
+      "budget_pool": "gmgn_enrichment_budget",
+      "priority_order": [
+        "open_position_exit",
+        "pending_entry_quote",
+        "active_high_score_shadow_quote",
+        "telegram_reclaim_refresh",
+        "gmgn_enrichment",
+        "random_control_polling"
+      ],
+      "quota_limit_per_min": 60,
+      "current_usage_per_min": 20,
+      "exit_safety_reserved_pct": 0.25,
+      "shadow_polling_limit_per_min": 10,
+      "quota_isolation_status": "healthy",
+      "metric_id": "provider_quota_exit_reserve_pct",
+      "threshold_id": "thr_provider_quota_exit_reserve_pct_min",
+      "quota_hash": "39a3f5809f10e62fca7015f481f9aec1ba663a989acc62ef0441519a1871062a"
+    }
+  ],
+  "economic_cost_budgets": [
+    {
+      "budget_id": "budget:exit_safety:seed",
+      "budget_pool": "exit_safety_budget",
+      "owner": "system",
+      "reserved_for": [
+        "open_position_exit"
+      ],
+      "soft_limit": 100,
+      "hard_limit": 120,
+      "current_usage": 40,
+      "measurement_window_ms": 60000,
+      "exit_safety_reserved": true,
+      "utilization": 0.4,
+      "metric_id": "economic_cost_budget_utilization",
+      "threshold_id": "thr_economic_cost_budget_utilization_max",
+      "budget_hash": "b40f8a7904e65c28da850117be41e68dfb2f83fc6b4f36afedd5323d67b07b21"
+    },
+    {
+      "budget_id": "budget:exploration:seed",
+      "budget_pool": "exploration_budget",
+      "owner": "system",
+      "reserved_for": [
+        "shadow_polling",
+        "random_control"
+      ],
+      "soft_limit": 50,
+      "hard_limit": 60,
+      "current_usage": 20,
+      "measurement_window_ms": 60000,
+      "exit_safety_reserved": false,
+      "utilization": 0.4,
+      "metric_id": "economic_cost_budget_utilization",
+      "threshold_id": "thr_economic_cost_budget_utilization_max",
+      "budget_hash": "1aadf6f45886428fd9c3f7b44424a5fcb2ea3c24bdd3357103124faa5cc838cc"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_capacity_load_latency_contracts",
+      "required_patterns": [
+        "CapacityPlanningContract",
+        "LoadTestReplayContract",
+        "LatencyAttributionContract",
+        "ProviderQuotaIsolationContract",
+        "EconomicCostBudgetContract"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"CapacityPlanningContract\"",
+      "required_patterns": [
+        "\"CapacityPlanningContract\"",
+        "\"LoadTestReplayContract\"",
+        "\"LatencyAttributionContract\"",
+        "\"ProviderQuotaIsolationContract\"",
+        "\"EconomicCostBudgetContract\""
+      ]
+    }
+  ]
+}

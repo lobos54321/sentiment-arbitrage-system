@@ -88,6 +88,7 @@ from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_res
 from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
 from entry_mode_registry import entry_mode_registry_entry
 from entry_mode_quality import evaluate_entry_mode_quality
+from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
@@ -22677,6 +22678,37 @@ def run_monitor(db):
                         data_source='entry_readiness+smart_entry+execution_guard',
                         payload=_entry_decision_contract.to_dict(),
                     )
+                    _runtime_mode_gate = evaluate_runtime_mode_gate(
+                        entry_mode=pending.get('entry_mode') or timing_reason,
+                        entry_branch=_entry_branch,
+                        position_size_sol=actual_position_size_sol,
+                    )
+                    pending['runtime_mode_gate'] = _runtime_mode_gate
+                    record_decision_event(
+                        db,
+                        component='v27_runtime_mode_gate',
+                        event_type='entry_audit' if _runtime_mode_gate.get('pass') else 'entry_block',
+                        decision=_runtime_mode_gate.get('decision'),
+                        reason=_runtime_mode_gate.get('reason'),
+                        token_ca=pending['token_ca'],
+                        symbol=pending['symbol'],
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=pending['signal_ts'],
+                        signal_id=pending.get('premium_signal_id'),
+                        strategy_stage=_pending_strategy_stage,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        data_source='v27_mode_readiness+pending_entry',
+                        payload=_runtime_mode_gate,
+                    )
+                    if not _runtime_mode_gate.get('pass'):
+                        log.info(
+                            f"  [V27_MODE_GATE] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_runtime_mode_gate.get('reason')} "
+                            f"required={_runtime_mode_gate.get('required_mode')} "
+                            f"highest={_runtime_mode_gate.get('highest_allowed_mode')}"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
                     _track_entry_contract_recovery_candidate(
                         db,
                         discovery_candidates,

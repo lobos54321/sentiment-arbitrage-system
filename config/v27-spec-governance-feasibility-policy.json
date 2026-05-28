@@ -1,0 +1,307 @@
+{
+  "contract_lifecycle": [
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "RenderedSpecViewContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "a431793b74b991592d0845cebe8d9dfe284f6c1e23d6544f06aceee38d7077c4",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "HealthStateEnumContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "811073e43578a3d47d88ae7dfc331cd6194714193d9dbff34e1cfee9be1187bd",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "ContractLifecycleContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "99041f6865d05c4ed4f810344673c2c397b16c822de7dd84353a733d557ea19b",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "ObjectivePriorityContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "afbac36bc67f14f47777930b3f6f11c8e8a27cfd76f562adc128621c9ac09724",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "GoalConfidenceContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "9af8d998baa8599272268c700f7458df664212c84acef50c92a0880286016ccb",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "FillTimeAnchorContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "b88727e632f45f1a3ff919d4db25415a5a4846ecb81765682062529e4ebfccf2",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    },
+    {
+      "allowed_modes": [
+        "normal_tiny"
+      ],
+      "backfill_required": false,
+      "contract_id": "ExAnteVsPosthocFeasibilityContract",
+      "contract_tests_status": "pass",
+      "contract_version": "v2.7.0.seed",
+      "deprecated_in_version": "none",
+      "introduced_in_version": "2.7.0",
+      "lifecycle_hash": "264318da0cf3d3f66f85d89f303864819937b59a8081bd1e2ac426f35eb13b08",
+      "metric_id": "contract_lifecycle_active_gate_coverage_rate",
+      "migration_required": false,
+      "observed_value": 1.0,
+      "owner": "system",
+      "status": "active_gate",
+      "sunset_deadline": "none",
+      "superseded_by": "none",
+      "threshold_id": "thr_contract_lifecycle_active_gate_coverage_rate_min"
+    }
+  ],
+  "ex_ante_posthoc_feasibility": [
+    {
+      "decision_ts": "2026-05-27T02:00:05Z",
+      "earliest_actionable_ts": "2026-05-27T02:00:05Z",
+      "ex_ante_feasible": true,
+      "ex_ante_source_fields": [
+        "system_min_decision_latency_sec",
+        "system_min_entry_latency_sec",
+        "current_quote_availability",
+        "current_risk_availability",
+        "current_pool_resolution",
+        "current_provider_health",
+        "current_reclaim_state",
+        "current_queue_delay"
+      ],
+      "feasibility_class": "physically_capturable",
+      "feasibility_hash": "aa28872e4256d2387806185892502839a8b1effa5005322a9518c771e84c5d19",
+      "feasibility_id": "feasibility:seed-physically-capturable",
+      "feasibility_policy_version": "v2.7.0.ex_ante_posthoc.seed",
+      "feature_available_at": "2026-05-27T02:00:04Z",
+      "metric_id": "ex_ante_feasibility_valid_rate",
+      "observed_value": 1.0,
+      "peak_ts": "2026-05-27T02:01:00Z",
+      "posthoc_feasible": true,
+      "required_inputs_available_at": {
+        "critical_risk_not_bad_available_at": "2026-05-27T02:00:04Z",
+        "decision_engine_available_at": "2026-05-27T02:00:05Z",
+        "entry_quote_executable_available_at": "2026-05-27T02:00:02Z",
+        "exit_quote_executable_available_at": "2026-05-27T02:00:03Z",
+        "liquidity_ok_available_at": "2026-05-27T02:00:04Z",
+        "pool_resolved_available_at": "2026-05-27T02:00:01Z",
+        "telegram_anchor_available_at": "2026-05-27T02:00:00Z"
+      },
+      "system_min_decision_latency_sec": 1,
+      "system_min_entry_latency_sec": 1,
+      "threshold_id": "thr_ex_ante_feasibility_valid_rate_min",
+      "used_future_peak_in_ex_ante": false
+    }
+  ],
+  "failure_action": "spec_governance_or_feasibility_blocked",
+  "fill_time_anchors": [
+    {
+      "anchor_hash": "59f18862e98fa65eb77308be3cf2090e1051c71012bdf7cde9a8c0f771e5c1a2",
+      "anchor_id": "fill-anchor:seed-simulated-fill",
+      "decision_available_at": "2026-05-27T02:00:01Z",
+      "decision_ts": "2026-05-27T02:00:00Z",
+      "entry_quote_at_decision_ts": "2026-05-27T02:00:01Z",
+      "fill_time_anchor_type": "simulated_fill_ts",
+      "latency_components": {
+        "decision_latency_ms": 1000,
+        "fill_simulation_latency_ms": 500,
+        "queue_latency_ms": 250,
+        "quote_latency_ms": 250
+      },
+      "metric_id": "fill_time_anchor_valid_rate",
+      "observed_value": 1.0,
+      "position_open_confirmed_ts": "2026-05-27T02:00:03Z",
+      "quote_ts": "2026-05-27T02:00:01Z",
+      "simulated_fill_ts": "2026-05-27T02:00:02Z",
+      "threshold_id": "thr_fill_time_anchor_valid_rate_min"
+    }
+  ],
+  "goal_confidence": [
+    {
+      "beta_posterior_lower_bound": 0.58,
+      "confidence_hash": "19b18ca1785003ff25b6f0ed9ea7ddc224e607ca8bac15d280d6107d782eb94d",
+      "denominator": 30,
+      "metric_id": "goal_confidence_lower_bound",
+      "metric_name": "goal_confidence_lower_bound",
+      "metric_version": "v2.7.0.goal_confidence.seed",
+      "min_denominator": 20,
+      "numerator": 20,
+      "observed_value": 0.58,
+      "point_estimate": 0.6666667,
+      "status": "pass",
+      "threshold_id": "thr_goal_confidence_lower_bound_min",
+      "wilson_lower_bound": 0.59,
+      "window_id": "rolling_24h_decision_available_at"
+    }
+  ],
+  "health_states": [
+    {
+      "blocking_modes": [],
+      "first_seen_at": "2026-05-27T02:00:00Z",
+      "health_component": "canonical_spec_health",
+      "health_hash": "1cf87dc7be8266824d1bc7eefd3c295f948d5924bdb270d898b0f331bdf69a44",
+      "health_state": "HEALTHY",
+      "last_seen_at": "2026-05-27T02:01:00Z",
+      "metric_id": "health_state_enum_valid_rate",
+      "observed_value": 1.0,
+      "owner": "system",
+      "recovery_condition": "rerun spec_governance_feasibility readiness after any mismatch",
+      "severity": "info",
+      "source_event_id": "event:spec-governance-health-seed",
+      "state_reason": "active spec hash, rendered view, metric and threshold registries validate together",
+      "threshold_id": "thr_health_state_enum_valid_rate_min"
+    }
+  ],
+  "objective_conflicts": [
+    {
+      "chosen_objective": "data_spec_truth",
+      "conflict_hash": "f6aaf49ea4795e3dd6c5cdbc66ac89af08dee280b146367eff601fb899010dbd",
+      "conflicting_objectives": [
+        "data_spec_truth",
+        "capture_quality",
+        "net_ev"
+      ],
+      "metric_id": "objective_priority_conflict_resolution_rate",
+      "objective_conflict_id": "conflict:data_truth_vs_capture_seed",
+      "observed_value": 1.0,
+      "operator_override_allowed": false,
+      "policy_version": "v2.7.0.objective_priority.seed",
+      "priority_rank": 4,
+      "reason": "data/spec truth blocks capture and EV promotion when evidence is stale or dirty",
+      "threshold_id": "thr_objective_priority_conflict_resolution_rate_min"
+    }
+  ],
+  "rendered_spec_views": [
+    {
+      "extra_section_ids": [],
+      "metric_id": "rendered_spec_view_valid_rate",
+      "missing_section_ids": [],
+      "observed_value": 1.0,
+      "render_validation_status": "valid",
+      "rendered_at": "2026-05-27T02:00:00Z",
+      "rendered_doc_hash": "77875f2771da4ae184624665f076f6e94a7a186b2169d09e1cbc439a11d65d20",
+      "rendered_view_id": "rendered:v2.7.0-canonical-markdown",
+      "renderer_version": "v2.7.0.render_canonical_spec.v1",
+      "section_count": 24,
+      "source_spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675",
+      "threshold_id": "thr_rendered_spec_view_valid_rate_min",
+      "view_hash": "8661445fa8f89f64268d85a8bea5885b6134e48cddf906cfaad9eb6617139ff4"
+    }
+  ],
+  "schema_version": "v2.7.0.spec_governance_feasibility_policy.v1",
+  "scope": "spec_governance_health_goal_confidence_fill_anchor_feasibility_truth",
+  "source_files": [
+    {
+      "required_patterns": [
+        "RenderedSpecViewContract",
+        "HealthStateEnumContract",
+        "ContractLifecycleContract",
+        "ObjectivePriorityContract",
+        "GoalConfidenceContract",
+        "FillTimeAnchorContract",
+        "ExAnteVsPosthocFeasibilityContract"
+      ],
+      "source_anchor": "def verify_spec_governance_feasibility_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"HealthStateEnumContract\"",
+        "\"ContractLifecycleContract\"",
+        "\"ObjectivePriorityContract\"",
+        "\"GoalConfidenceContract\"",
+        "\"FillTimeAnchorContract\"",
+        "\"ExAnteVsPosthocFeasibilityContract\""
+      ],
+      "source_anchor": "\"RenderedSpecViewContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ]
+}

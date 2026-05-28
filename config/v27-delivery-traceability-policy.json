@@ -1,0 +1,799 @@
+{
+  "dashboard_staleness_panels": [
+    {
+      "data_seq": 1200,
+      "event_log_latest_seq": 1200,
+      "last_refresh_at": "2026-05-28T00:00:00Z",
+      "max_allowed_panel_lag_sec": 60,
+      "metric_id": "dashboard_staleness_safe_rate",
+      "observed_value": 1.0,
+      "operator_override_allowed": false,
+      "panel_hash": "a3f52e307711ae0f23fb91a58d3d430ac3569ccddd4298bc74c4a934f0af5eef",
+      "panel_lag_sec": 5,
+      "panel_name": "L1 Executive",
+      "stale_banner_required": true,
+      "staleness_threshold_id": "thr_dashboard_staleness_safe_rate_min",
+      "threshold_id": "thr_dashboard_staleness_safe_rate_min"
+    },
+    {
+      "data_seq": 1200,
+      "event_log_latest_seq": 1201,
+      "last_refresh_at": "2026-05-28T00:00:00Z",
+      "max_allowed_panel_lag_sec": 60,
+      "metric_id": "dashboard_staleness_safe_rate",
+      "observed_value": 1.0,
+      "operator_override_allowed": false,
+      "panel_hash": "1bf76ef996584431303ed8a52ea9e35453fd17d554a0720796f285f3f963d91b",
+      "panel_lag_sec": 8,
+      "panel_name": "L2 No-Trade Root Cause",
+      "stale_banner_required": true,
+      "staleness_threshold_id": "thr_dashboard_staleness_safe_rate_min",
+      "threshold_id": "thr_dashboard_staleness_safe_rate_min"
+    }
+  ],
+  "decommission_policies": [
+    {
+      "allowed_historical_use": "historical_evidence_only_with_version_tag",
+      "artifact_id": "hard_gate_pass_tiny_probe",
+      "artifact_type": "route",
+      "dashboard_display_policy": "historical_only_red_badge",
+      "decommission_hash": "c967b89993f40612d067c8ee6bc63179e2ce4ef1a11ae7620becfa78ca16fbf4",
+      "decommission_reason": "direct entry route prohibited by v2.6.13 non-negotiable core",
+      "deprecated_at": "2026-05-28T00:00:00Z",
+      "direct_entry_allowed": false,
+      "metric_id": "decommission_policy_safe_rate",
+      "new_promotion_evidence_allowed": false,
+      "observed_value": 1.0,
+      "operator_audit_required": true,
+      "owner": "system",
+      "replacement_artifact_id": "clean_missed_dog_reclaim_tiny_probe",
+      "retired_at": "2026-05-28T00:00:00Z",
+      "runtime_reference_allowed": false,
+      "status": "retired",
+      "threshold_id": "thr_decommission_policy_safe_rate_min",
+      "training_reference_allowed": false
+    },
+    {
+      "allowed_historical_use": "historical_evidence_only_with_version_tag",
+      "artifact_id": "source_resonance_tiny_probe",
+      "artifact_type": "route",
+      "dashboard_display_policy": "historical_only_red_badge",
+      "decommission_hash": "c16f1064001cfb7b6df2a5122ba8f301cb26f07f5db5d4f15b75e9c8a06d7bc8",
+      "decommission_reason": "source_resonance direct entry prohibited by v2.6.13 non-negotiable core",
+      "deprecated_at": "2026-05-28T00:00:00Z",
+      "direct_entry_allowed": false,
+      "metric_id": "decommission_policy_safe_rate",
+      "new_promotion_evidence_allowed": false,
+      "observed_value": 1.0,
+      "operator_audit_required": true,
+      "owner": "system",
+      "replacement_artifact_id": "clean_dog_reclaim_ultra_tiny_exploration",
+      "retired_at": "2026-05-28T00:00:00Z",
+      "runtime_reference_allowed": false,
+      "status": "retired",
+      "threshold_id": "thr_decommission_policy_safe_rate_min",
+      "training_reference_allowed": false
+    },
+    {
+      "allowed_historical_use": "dashboard_reference_only",
+      "artifact_id": "legacy_dashboard_capture_rate_widget",
+      "artifact_type": "dashboard_panel",
+      "dashboard_display_policy": "hidden_from_release_evidence",
+      "decommission_hash": "10aa731eb95327ecada76d5fb58c979855d8c05eb7359b4c950f9ef03fce4346",
+      "decommission_reason": "legacy widget hides D0/D1/D2/D3a denominator ladder",
+      "deprecated_at": "2026-05-28T00:00:00Z",
+      "direct_entry_allowed": false,
+      "metric_id": "decommission_policy_safe_rate",
+      "new_promotion_evidence_allowed": false,
+      "observed_value": 1.0,
+      "operator_audit_required": true,
+      "owner": "system",
+      "replacement_artifact_id": "dog_goal_l1_denominator_ladder",
+      "retired_at": "open",
+      "runtime_reference_allowed": false,
+      "status": "deprecated",
+      "threshold_id": "thr_decommission_policy_safe_rate_min",
+      "training_reference_allowed": false
+    }
+  ],
+  "failure_action": "delivery_traceability_blocked",
+  "implementation_issue_graph": [
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "8892c2bd51ecaec87148f21e55c208277292eb4e85b5d66d767233faa7b99f9c",
+      "issue_id": "V27-DT-001",
+      "metric_ids": [
+        "reconciliation_policy_safe_rate"
+      ],
+      "mode_readiness_target": "shadow_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S13"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_reconciliation_policy_safe_rate_min"
+      ]
+    },
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "1339a2575c10974d03a258bb74921f6ff565aec188500f9c2f51f053b6c9e3e4",
+      "issue_id": "V27-DT-002",
+      "metric_ids": [
+        "dashboard_staleness_safe_rate"
+      ],
+      "mode_readiness_target": "shadow_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S14"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_dashboard_staleness_safe_rate_min"
+      ]
+    },
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "27403e299d59957e94acd149ba7f46d03cbd25bccf62af4b4b87994e199ed35e",
+      "issue_id": "V27-DT-003",
+      "metric_ids": [
+        "spec_traceability_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S21"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_spec_traceability_valid_rate_min"
+      ]
+    },
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "82818d98106be0a84aec9149fcdef467b136b8a04eef4eb29a9b1425f344ae8c",
+      "issue_id": "V27-DT-004",
+      "metric_ids": [
+        "implementation_issue_graph_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S21"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_implementation_issue_graph_valid_rate_min"
+      ]
+    },
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "8ea802955c5a3a956303b9c8251e765bdfd09019b93a950ed97c5075037a21c8",
+      "issue_id": "V27-DT-005",
+      "metric_ids": [
+        "module_closure_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S18"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_module_closure_valid_rate_min"
+      ]
+    },
+    {
+      "acceptance_tests": [
+        "python3 scripts/v27_basic_contract_readiness.py --strict",
+        "python3 -m pytest test_v27_basic_contract_readiness.py -q -p no:cacheprovider"
+      ],
+      "dependency_ids": [],
+      "issue_hash": "ea9678852301f83e83845fb82d950cbab0c7e7ad5a190cd964dbbdc5d0922455",
+      "issue_id": "V27-DT-006",
+      "metric_ids": [
+        "decommission_policy_safe_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "owner": "system",
+      "spec_section_ids": [
+        "S18"
+      ],
+      "status": "validated",
+      "threshold_ids": [
+        "thr_decommission_policy_safe_rate_min"
+      ]
+    }
+  ],
+  "module_closures": [
+    {
+      "contract_ids": [
+        "ReconciliationPolicyContract"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "reconciliation_blocked"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "reconciliation_blocked",
+      "metric_ids": [
+        "reconciliation_policy_safe_rate"
+      ],
+      "mode_readiness_target": "shadow_blocking",
+      "module_closure_hash": "2ec2d6c66f1f45a7181fdcf1b96b06716b89c47fde5541ed13afd7ce138279a6",
+      "module_name": "delivery_traceability_ReconciliationPolicyContract",
+      "outcome_metrics": [
+        "reconciliation_policy_safe_rate"
+      ],
+      "output_events": [
+        "ReconciliationPolicyContract_validated",
+        "reconciliation_blocked"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S13"
+      ],
+      "threshold_ids": [
+        "thr_reconciliation_policy_safe_rate_min"
+      ]
+    },
+    {
+      "contract_ids": [
+        "DashboardStalenessContract"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "dashboard_stale_no_override"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "dashboard_stale_no_override",
+      "metric_ids": [
+        "dashboard_staleness_safe_rate"
+      ],
+      "mode_readiness_target": "shadow_blocking",
+      "module_closure_hash": "9890453d455dd4432008b72285ddf622c1b255c8a2dda92d805b80af0df2727c",
+      "module_name": "delivery_traceability_DashboardStalenessContract",
+      "outcome_metrics": [
+        "dashboard_staleness_safe_rate"
+      ],
+      "output_events": [
+        "DashboardStalenessContract_validated",
+        "dashboard_stale_no_override"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S14"
+      ],
+      "threshold_ids": [
+        "thr_dashboard_staleness_safe_rate_min"
+      ]
+    },
+    {
+      "contract_ids": [
+        "SpecTraceabilityMatrix"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "release_blocked"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "release_blocked",
+      "metric_ids": [
+        "spec_traceability_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "module_closure_hash": "653d1fda06d1c826c1e2c749ed9228766cb7f39832a677a4c3f459285d570c07",
+      "module_name": "delivery_traceability_SpecTraceabilityMatrix",
+      "outcome_metrics": [
+        "spec_traceability_valid_rate"
+      ],
+      "output_events": [
+        "SpecTraceabilityMatrix_validated",
+        "release_blocked"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S21"
+      ],
+      "threshold_ids": [
+        "thr_spec_traceability_valid_rate_min"
+      ]
+    },
+    {
+      "contract_ids": [
+        "ImplementationIssueGraphContract"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "release_blocked"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "release_blocked",
+      "metric_ids": [
+        "implementation_issue_graph_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "module_closure_hash": "343dfb0968ffbd8a31ebb8d466b17724d9ea533b65b99329232e772e29d6f734",
+      "module_name": "delivery_traceability_ImplementationIssueGraphContract",
+      "outcome_metrics": [
+        "implementation_issue_graph_valid_rate"
+      ],
+      "output_events": [
+        "ImplementationIssueGraphContract_validated",
+        "release_blocked"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S21"
+      ],
+      "threshold_ids": [
+        "thr_implementation_issue_graph_valid_rate_min"
+      ]
+    },
+    {
+      "contract_ids": [
+        "ModuleClosureContract"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "real_entry_gate_blocked"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "real_entry_gate_blocked",
+      "metric_ids": [
+        "module_closure_valid_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "module_closure_hash": "f9c73ce02a566319f946de9232d6ce22ff52f92ab805af3a7df22a0b1d559090",
+      "module_name": "delivery_traceability_ModuleClosureContract",
+      "outcome_metrics": [
+        "module_closure_valid_rate"
+      ],
+      "output_events": [
+        "ModuleClosureContract_validated",
+        "real_entry_gate_blocked"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S18"
+      ],
+      "threshold_ids": [
+        "thr_module_closure_valid_rate_min"
+      ]
+    },
+    {
+      "contract_ids": [
+        "DecommissionPolicyContract"
+      ],
+      "contract_tests": [
+        {
+          "status": "pass",
+          "test_file": "test_v27_basic_contract_readiness.py"
+        }
+      ],
+      "dashboard_surface": "L8 Delivery Truth",
+      "decision_fields": [
+        "metric_id",
+        "threshold_id",
+        "runtime_config_hash",
+        "spec_hash"
+      ],
+      "failure_events": [
+        "global_circuit_breaker"
+      ],
+      "governance_rules": [
+        "no_traceability_no_gate",
+        "operator_audit_required",
+        "retired_artifact_cannot_gate_entry"
+      ],
+      "input_events": [
+        "canonical_spec_changed",
+        "policy_bundle_changed",
+        "dashboard_panel_refreshed"
+      ],
+      "kill_condition": "global_circuit_breaker",
+      "metric_ids": [
+        "decommission_policy_safe_rate"
+      ],
+      "mode_readiness_target": "normal_tiny_blocking",
+      "module_closure_hash": "92cb440d1979cf45d4cd6c352231e827c73cb528fe6963179b7e281065f97252",
+      "module_name": "delivery_traceability_DecommissionPolicyContract",
+      "outcome_metrics": [
+        "decommission_policy_safe_rate"
+      ],
+      "output_events": [
+        "DecommissionPolicyContract_validated",
+        "global_circuit_breaker"
+      ],
+      "owner": "system",
+      "runtime_config_keys": [
+        "runtime_config_hash",
+        "policy_bundle_hash",
+        "metric_registry_hash",
+        "threshold_catalog_hash"
+      ],
+      "spec_section_ids": [
+        "S18"
+      ],
+      "threshold_ids": [
+        "thr_decommission_policy_safe_rate_min"
+      ]
+    }
+  ],
+  "reconciliation_policies": [
+    {
+      "audit_required": true,
+      "auto_repair_allowed": false,
+      "dashboard_surface": "L5 Execution Truth / ledger reconciliation",
+      "manual_review_required": true,
+      "metric_id": "reconciliation_policy_safe_rate",
+      "mismatch_class": "ledger_mismatch",
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": false,
+      "reconciliation_hash": "51ae613f40cc66e81f530a847688cd6c70293699da085b5c86609aeb6e7a3512",
+      "reconciliation_policy_id": "ledger-mismatch-manual-review-v27",
+      "repair_class": "manual_review_required",
+      "threshold_id": "thr_reconciliation_policy_safe_rate_min"
+    },
+    {
+      "audit_required": true,
+      "auto_repair_allowed": true,
+      "dashboard_surface": "L3 Data Truth / projection rebuild",
+      "manual_review_required": false,
+      "metric_id": "reconciliation_policy_safe_rate",
+      "mismatch_class": "materialized_view_mismatch",
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": false,
+      "reconciliation_hash": "1db6e7f8b7e0dc25e1bb2468b46dded0d1426abcb6029d751cf5aebf2ad73eff",
+      "reconciliation_policy_id": "materialized-view-rebuild-only-v27",
+      "repair_class": "rebuild_projection_only",
+      "threshold_id": "thr_reconciliation_policy_safe_rate_min"
+    },
+    {
+      "audit_required": true,
+      "auto_repair_allowed": false,
+      "dashboard_surface": "L5 Execution Truth / quarantined paper trades",
+      "manual_review_required": true,
+      "metric_id": "reconciliation_policy_safe_rate",
+      "mismatch_class": "paper_trade_vs_ledger_mismatch",
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": false,
+      "reconciliation_hash": "7b2cd200010a1d3a6c8d374a2f9ead0a6cd7abbb6912b86c5b23d84f9878db16",
+      "reconciliation_policy_id": "paper-trade-ledger-quarantine-v27",
+      "repair_class": "quarantine_trade",
+      "threshold_id": "thr_reconciliation_policy_safe_rate_min"
+    },
+    {
+      "audit_required": true,
+      "auto_repair_allowed": false,
+      "dashboard_surface": "L8 Delivery Truth / audit integrity",
+      "manual_review_required": true,
+      "metric_id": "reconciliation_policy_safe_rate",
+      "mismatch_class": "audit_chain_hash_mismatch",
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": false,
+      "reconciliation_hash": "1f533eb5f58454adfd4ea64789e61d4d931ac1695e37758ed3af60e39b921242",
+      "reconciliation_policy_id": "audit-chain-repair-forbidden-v27",
+      "repair_class": "repair_forbidden",
+      "threshold_id": "thr_reconciliation_policy_safe_rate_min"
+    },
+    {
+      "audit_required": true,
+      "auto_repair_allowed": true,
+      "dashboard_surface": "L3 Data Truth / cache invalidation",
+      "manual_review_required": false,
+      "metric_id": "reconciliation_policy_safe_rate",
+      "mismatch_class": "dashboard_cache_stale",
+      "observed_value": 1.0,
+      "promotion_evidence_allowed": false,
+      "reconciliation_hash": "004f09f5fe635380af403c74681f88c9d6b8a964dfef85c0114e9c5f523bd2c4",
+      "reconciliation_policy_id": "dashboard-cache-auto-invalidate-v27",
+      "repair_class": "auto_repair_allowed",
+      "threshold_id": "thr_reconciliation_policy_safe_rate_min"
+    }
+  ],
+  "schema_version": "v2.7.0.delivery_traceability_policy.v1",
+  "scope": "reconciliation_dashboard_staleness_traceability_issue_graph_module_closure_decommission",
+  "source_files": [
+    {
+      "required_patterns": [
+        "ReconciliationPolicyContract",
+        "DashboardStalenessContract",
+        "SpecTraceabilityMatrix",
+        "ImplementationIssueGraphContract",
+        "ModuleClosureContract",
+        "DecommissionPolicyContract"
+      ],
+      "source_anchor": "def verify_delivery_traceability_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"DashboardStalenessContract\"",
+        "\"SpecTraceabilityMatrix\"",
+        "\"ImplementationIssueGraphContract\"",
+        "\"ModuleClosureContract\"",
+        "\"DecommissionPolicyContract\""
+      ],
+      "source_anchor": "\"ReconciliationPolicyContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ],
+  "spec_traceability_matrix": [
+    {
+      "contract_id": "ReconciliationPolicyContract",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-001",
+      "metric_ids": [
+        "reconciliation_policy_safe_rate"
+      ],
+      "owner": "system",
+      "requirement": "ReconciliationPolicyContract must be machine-checkable before shadow_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_ReconciliationPolicyContract",
+      "spec_section_id": "S13",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_reconciliation_policy_safe_rate_min"
+      ],
+      "traceability_hash": "9fc02f5665562042548acca42c083f856b7be4acdf0f81c992f42ee7d29528f9",
+      "traceability_id": "trace:ReconciliationPolicyContract"
+    },
+    {
+      "contract_id": "DashboardStalenessContract",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-002",
+      "metric_ids": [
+        "dashboard_staleness_safe_rate"
+      ],
+      "owner": "system",
+      "requirement": "DashboardStalenessContract must be machine-checkable before shadow_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_DashboardStalenessContract",
+      "spec_section_id": "S14",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_dashboard_staleness_safe_rate_min"
+      ],
+      "traceability_hash": "4840a3a272096cc29d8243085d81c8e2378eb4a469d7a98e94b0c51a3a5c7fd4",
+      "traceability_id": "trace:DashboardStalenessContract"
+    },
+    {
+      "contract_id": "SpecTraceabilityMatrix",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-003",
+      "metric_ids": [
+        "spec_traceability_valid_rate"
+      ],
+      "owner": "system",
+      "requirement": "SpecTraceabilityMatrix must be machine-checkable before normal_tiny_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_SpecTraceabilityMatrix",
+      "spec_section_id": "S21",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_spec_traceability_valid_rate_min"
+      ],
+      "traceability_hash": "fec5e2d9318a4b36748e2363927698dcd796b38677e57261979695b6427b214e",
+      "traceability_id": "trace:SpecTraceabilityMatrix"
+    },
+    {
+      "contract_id": "ImplementationIssueGraphContract",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-004",
+      "metric_ids": [
+        "implementation_issue_graph_valid_rate"
+      ],
+      "owner": "system",
+      "requirement": "ImplementationIssueGraphContract must be machine-checkable before normal_tiny_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_ImplementationIssueGraphContract",
+      "spec_section_id": "S21",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_implementation_issue_graph_valid_rate_min"
+      ],
+      "traceability_hash": "701d3038480796bfa3e5af74e7a25a24812fdd4a11a453416588893ea559007b",
+      "traceability_id": "trace:ImplementationIssueGraphContract"
+    },
+    {
+      "contract_id": "ModuleClosureContract",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-005",
+      "metric_ids": [
+        "module_closure_valid_rate"
+      ],
+      "owner": "system",
+      "requirement": "ModuleClosureContract must be machine-checkable before normal_tiny_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_ModuleClosureContract",
+      "spec_section_id": "S18",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_module_closure_valid_rate_min"
+      ],
+      "traceability_hash": "54749edba9e04eb0c1776f0b6dda883342282f0f8ad201b59ef5e96dbc307e21",
+      "traceability_id": "trace:ModuleClosureContract"
+    },
+    {
+      "contract_id": "DecommissionPolicyContract",
+      "dashboard_surface": "L8 Delivery Truth",
+      "implementation_module": "scripts/v27_basic_contract_readiness.py",
+      "issue_id": "V27-DT-006",
+      "metric_ids": [
+        "decommission_policy_safe_rate"
+      ],
+      "owner": "system",
+      "requirement": "DecommissionPolicyContract must be machine-checkable before normal_tiny_blocking can be trusted",
+      "rollout_flag": "v27_delivery_traceability_DecommissionPolicyContract",
+      "spec_section_id": "S18",
+      "status": "validated",
+      "test_file": "test_v27_basic_contract_readiness.py",
+      "threshold_ids": [
+        "thr_decommission_policy_safe_rate_min"
+      ],
+      "traceability_hash": "9d17022a9dbd9430eef1231b927b44a4695eec0a2c6e54382b821eece47b01c0",
+      "traceability_id": "trace:DecommissionPolicyContract"
+    }
+  ]
+}

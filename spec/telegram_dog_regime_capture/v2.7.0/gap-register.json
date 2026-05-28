@@ -1,12 +1,154 @@
 {
-  "gap_register_schema_version": 1,
-  "status": "machine_checkable_adversarial_gap_register",
-  "purpose": "Carry every adversarially discovered v2.6.13+ gap until it is either promoted into the contract catalog or explicitly retired with audit.",
-  "coverage_rule": "A gap may be implemented in the catalog, queued for final spec expansion, or retired only by a future audited spec change. It must not silently disappear.",
   "batches": [
     {
+      "batch_id": "v2.6.13_capacity_load_latency_truth",
+      "contract_ids": [
+        "CapacityPlanningContract",
+        "LoadTestReplayContract",
+        "LatencyAttributionContract",
+        "ProviderQuotaIsolationContract",
+        "EconomicCostBudgetContract"
+      ],
+      "theme": "Capacity plans, load replay, latency attribution, provider quota isolation, and economic budgets must prove P0/P1 and exit safety survive Telegram bursts before normal tiny."
+    },
+    {
+      "batch_id": "v2.6.13_delivery_traceability",
+      "contract_ids": [
+        "ReconciliationPolicyContract",
+        "DashboardStalenessContract",
+        "SpecTraceabilityMatrix",
+        "ImplementationIssueGraphContract",
+        "ModuleClosureContract",
+        "DecommissionPolicyContract"
+      ],
+      "theme": "Reconciliation, dashboard freshness, traceability, implementation issue graph, module closure, and decommission policy must be machine-checkable before normal tiny can be trusted."
+    },
+    {
+      "batch_id": "v2.6.13_detector_shadow_calibration",
+      "contract_ids": [
+        "ReclaimDetector",
+        "OverextensionDetector",
+        "DetectorCalibrationContract"
+      ],
+      "theme": "Reclaim and overextension detectors must exist as shadow-only calibrated evidence before they can influence entry promotion."
+    },
+    {
+      "batch_id": "v2.6.13_execution_exit_safety",
+      "contract_ids": [
+        "LifecycleStateMachineContract",
+        "ExitExecutionStateMachine",
+        "ExitPolicyContract",
+        "CircuitBreakerPositionPolicy",
+        "EmergencyExitJournal",
+        "ExitQueueHealthContract"
+      ],
+      "theme": "Lifecycle, exit execution, exit policy, circuit breaker, emergency exit journal, and exit queue health must be machine-checkable before normal tiny can be trusted."
+    },
+    {
+      "batch_id": "v2.6.13_identity_unit_provider_finality",
+      "contract_ids": [
+        "TokenIdentityContract",
+        "DataUnitContract",
+        "ChainFinalityContract",
+        "ProviderSchemaContract"
+      ],
+      "theme": "Token identity, data unit, chain finality, and provider schema truth must be machine-checkable before denominator, label, or training evidence can be trusted."
+    },
+    {
+      "batch_id": "v2.6.13_markov_lifecycle_forecast_shadow",
+      "contract_ids": [
+        "TelegramLifecycleTransitionMatrixContract",
+        "LifecycleNstepForecastContract",
+        "AbsorbingSemiMarkovForecastContract",
+        "CompetingRiskForecastContract",
+        "CensoringPolicyContract",
+        "ForecastWalkForwardValidationContract",
+        "HMMResearchOnlyBoundaryContract"
+      ],
+      "theme": "Carries the v2.6.13 Markov-regime material forward as Telegram lifecycle absorbing Semi-Markov, competing-risk, censoring, no-lookahead forecast boundaries."
+    },
+    {
+      "batch_id": "v2.6.13_metric_threshold_truth_foundation",
+      "contract_ids": [
+        "MetricDefinitionRegistry",
+        "ThresholdCatalogContract"
+      ],
+      "theme": "Metric and threshold truth sources required before any mode can trust dashboard, release, or policy evidence."
+    },
+    {
+      "batch_id": "v2.6.13_operator_alert_kill_switch_safety",
+      "contract_ids": [
+        "OperatorAudit",
+        "OperatorSafetyContract",
+        "OwnershipOnCallContract",
+        "AlertPolicy",
+        "AlertAckEscalationPolicy",
+        "KillSwitchDrillContract"
+      ],
+      "theme": "Operator safety, on-call ownership, P0/P1 alert ack escalation, append-only operator audit, and kill-switch drill proof before normal tiny."
+    },
+    {
+      "batch_id": "v2.6.13_release_experiment_safety",
+      "contract_ids": [
+        "SecretsManagementContract",
+        "SystemSLO",
+        "NoTradeRootCause",
+        "ReleaseComplexityBudget",
+        "BackpressurePolicy",
+        "BudgetReserveContract",
+        "BlindedHoldoutContract",
+        "ManualOverrideContract",
+        "ContractTestSuite",
+        "AdversarialReplaySuite"
+      ],
+      "theme": "Secrets lifecycle, system SLO, no-trade root cause, release complexity, backpressure, budget reserve, holdout blinding, manual override quarantine, contract tests, and adversarial replay must be machine-checkable before normal tiny."
+    },
+    {
+      "batch_id": "v2.6.13_replay_build_model_trust",
+      "contract_ids": [
+        "ReplayDeterminismCheck",
+        "ReproducibleBuildContract",
+        "SupplyChainSecurityContract",
+        "PolicyBundleCompatibilityContract",
+        "ModelExpiryContract",
+        "ForecastSanityGuard"
+      ],
+      "theme": "Replay determinism, reproducible build, supply-chain provenance, compatible policy bundle, model expiry, and forecast sanity must be proven before normal tiny."
+    },
+    {
+      "batch_id": "v2.6.13_runtime_environment_truth_foundation",
+      "contract_ids": [
+        "RuntimeConfigDriftContract",
+        "EnvironmentSeparationContract"
+      ],
+      "theme": "Runtime config drift and environment separation must be observe-only blockers before decisions, dashboards, backfills, or paper evidence can be trusted."
+    },
+    {
+      "batch_id": "v2.6.13_spec_governance_confidence_fill_feasibility",
+      "contract_ids": [
+        "RenderedSpecViewContract",
+        "HealthStateEnumContract",
+        "ContractLifecycleContract",
+        "ObjectivePriorityContract",
+        "GoalConfidenceContract",
+        "FillTimeAnchorContract",
+        "ExAnteVsPosthocFeasibilityContract"
+      ],
+      "theme": "Rendered spec views, health enums, contract lifecycle, objective priority, goal confidence, fill-time anchors, and ex-ante/posthoc feasibility must be machine-checkable before shadow or normal tiny evidence can be trusted."
+    },
+    {
+      "batch_id": "v2.6.13_training_truth_foundation",
+      "contract_ids": [
+        "FeatureAvailabilityContract",
+        "NullValuePolicyContract",
+        "DataLineageGraphContract",
+        "FeatureVectorSnapshotContract",
+        "TrainingDatasetManifestContract"
+      ],
+      "theme": "Feature availability, null semantics, lineage, feature vector snapshots, and training dataset manifests must be machine-checkable before model promotion or normal tiny evidence."
+    },
+    {
       "batch_id": "v2.6.14_evidence_finality_replay_safety_fleet",
-      "theme": "Evidence finality, replay safety, provider proof, ledger invariants, and fleet consistency.",
       "contract_ids": [
         "CanonicalSerializationContract",
         "NumericPrecisionContract",
@@ -58,11 +200,11 @@
         "DataExportWatermarkContract",
         "ManualReplaySafetyContract",
         "ProviderTermsComplianceContract"
-      ]
+      ],
+      "theme": "Evidence finality, replay safety, provider proof, ledger invariants, and fleet consistency."
     },
     {
       "batch_id": "v2.6.15_queue_fleet_admin_parser_training_serving",
-      "theme": "Queue durability, worker readiness, admin command safety, parser ambiguity, and training-serving skew.",
       "contract_ids": [
         "EventSchemaCompatibilityContract",
         "EnumEvolutionContract",
@@ -110,11 +252,11 @@
         "NegativeControlContract",
         "LegalHoldContract",
         "DataLicenseComplianceContract"
-      ]
+      ],
+      "theme": "Queue durability, worker readiness, admin command safety, parser ambiguity, and training-serving skew."
     },
     {
       "batch_id": "v2.6.16_bypass_static_resources_source_risk_evidence",
-      "theme": "Bypass prevention, CI/CD enforcement, resource exhaustion, source authenticity, post-entry risk, and evidence anchoring.",
       "contract_ids": [
         "SpecConsistencyLinterContract",
         "WritePathRegistryContract",
@@ -155,11 +297,11 @@
         "OperatorTrainingCertificationContract",
         "RegressionBudgetContract",
         "UnknownUnknownsSamplingContract"
-      ]
+      ],
+      "theme": "Bypass prevention, CI/CD enforcement, resource exhaustion, source authenticity, post-entry risk, and evidence anchoring."
     },
     {
       "batch_id": "v2.6.17_meta_governance_evidence_release_safety",
-      "theme": "Contract conflict resolution, evidence eligibility, complexity control, release safety, waivers, and project-level stop loss.",
       "contract_ids": [
         "ContractConflictResolutionContract",
         "ContractPriorityGraph",
@@ -201,7 +343,12 @@
         "EvidenceConflictContract",
         "SourceAlphaDecayExitCriteria",
         "ProjectStopLossContract"
-      ]
+      ],
+      "theme": "Contract conflict resolution, evidence eligibility, complexity control, release safety, waivers, and project-level stop loss."
     }
-  ]
+  ],
+  "coverage_rule": "A gap may be implemented in the catalog, queued for final spec expansion, or retired only by a future audited spec change. It must not silently disappear.",
+  "gap_register_schema_version": 1,
+  "purpose": "Carry every adversarially discovered v2.6.13+ gap until it is either promoted into the contract catalog or explicitly retired with audit.",
+  "status": "machine_checkable_adversarial_gap_register"
 }

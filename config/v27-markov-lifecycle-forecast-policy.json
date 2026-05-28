@@ -1,0 +1,189 @@
+{
+  "absorbing_state_definition": [
+    "CRASH_DEAD",
+    "PEAK30",
+    "STALE_DEAD",
+    "STOP_BEFORE_PEAK",
+    "TERMINAL_DEAD",
+    "TOXIC_DEAD"
+  ],
+  "censoring_policies": [
+    {
+      "censoring_policy_version": "v2.7.0.telegram_lifecycle_censoring.seed",
+      "censoring_reason": "unabsorbed_before_max_absorption_steps",
+      "outcome_status": "right_censored_open",
+      "training_weight_policy": "exclude_from_absorbed_label_until_finalized"
+    }
+  ],
+  "competing_risk_censoring_policy_version": "v2.7.0.telegram_lifecycle_censoring.seed",
+  "failure_action": "forecast_research_only",
+  "hmm_research_only_boundaries": [
+    {
+      "artifact_id": "hmm:telegram-lifecycle-research-seed",
+      "entry_gate_allowed": false,
+      "full_sequence_viterbi_allowed": false,
+      "online_filtering_only": true,
+      "research_only": true
+    }
+  ],
+  "sample_lifecycle_events": [
+    {
+      "decision_available_at": "2026-05-27T00:00:01Z",
+      "event_id": "winner-1",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "TELEGRAM_SEEN",
+      "monotonic_ingest_seq": 1,
+      "token_lifecycle_key": "solana:winner:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:02Z",
+      "event_id": "winner-2",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "TRADABLE_CLEAN",
+      "monotonic_ingest_seq": 2,
+      "token_lifecycle_key": "solana:winner:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:03Z",
+      "event_id": "winner-3",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "RECLAIM_CONFIRMED",
+      "monotonic_ingest_seq": 3,
+      "token_lifecycle_key": "solana:winner:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:04Z",
+      "event_id": "winner-4",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "PEAK30",
+      "monotonic_ingest_seq": 4,
+      "token_lifecycle_key": "solana:winner:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:05Z",
+      "event_id": "stopper-1",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "TELEGRAM_SEEN",
+      "monotonic_ingest_seq": 5,
+      "token_lifecycle_key": "solana:stopper:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:06Z",
+      "event_id": "stopper-2",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "TRADABLE_CLEAN",
+      "monotonic_ingest_seq": 6,
+      "token_lifecycle_key": "solana:stopper:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:07Z",
+      "event_id": "stopper-3",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "RECLAIM_CONFIRMED",
+      "monotonic_ingest_seq": 7,
+      "token_lifecycle_key": "solana:stopper:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:08Z",
+      "event_id": "stopper-4",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "STOP_BEFORE_PEAK",
+      "monotonic_ingest_seq": 8,
+      "token_lifecycle_key": "solana:stopper:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:09Z",
+      "event_id": "stale-1",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "TELEGRAM_SEEN",
+      "monotonic_ingest_seq": 9,
+      "token_lifecycle_key": "solana:stale:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:10Z",
+      "event_id": "stale-2",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "NO_QUOTE",
+      "monotonic_ingest_seq": 10,
+      "token_lifecycle_key": "solana:stale:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:11Z",
+      "event_id": "stale-3",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "STALE_DEAD",
+      "monotonic_ingest_seq": 11,
+      "token_lifecycle_key": "solana:stale:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:30Z",
+      "event_id": "future-1",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "RECLAIM_CONFIRMED",
+      "monotonic_ingest_seq": 30,
+      "token_lifecycle_key": "solana:future:pool"
+    },
+    {
+      "decision_available_at": "2026-05-27T00:00:31Z",
+      "event_id": "future-2",
+      "lifecycle_epoch": 0,
+      "lifecycle_state": "CRASH_DEAD",
+      "monotonic_ingest_seq": 31,
+      "token_lifecycle_key": "solana:future:pool"
+    }
+  ],
+  "schema_version": "v2.7.0.markov_lifecycle_forecast_policy.v1",
+  "scope": "v2.6.13_markov_lifecycle_forecast_shadow",
+  "snapshot_config": {
+    "cutoff_seq": 20,
+    "horizons": [
+      1,
+      2,
+      5
+    ],
+    "max_absorption_steps": 5,
+    "model_snapshot_id": "model:telegram-lifecycle-shadow-seed:v1",
+    "start_state": "RECLAIM_CONFIRMED"
+  },
+  "source_files": [
+    {
+      "required_patterns": [
+        "FORECAST_BOUNDARY",
+        "entry_gate_allowed",
+        "build_lifecycle_forecast_snapshot"
+      ],
+      "source_anchor": "def build_lifecycle_forecast_snapshot",
+      "source_file": "scripts/telegram_lifecycle_markov.py"
+    },
+    {
+      "required_patterns": [
+        "verify_markov_lifecycle_forecast_contracts",
+        "HMMResearchOnlyBoundaryContract",
+        "ForecastWalkForwardValidationContract"
+      ],
+      "source_anchor": "def verify_markov_lifecycle_forecast_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "test_markov_layer_is_explicitly_not_an_entry_gate",
+        "test_cutoff_seq_prevents_future_lifecycle_events_from_entering_matrix"
+      ],
+      "source_anchor": "test_markov_layer_is_explicitly_not_an_entry_gate",
+      "source_file": "test_telegram_lifecycle_markov.py"
+    }
+  ],
+  "state_duration_sec": {
+    "duration_basis": "ordered_lifecycle_step",
+    "source": "monotonic_ingest_seq_delta"
+  },
+  "walk_forward_validations": [
+    {
+      "cutoff_seq": 20,
+      "no_lookahead_proof": "matrix_build_cutoff_seq excludes lifecycle and outcome events after cutoff_seq before scoring",
+      "promotion_allowed": false,
+      "train_window_id": "event_seq_lte_20_seed",
+      "validation_id": "walk-forward:telegram-lifecycle-markov:seed"
+    }
+  ]
+}

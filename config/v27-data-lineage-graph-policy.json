@@ -1,0 +1,235 @@
+{
+  "schema_version": "v2.7.0.data_lineage_graph_policy.v1",
+  "scope": "v27_training_truth_lineage_seed",
+  "failure_action": "sample_not_eligible_for_training",
+  "lineage_nodes": [
+    {
+      "lineage_node_id": "node:raw_telegram_message:seed",
+      "node_type": "raw_telegram_message",
+      "source_id": "telegram_message_seed",
+      "source_hash": "7eaf871827c3986a44af23c0de550328d88cba4ab23e24b577905742c8998a8c",
+      "parent_node_ids": [],
+      "edge_type": "root",
+      "created_at": "2026-05-27T00:00:00Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "9f2c2b3c43ccf22f5e27cf9684fa62b6edff3cc72fc19255c717d9fdb102b022"
+    },
+    {
+      "lineage_node_id": "node:parsed_signal:seed",
+      "node_type": "parsed_signal",
+      "source_id": "parsed_signal_seed",
+      "source_hash": "0f86b492be9c05e564a40add6a2f06d06378c50ca01135d7227309166b3129ad",
+      "parent_node_ids": [
+        "node:raw_telegram_message:seed"
+      ],
+      "edge_type": "derived_from",
+      "created_at": "2026-05-27T00:00:01Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "3cd5bc75f34326c0da11c57c4548b5bfa377ea33d6e70eef7cff6dbe1d6a72e0"
+    },
+    {
+      "lineage_node_id": "node:token_identity:seed",
+      "node_type": "token_identity",
+      "source_id": "token_identity_seed",
+      "source_hash": "0cff50ab6c05407fd8cf8c6c2da8b7c361adea770ca841120f35bb0661048c92",
+      "parent_node_ids": [
+        "node:parsed_signal:seed"
+      ],
+      "edge_type": "derived_from",
+      "created_at": "2026-05-27T00:00:02Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "e8c291cd9c90905cd75dbb3c961b432e3df73b151f1bd6af4391b9819194832b"
+    },
+    {
+      "lineage_node_id": "node:quote_event:seed",
+      "node_type": "quote_event",
+      "source_id": "quote_event_seed",
+      "source_hash": "04e47742def6638e8ecb23f5865b1adeff259e4142ed1d5b61739dcc586c5b7c",
+      "parent_node_ids": [
+        "node:token_identity:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:00:03Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "666292577e94f36869100f536f9bd47c07d4a6ee2ee9c55e689861b1afac00a8"
+    },
+    {
+      "lineage_node_id": "node:feature_snapshot:seed",
+      "node_type": "feature_snapshot",
+      "source_id": "feature_snapshot_seed",
+      "source_hash": "9e574e05da6213db2fc44a4f59779df495ac9f5517cb4a3d27aeca86b153bd7d",
+      "parent_node_ids": [
+        "node:quote_event:seed"
+      ],
+      "edge_type": "derived_from",
+      "created_at": "2026-05-27T00:00:04Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "cb4dd0383521aea15446f399ba7a447611adc6249c8cdc9dd506ae14eacf6645"
+    },
+    {
+      "lineage_node_id": "node:feature_vector:seed",
+      "node_type": "feature_vector",
+      "source_id": "feature_vector_seed",
+      "source_hash": "8fe58174e47f0490c2cbb506a5bfdc37eaa5fdeb60b94985a3b94c1515b96303",
+      "parent_node_ids": [
+        "node:feature_snapshot:seed"
+      ],
+      "edge_type": "derived_from",
+      "created_at": "2026-05-27T00:00:05Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "faf332932c6a23eb95d8d6f00b648e943e90241e08daec49fd70f93e07b180b3"
+    },
+    {
+      "lineage_node_id": "node:forecast:seed",
+      "node_type": "forecast",
+      "source_id": "forecast_seed",
+      "source_hash": "1dcd1e4b45c22e907733181b6599cce89fdd9c8ea543a20aecbe325d2bbe46b3",
+      "parent_node_ids": [
+        "node:feature_vector:seed"
+      ],
+      "edge_type": "used_by",
+      "created_at": "2026-05-27T00:00:06Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "4e7f98d76a47f440e8a6e176b4ed20ea1b1fe6ac9589b84f77995cabb7d546c0"
+    },
+    {
+      "lineage_node_id": "node:decision:seed",
+      "node_type": "decision",
+      "source_id": "decision_seed",
+      "source_hash": "027911bbeaa51a618846e6f58263f9a8eb1f5672be764a67a4b9e52d2f48877f",
+      "parent_node_ids": [
+        "node:forecast:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:00:07Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "12bd5d4069a2494e18f89a336de4cbf29f7dd48f303e5c6485a2576d495fbb65"
+    },
+    {
+      "lineage_node_id": "node:execution_event:seed",
+      "node_type": "execution_event",
+      "source_id": "execution_event_seed",
+      "source_hash": "f54d46bdfe30d6e850466efc833bc4b66eac401452e91cda37330f9b51f4233a",
+      "parent_node_ids": [
+        "node:decision:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:00:08Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "69e8c5cafc9c51d6b092fa4f2dff03bfbe347d465aa7c9eb03b2743b0e583251"
+    },
+    {
+      "lineage_node_id": "node:ledger_event:seed",
+      "node_type": "ledger_event",
+      "source_id": "ledger_event_seed",
+      "source_hash": "a4f8bf916c75e12fa21b736849a6792335f77d1e1dfad81ad173b99d8571f7d1",
+      "parent_node_ids": [
+        "node:execution_event:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:00:09Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "c167360b9b8e892722c8b23a927ae101998cace92a9df364c72b73192f49285c"
+    },
+    {
+      "lineage_node_id": "node:outcome_label:seed",
+      "node_type": "outcome_label",
+      "source_id": "outcome_label_seed",
+      "source_hash": "14b41bb28480ce8b3b170c636ba3241d7d1e1408eecbcdc768a5f0df624b3fd8",
+      "parent_node_ids": [
+        "node:ledger_event:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:05:00Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "bebb299a06dd872d1e4358dbbed6cc644dbe6f33924fe6efc0c2f48c590152c6"
+    },
+    {
+      "lineage_node_id": "node:metric_value:seed",
+      "node_type": "metric_value",
+      "source_id": "metric_value_seed",
+      "source_hash": "dd461a87753af71e385793c51a14f774e9148f730db6681364efdbe55fcb2710",
+      "parent_node_ids": [
+        "node:outcome_label:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:05:01Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "569eabfb40f8dbd281df8f8b7feaf79861c9698602af77ff7ad0ea84fa27dde5"
+    },
+    {
+      "lineage_node_id": "node:dashboard_panel:seed",
+      "node_type": "dashboard_panel",
+      "source_id": "dashboard_panel_seed",
+      "source_hash": "9509de64a22cb7fe70e515f08df774f8fc71275302b2a6455a33fb87b6eacb61",
+      "parent_node_ids": [
+        "node:metric_value:seed"
+      ],
+      "edge_type": "used_by",
+      "created_at": "2026-05-27T00:05:02Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "db9b18e064ce2e74592440b718e9543dd1f8547b218458874fd9533055b2efb6"
+    },
+    {
+      "lineage_node_id": "node:training_dataset_manifest:seed",
+      "node_type": "training_dataset_manifest",
+      "source_id": "training_dataset_manifest_seed",
+      "source_hash": "efe6dea29f3d7eb39c84dd6fea37a17b229bab3587508dcc5c4601cc5b585f5b",
+      "parent_node_ids": [
+        "node:feature_vector:seed",
+        "node:outcome_label:seed"
+      ],
+      "edge_type": "generated",
+      "created_at": "2026-05-27T00:06:00Z",
+      "environment_id": "local_dev",
+      "spec_hash": "4949e970e5e6e90572975e6056fdbc098b5ba02024038c42f45300a1d17e92a2",
+      "build_hash": "seed_build_hash",
+      "lineage_hash": "05d114e3dfe2013ff8122e3dbb5452b82a8134304ca6fa688119e5fdd9d081db"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_data_lineage_graph_contract",
+      "required_patterns": [
+        "DataLineageGraphContract",
+        "lineage_hash_mismatch",
+        "data_lineage_graph_missing_malformed_or_broken"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"DataLineageGraphContract\"",
+      "required_patterns": [
+        "\"shadow\"",
+        "\"DataLineageGraphContract\""
+      ]
+    }
+  ]
+}

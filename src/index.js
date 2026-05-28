@@ -272,6 +272,10 @@ function startShadowDataSidecars(config) {
         SENTIMENT_DB: signalDb,
         DB_PATH: signalDb,
         PAPER_FAST_ENTRY_ENABLED: process.env.PAPER_FAST_ENTRY_ENABLED || 'true',
+        V27_READ_MODEL_DIR: process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
+        V27_MODE_READINESS_PATH: process.env.V27_MODE_READINESS_PATH || './data/v27_read_models/mode_readiness.json',
+        V27_RUNTIME_MODE_GATE_ENABLED: process.env.V27_RUNTIME_MODE_GATE_ENABLED || 'true',
+        V27_FAST_LANE_RUNTIME_MODE_GATE_MIN_MODE: process.env.V27_FAST_LANE_RUNTIME_MODE_GATE_MIN_MODE || 'ultra_tiny',
       },
     }));
   }

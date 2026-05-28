@@ -1,0 +1,60 @@
+{
+  "failure_action": "model_promotion_blocked",
+  "schema_version": "v2.7.0.training_dataset_manifest_policy.v1",
+  "scope": "v27_training_truth_dataset_manifest_seed",
+  "source_files": [
+    {
+      "required_patterns": [
+        "TrainingDatasetManifestContract",
+        "manifest_hash_mismatch",
+        "training_dataset_manifest_missing_malformed_or_unlinked"
+      ],
+      "source_anchor": "def verify_training_dataset_manifest_contract",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"normal_tiny\"",
+        "\"TrainingDatasetManifestContract\""
+      ],
+      "source_anchor": "\"TrainingDatasetManifestContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ],
+  "training_dataset_manifests": [
+    {
+      "build_hash": "seed_build_hash",
+      "created_at": "2026-05-27T00:06:00Z",
+      "dataset_id": "dataset:telegram_not_ath_reclaim_seed",
+      "event_log_hash_range": {
+        "from_event_log_hash": "seed_event_log_hash_start",
+        "to_event_log_hash": "seed_event_log_hash_end"
+      },
+      "excluded_sample_ids": [
+        "sample:manual_override_quarantined_seed_001"
+      ],
+      "exclusion_reasons": {
+        "sample:manual_override_quarantined_seed_001": "manual_override_quarantined"
+      },
+      "feature_versions": {
+        "feature_vector_schema": "v2.7.0.telegram_not_ath_reclaim_seed",
+        "null_value_policy": "v2.7.0.seed"
+      },
+      "included_sample_ids": [
+        "sample:telegram_not_ath_reclaim_seed_001"
+      ],
+      "label_versions": {
+        "source_dog_label": "v2.7.0.seed",
+        "trade_outcome_label": "v2.7.0.seed"
+      },
+      "manifest_hash": "3e8f5083f1f29dd2560e93ad111cbead7a4157fa8b8aff3117a8aa50c1d00e99",
+      "metric_registry_hash": "c3e39b030787aa5d54b309abf3646865988f6c612bd3cfc30b6abd7e047c4b05",
+      "observation_weights": {
+        "sample:telegram_not_ath_reclaim_seed_001": 1.0
+      },
+      "observation_weights_hash": "d5d1cff7cf8c12d7c1d57aa8bf570279379be65a85caddc5c88a121e7f15a380",
+      "spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675",
+      "threshold_catalog_hash": "0f5a4de3fd712d17ac8c70adec5573514e8d56c99afbf0a59d46f06d549f91f3"
+    }
+  ]
+}

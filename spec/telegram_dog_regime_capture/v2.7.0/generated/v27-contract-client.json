@@ -1,7 +1,7 @@
 {
   "checked_at": "2026-05-26T00:00:00Z",
   "client_name": "v27_contract_catalog_client",
-  "contract_count": 213,
+  "contract_count": 282,
   "contracts": [
     {
       "contract_id": "APIResponseContract",
@@ -28,6 +28,19 @@
         "generated_at"
       ],
       "section_id": "S14"
+    },
+    {
+      "contract_id": "AbsorbingSemiMarkovForecastContract",
+      "failure_action": "forecast_research_only",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "model_snapshot_id",
+        "absorbing_state_definition",
+        "state_duration_sec",
+        "absorption_probabilities",
+        "expected_time_to_absorption"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "AccessControlContract",
@@ -82,6 +95,19 @@
       "section_id": "S12"
     },
     {
+      "contract_id": "AdversarialReplaySuite",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "replay_id",
+        "scenario",
+        "expected_action",
+        "observed_action",
+        "machine_checked"
+      ],
+      "section_id": "S22"
+    },
+    {
       "contract_id": "AggregateBoundaryContract",
       "failure_action": "event_log_unhealthy",
       "mode_target": "mvp_blocking",
@@ -94,6 +120,19 @@
       "section_id": "S06"
     },
     {
+      "contract_id": "AlertAckEscalationPolicy",
+      "failure_action": "readiness_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "alert_id",
+        "severity",
+        "ack_required_by",
+        "acked_at",
+        "escalation_target"
+      ],
+      "section_id": "S14"
+    },
+    {
       "contract_id": "AlertNoiseBudgetContract",
       "failure_action": "alert_route_degraded",
       "mode_target": "normal_tiny_blocking",
@@ -103,6 +142,19 @@
         "noise_budget",
         "suppression_count",
         "owner"
+      ],
+      "section_id": "S14"
+    },
+    {
+      "contract_id": "AlertPolicy",
+      "failure_action": "alert_policy_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "alert_id",
+        "severity",
+        "trigger_condition",
+        "auto_action",
+        "owner_component"
       ],
       "section_id": "S14"
     },
@@ -198,6 +250,19 @@
       "section_id": "S11"
     },
     {
+      "contract_id": "BackpressurePolicy",
+      "failure_action": "capacity_backpressure_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "component",
+        "queue_depth",
+        "max_queue_depth",
+        "drops_p0_p1_allowed",
+        "exit_safety_priority"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "BackupRestoreDrillContract",
       "failure_action": "no_normal_tiny",
       "mode_target": "normal_tiny_blocking",
@@ -211,6 +276,19 @@
       "section_id": "S13"
     },
     {
+      "contract_id": "BlindedHoldoutContract",
+      "failure_action": "experiment_invalid",
+      "mode_target": "normal_tiny_promotion_blocking",
+      "required_fields": [
+        "holdout_id",
+        "window_id",
+        "blinded",
+        "access_count",
+        "no_retune_enforced"
+      ],
+      "section_id": "S10"
+    },
+    {
       "contract_id": "BreakGlassAccessContract",
       "failure_action": "break_glass_rejected",
       "mode_target": "normal_tiny_blocking",
@@ -222,6 +300,19 @@
         "audit_event_id"
       ],
       "section_id": "S15"
+    },
+    {
+      "contract_id": "BudgetReserveContract",
+      "failure_action": "budget_reserve_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "reserve_id",
+        "budget_pool",
+        "reserved_for",
+        "hard_limit",
+        "priority_class"
+      ],
+      "section_id": "S11"
     },
     {
       "contract_id": "CICDMergeGateContract",
@@ -312,6 +403,19 @@
       "section_id": "S01"
     },
     {
+      "contract_id": "CapacityPlanningContract",
+      "failure_action": "capacity_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "capacity_plan_id",
+        "component",
+        "expected_peak_qps",
+        "measured_peak_qps",
+        "headroom_pct"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "CapitalReservationPolicy",
       "failure_action": "no_new_entry",
       "mode_target": "ultra_tiny_blocking",
@@ -323,6 +427,18 @@
         "release_reason"
       ],
       "section_id": "S13"
+    },
+    {
+      "contract_id": "CensoringPolicyContract",
+      "failure_action": "forecast_research_only",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "censoring_policy_version",
+        "outcome_status",
+        "censoring_reason",
+        "training_weight_policy"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "ChainConfigContract",
@@ -338,6 +454,19 @@
       "section_id": "S05"
     },
     {
+      "contract_id": "ChainFinalityContract",
+      "failure_action": "shadow_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "chain",
+        "slot",
+        "commitment_level",
+        "rpc_consistency_check",
+        "chain_reorg_detected"
+      ],
+      "section_id": "S08"
+    },
+    {
       "contract_id": "ChangeFreezeContract",
       "failure_action": "change_rejected",
       "mode_target": "normal_tiny_blocking",
@@ -349,6 +478,18 @@
         "exception_policy"
       ],
       "section_id": "S16"
+    },
+    {
+      "contract_id": "CircuitBreakerPositionPolicy",
+      "failure_action": "global_circuit_breaker",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "trigger_events",
+        "new_entry_disabled",
+        "exit_safety_remains_active",
+        "open_position_policy"
+      ],
+      "section_id": "S11"
     },
     {
       "contract_id": "CircuitBreakerResumeContract",
@@ -414,6 +555,18 @@
         "action"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "CompetingRiskForecastContract",
+      "failure_action": "forecast_research_only",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "model_snapshot_id",
+        "p_absorb_peak30",
+        "p_absorb_stop_before_peak",
+        "censoring_policy_version"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "ComplexityBudgetContract",
@@ -505,6 +658,19 @@
       "section_id": "S18"
     },
     {
+      "contract_id": "ContractLifecycleContract",
+      "failure_action": "shadow_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "contract_id",
+        "contract_version",
+        "status",
+        "allowed_modes",
+        "contract_tests_status"
+      ],
+      "section_id": "S04"
+    },
+    {
       "contract_id": "ContractPriorityGraph",
       "failure_action": "contract_priority_invalid",
       "mode_target": "normal_tiny_governance",
@@ -516,6 +682,19 @@
         "resolved_at"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "ContractTestSuite",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "suite_id",
+        "contract_id",
+        "test_command",
+        "pass_fail",
+        "coverage_class"
+      ],
+      "section_id": "S22"
     },
     {
       "contract_id": "CounterfactualEntryTime",
@@ -593,6 +772,18 @@
       "section_id": "S14"
     },
     {
+      "contract_id": "DashboardStalenessContract",
+      "failure_action": "dashboard_stale_no_override",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "panel_name",
+        "panel_lag_sec",
+        "stale_banner_required",
+        "operator_override_allowed"
+      ],
+      "section_id": "S14"
+    },
+    {
       "contract_id": "DashboardTriageWorkflowContract",
       "failure_action": "triage_required",
       "mode_target": "normal_tiny_governance",
@@ -658,6 +849,32 @@
       "section_id": "S17"
     },
     {
+      "contract_id": "DataLineageGraphContract",
+      "failure_action": "sample_not_eligible_for_training",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "lineage_node_id",
+        "node_type",
+        "parent_node_ids",
+        "edge_type",
+        "source_hash"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "DataUnitContract",
+      "failure_action": "shadow_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "token_decimals",
+        "quote_decimals",
+        "price_unit",
+        "normalized_price",
+        "unit_validation_status"
+      ],
+      "section_id": "S05"
+    },
+    {
       "contract_id": "DatabaseTransactionIsolationContract",
       "failure_action": "storage_degraded",
       "mode_target": "mvp_blocking",
@@ -709,6 +926,19 @@
       "section_id": "S06"
     },
     {
+      "contract_id": "DecommissionPolicyContract",
+      "failure_action": "global_circuit_breaker",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "artifact_id",
+        "artifact_type",
+        "status",
+        "runtime_reference_allowed",
+        "operator_audit_required"
+      ],
+      "section_id": "S18"
+    },
+    {
       "contract_id": "DenominatorDedupContract",
       "failure_action": "denominator_dirty",
       "mode_target": "shadow_blocking",
@@ -731,6 +961,19 @@
         "canary_status"
       ],
       "section_id": "S16"
+    },
+    {
+      "contract_id": "DetectorCalibrationContract",
+      "failure_action": "no_model_promotion",
+      "mode_target": "normal_tiny_promotion_blocking",
+      "required_fields": [
+        "calibration_id",
+        "detector_id",
+        "metric_id",
+        "threshold_id",
+        "sample_n"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "DirectDatabaseMutationBan",
@@ -795,6 +1038,31 @@
       "section_id": "S09"
     },
     {
+      "contract_id": "EconomicCostBudgetContract",
+      "failure_action": "degrade_low_priority",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "budget_id",
+        "budget_pool",
+        "soft_limit",
+        "hard_limit",
+        "current_usage"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "EmergencyExitJournal",
+      "failure_action": "exit_evidence_quarantined",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "journal_event_id",
+        "position_id",
+        "reconciled_to_ledger",
+        "journal_append_only"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "EntryExecutionStateMachine",
       "failure_action": "abort_execution",
       "mode_target": "ultra_tiny_blocking",
@@ -830,6 +1098,24 @@
         "migration_action"
       ],
       "section_id": "S06"
+    },
+    {
+      "contract_id": "EnvironmentSeparationContract",
+      "failure_action": "environment_contamination",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "environment_id",
+        "environment_type",
+        "allowed_event_logs",
+        "allowed_databases",
+        "allowed_provider_keys",
+        "allowed_routes",
+        "allowed_modes",
+        "write_permissions",
+        "read_permissions",
+        "environment_hash"
+      ],
+      "section_id": "S03"
     },
     {
       "contract_id": "ErrorTaxonomyContract",
@@ -946,6 +1232,18 @@
       "section_id": "S09"
     },
     {
+      "contract_id": "ExAnteVsPosthocFeasibilityContract",
+      "failure_action": "sample_excluded",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "ex_ante_feasible",
+        "posthoc_feasible",
+        "feasibility_class",
+        "used_future_peak_in_ex_ante"
+      ],
+      "section_id": "S07"
+    },
+    {
       "contract_id": "ExceptionDebtRegister",
       "failure_action": "exception_debt_review_required",
       "mode_target": "normal_tiny_governance",
@@ -972,6 +1270,30 @@
       "section_id": "S12"
     },
     {
+      "contract_id": "ExitExecutionStateMachine",
+      "failure_action": "exit_safety_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "states",
+        "allowed_transitions",
+        "exit_quote_required",
+        "state_revalidation_required"
+      ],
+      "section_id": "S11"
+    },
+    {
+      "contract_id": "ExitPolicyContract",
+      "failure_action": "exit_policy_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "exit_policy_version",
+        "take_profit_rules",
+        "stop_loss_rules",
+        "time_stop_rules"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "ExitPolicyMigrationContract",
       "failure_action": "exit_policy_migration_blocked",
       "mode_target": "normal_tiny_blocking",
@@ -983,6 +1305,18 @@
         "migrated_at"
       ],
       "section_id": "S12"
+    },
+    {
+      "contract_id": "ExitQueueHealthContract",
+      "failure_action": "no_normal_tiny",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "exit_queue_status",
+        "stuck_open_position_count",
+        "exit_quote_failure_count",
+        "exit_safety_budget_reserved"
+      ],
+      "section_id": "S11"
     },
     {
       "contract_id": "ExperimentAssignmentImmutabilityContract",
@@ -1036,6 +1370,19 @@
       "section_id": "S18"
     },
     {
+      "contract_id": "FeatureAvailabilityContract",
+      "failure_action": "feature_leakage_detected",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "feature_window_end",
+        "feature_available_at",
+        "decision_available_at",
+        "label_available_at",
+        "null_policy_field"
+      ],
+      "section_id": "S07"
+    },
+    {
       "contract_id": "FeatureFlagDependencyContract",
       "failure_action": "feature_flag_blocked",
       "mode_target": "mvp_blocking",
@@ -1058,6 +1405,19 @@
         "online_hash",
         "normalization_version",
         "checked_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "FeatureVectorSnapshotContract",
+      "failure_action": "replay_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "feature_vector_hash",
+        "feature_names_ordered",
+        "feature_values_serialized",
+        "missing_value_policy",
+        "model_input_schema_version"
       ],
       "section_id": "S07"
     },
@@ -1100,6 +1460,42 @@
       "section_id": "S17"
     },
     {
+      "contract_id": "FillTimeAnchorContract",
+      "failure_action": "trade_outcome_invalid",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "decision_ts",
+        "decision_available_at",
+        "simulated_fill_ts",
+        "position_open_confirmed_ts"
+      ],
+      "section_id": "S06"
+    },
+    {
+      "contract_id": "ForecastSanityGuard",
+      "failure_action": "global_circuit_breaker",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "raw_forecast",
+        "sanitized_forecast",
+        "sanity_cap_reason",
+        "feature_vector_hash"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "ForecastWalkForwardValidationContract",
+      "failure_action": "no_model_promotion",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "validation_id",
+        "cutoff_seq",
+        "train_window_id",
+        "no_lookahead_proof"
+      ],
+      "section_id": "S09"
+    },
+    {
       "contract_id": "GateRetirementPolicy",
       "failure_action": "gate_retirement_rejected",
       "mode_target": "normal_tiny_governance",
@@ -1126,6 +1522,19 @@
       "section_id": "S16"
     },
     {
+      "contract_id": "GoalConfidenceContract",
+      "failure_action": "promotion_inconclusive",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "metric_id",
+        "numerator",
+        "denominator",
+        "wilson_lower_bound",
+        "beta_posterior_lower_bound"
+      ],
+      "section_id": "S02"
+    },
+    {
       "contract_id": "GracefulDegradationBoundary",
       "failure_action": "degrade_fail_closed",
       "mode_target": "normal_tiny_governance",
@@ -1137,6 +1546,30 @@
         "operator_message"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "HMMResearchOnlyBoundaryContract",
+      "failure_action": "no_entry_gate",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "artifact_id",
+        "research_only",
+        "online_filtering_only",
+        "full_sequence_viterbi_allowed"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "HealthStateEnumContract",
+      "failure_action": "health_state_invalid",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "health_component",
+        "health_state",
+        "blocking_modes",
+        "recovery_condition"
+      ],
+      "section_id": "S04"
     },
     {
       "contract_id": "HumanReadableReasonContract",
@@ -1214,6 +1647,19 @@
         "detected_at"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "ImplementationIssueGraphContract",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "issue_id",
+        "spec_section_ids",
+        "dependency_ids",
+        "acceptance_tests",
+        "status"
+      ],
+      "section_id": "S21"
     },
     {
       "contract_id": "InFlightConfigRotationPolicy",
@@ -1294,6 +1740,19 @@
       "section_id": "S14"
     },
     {
+      "contract_id": "KillSwitchDrillContract",
+      "failure_action": "normal_tiny_disabled",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "drill_id",
+        "kill_switch_type",
+        "new_entry_blocked",
+        "exit_safety_preserved",
+        "pass_fail"
+      ],
+      "section_id": "S15"
+    },
+    {
       "contract_id": "LabelDisputeResolutionContract",
       "failure_action": "label_quarantined",
       "mode_target": "normal_tiny_blocking",
@@ -1316,6 +1775,19 @@
         "supersedes_label_id"
       ],
       "section_id": "S07"
+    },
+    {
+      "contract_id": "LatencyAttributionContract",
+      "failure_action": "missed_analysis_invalid",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "token_lifecycle_key",
+        "latency_class",
+        "latency_ms",
+        "blocking_component",
+        "owner"
+      ],
+      "section_id": "S11"
     },
     {
       "contract_id": "LedgerSnapshotHashContract",
@@ -1344,6 +1816,44 @@
       "section_id": "S17"
     },
     {
+      "contract_id": "LifecycleNstepForecastContract",
+      "failure_action": "forecast_research_only",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "model_snapshot_id",
+        "forecast_horizon_steps",
+        "start_state",
+        "n_step_distribution",
+        "matrix_build_cutoff_seq"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "LifecycleStateMachineContract",
+      "failure_action": "shadow_only",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "states",
+        "allowed_transitions",
+        "state_version_fencing_required",
+        "invalid_transition_action"
+      ],
+      "section_id": "S10"
+    },
+    {
+      "contract_id": "LoadTestReplayContract",
+      "failure_action": "capacity_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "load_test_id",
+        "event_log_hash",
+        "replay_speed_multiplier",
+        "expected_invariants",
+        "pass_fail"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "LogRedactionVerificationContract",
       "failure_action": "log_stream_blocked",
       "mode_target": "mvp_blocking",
@@ -1368,6 +1878,19 @@
         "failure_action"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "ManualOverrideContract",
+      "failure_action": "manual_override_quarantined",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "override_id",
+        "operator_id",
+        "quarantine_required",
+        "promotion_evidence_allowed",
+        "training_allowed"
+      ],
+      "section_id": "S10"
     },
     {
       "contract_id": "ManualReplaySafetyContract",
@@ -1404,6 +1927,23 @@
         "metric_id",
         "impact_scope",
         "impact_report_hash"
+      ],
+      "section_id": "S02"
+    },
+    {
+      "contract_id": "MetricDefinitionRegistry",
+      "failure_action": "metric_invalid",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "metric_id",
+        "metric_name",
+        "formula",
+        "numerator_definition",
+        "denominator_definition",
+        "window_id",
+        "event_time_basis",
+        "metric_version",
+        "metric_hash"
       ],
       "section_id": "S02"
     },
@@ -1458,6 +1998,18 @@
       "section_id": "S09"
     },
     {
+      "contract_id": "ModelExpiryContract",
+      "failure_action": "shadow_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "model_snapshot_id",
+        "trained_until",
+        "expiry_ts",
+        "expired_action_cap"
+      ],
+      "section_id": "S09"
+    },
+    {
       "contract_id": "ModelRollbackContract",
       "failure_action": "shadow_only",
       "mode_target": "normal_tiny_blocking",
@@ -1468,6 +2020,19 @@
         "rollback_verified_at"
       ],
       "section_id": "S16"
+    },
+    {
+      "contract_id": "ModuleClosureContract",
+      "failure_action": "real_entry_gate_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "module_name",
+        "input_events",
+        "output_events",
+        "contract_tests",
+        "kill_condition"
+      ],
+      "section_id": "S18"
     },
     {
       "contract_id": "MutationCommandIdempotencyContract",
@@ -1508,6 +2073,19 @@
       "section_id": "S12"
     },
     {
+      "contract_id": "NoTradeRootCause",
+      "failure_action": "no_trade_unknown",
+      "mode_target": "ultra_tiny_blocking",
+      "required_fields": [
+        "root_cause_id",
+        "root_cause_code",
+        "d3a_candidate_count",
+        "fill_count",
+        "remediation_action"
+      ],
+      "section_id": "S20"
+    },
+    {
       "contract_id": "NotificationChannelIntegrityContract",
       "failure_action": "notification_blocked",
       "mode_target": "normal_tiny_blocking",
@@ -1521,6 +2099,19 @@
       "section_id": "S14"
     },
     {
+      "contract_id": "NullValuePolicyContract",
+      "failure_action": "feature_invalid_or_shadow_only",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "field_name",
+        "null_class",
+        "allowed_in_modes",
+        "default_value_allowed",
+        "imputation_policy"
+      ],
+      "section_id": "S07"
+    },
+    {
       "contract_id": "NumericPrecisionContract",
       "failure_action": "spec_dirty",
       "mode_target": "all_modes",
@@ -1531,6 +2122,18 @@
         "unit"
       ],
       "section_id": "S01"
+    },
+    {
+      "contract_id": "ObjectivePriorityContract",
+      "failure_action": "shadow_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "objective_conflict_id",
+        "conflicting_objectives",
+        "chosen_objective",
+        "reason"
+      ],
+      "section_id": "S04"
     },
     {
       "contract_id": "ObservationPolicyContract",
@@ -1571,6 +2174,20 @@
       "section_id": "S13"
     },
     {
+      "contract_id": "OperatorAudit",
+      "failure_action": "operator_action_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "operator_id",
+        "action",
+        "before_value",
+        "after_value",
+        "reason",
+        "approval_status"
+      ],
+      "section_id": "S15"
+    },
+    {
       "contract_id": "OperatorCognitiveLoadContract",
       "failure_action": "operator_load_degraded",
       "mode_target": "normal_tiny_governance",
@@ -1582,6 +2199,19 @@
         "action"
       ],
       "section_id": "S18"
+    },
+    {
+      "contract_id": "OperatorSafetyContract",
+      "failure_action": "operator_action_rejected",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "operator_id",
+        "action",
+        "danger_level",
+        "dashboard_freshness_ok",
+        "operator_safety_status"
+      ],
+      "section_id": "S15"
     },
     {
       "contract_id": "OperatorTrainingCertificationContract",
@@ -1607,6 +2237,32 @@
         "window_closed_at"
       ],
       "section_id": "S07"
+    },
+    {
+      "contract_id": "OverextensionDetector",
+      "failure_action": "cannot_be_normal_tiny_gate",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "detector_id",
+        "detector_version",
+        "detector_output_states",
+        "threshold_ids",
+        "feature_available_at_required"
+      ],
+      "section_id": "S09"
+    },
+    {
+      "contract_id": "OwnershipOnCallContract",
+      "failure_action": "readiness_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "component",
+        "owner",
+        "oncall_primary",
+        "oncall_secondary",
+        "runbook_url"
+      ],
+      "section_id": "S15"
     },
     {
       "contract_id": "PaperCapitalLedgerContract",
@@ -1721,6 +2377,19 @@
         "activated_at"
       ],
       "section_id": "S16"
+    },
+    {
+      "contract_id": "PolicyBundleCompatibilityContract",
+      "failure_action": "shadow_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "policy_bundle_id",
+        "model_snapshot_id",
+        "feature_schema_version",
+        "threshold_version",
+        "metric_registry_version"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "PositionOwnershipTransferContract",
@@ -1871,6 +2540,19 @@
       "section_id": "S08"
     },
     {
+      "contract_id": "ProviderQuotaIsolationContract",
+      "failure_action": "provider_degraded",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "provider",
+        "budget_pool",
+        "priority_order",
+        "quota_limit_per_min",
+        "exit_safety_reserved_pct"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "ProviderRequestReplayContract",
       "failure_action": "replay_incomplete",
       "mode_target": "normal_tiny_blocking",
@@ -1893,6 +2575,19 @@
         "signature_status",
         "transport_security",
         "verified_at"
+      ],
+      "section_id": "S08"
+    },
+    {
+      "contract_id": "ProviderSchemaContract",
+      "failure_action": "provider_degraded",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "provider_name",
+        "schema_version",
+        "required_fields",
+        "canary_parse_result",
+        "schema_drift_detected"
       ],
       "section_id": "S08"
     },
@@ -2003,6 +2698,19 @@
       "section_id": "S09"
     },
     {
+      "contract_id": "ReclaimDetector",
+      "failure_action": "cannot_be_normal_tiny_gate",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "detector_id",
+        "detector_version",
+        "detector_output_states",
+        "threshold_ids",
+        "feature_available_at_required"
+      ],
+      "section_id": "S09"
+    },
+    {
       "contract_id": "ReconciliationDiffContract",
       "failure_action": "repair_audit_missing",
       "mode_target": "mvp_blocking",
@@ -2011,6 +2719,18 @@
         "before_hash",
         "after_hash",
         "impact_scope"
+      ],
+      "section_id": "S13"
+    },
+    {
+      "contract_id": "ReconciliationPolicyContract",
+      "failure_action": "reconciliation_blocked",
+      "mode_target": "shadow_blocking",
+      "required_fields": [
+        "mismatch_class",
+        "repair_class",
+        "audit_required",
+        "promotion_evidence_allowed"
       ],
       "section_id": "S13"
     },
@@ -2040,6 +2760,18 @@
       "section_id": "S18"
     },
     {
+      "contract_id": "ReleaseComplexityBudget",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "release_id",
+        "max_new_gates_per_release",
+        "new_gates",
+        "required_shadow_hours_before_gate"
+      ],
+      "section_id": "S18"
+    },
+    {
       "contract_id": "ReleaseReadinessReviewContract",
       "failure_action": "release_blocked",
       "mode_target": "normal_tiny_blocking",
@@ -2053,6 +2785,31 @@
       "section_id": "S16"
     },
     {
+      "contract_id": "RenderedSpecViewContract",
+      "failure_action": "normal_tiny_disabled",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "source_spec_hash",
+        "rendered_doc_hash",
+        "render_validation_status",
+        "section_count"
+      ],
+      "section_id": "S00"
+    },
+    {
+      "contract_id": "ReplayDeterminismCheck",
+      "failure_action": "training_and_promotion_disabled",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "event_log_hash",
+        "policy_manifest_hash",
+        "decision_hash",
+        "forecast_hash",
+        "ledger_hash"
+      ],
+      "section_id": "S09"
+    },
+    {
       "contract_id": "ReplaySideEffectIsolationContract",
       "failure_action": "replay_aborted",
       "mode_target": "mvp_blocking",
@@ -2063,6 +2820,19 @@
         "provider_calls_allowed"
       ],
       "section_id": "S06"
+    },
+    {
+      "contract_id": "ReproducibleBuildContract",
+      "failure_action": "research_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "code_commit_hash",
+        "dependency_lock_hash",
+        "runtime_version",
+        "container_image_hash",
+        "build_hash"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "ResearchNotebookBoundaryContract",
@@ -2189,6 +2959,26 @@
       "section_id": "S15"
     },
     {
+      "contract_id": "RuntimeConfigDriftContract",
+      "failure_action": "runtime_config_drift",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "runtime_config_hash",
+        "env_vars_hash",
+        "feature_flags_hash",
+        "provider_config_hash",
+        "route_registry_hash",
+        "source_registry_hash",
+        "threshold_catalog_hash",
+        "metric_registry_hash",
+        "policy_bundle_hash",
+        "expected_hash",
+        "drift_detected",
+        "drift_action"
+      ],
+      "section_id": "S03"
+    },
+    {
       "contract_id": "RuntimeSpecAssertionContract",
       "failure_action": "runtime_assert_failed",
       "mode_target": "normal_tiny_governance",
@@ -2261,6 +3051,19 @@
         "access_reason",
         "audit_event_id",
         "accessed_at"
+      ],
+      "section_id": "S15"
+    },
+    {
+      "contract_id": "SecretsManagementContract",
+      "failure_action": "p0_security_event",
+      "mode_target": "mvp_blocking",
+      "required_fields": [
+        "secret_name",
+        "scope",
+        "rotation_interval_days",
+        "last_rotated_at",
+        "environment_allowed"
       ],
       "section_id": "S15"
     },
@@ -2453,6 +3256,19 @@
       "section_id": "S01"
     },
     {
+      "contract_id": "SpecTraceabilityMatrix",
+      "failure_action": "release_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "spec_section_id",
+        "implementation_module",
+        "test_file",
+        "issue_id",
+        "status"
+      ],
+      "section_id": "S21"
+    },
+    {
       "contract_id": "StandardizedStopContract",
       "failure_action": "no_model_promotion",
       "mode_target": "shadow_blocking",
@@ -2488,6 +3304,19 @@
       "section_id": "S16"
     },
     {
+      "contract_id": "SupplyChainSecurityContract",
+      "failure_action": "global_circuit_breaker",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "artifact_id",
+        "signature_status",
+        "SBOM_hash",
+        "vulnerability_scan_status",
+        "provenance_attestation"
+      ],
+      "section_id": "S09"
+    },
+    {
       "contract_id": "SyntheticSentinelEventContract",
       "failure_action": "projection_unhealthy",
       "mode_target": "mvp_blocking",
@@ -2501,6 +3330,19 @@
       "section_id": "S06"
     },
     {
+      "contract_id": "SystemSLO",
+      "failure_action": "new_entry_shadow_only",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "slo_id",
+        "metric_id",
+        "threshold_id",
+        "measured_value",
+        "new_entry_action"
+      ],
+      "section_id": "S11"
+    },
+    {
       "contract_id": "TelegramForwardedMessagePolicy",
       "failure_action": "message_quarantined",
       "mode_target": "shadow_blocking",
@@ -2512,6 +3354,19 @@
         "action"
       ],
       "section_id": "S04"
+    },
+    {
+      "contract_id": "TelegramLifecycleTransitionMatrixContract",
+      "failure_action": "forecast_research_only",
+      "mode_target": "shadow_first",
+      "required_fields": [
+        "model_snapshot_id",
+        "state_definition_version",
+        "transition_matrix",
+        "matrix_build_cutoff_seq",
+        "sample_n"
+      ],
+      "section_id": "S09"
     },
     {
       "contract_id": "TelegramSessionSecurityContract",
@@ -2553,6 +3408,30 @@
       "section_id": "S11"
     },
     {
+      "contract_id": "ThresholdCatalogContract",
+      "failure_action": "policy_bundle_incompatible",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "threshold_id",
+        "threshold_name",
+        "threshold_value",
+        "unit",
+        "comparison_operator",
+        "scope",
+        "applies_to_metric",
+        "applies_to_mode",
+        "owner",
+        "source_spec_section_id",
+        "policy_bundle_id",
+        "effective_from",
+        "effective_to",
+        "change_reason",
+        "approval_id",
+        "threshold_hash"
+      ],
+      "section_id": "S02"
+    },
+    {
       "contract_id": "TieBreakOrderingContract",
       "failure_action": "replay_nondeterministic",
       "mode_target": "mvp_blocking",
@@ -2563,6 +3442,19 @@
         "event_id"
       ],
       "section_id": "S06"
+    },
+    {
+      "contract_id": "TokenIdentityContract",
+      "failure_action": "shadow_only",
+      "mode_target": "observe_only_blocking",
+      "required_fields": [
+        "chain",
+        "token_ca",
+        "normalized_ca",
+        "checksum",
+        "identity_confidence"
+      ],
+      "section_id": "S05"
     },
     {
       "contract_id": "TopFixQueueContract",
@@ -2586,6 +3478,19 @@
         "counterfactual_entry_ts",
         "simulated_fill_price",
         "trade_label_available_at"
+      ],
+      "section_id": "S07"
+    },
+    {
+      "contract_id": "TrainingDatasetManifestContract",
+      "failure_action": "model_promotion_blocked",
+      "mode_target": "normal_tiny_blocking",
+      "required_fields": [
+        "dataset_id",
+        "event_log_hash_range",
+        "included_sample_ids",
+        "label_versions",
+        "feature_versions"
       ],
       "section_id": "S07"
     },
@@ -2706,8 +3611,8 @@
       "section_id": "S16"
     }
   ],
-  "generated_artifact_hash": "34d9b955d1f6bcec38a7c6a05694c2fba45dadae5d6819514751ca24ca6e67a5",
+  "generated_artifact_hash": "69856976ecf233098a5d959bcb5c0e3499c6dd481b9d78edda9b26b40cf57731",
   "generation_tool_version": "v2.7.0.contract_client_generator.v1",
   "source_schema_file": "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
-  "source_schema_hash": "629cd269adbfdecb48908bd47660416dc95d3028945aa6e28443b23767eafe48"
+  "source_schema_hash": "ec1658783990641833112a76ac0530088a287c9cfa77116f201fe5297ec2f6b6"
 }

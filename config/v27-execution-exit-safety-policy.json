@@ -1,0 +1,240 @@
+{
+  "circuit_breaker_position_policies": [
+    {
+      "circuit_breaker_hash": "d7b8c8398020d0526f66c503ac0a594a81ba25c95238aaece6d6e1680e91d9e0",
+      "exit_safety_remains_active": true,
+      "metric_id": "circuit_breaker_position_policy_coverage_rate",
+      "new_entry_disabled": true,
+      "observed_value": 1.0,
+      "open_position_policy": "exit_only",
+      "operator_ack_required": true,
+      "policy_id": "global-circuit-breaker-open-position-exit-only-v27",
+      "resume_condition": "governance_hysteresis_passed_and_exit_queue_healthy",
+      "threshold_id": "thr_circuit_breaker_position_policy_coverage_rate_min",
+      "trigger_events": [
+        "paper_live_boundary_breach",
+        "ledger_mismatch",
+        "DLQ_critical_unresolved",
+        "read_model_stale_critical"
+      ]
+    }
+  ],
+  "emergency_exit_journals": [
+    {
+      "completed_at": "2026-05-28T00:00:02Z",
+      "initiated_at": "2026-05-28T00:00:00Z",
+      "journal_append_only": true,
+      "journal_event_id": "event:emergency_exit_seed_001",
+      "journal_hash": "bd6ef48bedc6057541f00509d8ba7d9736f82a16b632f2ef155207a4f6380b71",
+      "journal_id": "emergency-exit-journal-seed-001",
+      "metric_id": "emergency_exit_journal_reconciliation_rate",
+      "observed_value": 1.0,
+      "operator_audit_required": true,
+      "outcome": "exit_safety_preserved_no_live_order",
+      "position_id": "position:paper_seed_001",
+      "reason": "kill_switch_drill_exit_only_seed",
+      "reconciled_to_ledger": true,
+      "threshold_id": "thr_emergency_exit_journal_reconciliation_rate_min"
+    }
+  ],
+  "exit_execution_state_machines": [
+    {
+      "allowed_transitions": [
+        {
+          "from": "POSITION_OPEN",
+          "to": "EXIT_SIGNALLED"
+        },
+        {
+          "from": "EXIT_SIGNALLED",
+          "to": "EXIT_QUOTE_REQUESTED"
+        },
+        {
+          "from": "EXIT_QUOTE_REQUESTED",
+          "to": "EXIT_QUOTE_EXECUTABLE"
+        },
+        {
+          "from": "EXIT_QUOTE_EXECUTABLE",
+          "to": "EXIT_SUBMITTED"
+        },
+        {
+          "from": "EXIT_SUBMITTED",
+          "to": "EXIT_CONFIRMED"
+        },
+        {
+          "from": "EXIT_QUOTE_REQUESTED",
+          "to": "EXIT_FAILED_QUARANTINED"
+        }
+      ],
+      "exit_quote_required": true,
+      "exit_safety_preserved": true,
+      "exit_state_machine_hash": "b568a417cd333fdaffdeb9e7ee60e15e53742579be6810c38521d0cd72b9e433",
+      "exit_state_machine_id": "paper-exit-execution-v27",
+      "failure_events": [
+        "exit_quote_failure",
+        "exit_state_machine_failure",
+        "open_position_stuck"
+      ],
+      "lease_fencing_required": true,
+      "metric_id": "exit_execution_state_machine_valid_rate",
+      "observed_value": 1.0,
+      "open_position_state": "POSITION_OPEN",
+      "state_revalidation_required": true,
+      "states": [
+        "POSITION_OPEN",
+        "EXIT_SIGNALLED",
+        "EXIT_QUOTE_REQUESTED",
+        "EXIT_QUOTE_EXECUTABLE",
+        "EXIT_SUBMITTED",
+        "EXIT_CONFIRMED",
+        "EXIT_FAILED_QUARANTINED"
+      ],
+      "terminal_states": [
+        "EXIT_CONFIRMED",
+        "EXIT_FAILED_QUARANTINED"
+      ],
+      "threshold_id": "thr_exit_execution_state_machine_valid_rate_min"
+    }
+  ],
+  "exit_policies": [
+    {
+      "applies_to_modes": [
+        "ultra_tiny",
+        "normal_tiny"
+      ],
+      "effective_from": "2026-05-28T00:00:00Z",
+      "entry_outcome_separation": true,
+      "exit_policy_hash": "7e6be3855d577614d36f8f40d443193d406bd3a327acf2d8635c692e7758641f",
+      "exit_policy_id": "paper-exit-policy-v27-fixed-tiny",
+      "exit_policy_version": "v2.7.0.exit_policy.fixed_tiny.seed",
+      "metric_id": "exit_policy_version_coverage_rate",
+      "observed_value": 1.0,
+      "stop_loss_rules": [
+        {
+          "quote_type": "delayed_executable_exit_quote",
+          "rule_id": "standardized_stop",
+          "threshold_pct": -30
+        }
+      ],
+      "take_profit_rules": [
+        {
+          "quote_type": "delayed_executable_exit_quote",
+          "rule_id": "tp30",
+          "threshold_pct": 30
+        }
+      ],
+      "threshold_id": "thr_exit_policy_version_coverage_rate_min",
+      "time_stop_rules": [
+        {
+          "max_hold_sec": 300,
+          "rule_id": "max_hold_5m"
+        }
+      ]
+    }
+  ],
+  "exit_queue_health": [
+    {
+      "exit_queue_status": "healthy",
+      "exit_quote_failure_count": 0,
+      "exit_safety_budget_reserved": true,
+      "exit_state_machine_failure_count": 0,
+      "max_allowed_open_exit_age_sec": 60,
+      "metric_id": "exit_queue_health_rate",
+      "observed_value": 1.0,
+      "oldest_open_exit_age_sec": 0,
+      "queue_health_hash": "97041d9572775e332bc3a90d9fd928dc3fe9098272210ea5753b1b818ef52c33",
+      "queue_id": "paper-exit-queue-health-seed",
+      "stuck_open_position_count": 0,
+      "threshold_id": "thr_exit_queue_health_rate_min"
+    }
+  ],
+  "failure_action": "execution_exit_safety_blocked",
+  "lifecycle_state_machines": [
+    {
+      "allowed_transitions": [
+        {
+          "from": "TELEGRAM_SEEN",
+          "to": "POOL_RESOLVED"
+        },
+        {
+          "from": "POOL_RESOLVED",
+          "to": "QUOTE_CLEAN"
+        },
+        {
+          "from": "QUOTE_CLEAN",
+          "to": "RECLAIM_CONFIRMED"
+        },
+        {
+          "from": "RECLAIM_CONFIRMED",
+          "to": "ENTRY_ELIGIBLE"
+        },
+        {
+          "from": "ENTRY_ELIGIBLE",
+          "to": "TINY_ENTERED"
+        },
+        {
+          "from": "TINY_ENTERED",
+          "to": "EXITING"
+        },
+        {
+          "from": "EXITING",
+          "to": "EXITED"
+        },
+        {
+          "from": "QUOTE_CLEAN",
+          "to": "TERMINAL_DEAD"
+        }
+      ],
+      "current_state": "TELEGRAM_SEEN",
+      "entry_gate_requires_module_closure": true,
+      "invalid_transition_action": "reject_and_audit",
+      "metric_id": "lifecycle_state_machine_valid_rate",
+      "observed_value": 1.0,
+      "state_machine_hash": "0198aa5943fd820db15a668a7713400a05b8cd833466e766a9a1fec0e592e48f",
+      "state_machine_id": "telegram-token-lifecycle-v27",
+      "state_version_fencing_required": true,
+      "states": [
+        "TELEGRAM_SEEN",
+        "POOL_RESOLVED",
+        "QUOTE_CLEAN",
+        "RECLAIM_CONFIRMED",
+        "ENTRY_ELIGIBLE",
+        "TINY_ENTERED",
+        "EXITING",
+        "EXITED",
+        "TERMINAL_DEAD"
+      ],
+      "terminal_states": [
+        "EXITED",
+        "TERMINAL_DEAD"
+      ],
+      "threshold_id": "thr_lifecycle_state_machine_valid_rate_min"
+    }
+  ],
+  "schema_version": "v2.7.0.execution_exit_safety_policy.v1",
+  "scope": "lifecycle_exit_execution_policy_circuit_breaker_emergency_exit_queue_safety",
+  "source_files": [
+    {
+      "required_patterns": [
+        "LifecycleStateMachineContract",
+        "ExitExecutionStateMachine",
+        "ExitPolicyContract",
+        "CircuitBreakerPositionPolicy",
+        "EmergencyExitJournal",
+        "ExitQueueHealthContract"
+      ],
+      "source_anchor": "def verify_execution_exit_safety_contracts",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"ExitExecutionStateMachine\"",
+        "\"ExitPolicyContract\"",
+        "\"CircuitBreakerPositionPolicy\"",
+        "\"EmergencyExitJournal\"",
+        "\"ExitQueueHealthContract\""
+      ],
+      "source_anchor": "\"LifecycleStateMachineContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "active_profile_id": "local_dev_seed",
+  "failure_action": "runtime_config_drift",
+  "profiles": [
+    {
+      "drift_action": "block_new_promotion_and_revalidate_before_execution",
+      "drift_detected": false,
+      "env_vars": [
+        {
+          "default_value": "local_dev",
+          "expected_value": "local_dev",
+          "name": "NODE_ENV",
+          "required": true
+        },
+        {
+          "default_value": "local_dev",
+          "expected_value": "local_dev",
+          "name": "V27_ENVIRONMENT_ID",
+          "required": true
+        },
+        {
+          "default_value": "true",
+          "expected_value": "true",
+          "name": "V27_PAPER_MODE_REQUIRED",
+          "required": true
+        },
+        {
+          "default_value": "false",
+          "expected_value": "false",
+          "name": "PREMIUM_LIVE_EXECUTION_ENABLED",
+          "required": true
+        },
+        {
+          "default_value": "1",
+          "expected_value": "1",
+          "name": "PYTHONUNBUFFERED",
+          "required": false
+        }
+      ],
+      "env_vars_hash": "692244f2bdf6db124363c8ea59da8ebf6fbc0cdc141cc5659f85ba7a4c21c29c",
+      "expected_hash": "e8bfe3632d9bd639f61d61dd9351c2c5bfa7b7c4d273f0f53e049a406b975e31",
+      "feature_flag_files": [
+        "config/v27-feature-flag-dependencies.json"
+      ],
+      "feature_flags_hash": "0db4ff6c80bb1f917173a6d296da276e697caf200e94eed3c2b233295ea4bc62",
+      "loaded_at": "2026-05-27T00:00:00Z",
+      "metric_registry_file": "config/v27-metric-definition-registry.json",
+      "metric_registry_hash": "c3e39b030787aa5d54b309abf3646865988f6c612bd3cfc30b6abd7e047c4b05",
+      "policy_bundle_files": [
+        "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
+        "config/v27-null-value-policy.json",
+        "config/v27-feature-vector-snapshot-policy.json",
+        "config/v27-data-lineage-graph-policy.json",
+        "config/v27-training-dataset-manifest-policy.json",
+        "config/v27-detector-shadow-calibration-policy.json",
+        "config/v27-capacity-load-latency-policy.json",
+        "config/v27-operator-runtime-safety-policy.json",
+        "config/v27-replay-build-model-policy.json",
+        "config/v27-spec-governance-feasibility-policy.json",
+        "config/v27-identity-unit-provider-finality-policy.json",
+        "config/v27-execution-exit-safety-policy.json",
+        "config/v27-delivery-traceability-policy.json",
+        "config/v27-release-experiment-safety-policy.json"
+      ],
+      "policy_bundle_hash": "d02f5eadccf5943575c1bcf5ef425b86021ef067e32ef3211bd520c14381e702",
+      "profile_id": "local_dev_seed",
+      "provider_config_files": [
+        "config/system.config.json",
+        "config/v27-chain-config.json"
+      ],
+      "provider_config_hash": "12bc8cdc77a00d76809b072dff0496a10f8bdd2cd15ab9d2cbf8c022429253f9",
+      "route_registry_file": "config/entry-mode-registry.json",
+      "route_registry_hash": "b43f7661c0f8dd184f3b1bb2f85267a8ef502597a862083b785facd04f69a339",
+      "runtime_config_hash": "e8bfe3632d9bd639f61d61dd9351c2c5bfa7b7c4d273f0f53e049a406b975e31",
+      "source_registry_file": "config/v27-source-registry.json",
+      "source_registry_hash": "9eade6bd07e3d8fd6bb1a15d36f5de20d5a36ec859041b1242d6123f8e4e2b72",
+      "threshold_catalog_file": "config/v27-threshold-catalog.json",
+      "threshold_catalog_hash": "0f5a4de3fd712d17ac8c70adec5573514e8d56c99afbf0a59d46f06d549f91f3"
+    }
+  ],
+  "schema_version": "v2.7.0.runtime_config_drift_policy.v1",
+  "scope": "v27_runtime_config_truth_seed",
+  "source_files": [
+    {
+      "required_patterns": [
+        "RuntimeConfigDriftContract",
+        "runtime_config_hash_mismatch",
+        "runtime_config_drift_missing_malformed_or_drifted"
+      ],
+      "source_anchor": "def verify_runtime_config_drift_contract",
+      "source_file": "scripts/v27_basic_contract_readiness.py"
+    },
+    {
+      "required_patterns": [
+        "\"observe_only\"",
+        "\"RuntimeConfigDriftContract\""
+      ],
+      "source_anchor": "\"RuntimeConfigDriftContract\"",
+      "source_file": "scripts/v27_mode_readiness.py"
+    }
+  ]
+}

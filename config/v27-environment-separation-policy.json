@@ -1,0 +1,128 @@
+{
+  "schema_version": "v2.7.0.environment_separation_policy.v1",
+  "scope": "v27_environment_truth_seed",
+  "failure_action": "environment_contamination",
+  "active_environment_default": "local_dev",
+  "environments": [
+    {
+      "environment_id": "local_dev",
+      "environment_type": "local_dev",
+      "allowed_event_logs": [
+        "data/v27_event_log"
+      ],
+      "allowed_databases": [
+        "data/paper_trades.db",
+        "data/sentiment_arb.db"
+      ],
+      "allowed_provider_keys": [
+        "public_market_data_only",
+        "paper_mode_provider_keys"
+      ],
+      "allowed_routes": [
+        "observe_only",
+        "shadow"
+      ],
+      "allowed_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "write_permissions": [
+        "local_event_log_append",
+        "local_read_model_rebuild"
+      ],
+      "read_permissions": [
+        "local_dev",
+        "research"
+      ],
+      "data_export_allowed": true,
+      "promotion_allowed": false,
+      "environment_hash": "6d3d40e5daf754467b5316ab7229640b3e82df2babea97bbd90320468ac8b467"
+    },
+    {
+      "environment_id": "paper",
+      "environment_type": "paper",
+      "allowed_event_logs": [
+        "data/v27_event_log"
+      ],
+      "allowed_databases": [
+        "data/paper_trades.db"
+      ],
+      "allowed_provider_keys": [
+        "paper_mode_provider_keys"
+      ],
+      "allowed_routes": [
+        "observe_only",
+        "shadow",
+        "ultra_tiny",
+        "normal_tiny"
+      ],
+      "allowed_modes": [
+        "observe_only",
+        "shadow",
+        "ultra_tiny",
+        "normal_tiny"
+      ],
+      "write_permissions": [
+        "paper_event_log_append",
+        "paper_outbox_publish",
+        "paper_ledger_append"
+      ],
+      "read_permissions": [
+        "paper",
+        "dashboard_readonly"
+      ],
+      "data_export_allowed": true,
+      "promotion_allowed": true,
+      "environment_hash": "55ed11fef2ddee40423ac25d0e03f121aca743fcbb74af9a1f7faa8be3ae4cb5"
+    },
+    {
+      "environment_id": "dashboard_readonly",
+      "environment_type": "dashboard_readonly",
+      "allowed_event_logs": [
+        "data/v27_event_log"
+      ],
+      "allowed_databases": [
+        "data/v27_read_models/denominator_snapshot.json"
+      ],
+      "allowed_provider_keys": [],
+      "allowed_routes": [
+        "observe_only",
+        "shadow",
+        "ultra_tiny",
+        "normal_tiny"
+      ],
+      "allowed_modes": [
+        "observe_only",
+        "shadow",
+        "ultra_tiny",
+        "normal_tiny"
+      ],
+      "write_permissions": [],
+      "read_permissions": [
+        "dashboard_readonly"
+      ],
+      "data_export_allowed": false,
+      "promotion_allowed": false,
+      "environment_hash": "dcffeebc33b7d448db6400ffb779f958752f91b3d5bd98e38d1df33ea331c2ae"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_environment_separation_contract",
+      "required_patterns": [
+        "EnvironmentSeparationContract",
+        "environment_hash_mismatch",
+        "environment_separation_missing_malformed_or_contaminated"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"EnvironmentSeparationContract\"",
+      "required_patterns": [
+        "\"observe_only\"",
+        "\"EnvironmentSeparationContract\""
+      ]
+    }
+  ]
+}

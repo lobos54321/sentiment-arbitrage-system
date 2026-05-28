@@ -12,6 +12,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_aggregate_boundary_contract,
     verify_audit_log_integrity,
     verify_background_job_registry,
+    verify_capacity_load_latency_contracts,
     verify_cicd_merge_gate_contract,
     verify_clock_rollback_guard_contract,
     verify_connection_pool_partition_contract,
@@ -20,28 +21,45 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_dashboard_action_separation_contract,
     verify_direct_database_mutation_ban,
     verify_distributed_lock_backend_health_contract,
+    verify_detector_shadow_calibration_contracts,
     verify_enum_evolution_contract,
     verify_entry_point_inventory,
     verify_error_taxonomy,
     verify_event_schema_compatibility_contract,
     verify_feature_flag_dependency_contract,
+    verify_feature_availability_contract,
+    verify_feature_vector_snapshot_contract,
     verify_filesystem_disk_pressure_policy,
+    verify_data_lineage_graph_contract,
+    verify_delivery_traceability_contracts,
     verify_evidence_eligibility_matrix,
     verify_generated_client_contract,
     verify_human_readable_reason_contract,
+    verify_identity_unit_provider_finality_contracts,
     verify_log_redaction_verification,
     verify_machine_readable_reason_contract,
+    verify_markov_lifecycle_forecast_contracts,
+    verify_metric_definition_registry,
     verify_mutation_command_idempotency_contract,
+    verify_null_value_policy_contract,
     verify_numeric_precision_policy,
+    verify_operator_runtime_safety_contracts,
     verify_pipeline_progress_invariant,
     verify_projection_version_isolation_contract,
     verify_queue_ack_nack_contract,
+    verify_release_experiment_safety_contracts,
+    verify_replay_build_model_contracts,
+    verify_runtime_config_drift_contract,
     verify_scheduled_job_mode_gate_contract,
     verify_snapshot_compaction_invariant_contract,
     verify_snapshot_compaction_read_barrier_contract,
     verify_spec_change_impact_analysis_contract,
     verify_static_policy_enforcement,
+    verify_threshold_catalog,
+    verify_training_dataset_manifest_contract,
     verify_thread_pool_isolation_contract,
+    verify_environment_separation_contract,
+    verify_execution_exit_safety_contracts,
     verify_access_control_policy,
     verify_input_sanitization,
     verify_paper_mode_safety,
@@ -51,6 +69,7 @@ from v27_basic_contract_readiness import (  # noqa: E402
     verify_service_readiness_probe_contract,
     verify_secret_access_audit_contract,
     verify_shadow_observation_identity_contracts,
+    verify_spec_governance_feasibility_contracts,
     verify_silent_worker_death_detector_contract,
     verify_source_parser_authenticity_contracts,
     verify_top_fix_queue,
@@ -70,6 +89,75 @@ def test_basic_contract_readiness_passes_seed_foundation():
     for contract_id in (
         "SpecConsistencyLinterContract",
         "NumericPrecisionContract",
+        "MetricDefinitionRegistry",
+        "ThresholdCatalogContract",
+        "RuntimeConfigDriftContract",
+        "EnvironmentSeparationContract",
+        "NullValuePolicyContract",
+        "FeatureAvailabilityContract",
+        "FeatureVectorSnapshotContract",
+        "DataLineageGraphContract",
+        "TrainingDatasetManifestContract",
+        "TelegramLifecycleTransitionMatrixContract",
+        "LifecycleNstepForecastContract",
+        "AbsorbingSemiMarkovForecastContract",
+        "CompetingRiskForecastContract",
+        "CensoringPolicyContract",
+        "ForecastWalkForwardValidationContract",
+        "HMMResearchOnlyBoundaryContract",
+        "ReclaimDetector",
+        "OverextensionDetector",
+        "DetectorCalibrationContract",
+        "CapacityPlanningContract",
+        "LoadTestReplayContract",
+        "LatencyAttributionContract",
+        "ProviderQuotaIsolationContract",
+        "EconomicCostBudgetContract",
+        "OperatorAudit",
+        "OperatorSafetyContract",
+        "OwnershipOnCallContract",
+        "AlertPolicy",
+        "AlertAckEscalationPolicy",
+        "KillSwitchDrillContract",
+        "ReplayDeterminismCheck",
+        "ReproducibleBuildContract",
+        "SupplyChainSecurityContract",
+        "PolicyBundleCompatibilityContract",
+        "ModelExpiryContract",
+        "ForecastSanityGuard",
+        "RenderedSpecViewContract",
+        "HealthStateEnumContract",
+        "ContractLifecycleContract",
+        "ObjectivePriorityContract",
+        "GoalConfidenceContract",
+        "FillTimeAnchorContract",
+        "ExAnteVsPosthocFeasibilityContract",
+        "TokenIdentityContract",
+        "DataUnitContract",
+        "ChainFinalityContract",
+        "ProviderSchemaContract",
+        "LifecycleStateMachineContract",
+        "ExitExecutionStateMachine",
+        "ExitPolicyContract",
+        "CircuitBreakerPositionPolicy",
+        "EmergencyExitJournal",
+        "ExitQueueHealthContract",
+        "ReconciliationPolicyContract",
+        "DashboardStalenessContract",
+        "SpecTraceabilityMatrix",
+        "ImplementationIssueGraphContract",
+        "ModuleClosureContract",
+        "DecommissionPolicyContract",
+        "SecretsManagementContract",
+        "SystemSLO",
+        "NoTradeRootCause",
+        "ReleaseComplexityBudget",
+        "BackpressurePolicy",
+        "BudgetReserveContract",
+        "BlindedHoldoutContract",
+        "ManualOverrideContract",
+        "ContractTestSuite",
+        "AdversarialReplaySuite",
         "HumanReadableReasonContract",
         "MachineReadableReasonContract",
         "PaperModeSafetyBoundary",
@@ -226,6 +314,700 @@ def test_numeric_precision_policy_verifies_units_samples_and_source_anchors():
         "token_base_units",
         "unix_ms",
     }
+
+
+def test_metric_definition_registry_and_threshold_catalog_verify_hashes_and_links():
+    metrics = verify_metric_definition_registry()
+    thresholds = verify_threshold_catalog()
+
+    assert metrics["status"] == "pass"
+    assert thresholds["status"] == "pass"
+    assert metrics["evidence"]["missing_required_metrics"] == []
+    assert thresholds["evidence"]["missing_required_thresholds"] == []
+    assert metrics["evidence"]["malformed_metrics"] == []
+    assert thresholds["evidence"]["malformed_thresholds"] == []
+
+
+def test_metric_definition_registry_blocks_hash_drift(tmp_path):
+    registry = json.loads(Path("config/v27-metric-definition-registry.json").read_text(encoding="utf-8"))
+    registry["metrics"][0]["formula"] = "captured / hidden_denominator"
+    registry_path = tmp_path / "metric-definition-registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    report = verify_metric_definition_registry(registry_path=registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "metric_definition_registry_missing_malformed_or_drifted"
+    assert "metric_hash_mismatch" in report["evidence"]["malformed_metrics"][0]["violations"]
+
+
+def test_threshold_catalog_blocks_unknown_metric_and_hash_drift(tmp_path):
+    catalog = json.loads(Path("config/v27-threshold-catalog.json").read_text(encoding="utf-8"))
+    catalog["thresholds"][0]["applies_to_metric"] = "unregistered_metric"
+    catalog["thresholds"][0]["threshold_value"] = 0.61
+    catalog_path = tmp_path / "threshold-catalog.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    report = verify_threshold_catalog(threshold_catalog_path=catalog_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "threshold_catalog_missing_malformed_or_drifted"
+    violations = set(report["evidence"]["malformed_thresholds"][0]["violations"])
+    assert {"applies_to_metric_unknown", "threshold_hash_mismatch"} <= violations
+
+
+def test_threshold_catalog_blocks_hardcoded_governance_literal(tmp_path):
+    source = tmp_path / "governance.py"
+    source.write_text("CAPTURE_RATE = 0.60\n", encoding="utf-8")
+    catalog = json.loads(Path("config/v27-threshold-catalog.json").read_text(encoding="utf-8"))
+    catalog["hardcoded_threshold_guard"]["protected_source_files"] = [str(source)]
+    catalog_path = tmp_path / "threshold-catalog.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+
+    report = verify_threshold_catalog(threshold_catalog_path=catalog_path)
+
+    assert report["status"] == "missing_evidence"
+    assert "hardcoded_threshold_literal_detected" in report["evidence"]["hardcode_guard_errors"]
+    assert report["evidence"]["hardcode_guard"]["violations"][0]["threshold_id"] == "thr_capture_rate_d3a_24h_min"
+
+
+def test_runtime_config_and_environment_separation_verify_hashes_and_runtime_boundary():
+    runtime = verify_runtime_config_drift_contract(env={})
+    environment = verify_environment_separation_contract(env={})
+
+    assert runtime["status"] == "pass"
+    assert environment["status"] == "pass"
+    assert runtime["evidence"]["malformed_profiles"] == []
+    assert environment["evidence"]["malformed_environments"] == []
+    assert environment["evidence"]["runtime_violations"] == []
+
+
+def test_runtime_config_blocks_env_drift(tmp_path):
+    policy = json.loads(Path("config/v27-runtime-config-drift-policy.json").read_text(encoding="utf-8"))
+    policy_path = tmp_path / "runtime-config-drift-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_runtime_config_drift_contract(policy_path=policy_path, env={"V27_ENVIRONMENT_ID": "paper"})
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "runtime_config_drift_missing_malformed_or_drifted"
+    violations = set(report["evidence"]["malformed_profiles"][0]["violations"])
+    assert {"env_var_drift", "env_vars_hash_mismatch", "runtime_config_hash_mismatch", "expected_hash_mismatch"} <= violations
+
+
+def test_environment_separation_blocks_live_capability():
+    report = verify_environment_separation_contract(env={"PREMIUM_LIVE_EXECUTION_ENABLED": "true", "LIVE_PRIVATE_KEY": "secret"})
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "environment_separation_missing_malformed_or_contaminated"
+    assert {"live_execution_env_enabled", "live_secret_present"} <= set(report["evidence"]["runtime_violations"])
+
+
+def test_training_truth_contracts_verify_no_leakage_hashes_and_lineage():
+    null_policy = verify_null_value_policy_contract()
+    feature_availability = verify_feature_availability_contract()
+    feature_vector = verify_feature_vector_snapshot_contract()
+    lineage = verify_data_lineage_graph_contract()
+    manifest = verify_training_dataset_manifest_contract()
+
+    assert null_policy["status"] == "pass"
+    assert feature_availability["status"] == "pass"
+    assert feature_vector["status"] == "pass"
+    assert lineage["status"] == "pass"
+    assert manifest["status"] == "pass"
+    assert null_policy["evidence"]["missing_required_fields"] == []
+    assert feature_availability["evidence"]["missing_required_features"] == []
+    assert feature_vector["evidence"]["malformed_feature_vector_snapshots"] == []
+    assert lineage["evidence"]["missing_required_node_types"] == []
+    assert manifest["evidence"]["malformed_manifests"] == []
+
+
+def test_detector_shadow_calibration_contracts_verify_shadow_only_detectors():
+    reports = {item["contract_id"]: item for item in verify_detector_shadow_calibration_contracts()}
+
+    assert reports["ReclaimDetector"]["status"] == "pass"
+    assert reports["OverextensionDetector"]["status"] == "pass"
+    assert reports["DetectorCalibrationContract"]["status"] == "pass"
+    assert reports["ReclaimDetector"]["evidence"]["malformed_detector_records"] == []
+    assert reports["DetectorCalibrationContract"]["evidence"]["malformed_calibrations"] == []
+
+
+def test_detector_shadow_calibration_blocks_reclaim_gate_drift(tmp_path):
+    policy = json.loads(Path("config/v27-detector-shadow-calibration-policy.json").read_text(encoding="utf-8"))
+    policy["detectors"][0]["gate_allowed"] = True
+    policy_path = tmp_path / "detector-shadow-calibration-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_detector_shadow_calibration_contracts(policy_path=policy_path)}
+
+    reclaim = reports["ReclaimDetector"]
+    assert reclaim["status"] == "missing_evidence"
+    assert reclaim["blocking_reason"] == "reclaim_detector_missing_malformed_or_unsafe"
+    violations = set(reclaim["evidence"]["malformed_detector_records"][0]["violations"])
+    assert {"gate_allowed_must_be_false", "detector_hash_mismatch"} <= violations
+
+
+def test_detector_shadow_calibration_blocks_contaminated_or_failed_calibration(tmp_path):
+    policy = json.loads(Path("config/v27-detector-shadow-calibration-policy.json").read_text(encoding="utf-8"))
+    policy["calibrations"][0]["contaminated_sample_count"] = 1
+    policy["calibrations"][1]["observed_value"] = 0.3
+    policy_path = tmp_path / "detector-shadow-calibration-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_detector_shadow_calibration_contracts(policy_path=policy_path)}
+
+    calibration = reports["DetectorCalibrationContract"]
+    assert calibration["status"] == "missing_evidence"
+    assert calibration["blocking_reason"] == "detector_calibration_missing_malformed_or_contaminated"
+    first = set(calibration["evidence"]["malformed_calibrations"][0]["violations"])
+    second = set(calibration["evidence"]["malformed_calibrations"][1]["violations"])
+    assert {"contaminated_samples_not_allowed", "calibration_hash_mismatch"} <= first
+    assert {"observed_value_fails_threshold", "calibration_hash_mismatch"} <= second
+
+
+def test_capacity_load_latency_contracts_verify_runtime_burst_safety():
+    reports = {item["contract_id"]: item for item in verify_capacity_load_latency_contracts()}
+
+    for contract_id in (
+        "CapacityPlanningContract",
+        "LoadTestReplayContract",
+        "LatencyAttributionContract",
+        "ProviderQuotaIsolationContract",
+        "EconomicCostBudgetContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["CapacityPlanningContract"]["evidence"]["missing_capacity_components"] == []
+    assert reports["LoadTestReplayContract"]["evidence"]["missing_load_scenarios"] == []
+    assert reports["LatencyAttributionContract"]["evidence"]["malformed_latency_attributions"] == []
+    assert reports["ProviderQuotaIsolationContract"]["evidence"]["malformed_quota_records"] == []
+    assert reports["EconomicCostBudgetContract"]["evidence"]["malformed_budgets"] == []
+
+
+def test_capacity_planning_blocks_missing_exit_component_and_low_headroom(tmp_path):
+    policy = json.loads(Path("config/v27-capacity-load-latency-policy.json").read_text(encoding="utf-8"))
+    policy["capacity_plans"] = [
+        item for item in policy["capacity_plans"] if item["component"] != "exit_executor"
+    ]
+    policy["capacity_plans"][0]["headroom_pct"] = 0.1
+    policy_path = tmp_path / "capacity-load-latency-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_capacity_load_latency_contracts(policy_path=policy_path)}
+
+    capacity = reports["CapacityPlanningContract"]
+    assert capacity["status"] == "missing_evidence"
+    assert capacity["blocking_reason"] == "capacity_planning_missing_malformed_or_insufficient"
+    assert "exit_executor" in capacity["evidence"]["missing_capacity_components"]
+    violations = set(capacity["evidence"]["malformed_capacity_plans"][0]["violations"])
+    assert {"record_value_fails_threshold", "headroom_below_degradation_threshold", "capacity_hash_mismatch"} <= violations
+
+
+def test_load_latency_quota_budget_block_when_runtime_safety_breaks(tmp_path):
+    policy = json.loads(Path("config/v27-capacity-load-latency-policy.json").read_text(encoding="utf-8"))
+    policy["load_tests"][0]["pass_fail"] = "fail"
+    policy["latency_attributions"][0]["peak_ts"] = "2026-05-27T00:00:05Z"
+    policy["provider_quota_isolation"][0]["priority_order"] = ["random_control_polling", "open_position_exit"]
+    policy["economic_cost_budgets"][1]["reserved_for"].append("exit_safety")
+    policy_path = tmp_path / "capacity-load-latency-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_capacity_load_latency_contracts(policy_path=policy_path)}
+
+    assert reports["LoadTestReplayContract"]["status"] == "missing_evidence"
+    assert "load_test_not_pass" in reports["LoadTestReplayContract"]["evidence"]["malformed_load_tests"][0]["violations"]
+    assert reports["LatencyAttributionContract"]["status"] == "missing_evidence"
+    assert "simulated_fill_ts_after_peak_ts" in reports["LatencyAttributionContract"]["evidence"]["malformed_latency_attributions"][0]["violations"]
+    assert reports["ProviderQuotaIsolationContract"]["status"] == "missing_evidence"
+    assert "exit_and_entry_priorities_not_first" in reports["ProviderQuotaIsolationContract"]["evidence"]["malformed_quota_records"][0]["violations"]
+    assert reports["EconomicCostBudgetContract"]["status"] == "missing_evidence"
+    assert "exploration_budget_cannot_reserve_exit_safety" in reports["EconomicCostBudgetContract"]["evidence"]["malformed_budgets"][0]["violations"]
+
+
+def test_operator_runtime_safety_contracts_verify_operator_alert_and_kill_switch_safety():
+    reports = {item["contract_id"]: item for item in verify_operator_runtime_safety_contracts()}
+
+    for contract_id in (
+        "OperatorAudit",
+        "OperatorSafetyContract",
+        "OwnershipOnCallContract",
+        "AlertPolicy",
+        "AlertAckEscalationPolicy",
+        "KillSwitchDrillContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["OperatorAudit"]["evidence"]["malformed_operator_audits"] == []
+    assert reports["OperatorSafetyContract"]["evidence"]["unsafe_allowed_count"] == 0
+    assert reports["OwnershipOnCallContract"]["evidence"]["missing_ownership_components"] == []
+    assert reports["AlertPolicy"]["evidence"]["missing_alert_ids"] == []
+    assert reports["AlertAckEscalationPolicy"]["evidence"]["malformed_alert_acks"] == []
+    assert reports["KillSwitchDrillContract"]["evidence"]["missing_kill_switch_types"] == []
+
+
+def test_operator_runtime_safety_blocks_unsafe_operator_alert_and_kill_switch_breaks(tmp_path):
+    policy = json.loads(Path("config/v27-operator-runtime-safety-policy.json").read_text(encoding="utf-8"))
+    policy["operator_audits"][0]["approval_status"] = "pending"
+    policy["operator_safety_checks"][0]["dashboard_freshness_ok"] = False
+    policy["ownership_oncall"] = [
+        item for item in policy["ownership_oncall"] if item["component"] != "exit_executor"
+    ]
+    policy["alert_policies"][0]["auto_action"] = ["operator_ack_required"]
+    policy["alert_ack_escalations"][0]["acked_at"] = "2026-05-27T01:06:00Z"
+    policy["kill_switch_drills"][0]["new_entry_blocked"] = False
+    policy_path = tmp_path / "operator-runtime-safety-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_operator_runtime_safety_contracts(policy_path=policy_path)}
+
+    assert reports["OperatorAudit"]["status"] == "missing_evidence"
+    assert "approval_status_not_approved" in reports["OperatorAudit"]["evidence"]["malformed_operator_audits"][0]["violations"]
+    assert reports["OperatorSafetyContract"]["status"] == "missing_evidence"
+    safety_violations = set(reports["OperatorSafetyContract"]["evidence"]["malformed_safety_checks"][0]["violations"])
+    assert {"dashboard_freshness_required_for_high_danger", "safety_hash_mismatch"} <= safety_violations
+    assert reports["OwnershipOnCallContract"]["status"] == "missing_evidence"
+    assert "exit_executor" in reports["OwnershipOnCallContract"]["evidence"]["missing_ownership_components"]
+    assert reports["AlertPolicy"]["status"] == "missing_evidence"
+    assert "p0_alert_must_disable_new_entry" in reports["AlertPolicy"]["evidence"]["malformed_alert_policies"][0]["violations"]
+    assert reports["AlertAckEscalationPolicy"]["status"] == "missing_evidence"
+    assert "alert_ack_chronology_invalid" in reports["AlertAckEscalationPolicy"]["evidence"]["malformed_alert_acks"][0]["violations"]
+    assert reports["KillSwitchDrillContract"]["status"] == "missing_evidence"
+    assert "new_entry_not_blocked" in reports["KillSwitchDrillContract"]["evidence"]["malformed_kill_switch_drills"][0]["violations"]
+
+
+def test_replay_build_model_contracts_verify_replay_build_and_forecast_trust():
+    reports = {item["contract_id"]: item for item in verify_replay_build_model_contracts()}
+
+    for contract_id in (
+        "ReplayDeterminismCheck",
+        "ReproducibleBuildContract",
+        "SupplyChainSecurityContract",
+        "PolicyBundleCompatibilityContract",
+        "ModelExpiryContract",
+        "ForecastSanityGuard",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["ReplayDeterminismCheck"]["evidence"]["malformed_replay_checks"] == []
+    assert reports["ReproducibleBuildContract"]["evidence"]["malformed_builds"] == []
+    assert reports["SupplyChainSecurityContract"]["evidence"]["missing_artifact_types"] == []
+    assert reports["PolicyBundleCompatibilityContract"]["evidence"]["malformed_bundles"] == []
+    assert reports["ModelExpiryContract"]["evidence"]["malformed_model_expiry"] == []
+    assert reports["ForecastSanityGuard"]["evidence"]["malformed_forecast_rows"] == []
+
+
+def test_replay_build_model_contracts_block_nondeterministic_unsigned_expired_or_unsafe_forecast(tmp_path):
+    policy = json.loads(Path("config/v27-replay-build-model-policy.json").read_text(encoding="utf-8"))
+    policy["replay_determinism_checks"][0]["pass_fail"] = "fail"
+    policy["reproducible_builds"][0]["code_commit_hash"] = "not-a-sha"
+    policy["supply_chain_artifacts"][0]["signature_status"] = "unsigned"
+    policy["policy_bundle_compatibility"][0]["compatibility_status"] = "incompatible"
+    policy["model_expiry"][0]["checked_at"] = "2026-05-27T04:00:00Z"
+    policy["forecast_sanity_guards"][0]["fallback_level"] = "global"
+    policy["forecast_sanity_guards"][0]["sanitized_forecast"] = 0.9
+    policy_path = tmp_path / "replay-build-model-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_replay_build_model_contracts(policy_path=policy_path)}
+
+    assert reports["ReplayDeterminismCheck"]["status"] == "missing_evidence"
+    assert "replay_check_not_pass" in reports["ReplayDeterminismCheck"]["evidence"]["malformed_replay_checks"][0]["violations"]
+    assert reports["ReproducibleBuildContract"]["status"] == "missing_evidence"
+    assert "code_commit_hash_must_be_sha256" in reports["ReproducibleBuildContract"]["evidence"]["malformed_builds"][0]["violations"]
+    assert reports["SupplyChainSecurityContract"]["status"] == "missing_evidence"
+    assert "signature_not_verified" in reports["SupplyChainSecurityContract"]["evidence"]["malformed_artifacts"][0]["violations"]
+    assert reports["PolicyBundleCompatibilityContract"]["status"] == "missing_evidence"
+    assert "policy_bundle_not_compatible" in reports["PolicyBundleCompatibilityContract"]["evidence"]["malformed_bundles"][0]["violations"]
+    assert reports["ModelExpiryContract"]["status"] == "missing_evidence"
+    assert "model_expired_or_checked_before_training" in reports["ModelExpiryContract"]["evidence"]["malformed_model_expiry"][0]["violations"]
+    assert reports["ForecastSanityGuard"]["status"] == "missing_evidence"
+    forecast_violations = set(reports["ForecastSanityGuard"]["evidence"]["malformed_forecast_rows"][0]["violations"])
+    assert {"sanitized_forecast_exceeds_raw", "global_fallback_cannot_high_conviction"} <= forecast_violations
+
+
+def test_markov_lifecycle_forecast_contracts_verify_shadow_only_no_lookahead_boundary():
+    reports = {item["contract_id"]: item for item in verify_markov_lifecycle_forecast_contracts()}
+
+    for contract_id in (
+        "TelegramLifecycleTransitionMatrixContract",
+        "LifecycleNstepForecastContract",
+        "AbsorbingSemiMarkovForecastContract",
+        "CompetingRiskForecastContract",
+        "CensoringPolicyContract",
+        "ForecastWalkForwardValidationContract",
+        "HMMResearchOnlyBoundaryContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["TelegramLifecycleTransitionMatrixContract"]["evidence"]["transition_matrix_errors"] == []
+    assert reports["ForecastWalkForwardValidationContract"]["evidence"]["malformed_walk_forward_validations"] == []
+    assert reports["HMMResearchOnlyBoundaryContract"]["evidence"]["malformed_hmm_boundaries"] == []
+
+
+def test_markov_lifecycle_forecast_contracts_block_entry_leaky_hmm_and_lookahead(tmp_path):
+    policy = json.loads(Path("config/v27-markov-lifecycle-forecast-policy.json").read_text(encoding="utf-8"))
+    policy["hmm_research_only_boundaries"][0]["full_sequence_viterbi_allowed"] = True
+    policy["hmm_research_only_boundaries"][0]["entry_gate_allowed"] = True
+    policy["walk_forward_validations"][0]["no_lookahead_proof"] = "uses full future outcome labels"
+    policy["walk_forward_validations"][0]["promotion_allowed"] = True
+    policy_path = tmp_path / "markov-lifecycle-forecast-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_markov_lifecycle_forecast_contracts(policy_path=policy_path)}
+
+    assert reports["ForecastWalkForwardValidationContract"]["status"] == "missing_evidence"
+    walk_forward_violations = set(
+        reports["ForecastWalkForwardValidationContract"]["evidence"]["malformed_walk_forward_validations"][0]["violations"]
+    )
+    assert {"no_lookahead_proof_must_reference_cutoff", "promotion_allowed_must_be_false"} <= walk_forward_violations
+    assert reports["HMMResearchOnlyBoundaryContract"]["status"] == "missing_evidence"
+    hmm_violations = set(reports["HMMResearchOnlyBoundaryContract"]["evidence"]["malformed_hmm_boundaries"][0]["violations"])
+    assert {"full_sequence_viterbi_must_be_false", "entry_gate_allowed_must_be_false"} <= hmm_violations
+
+
+def test_spec_governance_feasibility_contracts_verify_spec_health_confidence_and_no_leakage():
+    reports = {item["contract_id"]: item for item in verify_spec_governance_feasibility_contracts()}
+
+    for contract_id in (
+        "RenderedSpecViewContract",
+        "HealthStateEnumContract",
+        "ContractLifecycleContract",
+        "ObjectivePriorityContract",
+        "GoalConfidenceContract",
+        "FillTimeAnchorContract",
+        "ExAnteVsPosthocFeasibilityContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["RenderedSpecViewContract"]["evidence"]["malformed_rendered_views"] == []
+    assert reports["HealthStateEnumContract"]["evidence"]["malformed_health_states"] == []
+    assert reports["ContractLifecycleContract"]["evidence"]["missing_lifecycle_contracts"] == []
+    assert reports["ObjectivePriorityContract"]["evidence"]["malformed_objective_conflicts"] == []
+    assert reports["GoalConfidenceContract"]["evidence"]["malformed_goal_confidence"] == []
+    assert reports["FillTimeAnchorContract"]["evidence"]["malformed_fill_time_anchors"] == []
+    assert reports["ExAnteVsPosthocFeasibilityContract"]["evidence"]["malformed_feasibility"] == []
+
+
+def test_spec_governance_feasibility_blocks_stale_unknown_inconclusive_or_leaky_rows(tmp_path):
+    policy = json.loads(Path("config/v27-spec-governance-feasibility-policy.json").read_text(encoding="utf-8"))
+    policy["rendered_spec_views"][0]["render_validation_status"] = "stale"
+    policy["health_states"][0]["health_state"] = "UNKNOWN"
+    policy["contract_lifecycle"][0]["status"] = "retired"
+    policy["objective_conflicts"][0]["chosen_objective"] = "roi_expansion"
+    policy["goal_confidence"][0]["denominator"] = 1
+    policy["fill_time_anchors"][0]["fill_time_anchor_type"] = "decision_ts"
+    policy["ex_ante_posthoc_feasibility"][0]["used_future_peak_in_ex_ante"] = True
+    policy["ex_ante_posthoc_feasibility"][0]["ex_ante_source_fields"].append("future_peak_ts")
+    policy_path = tmp_path / "spec-governance-feasibility-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_spec_governance_feasibility_contracts(policy_path=policy_path)}
+
+    assert reports["RenderedSpecViewContract"]["status"] == "missing_evidence"
+    assert "render_validation_not_valid" in reports["RenderedSpecViewContract"]["evidence"]["malformed_rendered_views"][0]["violations"]
+    assert reports["HealthStateEnumContract"]["status"] == "missing_evidence"
+    assert "unknown_state_cannot_pass_readiness" in reports["HealthStateEnumContract"]["evidence"]["malformed_health_states"][0]["violations"]
+    assert reports["ContractLifecycleContract"]["status"] == "missing_evidence"
+    assert "contract_not_active_gate_for_readiness" in reports["ContractLifecycleContract"]["evidence"]["malformed_lifecycles"][0]["violations"]
+    assert reports["ObjectivePriorityContract"]["status"] == "missing_evidence"
+    assert "chosen_objective_not_highest_priority" in reports["ObjectivePriorityContract"]["evidence"]["malformed_objective_conflicts"][0]["violations"]
+    assert reports["GoalConfidenceContract"]["status"] == "missing_evidence"
+    assert "denominator_below_min" in reports["GoalConfidenceContract"]["evidence"]["malformed_goal_confidence"][0]["violations"]
+    assert reports["FillTimeAnchorContract"]["status"] == "missing_evidence"
+    assert "fill_time_anchor_type_must_be_simulated_fill_ts" in reports["FillTimeAnchorContract"]["evidence"]["malformed_fill_time_anchors"][0]["violations"]
+    assert reports["ExAnteVsPosthocFeasibilityContract"]["status"] == "missing_evidence"
+    feasibility_violations = set(reports["ExAnteVsPosthocFeasibilityContract"]["evidence"]["malformed_feasibility"][0]["violations"])
+    assert {"future_peak_used_in_ex_ante", "forbidden_ex_ante_source_field"} <= feasibility_violations
+
+
+def test_identity_unit_provider_finality_contracts_verify_identity_units_and_schema():
+    reports = {item["contract_id"]: item for item in verify_identity_unit_provider_finality_contracts()}
+
+    for contract_id in (
+        "TokenIdentityContract",
+        "DataUnitContract",
+        "ChainFinalityContract",
+        "ProviderSchemaContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["TokenIdentityContract"]["evidence"]["malformed_identities"] == []
+    assert reports["DataUnitContract"]["evidence"]["malformed_data_units"] == []
+    assert reports["ChainFinalityContract"]["evidence"]["malformed_finalities"] == []
+    assert reports["ProviderSchemaContract"]["evidence"]["malformed_provider_schemas"] == []
+
+
+def test_identity_unit_provider_finality_blocks_dirty_identity_unit_finality_and_schema(tmp_path):
+    policy = json.loads(Path("config/v27-identity-unit-provider-finality-policy.json").read_text(encoding="utf-8"))
+    policy["token_identities"][0]["identity_confidence"] = 0.5
+    policy["data_units"][0]["unit_validation_status"] = "invalid"
+    policy["chain_finality"][0]["commitment_level"] = "confirmed"
+    policy["chain_finality"][0]["chain_reorg_detected"] = True
+    policy["provider_schemas"][0]["schema_drift_detected"] = True
+    policy["provider_schemas"][0]["canary_parse_result"] = "fail"
+    policy_path = tmp_path / "identity-unit-provider-finality-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_identity_unit_provider_finality_contracts(policy_path=policy_path)}
+
+    assert reports["TokenIdentityContract"]["status"] == "missing_evidence"
+    assert "identity_hash_mismatch" in reports["TokenIdentityContract"]["evidence"]["malformed_identities"][0]["violations"]
+    assert "observed_value_must_match_identity_confidence" in reports["TokenIdentityContract"]["evidence"]["malformed_identities"][0]["violations"]
+    assert reports["DataUnitContract"]["status"] == "missing_evidence"
+    assert "unit_validation_status_not_valid" in reports["DataUnitContract"]["evidence"]["malformed_data_units"][0]["violations"]
+    assert reports["ChainFinalityContract"]["status"] == "missing_evidence"
+    finality_violations = set(reports["ChainFinalityContract"]["evidence"]["malformed_finalities"][0]["violations"])
+    assert {"commitment_level_below_minimum", "chain_reorg_detected"} <= finality_violations
+    assert reports["ProviderSchemaContract"]["status"] == "missing_evidence"
+    schema_violations = set(reports["ProviderSchemaContract"]["evidence"]["malformed_provider_schemas"][0]["violations"])
+    assert {"schema_drift_detected", "canary_parse_result_not_pass"} <= schema_violations
+
+
+def test_execution_exit_safety_contracts_verify_lifecycle_exit_and_queue_safety():
+    reports = {item["contract_id"]: item for item in verify_execution_exit_safety_contracts()}
+
+    for contract_id in (
+        "LifecycleStateMachineContract",
+        "ExitExecutionStateMachine",
+        "ExitPolicyContract",
+        "CircuitBreakerPositionPolicy",
+        "EmergencyExitJournal",
+        "ExitQueueHealthContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["LifecycleStateMachineContract"]["evidence"]["malformed_lifecycle_machines"] == []
+    assert reports["ExitExecutionStateMachine"]["evidence"]["malformed_exit_state_machines"] == []
+    assert reports["ExitPolicyContract"]["evidence"]["malformed_exit_policies"] == []
+    assert reports["CircuitBreakerPositionPolicy"]["evidence"]["malformed_circuit_breakers"] == []
+    assert reports["EmergencyExitJournal"]["evidence"]["malformed_emergency_journals"] == []
+    assert reports["ExitQueueHealthContract"]["evidence"]["malformed_exit_queue_health"] == []
+
+
+def test_execution_exit_safety_blocks_unsafe_exit_policy_circuit_breaker_and_queue(tmp_path):
+    policy = json.loads(Path("config/v27-execution-exit-safety-policy.json").read_text(encoding="utf-8"))
+    policy["lifecycle_state_machines"][0]["state_version_fencing_required"] = False
+    policy["exit_execution_state_machines"][0]["exit_safety_preserved"] = False
+    policy["exit_policies"][0]["entry_outcome_separation"] = False
+    policy["circuit_breaker_position_policies"][0]["new_entry_disabled"] = False
+    policy["emergency_exit_journals"][0]["reconciled_to_ledger"] = False
+    policy["exit_queue_health"][0]["exit_queue_status"] = "degraded"
+    policy["exit_queue_health"][0]["stuck_open_position_count"] = 1
+    policy_path = tmp_path / "execution-exit-safety-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_execution_exit_safety_contracts(policy_path=policy_path)}
+
+    assert reports["LifecycleStateMachineContract"]["status"] == "missing_evidence"
+    assert "state_version_fencing_required" in reports["LifecycleStateMachineContract"]["evidence"]["malformed_lifecycle_machines"][0]["violations"]
+    assert reports["ExitExecutionStateMachine"]["status"] == "missing_evidence"
+    assert "exit_safety_must_be_preserved" in reports["ExitExecutionStateMachine"]["evidence"]["malformed_exit_state_machines"][0]["violations"]
+    assert reports["ExitPolicyContract"]["status"] == "missing_evidence"
+    assert "entry_outcome_separation_required" in reports["ExitPolicyContract"]["evidence"]["malformed_exit_policies"][0]["violations"]
+    assert reports["CircuitBreakerPositionPolicy"]["status"] == "missing_evidence"
+    assert "new_entry_must_be_disabled" in reports["CircuitBreakerPositionPolicy"]["evidence"]["malformed_circuit_breakers"][0]["violations"]
+    assert reports["EmergencyExitJournal"]["status"] == "missing_evidence"
+    assert "journal_must_reconcile_to_ledger" in reports["EmergencyExitJournal"]["evidence"]["malformed_emergency_journals"][0]["violations"]
+    assert reports["ExitQueueHealthContract"]["status"] == "missing_evidence"
+    queue_violations = set(reports["ExitQueueHealthContract"]["evidence"]["malformed_exit_queue_health"][0]["violations"])
+    assert {"exit_queue_status_not_healthy", "stuck_open_position_count_must_be_zero"} <= queue_violations
+
+
+def test_delivery_traceability_contracts_verify_reconciliation_dashboard_and_delivery_chain():
+    reports = {item["contract_id"]: item for item in verify_delivery_traceability_contracts()}
+
+    for contract_id in (
+        "ReconciliationPolicyContract",
+        "DashboardStalenessContract",
+        "SpecTraceabilityMatrix",
+        "ImplementationIssueGraphContract",
+        "ModuleClosureContract",
+        "DecommissionPolicyContract",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["ReconciliationPolicyContract"]["evidence"]["malformed_reconciliation_policies"] == []
+    assert reports["DashboardStalenessContract"]["evidence"]["malformed_dashboard_staleness_panels"] == []
+    assert reports["SpecTraceabilityMatrix"]["evidence"]["malformed_traceability_rows"] == []
+    assert reports["ImplementationIssueGraphContract"]["evidence"]["malformed_issues"] == []
+    assert reports["ModuleClosureContract"]["evidence"]["malformed_module_closures"] == []
+    assert reports["DecommissionPolicyContract"]["evidence"]["malformed_decommission_policies"] == []
+
+
+def test_delivery_traceability_blocks_unsafe_repair_stale_dashboard_and_retired_route(tmp_path):
+    policy = json.loads(Path("config/v27-delivery-traceability-policy.json").read_text(encoding="utf-8"))
+    policy["reconciliation_policies"][0]["auto_repair_allowed"] = True
+    policy["dashboard_staleness_panels"][0]["panel_lag_sec"] = 90
+    policy["dashboard_staleness_panels"][0]["operator_override_allowed"] = True
+    policy["spec_traceability_matrix"][0]["status"] = "not_started"
+    policy["implementation_issue_graph"][0]["acceptance_tests"] = []
+    policy["module_closures"][0]["contract_tests"][0]["status"] = "fail"
+    policy["decommission_policies"][0]["runtime_reference_allowed"] = True
+    policy["decommission_policies"][0]["direct_entry_allowed"] = True
+    policy_path = tmp_path / "delivery-traceability-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_delivery_traceability_contracts(policy_path=policy_path)}
+
+    assert reports["ReconciliationPolicyContract"]["status"] == "missing_evidence"
+    assert "ledger_mismatch_cannot_auto_repair" in reports["ReconciliationPolicyContract"]["evidence"]["malformed_reconciliation_policies"][0]["violations"]
+    assert reports["DashboardStalenessContract"]["status"] == "missing_evidence"
+    dashboard_violations = set(reports["DashboardStalenessContract"]["evidence"]["malformed_dashboard_staleness_panels"][0]["violations"])
+    assert {"panel_lag_above_threshold", "operator_override_must_be_disabled_on_dashboard_panel"} <= dashboard_violations
+    assert reports["SpecTraceabilityMatrix"]["status"] == "missing_evidence"
+    assert "traceability_status_not_tested_deployed_or_validated" in reports["SpecTraceabilityMatrix"]["evidence"]["malformed_traceability_rows"][0]["violations"]
+    assert reports["ImplementationIssueGraphContract"]["status"] == "missing_evidence"
+    assert "acceptance_tests_required_for_done" in reports["ImplementationIssueGraphContract"]["evidence"]["malformed_issues"][0]["violations"]
+    assert reports["ModuleClosureContract"]["status"] == "missing_evidence"
+    assert "contract_tests_must_pass" in reports["ModuleClosureContract"]["evidence"]["malformed_module_closures"][0]["violations"]
+    assert reports["DecommissionPolicyContract"]["status"] == "missing_evidence"
+    decommission_violations = set(reports["DecommissionPolicyContract"]["evidence"]["malformed_decommission_policies"][0]["violations"])
+    assert {"retired_artifact_runtime_reference_forbidden", "direct_entry_must_be_false"} <= decommission_violations
+
+
+def test_release_experiment_safety_contracts_verify_release_blockers():
+    reports = {item["contract_id"]: item for item in verify_release_experiment_safety_contracts()}
+
+    for contract_id in (
+        "SecretsManagementContract",
+        "SystemSLO",
+        "NoTradeRootCause",
+        "ReleaseComplexityBudget",
+        "BackpressurePolicy",
+        "BudgetReserveContract",
+        "BlindedHoldoutContract",
+        "ManualOverrideContract",
+        "ContractTestSuite",
+        "AdversarialReplaySuite",
+    ):
+        assert reports[contract_id]["status"] == "pass"
+
+    assert reports["SecretsManagementContract"]["evidence"]["malformed_secrets"] == []
+    assert reports["SystemSLO"]["evidence"]["malformed_slos"] == []
+    assert reports["NoTradeRootCause"]["evidence"]["malformed_no_trade_root_causes"] == []
+    assert reports["ReleaseComplexityBudget"]["evidence"]["malformed_release_complexity"] == []
+    assert reports["BackpressurePolicy"]["evidence"]["malformed_backpressure_policies"] == []
+    assert reports["BudgetReserveContract"]["evidence"]["malformed_budget_reserves"] == []
+    assert reports["BlindedHoldoutContract"]["evidence"]["malformed_holdouts"] == []
+    assert reports["ManualOverrideContract"]["evidence"]["malformed_manual_overrides"] == []
+    assert reports["ContractTestSuite"]["evidence"]["malformed_contract_tests"] == []
+    assert reports["AdversarialReplaySuite"]["evidence"]["malformed_adversarial_replays"] == []
+
+
+def test_release_experiment_safety_blocks_contamination_and_unsafe_runtime(tmp_path):
+    policy = json.loads(Path("config/v27-release-experiment-safety-policy.json").read_text(encoding="utf-8"))
+    policy["secrets_management"][0]["mutation_scope_allowed"] = True
+    policy["system_slos"][0]["status"] = "degraded"
+    policy["system_slos"][0]["severity"] = "P1"
+    policy["no_trade_root_causes"][0]["category"] = "unknown"
+    policy["release_complexity_budgets"][0]["new_gates"] = 2
+    policy["backpressure_policies"][0]["drops_p0_p1_allowed"] = True
+    policy["budget_reserves"][0]["borrow_allowed"] = True
+    policy["blinded_holdouts"][0]["access_count"] = 1
+    policy["manual_overrides"][0]["training_allowed"] = True
+    policy["contract_test_suite"][0]["pass_fail"] = "fail"
+    policy["adversarial_replay_suite"][0]["observed_action"] = "allowed"
+    policy_path = tmp_path / "release-experiment-safety-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    reports = {item["contract_id"]: item for item in verify_release_experiment_safety_contracts(policy_path=policy_path)}
+
+    assert reports["SecretsManagementContract"]["status"] == "missing_evidence"
+    assert "dashboard_token_mutation_scope_forbidden" in reports["SecretsManagementContract"]["evidence"]["malformed_secrets"][0]["violations"]
+    assert reports["SystemSLO"]["status"] == "missing_evidence"
+    slo_violations = set(reports["SystemSLO"]["evidence"]["malformed_slos"][0]["violations"])
+    assert {"slo_status_not_healthy", "critical_slo_unresolved"} <= slo_violations
+    assert reports["NoTradeRootCause"]["status"] == "missing_evidence"
+    assert "d3a_zero_fill_requires_known_root_cause" in reports["NoTradeRootCause"]["evidence"]["malformed_no_trade_root_causes"][0]["violations"]
+    assert reports["ReleaseComplexityBudget"]["status"] == "missing_evidence"
+    assert "new_gates_exceed_release_budget" in reports["ReleaseComplexityBudget"]["evidence"]["malformed_release_complexity"][0]["violations"]
+    assert reports["BackpressurePolicy"]["status"] == "missing_evidence"
+    assert "p0_p1_drop_forbidden" in reports["BackpressurePolicy"]["evidence"]["malformed_backpressure_policies"][0]["violations"]
+    assert reports["BudgetReserveContract"]["status"] == "missing_evidence"
+    assert "p0_p1_reserve_borrow_forbidden" in reports["BudgetReserveContract"]["evidence"]["malformed_budget_reserves"][0]["violations"]
+    assert reports["BlindedHoldoutContract"]["status"] == "missing_evidence"
+    assert "holdout_access_count_must_be_zero" in reports["BlindedHoldoutContract"]["evidence"]["malformed_holdouts"][0]["violations"]
+    assert reports["ManualOverrideContract"]["status"] == "missing_evidence"
+    assert "manual_override_training_forbidden" in reports["ManualOverrideContract"]["evidence"]["malformed_manual_overrides"][0]["violations"]
+    assert reports["ContractTestSuite"]["status"] == "missing_evidence"
+    assert "contract_test_not_pass" in reports["ContractTestSuite"]["evidence"]["malformed_contract_tests"][0]["violations"]
+    assert reports["AdversarialReplaySuite"]["status"] == "missing_evidence"
+    assert "observed_action_must_match_expected_action" in reports["AdversarialReplaySuite"]["evidence"]["malformed_adversarial_replays"][0]["violations"]
+
+
+def test_null_value_policy_blocks_critical_unknown_decision_default(tmp_path):
+    policy = json.loads(Path("config/v27-null-value-policy.json").read_text(encoding="utf-8"))
+    policy["null_policies"][0]["default_value_allowed"] = True
+    policy["null_policies"][0]["decision_allowed"] = True
+    policy_path = tmp_path / "null-value-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_null_value_policy_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "null_value_policy_missing_malformed_or_unsafe"
+    violations = set(report["evidence"]["malformed_policies"][0]["violations"])
+    assert {
+        "critical_field_default_value_forbidden",
+        "critical_unknown_decision_allowed",
+        "policy_hash_mismatch",
+    } <= violations
+
+
+def test_feature_availability_blocks_future_leakage(tmp_path):
+    policy = json.loads(Path("config/v27-feature-vector-snapshot-policy.json").read_text(encoding="utf-8"))
+    policy["feature_availability"][1]["feature_available_at"] = "2026-05-27T00:00:20Z"
+    policy_path = tmp_path / "feature-vector-snapshot-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_feature_availability_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "feature_availability_missing_malformed_or_leaky"
+    violations = set(report["evidence"]["malformed_feature_availability"][0]["violations"])
+    assert {"feature_available_after_decision", "availability_hash_mismatch"} <= violations
+
+
+def test_feature_vector_snapshot_blocks_future_availability_and_hash_drift(tmp_path):
+    policy = json.loads(Path("config/v27-feature-vector-snapshot-policy.json").read_text(encoding="utf-8"))
+    policy["feature_vector_snapshots"][0]["feature_available_at_map"]["entry_quote_price"] = "2026-05-27T00:00:20Z"
+    policy_path = tmp_path / "feature-vector-snapshot-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_feature_vector_snapshot_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "feature_vector_snapshot_missing_malformed_or_unreproducible"
+    violations = set(report["evidence"]["malformed_feature_vector_snapshots"][0]["violations"])
+    assert {"entry_quote_price_available_after_decision", "feature_vector_hash_mismatch"} <= violations
+
+
+def test_data_lineage_graph_blocks_unknown_parent_and_hash_drift(tmp_path):
+    policy = json.loads(Path("config/v27-data-lineage-graph-policy.json").read_text(encoding="utf-8"))
+    policy["lineage_nodes"][1]["parent_node_ids"] = ["node:missing:seed"]
+    policy_path = tmp_path / "data-lineage-graph-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_data_lineage_graph_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "data_lineage_graph_missing_malformed_or_broken"
+    violations = set(report["evidence"]["malformed_lineage_nodes"][0]["violations"])
+    assert {"unknown_parent_node_id", "lineage_hash_mismatch"} <= violations
+
+
+def test_training_dataset_manifest_blocks_spec_hash_drift(tmp_path):
+    policy = json.loads(Path("config/v27-training-dataset-manifest-policy.json").read_text(encoding="utf-8"))
+    policy["training_dataset_manifests"][0]["spec_hash"] = "bad_spec_hash"
+    policy_path = tmp_path / "training-dataset-manifest-policy.json"
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+
+    report = verify_training_dataset_manifest_contract(policy_path=policy_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["blocking_reason"] == "training_dataset_manifest_missing_malformed_or_unlinked"
+    violations = set(report["evidence"]["malformed_manifests"][0]["violations"])
+    assert {"spec_hash_mismatch", "manifest_hash_mismatch"} <= violations
 
 
 def test_reason_taxonomy_contracts_bind_human_and_machine_reasons():
@@ -1806,7 +2588,9 @@ def test_ci_spec_generated_policy_covers_ci_client_and_impact():
 
     assert client["status"] == "pass"
     assert client["evidence"]["client_count"] == 1
-    assert client["evidence"]["catalog_contract_count"] == 213
+    catalog = json.loads(Path("spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json").read_text(encoding="utf-8"))
+    assert client["evidence"]["catalog_contract_count"] == len(catalog["contracts"])
+    assert {"MetricDefinitionRegistry", "ThresholdCatalogContract"} <= set(catalog["contracts"])
     assert client["evidence"]["malformed_clients"] == []
 
     assert impact["status"] == "pass"

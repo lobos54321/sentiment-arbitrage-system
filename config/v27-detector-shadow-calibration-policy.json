@@ -1,0 +1,132 @@
+{
+  "schema_version": "v2.7.0.detector_shadow_calibration_policy.v1",
+  "scope": "v27_detector_shadow_calibration_seed",
+  "failure_action": "detector_shadow_only",
+  "detectors": [
+    {
+      "detector_id": "reclaim_detector",
+      "contract_id": "ReclaimDetector",
+      "detector_name": "telegram_reclaim_detector_shadow_seed",
+      "detector_version": "v2.7.0.seed",
+      "detector_output_states": [
+        "RECLAIM_FORMING_OBSERVED",
+        "RECLAIM_CONFIRMED_OBSERVED",
+        "RECLAIM_FAILED_OBSERVED"
+      ],
+      "allowed_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "gate_allowed": false,
+      "threshold_ids": [
+        "thr_reclaim_confirmed_precision_shadow_min"
+      ],
+      "metric_ids": [
+        "reclaim_confirmed_precision_for_peak30"
+      ],
+      "required_feature_available_at_fields": [
+        "price_reclaim_from_local_low_available_at",
+        "volume_reclaim_available_at",
+        "quote_clean_continuity_available_at"
+      ],
+      "feature_available_at_required": true,
+      "source_event_type": "detector_shadow_event",
+      "failure_action": "cannot_be_normal_tiny_gate",
+      "detector_hash": "8c58ac87bf522bfcaa2d19c5083d90fe1bb74b95f5f7402cb3292c7286920075"
+    },
+    {
+      "detector_id": "overextension_detector",
+      "contract_id": "OverextensionDetector",
+      "detector_name": "telegram_overextension_detector_shadow_seed",
+      "detector_version": "v2.7.0.seed",
+      "detector_output_states": [
+        "OVEREXTENDED_OBSERVED",
+        "NOT_OVEREXTENDED_OBSERVED",
+        "LATE_CLEAN_NOT_ACTIONABLE"
+      ],
+      "allowed_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "gate_allowed": false,
+      "threshold_ids": [
+        "thr_overextended_false_negative_shadow_max"
+      ],
+      "metric_ids": [
+        "overextended_false_negative_peak30_rate"
+      ],
+      "required_feature_available_at_fields": [
+        "extension_from_local_low_available_at",
+        "distance_to_recent_high_available_at",
+        "quote_deterioration_available_at"
+      ],
+      "feature_available_at_required": true,
+      "source_event_type": "detector_shadow_event",
+      "failure_action": "cannot_be_normal_tiny_gate",
+      "detector_hash": "e4c4f7c8ef87e599e147d40b9e61487a8b5532f6d4b7820b37cdfaf854464a8e"
+    }
+  ],
+  "calibrations": [
+    {
+      "calibration_id": "calibration:reclaim_detector:seed",
+      "detector_id": "reclaim_detector",
+      "metric_id": "reclaim_confirmed_precision_for_peak30",
+      "threshold_id": "thr_reclaim_confirmed_precision_shadow_min",
+      "window_id": "rolling_24h_decision_available_at",
+      "sample_n": 30,
+      "observed_value": 0.72,
+      "comparison_operator": ">=",
+      "threshold_value": 0.7,
+      "calibration_status": "shadow_healthy",
+      "promotion_allowed": false,
+      "contaminated_sample_count": 0,
+      "checked_at": "2026-05-27T00:00:00Z",
+      "calibration_hash": "4f1603e96204a755a5974be5d09f52b2b7fb9cf9fadb7c14415ff4eb6ca70616"
+    },
+    {
+      "calibration_id": "calibration:overextension_detector:seed",
+      "detector_id": "overextension_detector",
+      "metric_id": "overextended_false_negative_peak30_rate",
+      "threshold_id": "thr_overextended_false_negative_shadow_max",
+      "window_id": "rolling_24h_decision_available_at",
+      "sample_n": 30,
+      "observed_value": 0.1,
+      "comparison_operator": "<=",
+      "threshold_value": 0.2,
+      "calibration_status": "shadow_healthy",
+      "promotion_allowed": false,
+      "contaminated_sample_count": 0,
+      "checked_at": "2026-05-27T00:00:00Z",
+      "calibration_hash": "c9f6e7e1f668f576aabdd7836afe15a922620ec433e32a73b3bb4425593ea023"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_detector_shadow_calibration_contracts",
+      "required_patterns": [
+        "ReclaimDetector",
+        "OverextensionDetector",
+        "DetectorCalibrationContract",
+        "detector_calibration_missing_malformed_or_contaminated"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_denominator_projection.py",
+      "source_anchor": "\"ReclaimDetector\"",
+      "required_patterns": [
+        "\"ReclaimDetector\"",
+        "\"OverextensionDetector\""
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"ReclaimDetector\"",
+      "required_patterns": [
+        "\"ReclaimDetector\"",
+        "\"OverextensionDetector\"",
+        "\"DetectorCalibrationContract\""
+      ]
+    }
+  ]
+}

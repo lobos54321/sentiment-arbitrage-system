@@ -1,0 +1,138 @@
+{
+  "schema_version": "v2.7.0.null_value_policy.v1",
+  "scope": "v27_training_truth_null_semantics_seed",
+  "failure_action": "feature_invalid_or_shadow_only",
+  "null_policies": [
+    {
+      "field_name": "critical_risk_status",
+      "null_class": "provider_unknown",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "no_imputation_shadow_only",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "UNKNOWN_RISK",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "e84f91bbcb2b0487c5f4995a1029b0700c59c6f943cfd30abe2124b973dc8cd2"
+    },
+    {
+      "field_name": "entry_quote_price",
+      "null_class": "delayed_unavailable",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "no_imputation_quote_unavailable",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "QUOTE_UNAVAILABLE",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "bbdea8fec466deb01528e2828d4ab208dcfa22c45846a58f20db70d483e0cd85"
+    },
+    {
+      "field_name": "exit_quote_price",
+      "null_class": "delayed_unavailable",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "no_imputation_exit_quote_unavailable",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "EXIT_QUOTE_UNAVAILABLE",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "768ed1a60d2a3bd52cac83a8a9a288a2cfe2ae8b51695ea049079754d0c0c664"
+    },
+    {
+      "field_name": "reference_price",
+      "null_class": "missing_not_observed",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "label_unavailable_no_imputation",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "REFERENCE_PRICE_MISSING",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "44773360888ef6e409e271b9f48840923401a2196c1fc22351509844d0b428e2"
+    },
+    {
+      "field_name": "token_identity_confidence",
+      "null_class": "parse_failed",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "quarantine_identity_unknown",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "IDENTITY_UNKNOWN",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "e04cd94fed1283d7437d942dc9d13cf1bca70ed4206452876b9418f7aa4c5fc6"
+    },
+    {
+      "field_name": "feature_available_at",
+      "null_class": "missing_not_observed",
+      "allowed_in_modes": [
+        "observe_only"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "exclude_feature_from_prod_matrix",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "FEATURE_AVAILABILITY_MISSING",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "8b40b2ebe7577b09f71e6265d78227b372f82ca987ce77201e1d4828cdd0d4ab"
+    },
+    {
+      "field_name": "gmgn_risk_status",
+      "null_class": "provider_unknown",
+      "allowed_in_modes": [
+        "observe_only",
+        "shadow",
+        "ultra_tiny"
+      ],
+      "default_value_allowed": false,
+      "imputation_policy": "non_critical_unknown_shadow_or_ultra_tiny_only",
+      "training_allowed": false,
+      "decision_allowed": false,
+      "dashboard_display": "GMGN_RISK_UNKNOWN",
+      "owner": "system",
+      "policy_version": "v2.7.0.seed",
+      "policy_hash": "7452aafdc5c024e97cf4300b3da121f8b7e05b7911ae0541a01bdbf2071acadc"
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_null_value_policy_contract",
+      "required_patterns": [
+        "NullValuePolicyContract",
+        "critical_unknown_decision_allowed",
+        "null_value_policy_missing_malformed_or_unsafe"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"NullValuePolicyContract\"",
+      "required_patterns": [
+        "\"shadow\"",
+        "\"NullValuePolicyContract\""
+      ]
+    }
+  ]
+}

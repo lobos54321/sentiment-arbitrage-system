@@ -6,6 +6,30 @@ import datetime as dt
 from scripts import paper_fast_lane as fast
 
 
+def write_mode_readiness(path, *, highest_allowed_mode="normal_tiny", blocked_modes=()):
+    blocked = set(blocked_modes)
+    modes = {}
+    for mode in ("observe_only", "shadow", "ultra_tiny", "normal_tiny"):
+        modes[mode] = {
+            "status": "blocked" if mode in blocked else "allowed",
+            "blocking_contracts": ["UnitBlockingContract"] if mode in blocked else [],
+        }
+    payload = {
+        "matrix_schema_version": "v2.7.0.mode_readiness.v1",
+        "highest_allowed_mode": highest_allowed_mode,
+        "health": {
+            "status": "mode_readiness_evaluated",
+            "observe_only_ready": True,
+            "shadow_ready": True,
+            "ultra_tiny_ready": highest_allowed_mode in ("ultra_tiny", "normal_tiny"),
+            "normal_tiny_ready": highest_allowed_mode == "normal_tiny",
+        },
+        "modes": modes,
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 def test_fast_queue_deduplicates_by_queue_key(tmp_path):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)
@@ -153,7 +177,8 @@ def test_claim_queue_item_is_single_owner(tmp_path):
     assert fast.claim_queue_item(db, "worker-2") is None
 
 
-def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path):
+def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeypatch):
+    monkeypatch.setenv("V27_MODE_READINESS_PATH", str(write_mode_readiness(tmp_path / "mode_readiness.json")))
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)
     fast.init_fast_lane_schema(db)
@@ -201,6 +226,34 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path):
     ).fetchone()
     assert queue["status"] == "watch_only"
     assert queue["last_error"] == "entry_mode_quality_tail_loss"
+
+
+def test_process_queue_item_blocks_when_v27_mode_readiness_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("V27_MODE_READINESS_PATH", str(tmp_path / "missing_mode_readiness.json"))
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="missing_quote_recovery_fast",
+        token_ca="TokenModeGate",
+        symbol="MODE",
+        signal_ts=now,
+        receive_ts=now,
+        entry_branch="missing_trigger_or_quote",
+        entry_mode_hint="pre_pass_resonance_tiny_probe",
+        now_ts=now,
+    )
+    row = fast.claim_queue_item(db, "worker-1")
+
+    fast.process_queue_item(db, row, "worker-1")
+
+    queue = db.execute(
+        "SELECT status, last_error FROM paper_fast_entry_queue WHERE token_ca = 'TokenModeGate'"
+    ).fetchone()
+    assert queue["status"] == "watch_only"
+    assert queue["last_error"] == "v27_mode_readiness_missing"
 
 
 def test_entry_guard_rejects_hard_drift():

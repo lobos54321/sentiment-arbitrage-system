@@ -7,8 +7,8 @@ Generated from repo-local canonical JSON artifacts.
 - Manifest: `spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json`
 - Contract catalog: `spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json`
 - Gap register: `spec/telegram_dog_regime_capture/v2.7.0/gap-register.json`
-- Catalog contracts: `213`
-- Gap register contracts: `175`
+- Catalog contracts: `282`
+- Gap register contracts: `244`
 - Gap contracts missing catalog records: `0`
 
 ## Release Principle
@@ -22,8 +22,8 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 ## S14 - Dashboard, API, Exports, Alerts, and Operator Console
 
 - Section mode target: `mvp_and_normal_tiny_blocking`
-- Catalog contract count: `18`
-- Gap batch count: `4`
+- Catalog contract count: `21`
+- Gap batch count: `6`
 
 ### Catalog Contracts
 
@@ -41,12 +41,26 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Failure action: `api_envelope_invalid`
 - Required fields: `endpoint, envelope_version, payload_hash, error_shape, generated_at`
 
+#### AlertAckEscalationPolicy
+
+- Section: `S14`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `readiness_degraded`
+- Required fields: `alert_id, severity, ack_required_by, acked_at, escalation_target`
+
 #### AlertNoiseBudgetContract
 
 - Section: `S14`
 - Mode target: `normal_tiny_blocking`
 - Failure action: `alert_route_degraded`
 - Required fields: `alert_family, window_id, noise_budget, suppression_count, owner`
+
+#### AlertPolicy
+
+- Section: `S14`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `alert_policy_invalid`
+- Required fields: `alert_id, severity, trigger_condition, auto_action, owner_component`
 
 #### AlertSuppressionAuditContract
 
@@ -96,6 +110,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Mode target: `shadow_blocking`
 - Failure action: `dashboard_query_untrusted`
 - Required fields: `query_id, source_snapshot_hash, filter_hash, result_hash, queried_at`
+
+#### DashboardStalenessContract
+
+- Section: `S14`
+- Mode target: `shadow_blocking`
+- Failure action: `dashboard_stale_no_override`
+- Required fields: `panel_name, panel_lag_sec, stale_banner_required, operator_override_allowed`
 
 #### DashboardTriageWorkflowContract
 
@@ -155,6 +176,16 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 
 ### Gap Register Coverage
 
+#### v2.6.13_delivery_traceability
+
+- Theme: Reconciliation, dashboard freshness, traceability, implementation issue graph, module closure, and decommission policy must be machine-checkable before normal tiny can be trusted.
+- Contracts: `DashboardStalenessContract`
+
+#### v2.6.13_operator_alert_kill_switch_safety
+
+- Theme: Operator safety, on-call ownership, P0/P1 alert ack escalation, append-only operator audit, and kill-switch drill proof before normal tiny.
+- Contracts: `AlertAckEscalationPolicy, AlertPolicy`
+
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
 - Theme: Evidence finality, replay safety, provider proof, ledger invariants, and fleet consistency.
@@ -178,8 +209,8 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 ## S15 - Access, Secrets, Admin Mutations, and Human Safety
 
 - Section mode target: `mvp_and_normal_tiny_blocking`
-- Catalog contract count: `12`
-- Gap batch count: `4`
+- Catalog contract count: `17`
+- Gap batch count: `6`
 
 ### Catalog Contracts
 
@@ -225,6 +256,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Failure action: `break_glass_rejected`
 - Required fields: `break_glass_id, operator_id, reason, expires_at, audit_event_id`
 
+#### KillSwitchDrillContract
+
+- Section: `S15`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `normal_tiny_disabled`
+- Required fields: `drill_id, kill_switch_type, new_entry_blocked, exit_safety_preserved, pass_fail`
+
 #### LogRedactionVerificationContract
 
 - Section: `S15`
@@ -239,12 +277,33 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Failure action: `reject_duplicate_mutation`
 - Required fields: `command_id, idempotency_key, mutation_target, dedupe_hash, result_hash`
 
+#### OperatorAudit
+
+- Section: `S15`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `operator_action_rejected`
+- Required fields: `operator_id, action, before_value, after_value, reason, approval_status`
+
+#### OperatorSafetyContract
+
+- Section: `S15`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `operator_action_rejected`
+- Required fields: `operator_id, action, danger_level, dashboard_freshness_ok, operator_safety_status`
+
 #### OperatorTrainingCertificationContract
 
 - Section: `S15`
 - Mode target: `normal_tiny_blocking`
 - Failure action: `operator_action_blocked`
 - Required fields: `operator_id, training_module, certification_status, expires_at, checked_at`
+
+#### OwnershipOnCallContract
+
+- Section: `S15`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `readiness_degraded`
+- Required fields: `component, owner, oncall_primary, oncall_secondary, runbook_url`
 
 #### RunbookFreshnessContract
 
@@ -260,6 +319,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Failure action: `secret_access_alert`
 - Required fields: `secret_id, accessor_id, access_reason, audit_event_id, accessed_at`
 
+#### SecretsManagementContract
+
+- Section: `S15`
+- Mode target: `mvp_blocking`
+- Failure action: `p0_security_event`
+- Required fields: `secret_name, scope, rotation_interval_days, last_rotated_at, environment_allowed`
+
 #### WaiverPolicyContract
 
 - Section: `S15`
@@ -268,6 +334,16 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Required fields: `waiver_id, contract_id, scope, expires_at, non_waivable`
 
 ### Gap Register Coverage
+
+#### v2.6.13_operator_alert_kill_switch_safety
+
+- Theme: Operator safety, on-call ownership, P0/P1 alert ack escalation, append-only operator audit, and kill-switch drill proof before normal tiny.
+- Contracts: `KillSwitchDrillContract, OperatorAudit, OperatorSafetyContract, OwnershipOnCallContract`
+
+#### v2.6.13_release_experiment_safety
+
+- Theme: Secrets lifecycle, system SLO, no-trade root cause, release complexity, backpressure, budget reserve, holdout blinding, manual override quarantine, contract tests, and adversarial replay must be machine-checkable before normal tiny.
+- Contracts: `SecretsManagementContract`
 
 #### v2.6.14_evidence_finality_replay_safety_fleet
 
@@ -550,8 +626,8 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 ## S18 - Meta-Governance, Complexity Control, and Project Exit
 
 - Section mode target: `normal_tiny_governance`
-- Catalog contract count: `32`
-- Gap batch count: `3`
+- Catalog contract count: `35`
+- Gap batch count: `5`
 
 ### Catalog Contracts
 
@@ -603,6 +679,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Mode target: `normal_tiny_governance`
 - Failure action: `contract_priority_invalid`
 - Required fields: `graph_id, higher_priority_contract, lower_priority_contract, cycle_detected, resolved_at`
+
+#### DecommissionPolicyContract
+
+- Section: `S18`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `global_circuit_breaker`
+- Required fields: `artifact_id, artifact_type, status, runtime_reference_allowed, operator_audit_required`
 
 #### EvidenceAgingContract
 
@@ -695,6 +778,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Failure action: `mode_blocked`
 - Required fields: `boundary_id, trusted_inputs, untrusted_inputs, required_contracts, failure_action`
 
+#### ModuleClosureContract
+
+- Section: `S18`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `real_entry_gate_blocked`
+- Required fields: `module_name, input_events, output_events, contract_tests, kill_condition`
+
 #### OperatorCognitiveLoadContract
 
 - Section: `S18`
@@ -722,6 +812,13 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 - Mode target: `normal_tiny_governance`
 - Failure action: `release_blocked`
 - Required fields: `budget_id, metric_id, allowed_regression, observed_regression, action`
+
+#### ReleaseComplexityBudget
+
+- Section: `S18`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `release_blocked`
+- Required fields: `release_id, max_new_gates_per_release, new_gates, required_shadow_hours_before_gate`
 
 #### ResearchNotebookBoundaryContract
 
@@ -781,6 +878,16 @@ Implement and verify the first remaining normal_tiny runtime blocker evidence ch
 
 ### Gap Register Coverage
 
+#### v2.6.13_delivery_traceability
+
+- Theme: Reconciliation, dashboard freshness, traceability, implementation issue graph, module closure, and decommission policy must be machine-checkable before normal tiny can be trusted.
+- Contracts: `DecommissionPolicyContract, ModuleClosureContract`
+
+#### v2.6.13_release_experiment_safety
+
+- Theme: Secrets lifecycle, system SLO, no-trade root cause, release complexity, backpressure, budget reserve, holdout blinding, manual override quarantine, contract tests, and adversarial replay must be machine-checkable before normal tiny.
+- Contracts: `ReleaseComplexityBudget`
+
 #### v2.6.15_queue_fleet_admin_parser_training_serving
 
 - Theme: Queue durability, worker readiness, admin command safety, parser ambiguity, and training-serving skew.
@@ -818,44 +925,82 @@ No gap-register contracts currently target this section.
 ## S20 - Tracer Bullet 0
 
 - Section mode target: `first_vertical_slice`
-- Catalog contract count: `0`
-- Gap batch count: `0`
+- Catalog contract count: `1`
+- Gap batch count: `1`
 
 ### Catalog Contracts
 
-No catalog contracts currently target this section.
+#### NoTradeRootCause
+
+- Section: `S20`
+- Mode target: `ultra_tiny_blocking`
+- Failure action: `no_trade_unknown`
+- Required fields: `root_cause_id, root_cause_code, d3a_candidate_count, fill_count, remediation_action`
 
 ### Gap Register Coverage
 
-No gap-register contracts currently target this section.
+#### v2.6.13_release_experiment_safety
+
+- Theme: Secrets lifecycle, system SLO, no-trade root cause, release complexity, backpressure, budget reserve, holdout blinding, manual override quarantine, contract tests, and adversarial replay must be machine-checkable before normal tiny.
+- Contracts: `NoTradeRootCause`
 
 ## S21 - First Implementation Issue Graph
 
 - Section mode target: `implementation_planning`
-- Catalog contract count: `0`
-- Gap batch count: `0`
+- Catalog contract count: `2`
+- Gap batch count: `1`
 
 ### Catalog Contracts
 
-No catalog contracts currently target this section.
+#### ImplementationIssueGraphContract
+
+- Section: `S21`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `release_blocked`
+- Required fields: `issue_id, spec_section_ids, dependency_ids, acceptance_tests, status`
+
+#### SpecTraceabilityMatrix
+
+- Section: `S21`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `release_blocked`
+- Required fields: `spec_section_id, implementation_module, test_file, issue_id, status`
 
 ### Gap Register Coverage
 
-No gap-register contracts currently target this section.
+#### v2.6.13_delivery_traceability
+
+- Theme: Reconciliation, dashboard freshness, traceability, implementation issue graph, module closure, and decommission policy must be machine-checkable before normal tiny can be trusted.
+- Contracts: `ImplementationIssueGraphContract, SpecTraceabilityMatrix`
 
 ## S22 - Contract Test and Adversarial Replay Requirements
 
 - Section mode target: `all_modes`
-- Catalog contract count: `0`
-- Gap batch count: `0`
+- Catalog contract count: `2`
+- Gap batch count: `1`
 
 ### Catalog Contracts
 
-No catalog contracts currently target this section.
+#### AdversarialReplaySuite
+
+- Section: `S22`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `release_blocked`
+- Required fields: `replay_id, scenario, expected_action, observed_action, machine_checked`
+
+#### ContractTestSuite
+
+- Section: `S22`
+- Mode target: `normal_tiny_blocking`
+- Failure action: `release_blocked`
+- Required fields: `suite_id, contract_id, test_command, pass_fail, coverage_class`
 
 ### Gap Register Coverage
 
-No gap-register contracts currently target this section.
+#### v2.6.13_release_experiment_safety
+
+- Theme: Secrets lifecycle, system SLO, no-trade root cause, release complexity, backpressure, budget reserve, holdout blinding, manual override quarantine, contract tests, and adversarial replay must be machine-checkable before normal tiny.
+- Contracts: `AdversarialReplaySuite, ContractTestSuite`
 
 ## S23 - Part 3 Coverage Summary
 

@@ -1,0 +1,115 @@
+{
+  "schema_version": "v2.7.0.feature_vector_snapshot_policy.v1",
+  "scope": "v27_training_truth_feature_availability_and_vector_seed",
+  "failure_action": "feature_leakage_detected",
+  "feature_availability": [
+    {
+      "feature_name": "critical_risk_status",
+      "feature_window_start": "2026-05-27T00:00:00Z",
+      "feature_window_end": "2026-05-27T00:00:05Z",
+      "feature_available_at": "2026-05-27T00:00:06Z",
+      "decision_available_at": "2026-05-27T00:00:10Z",
+      "label_available_at": "2026-05-27T00:05:00Z",
+      "feature_source": "risk_provider_realtime",
+      "feature_research_only": false,
+      "null_policy_field": "critical_risk_status",
+      "availability_hash": "09ba91a5827e526b341685d0fc7f081cd618fb5159cda707ae608cca09066f3c"
+    },
+    {
+      "feature_name": "entry_quote_price",
+      "feature_window_start": "2026-05-27T00:00:00Z",
+      "feature_window_end": "2026-05-27T00:00:07Z",
+      "feature_available_at": "2026-05-27T00:00:08Z",
+      "decision_available_at": "2026-05-27T00:00:10Z",
+      "label_available_at": "2026-05-27T00:05:00Z",
+      "feature_source": "entry_quote_realtime",
+      "feature_research_only": false,
+      "null_policy_field": "entry_quote_price",
+      "availability_hash": "0fad086bd44c17eb2f2fe860a2f4c523502b5d10dee24382dd4ad2a7979a4735"
+    },
+    {
+      "feature_name": "exit_quote_price",
+      "feature_window_start": "2026-05-27T00:00:00Z",
+      "feature_window_end": "2026-05-27T00:00:07Z",
+      "feature_available_at": "2026-05-27T00:00:08Z",
+      "decision_available_at": "2026-05-27T00:00:10Z",
+      "label_available_at": "2026-05-27T00:05:00Z",
+      "feature_source": "exit_quote_realtime",
+      "feature_research_only": false,
+      "null_policy_field": "exit_quote_price",
+      "availability_hash": "0fd5cc88da1df099643287383c47f57d085f2dbb2a981938258dd8305b4a0774"
+    },
+    {
+      "feature_name": "reference_price",
+      "feature_window_start": "2026-05-27T00:00:00Z",
+      "feature_window_end": "2026-05-27T00:00:07Z",
+      "feature_available_at": "2026-05-27T00:00:08Z",
+      "decision_available_at": "2026-05-27T00:00:10Z",
+      "label_available_at": "2026-05-27T00:05:00Z",
+      "feature_source": "first_realtime_clean_quote",
+      "feature_research_only": false,
+      "null_policy_field": "reference_price",
+      "availability_hash": "f24bce3a4fb775db204506252ac7ab76cdc6d883e71388219d5b4051220c6041"
+    }
+  ],
+  "feature_vector_snapshots": [
+    {
+      "feature_vector_hash": "b25944f44340980de3ecc75241e8a1a5067b6d5d4fef5e52cd4231fa6bcbfe7e",
+      "feature_names_ordered": [
+        "critical_risk_status",
+        "entry_quote_price",
+        "exit_quote_price",
+        "reference_price"
+      ],
+      "feature_values_serialized": {
+        "critical_risk_status": "known_clean",
+        "entry_quote_price": "0.00000123",
+        "exit_quote_price": "0.00000122",
+        "reference_price": "0.00000123"
+      },
+      "missing_value_policy": "critical_risk_status",
+      "normalization_version": "v2.7.0.seed_decimal_string",
+      "model_input_schema_version": "v2.7.0.telegram_not_ath_reclaim_seed",
+      "decision_ts": "2026-05-27T00:00:10Z",
+      "feature_available_at_map": {
+        "critical_risk_status": "2026-05-27T00:00:06Z",
+        "entry_quote_price": "2026-05-27T00:00:08Z",
+        "exit_quote_price": "2026-05-27T00:00:08Z",
+        "reference_price": "2026-05-27T00:00:08Z"
+      },
+      "source_lineage_node_ids": [
+        "node:feature_snapshot:seed",
+        "node:feature_vector:seed"
+      ]
+    }
+  ],
+  "source_files": [
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_feature_availability_contract",
+      "required_patterns": [
+        "FeatureAvailabilityContract",
+        "feature_available_after_decision",
+        "feature_availability_missing_malformed_or_leaky"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_basic_contract_readiness.py",
+      "source_anchor": "def verify_feature_vector_snapshot_contract",
+      "required_patterns": [
+        "FeatureVectorSnapshotContract",
+        "feature_vector_hash_mismatch",
+        "feature_vector_snapshot_missing_malformed_or_unreproducible"
+      ]
+    },
+    {
+      "source_file": "scripts/v27_mode_readiness.py",
+      "source_anchor": "\"FeatureVectorSnapshotContract\"",
+      "required_patterns": [
+        "\"normal_tiny\"",
+        "\"FeatureAvailabilityContract\"",
+        "\"FeatureVectorSnapshotContract\""
+      ]
+    }
+  ]
+}
