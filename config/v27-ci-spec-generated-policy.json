@@ -255,7 +255,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-27T00:00:00Z",
-      "impact_hash": "588436d63d049507e49b977d3b2055031a0023479f0fb496116968dfb1323da4",
+      "impact_hash": "f65f9ab5a63e5a58b5f0a2ef6b5971d266f85bce3ee6226d43f3f1849c6bff38",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -343,7 +343,7 @@
         "config/v27-threshold-catalog.json": "0f5a4de3fd712d17ac8c70adec5573514e8d56c99afbf0a59d46f06d549f91f3",
         "config/v27-training-dataset-manifest-policy.json": "815fba6c1648b34d7fcb6ee5e78d088bb698b2234daa2992d680ce0a4e912aa9",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
-        "scripts/paper_fast_lane.py": "958d37b334d5fc1f1d827ba841fa81c6f7cecba369d146319d179ee5e4bd3e94",
+        "scripts/paper_fast_lane.py": "4da26dc0934668855d5d16be2108709c3d059e353233e8ca1fbc1957bf8add2b",
         "scripts/paper_trade_monitor.py": "4b5fbe69cdab29c113a62a598e33076ee6293c0b59b99725cabb4751c5b7165c",
         "scripts/telegram_lifecycle_markov.py": "13a32477b07d009ec2ee616e6d6aa25d67a8b00260185fe98267642a4b4942a1",
         "scripts/v27_basic_contract_readiness.py": "b83af3b6d4ce3ebcdb803d7203659005f2538f7119aee8bb6ba81e2fe005644c",

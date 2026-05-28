@@ -267,15 +267,16 @@ DEGRADED_CANARY_BRANCHES = {
 SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
 
 
-def connect_db(path):
+def connect_db(path, *, ensure_wal=True):
     timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "60"))
     db = sqlite3.connect(path, timeout=timeout_sec, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
-    try:
-        db.execute("PRAGMA journal_mode = WAL")
-    except sqlite3.OperationalError:
-        pass
+    if ensure_wal:
+        try:
+            db.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
     return db
 
 
@@ -2112,7 +2113,7 @@ def process_premium_signal_row(pdb, row, *, now_ts=None):
     return "deduped"
 
 
-def scan_premium_once(sdb, pdb, *, last_id=0, lookback_sec=0, now_ts=None):
+def scan_premium_once(sdb, pdb, *, last_id=0, lookback_sec=0, now_ts=None, ensure_schema=True):
     """Scan new premium rows and reconcile recent status changes.
 
     Some premium rows are inserted before their final hard_gate_status is known.
@@ -2120,7 +2121,8 @@ def scan_premium_once(sdb, pdb, *, last_id=0, lookback_sec=0, now_ts=None):
     rescue status. The recent-window reconciliation path is deliberately
     idempotent; fast-lane queue keys and token dedupe prevent duplicate entries.
     """
-    init_fast_lane_schema(pdb)
+    if ensure_schema:
+        init_fast_lane_schema(pdb)
     if not table_exists(sdb, "premium_signals"):
         return {"last_id": last_id, "rows": 0, "queued": 0, "watch_only": 0, "deduped": 0}
     cols = table_columns(sdb, "premium_signals")
@@ -2159,7 +2161,7 @@ def scan_premium_once(sdb, pdb, *, last_id=0, lookback_sec=0, now_ts=None):
 def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
     last_id = 0
     try:
-        sdb = connect_db(signal_db_path)
+        sdb = connect_db(signal_db_path, ensure_wal=False)
         if table_exists(sdb, "premium_signals"):
             cutoff = int(time.time() - max(0, int(lookback_sec or 0)))
             cols = table_columns(sdb, "premium_signals")
@@ -2174,9 +2176,8 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
         last_id = 0
     while not stop_event.is_set():
         try:
-            sdb = connect_db(signal_db_path)
-            pdb = connect_db(paper_db_path)
-            init_fast_lane_schema(pdb)
+            sdb = connect_db(signal_db_path, ensure_wal=False)
+            pdb = connect_db(paper_db_path, ensure_wal=False)
             if not table_exists(sdb, "premium_signals"):
                 time.sleep(FAST_ENTRY_SCAN_INTERVAL_SEC)
                 continue
@@ -2185,6 +2186,7 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
                 pdb,
                 last_id=last_id,
                 lookback_sec=lookback_sec,
+                ensure_schema=False,
             )
             last_id = int(result.get("last_id") or last_id)
             sdb.close()
@@ -2197,8 +2199,7 @@ def premium_scan(signal_db_path, paper_db_path, stop_event, lookback_sec):
 def source_resonance_scan(paper_db_path, stop_event):
     while not stop_event.is_set():
         try:
-            db = connect_db(paper_db_path)
-            init_fast_lane_schema(db)
+            db = connect_db(paper_db_path, ensure_wal=False)
             if table_exists(db, "source_resonance_candidates"):
                 source_cols = table_columns(db, "source_resonance_candidates")
                 rows = db.execute(
@@ -2589,9 +2590,10 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
     }
 
 
-def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
+def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
     now_ts = float(now_ts if now_ts is not None else time.time())
-    init_fast_lane_schema(db)
+    if ensure_schema:
+        init_fast_lane_schema(db)
     if not table_exists(db, "paper_missed_signal_attribution"):
         return {"rows": 0, "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
     cols = table_columns(db, "paper_missed_signal_attribution")
@@ -2707,8 +2709,10 @@ def missed_rescue_scan(paper_db_path, stop_event):
     while not stop_event.is_set():
         db = None
         try:
-            db = connect_db(paper_db_path)
-            result = scan_missed_rescue_once(db)
+            write_fast_lane_health(paper_db_path=paper_db_path, worker_state="missed_rescue_connecting")
+            db = connect_db(paper_db_path, ensure_wal=False)
+            write_fast_lane_health(paper_db_path=paper_db_path, worker_state="missed_rescue_scanning")
+            result = scan_missed_rescue_once(db, ensure_schema=False)
             write_fast_lane_health(paper_db_path=paper_db_path, missed_rescue_result=result)
         except Exception as exc:
             write_fast_lane_health(paper_db_path=paper_db_path, error=exc)
@@ -2721,7 +2725,7 @@ def missed_rescue_scan(paper_db_path, stop_event):
 
 def worker_loop(paper_db_path, worker_id, stop_event):
     owner = f"fast-worker-{worker_id}"
-    db = connect_db(paper_db_path)
+    db = connect_db(paper_db_path, ensure_wal=False)
     init_fast_lane_schema(db)
     while not stop_event.is_set():
         try:
