@@ -38,8 +38,14 @@ from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
+DEFAULT_FAST_LANE_HEALTH_PATH = PROJECT_ROOT / "data" / "paper-fast-lane-health.json"
 
 log = logging.getLogger("paper_fast_lane")
+FAST_LANE_HEALTH_LOCK = threading.Lock()
+FAST_LANE_HEALTH_STATE = {
+    "missed_rescue_scan_count": 0,
+    "missed_rescue_error_count": 0,
+}
 
 FAST_LANE_POLICY_VERSION = os.environ.get("PAPER_FAST_LANE_POLICY_VERSION", "fast_lane_v1")
 CLEAN_DOG_RECLAIM_POLICY_VERSION = os.environ.get(
@@ -338,6 +344,61 @@ def timestamp_order_expr(exprs):
 def add_column_if_missing(db, table, column, definition):
     if column not in table_columns(db, table):
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def fast_lane_health_path():
+    raw = os.environ.get("PAPER_FAST_LANE_HEALTH_PATH")
+    return Path(raw) if raw else DEFAULT_FAST_LANE_HEALTH_PATH
+
+
+def iso_utc_from_ts(value):
+    return dt.datetime.fromtimestamp(float(value), dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def missed_rescue_health_counts(result):
+    result = result or {}
+    keys = (
+        "rows",
+        "processed",
+        "queued",
+        "watch_only",
+        "counterfactual_only",
+        "deduped",
+        "backlog_lookback_sec",
+    )
+    return {key: int(result.get(key) or 0) for key in keys}
+
+
+def write_fast_lane_health(*, paper_db_path=None, missed_rescue_result=None, error=None, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    path = fast_lane_health_path()
+    with FAST_LANE_HEALTH_LOCK:
+        FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"] += 1
+        if error is not None:
+            FAST_LANE_HEALTH_STATE["missed_rescue_error_count"] += 1
+        payload = {
+            "schema_version": "v2.7.0.paper_fast_lane_health.v1",
+            "updated_at": iso_utc_from_ts(now_ts),
+            "paper_db_exists": bool(Path(paper_db_path).exists()) if paper_db_path else None,
+            "missed_rescue": {
+                "last_scan_at": iso_utc_from_ts(now_ts),
+                "scan_count": FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"],
+                "error_count": FAST_LANE_HEALTH_STATE["missed_rescue_error_count"],
+                "last_result": missed_rescue_health_counts(missed_rescue_result),
+                "last_error": (
+                    {
+                        "type": error.__class__.__name__,
+                        "message": str(error)[:300],
+                    }
+                    if error is not None
+                    else None
+                ),
+            },
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp_path, path)
 
 
 def market_session_for_ts(value):
@@ -2639,12 +2700,17 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
 
 def missed_rescue_scan(paper_db_path, stop_event):
     while not stop_event.is_set():
+        db = None
         try:
             db = connect_db(paper_db_path)
-            scan_missed_rescue_once(db)
-            db.close()
+            result = scan_missed_rescue_once(db)
+            write_fast_lane_health(paper_db_path=paper_db_path, missed_rescue_result=result)
         except Exception as exc:
+            write_fast_lane_health(paper_db_path=paper_db_path, error=exc)
             log.warning("missed rescue scan failed: %s", exc, exc_info=True)
+        finally:
+            if db is not None:
+                db.close()
         stop_event.wait(max(2.0, FAST_ENTRY_SCAN_INTERVAL_SEC * 2))
 
 

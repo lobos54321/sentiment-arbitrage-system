@@ -21,6 +21,7 @@ import {
   boundedWindowedSinceTs,
   dogCatchGoalFromLiveSnapshot,
   missedRecoverySummaryFromLiveSnapshot,
+  readPaperFastLaneHealth,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   LOG_REDACTION_PATTERN_SET,
@@ -212,6 +213,40 @@ test('v27 read model health reports missing materialized snapshot as unsafe', ()
   assert.equal(health.dashboard_safe, false);
   assert.deepEqual(health.blocking_reasons, ['v27_read_model_health_missing']);
   assert.equal(health.health.status, 'v27_read_model_health_missing');
+});
+
+test('paper fast lane health exposes public-safe missed rescue heartbeat', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-fast-lane-health-'));
+  const healthPath = join(dir, 'paper-fast-lane-health.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    schema_version: 'v2.7.0.paper_fast_lane_health.v1',
+    updated_at: '2026-05-28T23:00:00Z',
+    paper_db_exists: true,
+    missed_rescue: {
+      last_scan_at: '2026-05-28T23:00:00Z',
+      scan_count: 3,
+      error_count: 0,
+      last_result: {
+        rows: 30,
+        processed: 12,
+        queued: 2,
+        watch_only: 10,
+        counterfactual_only: 0,
+        deduped: 0,
+        backlog_lookback_sec: 86400,
+      },
+      last_error: null,
+    },
+  }));
+
+  const health = readPaperFastLaneHealth({ healthPath });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'ok');
+  assert.equal(health.paper_db_exists, true);
+  assert.equal(health.missed_rescue.scan_count, 3);
+  assert.equal(health.missed_rescue.last_result.processed, 12);
+  assert.equal(health.missed_rescue.last_error, null);
 });
 
 test('v27 read model health exposes materialized verifier result', () => {

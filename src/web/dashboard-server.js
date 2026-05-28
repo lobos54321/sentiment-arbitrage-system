@@ -817,6 +817,47 @@ function readTinyText(filePath, maxBytes = 2000) {
   }
 }
 
+function paperFastLaneHealthPath(env = process.env) {
+  const raw = env.PAPER_FAST_LANE_HEALTH_PATH || './data/paper-fast-lane-health.json';
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+export function readPaperFastLaneHealth(options = {}) {
+  const healthPath = options.healthPath || paperFastLaneHealthPath(options.env || process.env);
+  try {
+    if (!fs.existsSync(healthPath)) {
+      return {
+        available: false,
+        path: healthPath,
+        status: 'paper_fast_lane_health_missing',
+      };
+    }
+    const payload = JSON.parse(fs.readFileSync(healthPath, 'utf8'));
+    return {
+      available: true,
+      path: healthPath,
+      status: payload?.missed_rescue?.last_error ? 'paper_fast_lane_scan_error' : 'ok',
+      schema_version: payload?.schema_version || null,
+      updated_at: payload?.updated_at || null,
+      paper_db_exists: payload?.paper_db_exists ?? null,
+      missed_rescue: {
+        last_scan_at: payload?.missed_rescue?.last_scan_at || null,
+        scan_count: Number(payload?.missed_rescue?.scan_count || 0),
+        error_count: Number(payload?.missed_rescue?.error_count || 0),
+        last_result: payload?.missed_rescue?.last_result || {},
+        last_error: payload?.missed_rescue?.last_error || null,
+      },
+    };
+  } catch (error) {
+    return {
+      available: false,
+      path: healthPath,
+      status: 'paper_fast_lane_health_parse_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
 export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
@@ -4904,6 +4945,7 @@ const server = http.createServer(async (req, res) => {
         total: shadowSidecars.length,
         workers: shadowSidecars,
       },
+      paper_fast_lane_health: readPaperFastLaneHealth(),
     }));
     return;
   } else if (url.pathname === '/dashboard') {
