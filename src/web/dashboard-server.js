@@ -4884,6 +4884,13 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping') {
+    const shadowSidecars = Array.isArray(global.__shadowDataSidecars)
+      ? global.__shadowDataSidecars.map((worker) => (
+        typeof worker?.getStatus === 'function'
+          ? worker.getStatus()
+          : { name: worker?.name || 'unknown', running: null }
+      ))
+      : [];
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: global.__startupError ? 'degraded' : 'ok',
@@ -4891,6 +4898,12 @@ const server = http.createServer(async (req, res) => {
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
       startup_error: global.__startupError || null,
+      shadow_sidecars: {
+        available: shadowSidecars.length > 0,
+        running: shadowSidecars.filter((worker) => worker.running === true).length,
+        total: shadowSidecars.length,
+        workers: shadowSidecars,
+      },
     }));
     return;
   } else if (url.pathname === '/dashboard') {

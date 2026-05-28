@@ -148,12 +148,27 @@ function startDashboardOnce() {
 function startPythonSidecar({ name, args, env = {}, logPath }) {
   let child = null;
   let stopped = false;
+  const status = {
+    name,
+    running: false,
+    pid: null,
+    log_path: logPath,
+    started_at: null,
+    last_exit_at: null,
+    last_exit_code: null,
+    last_exit_signal: null,
+    restart_count: 0,
+  };
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
   const launch = () => {
     if (stopped) return;
     logStream.write(`[node-supervisor] ${new Date().toISOString()} starting ${name}: python3 ${args.join(' ')}\n`);
+    status.started_at = new Date().toISOString();
+    status.last_exit_at = null;
+    status.last_exit_code = null;
+    status.last_exit_signal = null;
     child = spawn('python3', args, {
       cwd: process.cwd(),
       env: {
@@ -163,23 +178,46 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    status.running = true;
+    status.pid = child.pid || null;
     child.stdout.pipe(logStream, { end: false });
     child.stderr.pipe(logStream, { end: false });
     child.on('exit', (code, signal) => {
+      status.running = false;
+      status.pid = null;
+      status.last_exit_at = new Date().toISOString();
+      status.last_exit_code = code;
+      status.last_exit_signal = signal;
       logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} exited code=${code} signal=${signal}\n`);
-      if (!stopped) setTimeout(launch, 15000);
+      if (!stopped) {
+        status.restart_count += 1;
+        setTimeout(launch, 15000);
+      }
     });
     child.on('error', (error) => {
+      status.running = false;
+      status.pid = null;
+      status.last_exit_at = new Date().toISOString();
       logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} spawn error: ${error.message}\n`);
-      if (!stopped) setTimeout(launch, 15000);
+      if (!stopped) {
+        status.restart_count += 1;
+        setTimeout(launch, 15000);
+      }
     });
   };
 
   launch();
   return {
     name,
+    getStatus() {
+      return {
+        ...status,
+        stopped,
+      };
+    },
     stop() {
       stopped = true;
+      status.running = false;
       try { if (child && !child.killed) child.kill('SIGTERM'); } catch {}
       try { logStream.end(`[node-supervisor] ${new Date().toISOString()} stopping ${name}\n`); } catch {}
     },
@@ -1504,6 +1542,7 @@ class PremiumChannelSystem {
         startDashboardOnce();
         this.writePaperModeSafetyRuntimeEvidence('before_sidecars');
         this.shadowDataSidecars = startShadowDataSidecars(this.config);
+        global.__shadowDataSidecars = this.shadowDataSidecars;
 
         const isLive = premiumLiveExecutionEnabled(this.config);
         const premiumMarketDataEnabled = applyMarketDataProcessOverride('MARKET_DATA_UNIFIED_PREMIUM');
