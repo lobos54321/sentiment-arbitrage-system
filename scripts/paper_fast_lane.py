@@ -159,6 +159,10 @@ FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC = float(os.environ.get(
     "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC",
     str(8 * 60 * 60),
 ))
+FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC = float(os.environ.get(
+    "FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC",
+    str(24 * 60 * 60),
+))
 FAST_ENTRY_BRANCH_CIRCUIT_ENABLED = os.environ.get(
     "FAST_ENTRY_BRANCH_CIRCUIT_ENABLED",
     "true",
@@ -2491,10 +2495,27 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
         return {"rows": 0, "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
     cols = table_columns(db, "paper_missed_signal_attribution")
     cutoff = now_ts - FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC
+    backlog_cutoff = now_ts - max(
+        FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
+        FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
+    )
     updated_expr = "COALESCE(strftime('%s', m.updated_at), 0)" if "updated_at" in cols else "0"
     created_expr = "COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)"
     first_tradable_expr = "COALESCE(m.first_tradable_ts, 0)" if "first_tradable_ts" in cols else "0"
     stop_before_peak_expr = "COALESCE(m.would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
+    active_window_clause = f"""
+            {first_tradable_expr} >= ?
+            OR {created_expr} >= ?
+            OR {updated_expr} >= ?
+    """
+    unprocessed_backlog_clause = f"""
+            s.missed_attribution_id IS NULL
+            AND (
+              {first_tradable_expr} >= ?
+              OR {created_expr} >= ?
+              OR {updated_expr} >= ?
+            )
+    """
     rows = db.execute(
         f"""
         SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
@@ -2510,9 +2531,8 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
         WHERE COALESCE({ 'm.tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
           AND {stop_before_peak_expr} != 1
           AND (
-            {first_tradable_expr} >= ?
-            OR {created_expr} >= ?
-            OR {updated_expr} >= ?
+            {active_window_clause}
+            OR ({unprocessed_backlog_clause})
           )
           AND (
             m.reject_reason IN (
@@ -2542,9 +2562,28 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None):
         ORDER BY COALESCE({first_tradable_expr}, {created_expr}, 0) ASC, m.id ASC
         LIMIT ?
         """,
-        (cutoff, cutoff, cutoff, limit or FAST_ENTRY_MISSED_RESCUE_LIMIT),
+        (
+            cutoff,
+            cutoff,
+            cutoff,
+            backlog_cutoff,
+            backlog_cutoff,
+            backlog_cutoff,
+            limit or FAST_ENTRY_MISSED_RESCUE_LIMIT,
+        ),
     ).fetchall()
-    counts = {"rows": len(rows), "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
+    counts = {
+        "rows": len(rows),
+        "processed": 0,
+        "queued": 0,
+        "watch_only": 0,
+        "counterfactual_only": 0,
+        "deduped": 0,
+        "backlog_lookback_sec": int(max(
+            FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
+            FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
+        )),
+    }
     for row in rows:
         signature = missed_rescue_signature(row)
         if row["processed_signature"] == signature:
