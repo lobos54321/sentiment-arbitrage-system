@@ -369,17 +369,22 @@ def missed_rescue_health_counts(result):
     return {key: int(result.get(key) or 0) for key in keys}
 
 
-def write_fast_lane_health(*, paper_db_path=None, missed_rescue_result=None, error=None, now_ts=None):
+def write_fast_lane_health(*, paper_db_path=None, missed_rescue_result=None, error=None, now_ts=None, worker_state=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
     path = fast_lane_health_path()
     with FAST_LANE_HEALTH_LOCK:
-        FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"] += 1
+        if missed_rescue_result is not None or error is not None:
+            FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"] += 1
         if error is not None:
             FAST_LANE_HEALTH_STATE["missed_rescue_error_count"] += 1
+        state = worker_state
+        if not state:
+            state = "scan_error" if error is not None else "scanned" if missed_rescue_result is not None else "starting"
         payload = {
             "schema_version": "v2.7.0.paper_fast_lane_health.v1",
             "updated_at": iso_utc_from_ts(now_ts),
             "paper_db_exists": bool(Path(paper_db_path).exists()) if paper_db_path else None,
+            "worker_state": state,
             "missed_rescue": {
                 "last_scan_at": iso_utc_from_ts(now_ts),
                 "scan_count": FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"],
@@ -2757,16 +2762,23 @@ def run_worker(args):
             lock_fh.write(str(os.getpid()))
             lock_fh.flush()
         except BlockingIOError:
+            write_fast_lane_health(
+                paper_db_path=args.paper_db,
+                error=RuntimeError(f"lock held at {lock_path}"),
+                worker_state="duplicate_lock_idling",
+            )
             log.warning("paper fast lane lock held at %s; duplicate worker idling", lock_path)
             while not stop_event.is_set():
                 time.sleep(300)
             return
 
+    write_fast_lane_health(paper_db_path=args.paper_db, worker_state="starting")
     schema_db = ptm.init_paper_db(args.paper_db)
     schema_db.close()
     db = connect_db(args.paper_db)
     init_fast_lane_schema(db)
     db.close()
+    write_fast_lane_health(paper_db_path=args.paper_db, worker_state="running")
 
     log.info(
         "paper fast lane started paper_db=%s signal_db=%s concurrency=%s",

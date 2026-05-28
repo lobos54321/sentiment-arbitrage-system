@@ -222,6 +222,7 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
     schema_version: 'v2.7.0.paper_fast_lane_health.v1',
     updated_at: '2026-05-28T23:00:00Z',
     paper_db_exists: true,
+    worker_state: 'scanned',
     missed_rescue: {
       last_scan_at: '2026-05-28T23:00:00Z',
       scan_count: 3,
@@ -244,6 +245,7 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
   assert.equal(health.available, true);
   assert.equal(health.status, 'ok');
   assert.equal(health.paper_db_exists, true);
+  assert.equal(health.worker_state, 'scanned');
   assert.equal(health.missed_rescue.scan_count, 3);
   assert.equal(health.missed_rescue.last_result.processed, 12);
   assert.equal(health.missed_rescue.last_error, null);

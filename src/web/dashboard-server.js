@@ -840,6 +840,7 @@ export function readPaperFastLaneHealth(options = {}) {
       schema_version: payload?.schema_version || null,
       updated_at: payload?.updated_at || null,
       paper_db_exists: payload?.paper_db_exists ?? null,
+      worker_state: payload?.worker_state || null,
       missed_rescue: {
         last_scan_at: payload?.missed_rescue?.last_scan_at || null,
         scan_count: Number(payload?.missed_rescue?.scan_count || 0),
