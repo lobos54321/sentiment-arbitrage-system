@@ -33,6 +33,17 @@ export const NOT_ATH_RELAXED_SHADOW_COHORTS = {
   },
 };
 
+export const NOT_ATH_WATCH_PARENT_BLOCKERS = [
+  'not_ath_v17',
+  'not_ath_prebuy_kline_block',
+  'not_ath_prebuy_kline_unknown_data_blocked',
+  'not_ath_prebuy_kline_retry_expired',
+];
+
+const NOT_ATH_WATCH_PARENT_BLOCKER_SQL = NOT_ATH_WATCH_PARENT_BLOCKERS
+  .map((reason) => `'${reason}'`)
+  .join(', ');
+
 function hasTable(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
 }
@@ -109,7 +120,7 @@ function relaxedShadowCohortSql({ sinceTs, trustedPeakExpr }) {
         COALESCE(momentum_reclaim, 0) AS momentum_reclaim,
         COALESCE(snapshot_pass, 0) AS snapshot_pass
       FROM lotto_not_ath_watch_shadow_snapshots
-      WHERE parent_blocker = 'not_ath_v17'
+      WHERE parent_blocker IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
         ${snapshotWhereSql}
     ),
     snapshot_pairs AS (
@@ -200,7 +211,7 @@ function relaxedShadowCohortSql({ sinceTs, trustedPeakExpr }) {
       FROM paper_missed_signal_attribution m
       WHERE m.route = 'LOTTO'
         AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-        AND m.reject_reason = 'not_ath_v17'
+        AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
         AND m.baseline_price IS NOT NULL
         ${missedWhereSql}
     ),

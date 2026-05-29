@@ -395,6 +395,15 @@ LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT = float(os.environ.get('LOTTO_NOT_A
 LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MAX_SPREAD_PCT', '5.0'))
 LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_LIQ_USD', '5000'))
 LOTTO_NOT_ATH_WATCH_SHADOW_MIN_VOL_M5 = float(os.environ.get('LOTTO_NOT_ATH_WATCH_SHADOW_MIN_VOL_M5', '5000'))
+LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS = {
+    'not_ath_v17',
+    'not_ath_prebuy_kline_block',
+    'not_ath_prebuy_kline_unknown_data_blocked',
+    'not_ath_prebuy_kline_retry_expired',
+}
+LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL = ', '.join(
+    f"'{reason}'" for reason in sorted(LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS)
+)
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MAX_MC', '200000'))
@@ -1888,6 +1897,11 @@ def _lotto_not_ath_watch_max_recovery_pnl(row):
     )
 
 
+def _lotto_not_ath_watch_parent_blocker(row):
+    reason = str(_row_value(row, 'reject_reason') or 'not_ath_v17').strip().lower()
+    return reason if reason in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS else 'not_ath_v17'
+
+
 def _lotto_not_ath_watch_horizon_sec(row, now_ts):
     interval = max(60, int(LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC or 300))
     return int(_lotto_not_ath_watch_age_sec(row, now_ts) // interval) * interval
@@ -1901,6 +1915,7 @@ def _lotto_not_ath_snapshot_detail(row):
         'token_ca': _row_value(row, 'token_ca'),
         'symbol': _row_value(row, 'symbol'),
         'signal_ts': _row_value(row, 'signal_ts'),
+        'parent_blocker': _row_value(row, 'parent_blocker'),
         'snapshot_ts': _row_value(row, 'snapshot_ts'),
         'horizon_sec': _row_value(row, 'horizon_sec'),
         'mark_price': _row_value(row, 'mark_price'),
@@ -1927,6 +1942,7 @@ def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id
     token_ca = _row_value(row, 'token_ca')
     if not token_ca:
         return {'inserted': False, 'reason': 'missing_token_ca'}
+    parent_blocker = _lotto_not_ath_watch_parent_blocker(row)
     signal_ts = _row_value(row, 'signal_ts')
     horizon_sec = _lotto_not_ath_watch_horizon_sec(row, now_ts)
     try:
@@ -1936,11 +1952,12 @@ def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id
             FROM lotto_not_ath_watch_shadow_snapshots
             WHERE token_ca = ?
               AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+              AND parent_blocker = ?
               AND horizon_sec = ?
             ORDER BY id DESC
             LIMIT 1
             """,
-            (token_ca, signal_ts, horizon_sec),
+            (token_ca, signal_ts, parent_blocker, horizon_sec),
         ).fetchone()
     except Exception as exc:
         return {'inserted': False, 'reason': 'snapshot_table_unavailable', 'error': str(exc)}
@@ -2070,7 +2087,7 @@ def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id
             lifecycle_id,
             _row_value(row, 'signal_id'),
             signal_ts,
-            'not_ath_v17',
+            parent_blocker,
             now_ts,
             created_ts,
             horizon_sec,
@@ -2103,6 +2120,7 @@ def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id
         'token_ca': token_ca,
         'symbol': symbol,
         'signal_ts': signal_ts,
+        'parent_blocker': parent_blocker,
         'snapshot_ts': now_ts,
         'horizon_sec': horizon_sec,
         'mark_price': mark_price,
@@ -2128,10 +2146,12 @@ def _record_lotto_not_ath_watch_shadow_snapshot(db, row, *, now_ts, lifecycle_id
 def _lotto_not_ath_watch_snapshot_confirmation(db, row, *, now_ts):
     token_ca = _row_value(row, 'token_ca')
     signal_ts = _row_value(row, 'signal_ts')
+    parent_blocker = _lotto_not_ath_watch_parent_blocker(row)
     age_sec = _lotto_not_ath_watch_age_sec(row, now_ts)
     max_recovery_pnl = _lotto_not_ath_watch_max_recovery_pnl(row)
     base = {
         'age_sec': age_sec,
+        'parent_blocker': parent_blocker,
         'snapshot_interval_sec': LOTTO_NOT_ATH_WATCH_SHADOW_SNAPSHOT_INTERVAL_SEC,
         'confirm_by_sec': LOTTO_NOT_ATH_WATCH_SHADOW_CONFIRM_BY_SEC,
         'max_quote_gap_pct': LOTTO_NOT_ATH_WATCH_SHADOW_MAX_QUOTE_GAP_PCT,
@@ -2152,13 +2172,14 @@ def _lotto_not_ath_watch_snapshot_confirmation(db, row, *, now_ts):
                 FROM lotto_not_ath_watch_shadow_snapshots s
                 WHERE s.token_ca = ?
                   AND COALESCE(s.signal_ts, 0) = COALESCE(?, 0)
+                  AND s.parent_blocker = ?
             )
             SELECT *
             FROM ranked
             WHERE rn = 1
             ORDER BY horizon_sec ASC
             """,
-            (token_ca, signal_ts),
+            (token_ca, signal_ts, parent_blocker),
         ).fetchall()
     except Exception as exc:
         return {
@@ -2286,11 +2307,12 @@ def _lotto_not_ath_watch_shadow_decision(row, *, now_ts):
 def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts, historical_proxy_detail=None, snapshot_detail=None):
     token_ca = _row_value(row, 'token_ca')
     created_ts = _lotto_not_ath_watch_created_ts(row, now_ts)
+    parent_blocker = _lotto_not_ath_watch_parent_blocker(row)
     return {
         'missed_attribution_id': _row_value(row, 'id'),
         'source_component': _row_value(row, 'component'),
         'source_reject_reason': _row_value(row, 'reject_reason'),
-        'parent_blocker': 'not_ath_v17',
+        'parent_blocker': parent_blocker,
         'watch_family': 'lotto_not_ath_watch',
         'watch_mode': 'shadow_only',
         'live_entry_enabled': False,
@@ -2307,7 +2329,7 @@ def _lotto_not_ath_watch_payload(row, decision_detail, *, now_ts, historical_pro
         'latest_snapshot': snapshot_detail,
         'watch_ledger_mvp': {
             'token_ca': token_ca,
-            'parent_blocker': 'not_ath_v17',
+            'parent_blocker': parent_blocker,
             'first_seen_ts': created_ts,
             'last_seen_ts': now_ts,
             'max_recovery_pnl': decision_detail.get('max_recovery_pnl'),
@@ -2329,7 +2351,7 @@ def _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, *, now_ts, lim
     have recovered missed dogs.
     """
     rows = db.execute(
-        """
+        f"""
         WITH candidates AS (
             SELECT
                 m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
@@ -2342,7 +2364,7 @@ def _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, *, now_ts, lim
             FROM paper_missed_signal_attribution m
             WHERE m.route = 'LOTTO'
               AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-              AND m.reject_reason = 'not_ath_v17'
+              AND m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
               AND m.baseline_price IS NOT NULL
               AND m.created_event_ts >= ?
               AND m.created_event_ts <= ?
@@ -2404,7 +2426,7 @@ def _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, *, now_ts, lim
 
 
 def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
-    """Record the first single-blocker watch MVP for LOTTO/not_ath_v17.
+    """Record the NOT_ATH blocker-family shadow watch MVP for LOTTO.
 
     This is deliberately shadow-only.  It opens a lightweight watch event, then
     persists one quote-clean reclaim snapshot per 5-minute horizon and only
@@ -2414,7 +2436,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
     if not LOTTO_NOT_ATH_WATCH_SHADOW_ENABLED:
         return 0
     rows = db.execute(
-        """
+        f"""
         WITH candidates AS (
             SELECT
                 m.id, m.token_ca, m.symbol, m.lifecycle_id, m.signal_id, m.signal_ts,
@@ -2427,7 +2449,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             FROM paper_missed_signal_attribution m
             WHERE m.route = 'LOTTO'
               AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-              AND m.reject_reason = 'not_ath_v17'
+              AND m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
               AND m.baseline_price IS NOT NULL
               AND m.created_event_ts >= ?
               AND NOT EXISTS (
@@ -2471,6 +2493,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
     for row in rows:
         token_ca = row['token_ca']
         symbol = row['symbol'] or token_ca[:8]
+        parent_blocker = _lotto_not_ath_watch_parent_blocker(row)
         lifecycle_id = row['lifecycle_id'] or build_lifecycle_id(token_ca, row['signal_ts'] or int(row['created_event_ts']))
         opened = db.execute(
             """
@@ -2480,9 +2503,10 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
               AND token_ca = ?
               AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
               AND event_type = 'watch_opened'
+              AND reason = ?
             LIMIT 1
             """,
-            (token_ca, row['signal_ts']),
+            (token_ca, row['signal_ts'], parent_blocker),
         ).fetchone()
         snapshot_detail = _record_lotto_not_ath_watch_shadow_snapshot(
             db,
@@ -2505,7 +2529,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
                 component='lotto_not_ath_watch_shadow',
                 event_type='watch_opened',
                 decision='WATCH',
-                reason='not_ath_v17',
+                reason=parent_blocker,
                 token_ca=token_ca,
                 symbol=symbol,
                 lifecycle_id=lifecycle_id,
@@ -11253,7 +11277,9 @@ DISCOVERY_LOTTO_HIGH_RISK_REASON_PREFIXES = (
 )
 LOTTO_NOT_ATH_RECLAIM_SOURCE_REASONS = {
     'not_ath_v17',
+    'not_ath_prebuy_kline_block',
     'not_ath_prebuy_kline_unknown_data_blocked',
+    'not_ath_prebuy_kline_retry_expired',
     'tracking_ttl_expired',
     'trend_bearish_timeout',
     'upstream_probe_mc_gate',

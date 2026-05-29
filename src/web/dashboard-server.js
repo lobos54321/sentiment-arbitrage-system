@@ -32,7 +32,10 @@ import {
   registryModesByTier,
   summarizeEntryModeRegistry,
 } from './mode-registry-utils.js';
-import { buildNotAthRelaxedShadowCohorts } from './not-ath-watch-shadow-utils.js';
+import {
+  buildNotAthRelaxedShadowCohorts,
+  NOT_ATH_WATCH_PARENT_BLOCKERS,
+} from './not-ath-watch-shadow-utils.js';
 import {
   buildPremiumSignalOutcomeAudit,
   LOTTO_OBSERVE_UPSTREAM_STATUSES,
@@ -60,6 +63,9 @@ const PAPER_REPORT_COOLDOWN_MS = Math.max(
   0,
   parseInt(process.env.PAPER_REPORT_COOLDOWN_MS || '5000', 10) || 5000
 );
+const NOT_ATH_WATCH_PARENT_BLOCKER_SQL = NOT_ATH_WATCH_PARENT_BLOCKERS
+  .map((reason) => `'${reason}'`)
+  .join(', ');
 let paperReportBusy = false;
 let paperReportCooldownUntil = 0;
 
@@ -8369,7 +8375,7 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   } else if (url.pathname === '/api/paper/not-ath-watch-shadow-backtest') {
-    // Single-blocker MVP backtest for LOTTO/not_ath_v17 shadow watch.
+    // Shadow backtest for LOTTO NOT_ATH watch blockers.
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
     if (!fs.existsSync(paperDbPath)) {
@@ -8444,7 +8450,7 @@ const server = http.createServer(async (req, res) => {
           FROM paper_missed_signal_attribution m
           WHERE m.route = 'LOTTO'
             AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-            AND m.reject_reason = 'not_ath_v17'
+            AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
             AND m.baseline_price IS NOT NULL
             ${whereSql}
         ),
@@ -8617,7 +8623,7 @@ const server = http.createServer(async (req, res) => {
               ON m.token_ca = t.token_ca
              AND COALESCE(m.signal_ts, 0) = COALESCE(t.signal_ts, 0)
              AND m.route = 'LOTTO'
-             AND m.reject_reason = 'not_ath_v17'
+             AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
           ),
           one AS (
             SELECT * FROM joined WHERE rn = 1
@@ -8662,7 +8668,7 @@ const server = http.createServer(async (req, res) => {
           WITH base AS (
             SELECT *
             FROM lotto_not_ath_watch_shadow_snapshots
-            WHERE parent_blocker = 'not_ath_v17'
+            WHERE parent_blocker IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
               ${snapshotWhereSql}
           ),
           pass_pairs AS (
@@ -8706,7 +8712,7 @@ const server = http.createServer(async (req, res) => {
             AVG(spread_pct) AS avg_spread_pct,
             AVG(liquidity_usd) AS avg_liquidity_usd
           FROM lotto_not_ath_watch_shadow_snapshots
-          WHERE parent_blocker = 'not_ath_v17'
+          WHERE parent_blocker IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
             ${snapshotWhereSql}
           GROUP BY reason
           ORDER BY snapshots DESC, snapshot_pass_n DESC
@@ -8728,7 +8734,8 @@ const server = http.createServer(async (req, res) => {
         filters: {
           since_ts: sinceTs,
           since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
-          parent_blocker: 'LOTTO/upstream_gate/not_ath_v17',
+          parent_blocker: 'LOTTO/upstream_gate/not_ath_watch_parent_blockers',
+          parent_blockers: NOT_ATH_WATCH_PARENT_BLOCKERS,
           min_5m_pnl: params.min5m,
           min_15m_pnl: params.min15m,
           min_retention: params.retention,
@@ -8749,7 +8756,7 @@ const server = http.createServer(async (req, res) => {
         shadow_snapshots: {
           summary: shadowSnapshotSummary,
           by_reason: shadowSnapshotByReason,
-          note: 'Real future quote-clean snapshot collection for not_ath_v17; promotion requires two consecutive 5m snapshot_pass samples.',
+          note: 'Real future quote-clean snapshot collection for not_ath_v17 and prebuy-kline NOT_ATH blockers; promotion requires two consecutive 5m snapshot_pass samples.',
         },
         relaxed_shadow_cohorts: relaxedShadowCohorts,
       }, null, 2));

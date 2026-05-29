@@ -59,12 +59,13 @@ function insertSnapshot(db, row) {
       liquidity_usd, quote_clean, activity_reclaim, volume_reclaim,
       momentum_reclaim, snapshot_pass
     ) VALUES (
-      @token_ca, @signal_ts, @symbol, 'not_ath_v17', @snapshot_ts, @first_seen_ts,
+      @token_ca, @signal_ts, @symbol, @parent_blocker, @snapshot_ts, @first_seen_ts,
       @horizon_sec, @mark_price, @quote_price, @quote_gap_pct, @spread_pct,
       @liquidity_usd, @quote_clean, @activity_reclaim, @volume_reclaim,
       @momentum_reclaim, @snapshot_pass
     )
   `).run({
+    parent_blocker: 'not_ath_v17',
     mark_price: 0.00001,
     quote_price: 0.0000102,
     quote_gap_pct: 2,
@@ -89,11 +90,12 @@ function insertMissed(db, row) {
       would_stop_before_peak, tradability_status
     ) VALUES (
       @created_event_ts, @token_ca, @symbol, @signal_ts, 'LOTTO', 'upstream_gate',
-      'not_ath_v17', 1, @pnl_5m, @pnl_15m, @pnl_60m, @pnl_24h,
+      @reject_reason, 1, @pnl_5m, @pnl_15m, @pnl_60m, @pnl_24h,
       @max_pnl_recorded, @tradable_missed, @tradable_peak_pnl,
       @would_stop_before_peak, @tradability_status
     )
   `).run({
+    reject_reason: 'not_ath_v17',
     created_event_ts: 1000,
     pnl_5m: 0.05,
     pnl_15m: 0.1,
@@ -114,6 +116,31 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
   insertSnapshot(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, snapshot_ts: 1000, horizon_sec: 0 });
   insertSnapshot(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, snapshot_ts: 1300, horizon_sec: 300 });
   insertMissed(db, { token_ca: 'StrictCA', symbol: 'STRICT', signal_ts: 100, max_pnl_recorded: 1.2, tradable_peak_pnl: 1.2 });
+
+  insertSnapshot(db, {
+    token_ca: 'KlineCA',
+    symbol: 'KLINE',
+    signal_ts: 500,
+    snapshot_ts: 1000,
+    horizon_sec: 0,
+    parent_blocker: 'not_ath_prebuy_kline_block',
+  });
+  insertSnapshot(db, {
+    token_ca: 'KlineCA',
+    symbol: 'KLINE',
+    signal_ts: 500,
+    snapshot_ts: 1300,
+    horizon_sec: 300,
+    parent_blocker: 'not_ath_prebuy_kline_block',
+  });
+  insertMissed(db, {
+    token_ca: 'KlineCA',
+    symbol: 'KLINE',
+    signal_ts: 500,
+    reject_reason: 'not_ath_prebuy_kline_block',
+    max_pnl_recorded: 0.7,
+    tradable_peak_pnl: 0.7,
+  });
 
   insertSnapshot(db, {
     token_ca: 'LooseCA',
@@ -146,8 +173,9 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
   const byCohort = Object.fromEntries(report.cohorts.map((row) => [row.cohort, row]));
 
   assert.equal(report.available, true);
-  assert.equal(byCohort.two_snapshot_strict.candidates, 1);
+  assert.equal(byCohort.two_snapshot_strict.candidates, 2);
   assert.equal(byCohort.two_snapshot_strict.gold_n, 1);
+  assert.equal(byCohort.two_snapshot_strict.silver_n, 1);
   assert.equal(byCohort.quote_clean_no_double_confirm.candidates, 2);
   assert.equal(byCohort.quote_clean_no_double_confirm.gold_n, 1);
   assert.equal(byCohort.quote_clean_no_double_confirm.silver_n, 1);
