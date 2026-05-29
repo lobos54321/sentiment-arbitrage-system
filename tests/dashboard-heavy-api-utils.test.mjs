@@ -341,6 +341,38 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
     recentLimit: 2,
     topLimit: 3,
     maxJoinDeltaSec: 300,
+    fastLaneRescueByMissedId: new Map([
+      [0, {
+        missed_attribution_id: 0,
+        state: 'queued',
+        last_status: 'queued',
+        last_reason: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+        blocker: 'tracking_ttl_expired',
+        updated_at: 1_780_000_090,
+      }],
+      [1, {
+        missed_attribution_id: 1,
+        state: 'stale',
+        last_status: 'watch_only',
+        last_reason: 'ttl_rescue_tradable_signal_stale_watch_only',
+        entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+        blocker: 'tracking_ttl_expired',
+        updated_at: 1_780_000_070,
+      }],
+    ]),
+    fastLaneQueueByToken: new Map([
+      ['TokenGold', {
+        token_ca: 'TokenGold',
+        status: 'queued',
+        source_type: 'ttl_final_reclaim_fast',
+        entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+        updated_at: 1_780_000_091,
+      }],
+    ]),
   });
 
   assert.equal(report.audit_schema_version, 'v2.7.0.lotto_quote_gap_winner_join.v1');
@@ -378,6 +410,14 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
   assert.equal(report.top_joined_winners[0].trusted_peak_pnl_pct, 125);
   assert.equal(report.top_unique_joined_winners.length, 3);
   assert.equal(report.top_unique_joined_winners[0].token_ca, 'TokenGold');
+  assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_state, 'queued');
+  assert.equal(report.top_unique_joined_winners[0].fast_lane_entry_branch, 'tracking_ttl_reclaim_quote_clean_tiny_probe');
+  assert.equal(report.by_recovery_state[0].rescue_state, 'queued');
+  assert.equal(report.by_recovery_state[0].clean_medal_unique, 1);
+  assert.equal(
+    report.by_recovery_state.some((row) => row.rescue_state === 'stale' && row.fast_lane_status === 'watch_only'),
+    true
+  );
   assert.equal(report.unjoined_recent_audits[0].token_ca, 'TokenUnjoined');
   assert.equal(report.unjoined_recent_audits[0].best_abs_quote_gap_pct, 6);
 });

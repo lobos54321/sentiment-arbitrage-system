@@ -784,10 +784,55 @@ function finalizeLottoWinnerGapGroup(group) {
   };
 }
 
+function updateLottoWinnerGapGroupFromJoinedRow(group, row) {
+  const token = row?.token_ca ? String(row.token_ca) : null;
+  const trustedPeak = nullableFiniteNumber(row?.trusted_peak_pnl);
+  const gap = nullableFiniteNumber(row?.best_abs_quote_gap_pct);
+  const cleanTradable = Boolean(row?.clean_tradable);
+  const medal = trustedPeak != null && trustedPeak >= 0.25;
+  const tier = row?.tier || 'sub25_or_unknown';
+
+  group.events += 1;
+  if (token) group.unique_tokens.add(token);
+  if (cleanTradable) {
+    group.clean_tradable_events += 1;
+    if (token) group.clean_tradable_tokens.add(token);
+  }
+  if (medal) {
+    group.medal_events += 1;
+    if (token) group.medal_tokens.add(token);
+  }
+  if (medal && cleanTradable) {
+    group.clean_medal_events += 1;
+    if (token) group.clean_medal_tokens.add(token);
+  }
+  if (tier === 'gold') {
+    group.gold_events += 1;
+    if (token) group.gold_tokens.add(token);
+  } else if (tier === 'silver') {
+    group.silver_events += 1;
+    if (token) group.silver_tokens.add(token);
+  } else if (tier === 'bronze') {
+    group.bronze_events += 1;
+    if (token) group.bronze_tokens.add(token);
+  }
+  if (Boolean(row?.clean10)) group.clean10_events += 1;
+  if (Boolean(row?.clean30)) group.clean30_events += 1;
+  if (Boolean(row?.quote_executable_n > 0)) group.executable_events += 1;
+  if (gap != null) group.gap_values.push(gap);
+  if (trustedPeak != null) group.peak_values.push(trustedPeak);
+}
+
 export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = [], options = {}) {
   const recentLimit = Math.max(0, Math.min(Number(options.recentLimit || 25), 100));
   const topLimit = Math.max(1, Math.min(Number(options.topLimit || recentLimit || 25), 100));
   const maxJoinDeltaSec = Math.max(60, Math.min(Number(options.maxJoinDeltaSec || 3600), 24 * 3600));
+  const fastLaneRescueByMissedId = options.fastLaneRescueByMissedId instanceof Map
+    ? options.fastLaneRescueByMissedId
+    : new Map();
+  const fastLaneQueueByToken = options.fastLaneQueueByToken instanceof Map
+    ? options.fastLaneQueueByToken
+    : new Map();
   const missedByToken = new Map();
   for (const row of missedRows || []) {
     const token = row?.token_ca ? String(row.token_ca) : null;
@@ -808,6 +853,7 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
   };
   const byTier = new Map();
   const byBlocker = new Map();
+  const byRecoveryState = new Map();
   const joinedRows = [];
   const unjoinedRecentAudits = [];
   const joinedGapValues = [];
@@ -846,6 +892,16 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
     const tier = tierForPeakPnl(trustedPeak);
     const cleanTradable = Number(missed.tradable_missed || 0) === 1
       && Number(missed.would_stop_before_peak || 0) !== 1;
+    const rescue = missed.id != null ? fastLaneRescueByMissedId.get(Number(missed.id)) || null : null;
+    const queue = token ? fastLaneQueueByToken.get(String(token)) || null : null;
+    const fastLaneRescueState = rescue?.state || null;
+    const fastLaneLastStatus = rescue?.last_status || queue?.status || null;
+    const fastLaneLastReason = rescue?.last_reason || queue?.first_error || queue?.last_error || null;
+    const fastLaneEntryBranch = rescue?.entry_branch || queue?.entry_branch || null;
+    const fastLaneEntryModeHint = rescue?.entry_mode_hint || queue?.entry_mode_hint || payload.entry_mode_candidate || null;
+    const fastLaneBlocker = rescue?.blocker || null;
+    const fastLaneQueueStatus = queue?.status || null;
+    const fastLaneQueueReason = queue?.first_error || queue?.last_error || null;
     joinedEvents += 1;
     if (token) joinedTokenSet.add(String(token));
     if (trustedPeak >= 0.25) {
@@ -938,6 +994,17 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
       clean30: gapStats.clean30,
       audit_reason: String(auditRow.reason || payload.gate_reason || 'unknown'),
       entry_mode_candidate: payload.entry_mode_candidate || null,
+      fast_lane_rescue_state: fastLaneRescueState,
+      fast_lane_last_status: fastLaneLastStatus,
+      fast_lane_last_reason: fastLaneLastReason,
+      fast_lane_entry_branch: fastLaneEntryBranch,
+      fast_lane_entry_mode_hint: fastLaneEntryModeHint,
+      fast_lane_blocker: fastLaneBlocker,
+      fast_lane_queue_status: fastLaneQueueStatus,
+      fast_lane_queue_reason: fastLaneQueueReason,
+      fast_lane_queue_updated_at: queue?.updated_at ?? null,
+      fast_lane_queue_entry_branch: queue?.entry_branch ?? null,
+      fast_lane_queue_source_type: queue?.source_type ?? null,
     });
   }
 
@@ -965,6 +1032,24 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
     .sort((a, b) => (b.trusted_peak_pnl || 0) - (a.trusted_peak_pnl || 0)
       || (a.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) - (b.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))
     .slice(0, topLimit);
+  for (const row of joinedRows) {
+    const recoveryState = row.fast_lane_rescue_state || 'unprocessed';
+    const fastLaneStatus = row.fast_lane_last_status || row.fast_lane_queue_status || '-';
+    const fastLaneReason = row.fast_lane_last_reason || row.fast_lane_queue_reason || '-';
+    const entryBranch = row.fast_lane_entry_branch || '-';
+    const entryModeHint = row.fast_lane_entry_mode_hint || '-';
+    const recoveryKey = [recoveryState, fastLaneStatus, fastLaneReason, entryBranch, entryModeHint].join('|');
+    if (!byRecoveryState.has(recoveryKey)) {
+      byRecoveryState.set(recoveryKey, emptyLottoWinnerGapGroup({
+        rescue_state: recoveryState,
+        fast_lane_status: fastLaneStatus,
+        fast_lane_reason: fastLaneReason,
+        entry_branch: entryBranch === '-' ? null : entryBranch,
+        entry_mode_hint: entryModeHint === '-' ? null : entryModeHint,
+      }));
+    }
+    updateLottoWinnerGapGroupFromJoinedRow(byRecoveryState.get(recoveryKey), row);
+  }
 
   return {
     audit_schema_version: 'v2.7.0.lotto_quote_gap_winner_join.v1',
@@ -1016,6 +1101,13 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
         || b.medal_events - a.medal_events
         || b.clean10_events - a.clean10_events
         || b.events - a.events),
+    by_recovery_state: Array.from(byRecoveryState.values())
+      .map(finalizeLottoWinnerGapGroup)
+      .sort((a, b) => b.clean_medal_unique - a.clean_medal_unique
+        || b.medal_unique - a.medal_unique
+        || b.clean10_events - a.clean10_events
+        || b.events - a.events
+        || String(a.rescue_state || '').localeCompare(String(b.rescue_state || ''))),
     top_joined_winners: topJoinedWinners,
     top_unique_joined_winners: topUniqueJoinedWinners,
     unjoined_recent_audits: unjoinedRecentAudits,
@@ -7250,6 +7342,8 @@ const server = http.createServer(async (req, res) => {
       `).all({ since: sinceTs, limit });
       const auditTokens = Array.from(new Set(auditRows.map((row) => row.token_ca).filter(Boolean).map(String)));
       let missedRows = [];
+      let fastLaneRescueRows = [];
+      let fastLaneQueueRows = [];
       if (auditTokens.length > 0) {
         const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
         const missedColumn = (name, fallback = 'NULL') => missedCols.has(name) ? `m.${name}` : fallback;
@@ -7291,11 +7385,84 @@ const server = http.createServer(async (req, res) => {
           ORDER BY ${missedEventTsExpr} DESC, ${missedCols.has('id') ? 'm.id' : 'm.rowid'} DESC
           LIMIT @missedLimit
         `).all({ missedSince: missedSinceTs, missedLimit });
+        if (tableNames.has('paper_fast_missed_rescue_state')) {
+          const rescueCols = getTableColumns(paperDb, 'paper_fast_missed_rescue_state');
+          const rescueColumn = (name, fallback = 'NULL') => rescueCols.has(name) ? `r.${name}` : fallback;
+          const rescueWhere = rescueCols.has('token_ca')
+            ? `r.token_ca IN (${sqlInList(auditTokens)})`
+            : `r.missed_attribution_id IN (${sqlInList(missedRows.map((row) => row.id).filter((id) => id != null))})`;
+          if (rescueWhere && !rescueWhere.includes('IN ()')) {
+            fastLaneRescueRows = paperDb.prepare(`
+              SELECT
+                r.missed_attribution_id,
+                ${rescueColumn('rescue_signature')} AS rescue_signature,
+                ${rescueColumn('last_status')} AS last_status,
+                ${rescueColumn('last_reason')} AS last_reason,
+                ${rescueColumn('last_action_at')} AS last_action_at,
+                ${rescueColumn('updated_at')} AS updated_at,
+                ${rescueColumn('token_ca')} AS token_ca,
+                ${rescueColumn('entry_branch')} AS entry_branch,
+                ${rescueColumn('entry_mode_hint')} AS entry_mode_hint,
+                ${rescueColumn('policy_version')} AS policy_version,
+                ${rescueColumn('state')} AS state,
+                ${rescueColumn('blocker')} AS blocker,
+                ${rescueColumn('first_seen_at')} AS first_seen_at,
+                ${rescueColumn('last_clean_quote_ts')} AS last_clean_quote_ts,
+                ${rescueColumn('last_tradable_ts')} AS last_tradable_ts,
+                ${rescueColumn('eligibility_json')} AS eligibility_json
+              FROM paper_fast_missed_rescue_state r
+              WHERE ${rescueWhere}
+            `).all();
+          }
+        }
+        if (tableNames.has('paper_fast_entry_queue')) {
+          const queueCols = getTableColumns(paperDb, 'paper_fast_entry_queue');
+          const queueColumn = (name, fallback = 'NULL') => queueCols.has(name) ? `q.${name}` : fallback;
+          const queueUpdatedExpr = queueCols.has('updated_at')
+            ? 'q.updated_at'
+            : (queueCols.has('created_at') ? 'q.created_at' : 'q.id');
+          fastLaneQueueRows = paperDb.prepare(`
+            WITH ranked AS (
+              SELECT
+                q.id,
+                q.token_ca,
+                ${queueColumn('status')} AS status,
+                ${queueColumn('last_error')} AS last_error,
+                ${queueColumn('first_error')} AS first_error,
+                ${queueColumn('source_type')} AS source_type,
+                ${queueColumn('entry_branch')} AS entry_branch,
+                ${queueColumn('entry_mode_hint')} AS entry_mode_hint,
+                ${queueColumn('created_at')} AS created_at,
+                ${queueColumn('updated_at', 'q.created_at')} AS updated_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY q.token_ca
+                  ORDER BY ${queueUpdatedExpr} DESC, q.id DESC
+                ) AS rn
+              FROM paper_fast_entry_queue q
+              WHERE q.token_ca IN (${sqlInList(auditTokens)})
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+          `).all();
+        }
       }
+      const fastLaneRescueByMissedId = new Map(
+        fastLaneRescueRows
+          .filter((row) => row.missed_attribution_id != null)
+          .map((row) => [Number(row.missed_attribution_id), row])
+      );
+      const fastLaneQueueByToken = new Map(
+        fastLaneQueueRows
+          .filter((row) => row.token_ca)
+          .map((row) => [String(row.token_ca), row])
+      );
       const report = buildLottoQuoteGapWinnerJoinReport(auditRows, missedRows, {
         recentLimit,
         topLimit,
         maxJoinDeltaSec,
+        fastLaneRescueByMissedId,
+        fastLaneQueueByToken,
       });
       res.writeHead(200, apiJsonHeaders());
       res.end(JSON.stringify({
