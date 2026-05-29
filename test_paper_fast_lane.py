@@ -1059,6 +1059,7 @@ def test_premium_scan_records_stale_pass_as_watch_only(tmp_path, monkeypatch):
 def test_missed_rescue_scans_tradability_signature_not_only_new_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
     monkeypatch.setattr(fast, "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC", 300)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED", True)
     db = fast.connect_db(tmp_path / "paper.db")
     fast.init_fast_lane_schema(db)
     now = int(time.time())

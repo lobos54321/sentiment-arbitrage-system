@@ -77,6 +77,10 @@ FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LI
 FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
 FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
+FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED = os.environ.get(
+    "FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED",
+    "false",
+).lower() == "true"
 FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY", "8"))
 FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY", "12"))
 FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
@@ -2685,7 +2689,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
         "s.missed_attribution_id IS NULL OR COALESCE(s.rescue_signature, '') = ''",
         scan_limit,
     )
-    if len(rows) < scan_limit:
+    if FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED and len(rows) < scan_limit:
         rows.extend(fetch_scan_rows(
             "s.missed_attribution_id IS NOT NULL AND COALESCE(s.rescue_signature, '') != ''",
             scan_limit - len(rows),
