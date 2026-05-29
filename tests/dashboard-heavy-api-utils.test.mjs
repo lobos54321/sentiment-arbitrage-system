@@ -362,6 +362,7 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
   assert.equal(report.summary.p90_best_abs_quote_gap_pct, 15);
   assert.equal(report.by_tier[0].tier, 'gold');
   assert.equal(report.by_tier[0].unique_tokens, 1);
+  assert.equal(report.by_tier[0].clean_medal_unique, 1);
   assert.equal(report.by_tier[0].median_best_abs_quote_gap_pct, 6);
   assert.equal(report.by_tier[1].tier, 'silver');
   assert.equal(report.by_tier[1].median_trusted_peak_pnl_pct, 72);
@@ -370,10 +371,13 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
   assert.equal(report.by_blocker[0].reject_reason, 'no_kline_low_volume');
   assert.equal(report.by_blocker[0].events, 3);
   assert.equal(report.by_blocker[0].clean_medal_events, 3);
+  assert.equal(report.by_blocker[0].clean_medal_unique, 3);
   assert.equal(report.by_blocker[0].silver_events, 1);
   assert.equal(report.by_blocker[0].bronze_events, 1);
   assert.equal(report.top_joined_winners[0].token_ca, 'TokenGold');
   assert.equal(report.top_joined_winners[0].trusted_peak_pnl_pct, 125);
+  assert.equal(report.top_unique_joined_winners.length, 3);
+  assert.equal(report.top_unique_joined_winners[0].token_ca, 'TokenGold');
   assert.equal(report.unjoined_recent_audits[0].token_ca, 'TokenUnjoined');
   assert.equal(report.unjoined_recent_audits[0].best_abs_quote_gap_pct, 6);
 });

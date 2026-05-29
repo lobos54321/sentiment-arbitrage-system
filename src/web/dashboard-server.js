@@ -732,11 +732,17 @@ function emptyLottoWinnerGapGroup(keyFields) {
     events: 0,
     unique_tokens: new Set(),
     clean_tradable_events: 0,
+    clean_tradable_tokens: new Set(),
     medal_events: 0,
+    medal_tokens: new Set(),
     clean_medal_events: 0,
+    clean_medal_tokens: new Set(),
     gold_events: 0,
+    gold_tokens: new Set(),
     silver_events: 0,
+    silver_tokens: new Set(),
     bronze_events: 0,
+    bronze_tokens: new Set(),
     executable_events: 0,
     clean10_events: 0,
     clean30_events: 0,
@@ -747,9 +753,26 @@ function emptyLottoWinnerGapGroup(keyFields) {
 
 function finalizeLottoWinnerGapGroup(group) {
   const medianTrustedPeak = percentileNumber(group.peak_values, 50);
+  const hiddenKeys = new Set([
+    'unique_tokens',
+    'clean_tradable_tokens',
+    'medal_tokens',
+    'clean_medal_tokens',
+    'gold_tokens',
+    'silver_tokens',
+    'bronze_tokens',
+    'gap_values',
+    'peak_values',
+  ]);
   return {
-    ...Object.fromEntries(Object.entries(group).filter(([key]) => !['unique_tokens', 'gap_values', 'peak_values'].includes(key))),
+    ...Object.fromEntries(Object.entries(group).filter(([key]) => !hiddenKeys.has(key))),
     unique_tokens: group.unique_tokens.size,
+    clean_tradable_unique: group.clean_tradable_tokens.size,
+    medal_unique: group.medal_tokens.size,
+    clean_medal_unique: group.clean_medal_tokens.size,
+    gold_unique: group.gold_tokens.size,
+    silver_unique: group.silver_tokens.size,
+    bronze_unique: group.bronze_tokens.size,
     executable_rate_pct: group.events ? roundNumber((group.executable_events / group.events) * 100, 1) : null,
     clean10_rate_pct: group.events ? roundNumber((group.clean10_events / group.events) * 100, 1) : null,
     clean30_rate_pct: group.events ? roundNumber((group.clean30_events / group.events) * 100, 1) : null,
@@ -857,12 +880,30 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
     for (const group of [tierGroup, byBlocker.get(blockerKey)]) {
       group.events += 1;
       if (token) group.unique_tokens.add(String(token));
-      if (cleanTradable) group.clean_tradable_events += 1;
-      if (trustedPeak >= 0.25) group.medal_events += 1;
-      if (trustedPeak >= 0.25 && cleanTradable) group.clean_medal_events += 1;
-      if (tier === 'gold') group.gold_events += 1;
-      if (tier === 'silver') group.silver_events += 1;
-      if (tier === 'bronze') group.bronze_events += 1;
+      if (cleanTradable) {
+        group.clean_tradable_events += 1;
+        if (token) group.clean_tradable_tokens.add(String(token));
+      }
+      if (trustedPeak >= 0.25) {
+        group.medal_events += 1;
+        if (token) group.medal_tokens.add(String(token));
+      }
+      if (trustedPeak >= 0.25 && cleanTradable) {
+        group.clean_medal_events += 1;
+        if (token) group.clean_medal_tokens.add(String(token));
+      }
+      if (tier === 'gold') {
+        group.gold_events += 1;
+        if (token) group.gold_tokens.add(String(token));
+      }
+      if (tier === 'silver') {
+        group.silver_events += 1;
+        if (token) group.silver_tokens.add(String(token));
+      }
+      if (tier === 'bronze') {
+        group.bronze_events += 1;
+        if (token) group.bronze_tokens.add(String(token));
+      }
       if (gapStats.executable) group.executable_events += 1;
       if (gapStats.clean10) group.clean10_events += 1;
       if (gapStats.clean30) group.clean30_events += 1;
@@ -902,6 +943,25 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
 
   const topJoinedWinners = joinedRows
     .slice()
+    .sort((a, b) => (b.trusted_peak_pnl || 0) - (a.trusted_peak_pnl || 0)
+      || (a.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) - (b.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))
+    .slice(0, topLimit);
+  const bestByToken = new Map();
+  for (const row of joinedRows) {
+    if (!row.token_ca) continue;
+    const current = bestByToken.get(row.token_ca);
+    const rowCleanScore = row.clean_tradable ? 1 : 0;
+    const currentCleanScore = current?.clean_tradable ? 1 : 0;
+    if (!current
+      || (row.trusted_peak_pnl || 0) > (current.trusted_peak_pnl || 0)
+      || ((row.trusted_peak_pnl || 0) === (current.trusted_peak_pnl || 0) && rowCleanScore > currentCleanScore)
+      || ((row.trusted_peak_pnl || 0) === (current.trusted_peak_pnl || 0)
+        && rowCleanScore === currentCleanScore
+        && (row.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) < (current.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))) {
+      bestByToken.set(row.token_ca, row);
+    }
+  }
+  const topUniqueJoinedWinners = Array.from(bestByToken.values())
     .sort((a, b) => (b.trusted_peak_pnl || 0) - (a.trusted_peak_pnl || 0)
       || (a.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) - (b.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))
     .slice(0, topLimit);
@@ -950,11 +1010,14 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
         - ['gold', 'silver', 'bronze', 'sub25_or_unknown'].indexOf(b.tier)),
     by_blocker: Array.from(byBlocker.values())
       .map(finalizeLottoWinnerGapGroup)
-      .sort((a, b) => b.clean_medal_events - a.clean_medal_events
+      .sort((a, b) => b.clean_medal_unique - a.clean_medal_unique
+        || b.clean_medal_events - a.clean_medal_events
+        || b.medal_unique - a.medal_unique
         || b.medal_events - a.medal_events
         || b.clean10_events - a.clean10_events
         || b.events - a.events),
     top_joined_winners: topJoinedWinners,
+    top_unique_joined_winners: topUniqueJoinedWinners,
     unjoined_recent_audits: unjoinedRecentAudits,
     note: 'Read-only audit join: joins LOTTO quote-gap measurement events to missed attribution by token and nearby signal/event time; it does not change entry decisions.',
   };
