@@ -7388,10 +7388,18 @@ const server = http.createServer(async (req, res) => {
         if (tableNames.has('paper_fast_missed_rescue_state')) {
           const rescueCols = getTableColumns(paperDb, 'paper_fast_missed_rescue_state');
           const rescueColumn = (name, fallback = 'NULL') => rescueCols.has(name) ? `r.${name}` : fallback;
-          const rescueWhere = rescueCols.has('token_ca')
-            ? `r.token_ca IN (${sqlInList(auditTokens)})`
-            : `r.missed_attribution_id IN (${sqlInList(missedRows.map((row) => row.id).filter((id) => id != null))})`;
-          if (rescueWhere && !rescueWhere.includes('IN ()')) {
+          const missedIds = missedRows.map((row) => row.id).filter((id) => id != null);
+          const rescueWhereParts = [];
+          if (missedIds.length > 0) {
+            rescueWhereParts.push(`r.missed_attribution_id IN (${sqlInList(missedIds)})`);
+          }
+          if (rescueCols.has('token_ca') && auditTokens.length > 0) {
+            rescueWhereParts.push(`r.token_ca IN (${sqlInList(auditTokens)})`);
+          }
+          const rescueWhere = rescueWhereParts.length > 0
+            ? `(${rescueWhereParts.join(' OR ')})`
+            : null;
+          if (rescueWhere) {
             fastLaneRescueRows = paperDb.prepare(`
               SELECT
                 r.missed_attribution_id,

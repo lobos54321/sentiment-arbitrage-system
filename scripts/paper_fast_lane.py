@@ -2686,6 +2686,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
     for row in rows:
         signature = missed_rescue_signature(row)
         if row["processed_signature"] == signature:
+            counts["deduped"] += 1
             continue
         result = process_missed_rescue_row(db, row, now_ts=now_ts)
         status = result.get("status") or "unknown"
