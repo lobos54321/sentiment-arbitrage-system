@@ -14,6 +14,7 @@ import {
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
+  buildLottoQuoteGapWinnerJoinReport,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   appendDashboardAuditEvent,
@@ -196,6 +197,185 @@ test('lotto quote gap audit summary reports size curve actionability', () => {
   assert.equal(report.recent_events[1].no_mark_price, true);
   assert.equal(report.recent_events[1].best_abs_quote_gap_pct, null);
   assert.equal(report.recent_events[1].quote_curve[0].quote_gap_pct, null);
+});
+
+test('lotto quote gap winner join report ties clean audit gaps to confirmed winners', () => {
+  const auditRows = [
+    {
+      id: 30,
+      event_ts: 1_780_000_180,
+      token_ca: 'TokenUnjoined',
+      symbol: 'DOGU',
+      signal_ts: 1_780_000_140,
+      reason: 'lotto_fast_lane_ok',
+      payload_json: JSON.stringify({
+        gate_decision: 'allow',
+        entry_mode_candidate: 'newborn_momentum_tiny_scout',
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: 6, spread_pct: 6, latency_ms: 8 },
+        ],
+      }),
+    },
+    {
+      id: 20,
+      event_ts: 1_780_000_120,
+      token_ca: 'TokenBronze',
+      symbol: 'DOGC',
+      signal_ts: 1_780_000_090,
+      reason: 'gmgn_clean_smart_money_boost',
+      payload_json: JSON.stringify({
+        gate_decision: 'allow',
+        entry_mode_candidate: 'lotto_fast_lane',
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: 15, spread_pct: 15, latency_ms: 9 },
+          { size_key: '0.05', size_sol: 0.05, quote_executable: true, quote_gap_pct: 22, spread_pct: 22, latency_ms: 10 },
+        ],
+      }),
+    },
+    {
+      id: 15,
+      event_ts: 1_780_000_080,
+      token_ca: 'TokenGold',
+      symbol: 'DOGA',
+      signal_ts: 1_779_999_970,
+      reason: 'gmgn_clean_smart_money_boost',
+      payload_json: JSON.stringify({
+        gate_decision: 'allow',
+        entry_mode_candidate: 'lotto_fast_lane',
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: 6, spread_pct: 6, latency_ms: 8 },
+          { size_key: '0.05', size_sol: 0.05, quote_executable: true, quote_gap_pct: 8, spread_pct: 8, latency_ms: 9 },
+        ],
+      }),
+    },
+    {
+      id: 10,
+      event_ts: 1_780_000_060,
+      token_ca: 'TokenSilver',
+      symbol: 'DOGB',
+      signal_ts: 1_780_000_020,
+      reason: 'lotto_liq_unknown_pumpfun_wait',
+      payload_json: JSON.stringify({
+        gate_decision: 'wait',
+        entry_mode_candidate: 'gmgn_clean_lotto_fast_lane',
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: 12, spread_pct: 12, latency_ms: 11 },
+          { size_key: '0.05', size_sol: 0.05, quote_executable: true, quote_gap_pct: 18, spread_pct: 18, latency_ms: 12 },
+        ],
+      }),
+    },
+  ];
+
+  const missedRows = [
+    {
+      id: 3,
+      created_event_ts: 1_780_000_182,
+      token_ca: 'TokenUnjoinedX',
+      symbol: 'DOGU',
+      signal_ts: 1_780_000_140,
+      baseline_ts: 1_780_000_100,
+      route: 'LOTTO',
+      component: 'smart_entry',
+      reject_reason: 'no_kline_low_volume',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 0.95,
+      quote_clean_peak_pnl: 0.9,
+      executable_peak_pnl: 0.98,
+      pnl_24h: 0.9,
+    },
+    {
+      id: 2,
+      created_event_ts: 1_780_000_122,
+      token_ca: 'TokenBronze',
+      symbol: 'DOGC',
+      signal_ts: 1_780_000_092,
+      baseline_ts: 1_780_000_060,
+      route: 'LOTTO',
+      component: 'smart_entry',
+      reject_reason: 'no_kline_low_volume',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 0.32,
+      quote_clean_peak_pnl: 0.31,
+      executable_peak_pnl: 0.33,
+      pnl_24h: 0.31,
+    },
+    {
+      id: 1,
+      created_event_ts: 1_780_000_062,
+      token_ca: 'TokenSilver',
+      symbol: 'DOGB',
+      signal_ts: 1_780_000_021,
+      baseline_ts: 1_780_000_000,
+      route: 'LOTTO',
+      component: 'smart_entry',
+      reject_reason: 'no_kline_low_volume',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 0.7,
+      quote_clean_peak_pnl: 0.69,
+      executable_peak_pnl: 0.72,
+      pnl_24h: 0.69,
+    },
+    {
+      id: 0,
+      created_event_ts: 1_780_000_022,
+      token_ca: 'TokenGold',
+      symbol: 'DOGA',
+      signal_ts: 1_779_999_970,
+      baseline_ts: 1_779_999_940,
+      route: 'LOTTO',
+      component: 'smart_entry',
+      reject_reason: 'no_kline_low_volume',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 1.2,
+      quote_clean_peak_pnl: 1.1,
+      executable_peak_pnl: 1.25,
+      pnl_24h: 1.1,
+    },
+  ];
+
+  const report = buildLottoQuoteGapWinnerJoinReport(auditRows, missedRows, {
+    recentLimit: 2,
+    topLimit: 3,
+    maxJoinDeltaSec: 300,
+  });
+
+  assert.equal(report.audit_schema_version, 'v2.7.0.lotto_quote_gap_winner_join.v1');
+  assert.equal(report.summary.audit_events, 4);
+  assert.equal(report.summary.audit_unique_tokens, 4);
+  assert.equal(report.summary.joined_events, 3);
+  assert.equal(report.summary.joined_unique_tokens, 3);
+  assert.equal(report.summary.join_coverage_pct, 75);
+  assert.equal(report.summary.clean_tradable_joined_events, 3);
+  assert.equal(report.summary.joined_medal_events, 3);
+  assert.equal(report.summary.clean_medal_joined_events, 3);
+  assert.equal(report.summary.gold_events, 1);
+  assert.equal(report.summary.silver_events, 1);
+  assert.equal(report.summary.bronze_events, 1);
+  assert.equal(report.summary.joined_executable_events, 3);
+  assert.equal(report.summary.joined_clean10_events, 1);
+  assert.equal(report.summary.joined_clean30_events, 3);
+  assert.equal(report.summary.median_best_abs_quote_gap_pct, 12);
+  assert.equal(report.summary.p90_best_abs_quote_gap_pct, 15);
+  assert.equal(report.by_tier[0].tier, 'gold');
+  assert.equal(report.by_tier[0].unique_tokens, 1);
+  assert.equal(report.by_tier[0].median_best_abs_quote_gap_pct, 6);
+  assert.equal(report.by_tier[1].tier, 'silver');
+  assert.equal(report.by_tier[1].median_trusted_peak_pnl_pct, 72);
+  assert.equal(report.by_tier[2].tier, 'bronze');
+  assert.equal(report.by_tier[2].max_trusted_peak_pnl_pct, 33);
+  assert.equal(report.by_blocker[0].reject_reason, 'no_kline_low_volume');
+  assert.equal(report.by_blocker[0].events, 3);
+  assert.equal(report.by_blocker[0].clean_medal_events, 3);
+  assert.equal(report.by_blocker[0].silver_events, 1);
+  assert.equal(report.by_blocker[0].bronze_events, 1);
+  assert.equal(report.top_joined_winners[0].token_ca, 'TokenGold');
+  assert.equal(report.top_joined_winners[0].trusted_peak_pnl_pct, 125);
+  assert.equal(report.unjoined_recent_audits[0].token_ca, 'TokenUnjoined');
+  assert.equal(report.unjoined_recent_audits[0].best_abs_quote_gap_pct, 6);
 });
 
 test('dashboard audit events form a verifiable hash chain', () => {

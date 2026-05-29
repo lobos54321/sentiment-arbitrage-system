@@ -640,6 +640,326 @@ export function buildLottoQuoteGapAuditSummary(rows = [], options = {}) {
   };
 }
 
+function lottoQuoteGapStatsFromPayload(payload) {
+  const curve = Array.isArray(payload.quote_curve) ? payload.quote_curve : [];
+  const executableItems = curve.filter((item) => item && item.quote_executable);
+  const gaps = executableItems
+    .map((item) => nullableFiniteNumber(item.quote_gap_pct))
+    .filter((value) => value != null);
+  const absGaps = gaps.map(Math.abs);
+  const bestAbsGap = absGaps.length ? Math.min(...absGaps) : null;
+  return {
+    curve,
+    executable_n: executableItems.length,
+    executable: executableItems.length > 0,
+    best_abs_quote_gap_pct: bestAbsGap,
+    clean10: bestAbsGap != null && bestAbsGap <= 10,
+    clean30: bestAbsGap != null && bestAbsGap <= 30,
+  };
+}
+
+function missedTrustedPeakPnl(row) {
+  for (const key of [
+    'trusted_peak_pnl',
+    'executable_peak_pnl',
+    'quote_clean_peak_pnl',
+    'tradable_peak_pnl',
+    'max_pnl_recorded',
+    'pnl_24h',
+    'pnl_60m',
+    'pnl_15m',
+    'pnl_5m',
+  ]) {
+    const value = nullableFiniteNumber(row?.[key]);
+    if (value != null) return value;
+  }
+  return 0;
+}
+
+function tierForPeakPnl(value) {
+  const n = nullableFiniteNumber(value) ?? 0;
+  if (n >= 1.0) return 'gold';
+  if (n >= 0.5) return 'silver';
+  if (n >= 0.25) return 'bronze';
+  return 'sub25_or_unknown';
+}
+
+function positiveUnixishSec(value) {
+  const normalized = normalizeUnixishSec(value);
+  return normalized && normalized > 0 ? normalized : null;
+}
+
+function bestJoinCandidateForAudit(auditRow, missedCandidates, maxJoinDeltaSec) {
+  const auditPayload = parseJsonObject(auditRow.payload_json);
+  const auditSignalTs = positiveUnixishSec(auditRow.signal_ts ?? auditPayload.signal_ts);
+  const auditEventTs = positiveUnixishSec(auditRow.event_ts ?? auditPayload.event_ts);
+  const scored = [];
+  for (const row of missedCandidates || []) {
+    const missedSignalTs = positiveUnixishSec(row.signal_ts);
+    const missedEventTs = positiveUnixishSec(row.created_event_ts ?? row.event_ts ?? row.baseline_ts);
+    const signalDelta = auditSignalTs && missedSignalTs ? Math.abs(auditSignalTs - missedSignalTs) : null;
+    const eventDelta = auditEventTs && missedEventTs ? Math.abs(auditEventTs - missedEventTs) : null;
+    const deltas = [signalDelta, eventDelta].filter((value) => value != null);
+    const bestDelta = deltas.length ? Math.min(...deltas) : null;
+    if (bestDelta != null && bestDelta > maxJoinDeltaSec) continue;
+    scored.push({
+      row,
+      signal_delta_sec: signalDelta,
+      event_delta_sec: eventDelta,
+      join_delta_sec: bestDelta,
+      join_basis: signalDelta != null && signalDelta === bestDelta
+        ? 'signal_ts'
+        : (eventDelta != null && eventDelta === bestDelta ? 'event_ts' : 'token_only'),
+      trusted_peak_pnl: missedTrustedPeakPnl(row),
+      missed_event_ts: missedEventTs,
+    });
+  }
+  scored.sort((a, b) => {
+    const aHasDelta = a.join_delta_sec != null ? 0 : 1;
+    const bHasDelta = b.join_delta_sec != null ? 0 : 1;
+    return aHasDelta - bHasDelta
+      || (a.join_delta_sec ?? Number.MAX_SAFE_INTEGER) - (b.join_delta_sec ?? Number.MAX_SAFE_INTEGER)
+      || b.trusted_peak_pnl - a.trusted_peak_pnl
+      || (b.missed_event_ts || 0) - (a.missed_event_ts || 0)
+      || Number(b.row?.id || 0) - Number(a.row?.id || 0);
+  });
+  return scored[0] || null;
+}
+
+function emptyLottoWinnerGapGroup(keyFields) {
+  return {
+    ...keyFields,
+    events: 0,
+    unique_tokens: new Set(),
+    clean_tradable_events: 0,
+    medal_events: 0,
+    clean_medal_events: 0,
+    gold_events: 0,
+    silver_events: 0,
+    bronze_events: 0,
+    executable_events: 0,
+    clean10_events: 0,
+    clean30_events: 0,
+    gap_values: [],
+    peak_values: [],
+  };
+}
+
+function finalizeLottoWinnerGapGroup(group) {
+  const medianTrustedPeak = percentileNumber(group.peak_values, 50);
+  return {
+    ...Object.fromEntries(Object.entries(group).filter(([key]) => !['unique_tokens', 'gap_values', 'peak_values'].includes(key))),
+    unique_tokens: group.unique_tokens.size,
+    executable_rate_pct: group.events ? roundNumber((group.executable_events / group.events) * 100, 1) : null,
+    clean10_rate_pct: group.events ? roundNumber((group.clean10_events / group.events) * 100, 1) : null,
+    clean30_rate_pct: group.events ? roundNumber((group.clean30_events / group.events) * 100, 1) : null,
+    median_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(group.gap_values, 50), 3),
+    p90_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(group.gap_values, 90), 3),
+    max_best_abs_quote_gap_pct: group.gap_values.length ? roundNumber(Math.max(...group.gap_values), 3) : null,
+    median_trusted_peak_pnl_pct: medianTrustedPeak == null ? null : roundNumber(medianTrustedPeak * 100, 2),
+    max_trusted_peak_pnl_pct: group.peak_values.length ? roundNumber(Math.max(...group.peak_values) * 100, 2) : null,
+  };
+}
+
+export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = [], options = {}) {
+  const recentLimit = Math.max(0, Math.min(Number(options.recentLimit || 25), 100));
+  const topLimit = Math.max(1, Math.min(Number(options.topLimit || recentLimit || 25), 100));
+  const maxJoinDeltaSec = Math.max(60, Math.min(Number(options.maxJoinDeltaSec || 3600), 24 * 3600));
+  const missedByToken = new Map();
+  for (const row of missedRows || []) {
+    const token = row?.token_ca ? String(row.token_ca) : null;
+    if (!token) continue;
+    if (!missedByToken.has(token)) missedByToken.set(token, []);
+    missedByToken.get(token).push(row);
+  }
+
+  const auditTokenSet = new Set();
+  const joinedTokenSet = new Set();
+  const joinedMedalTokenSet = new Set();
+  const cleanTradableTokenSet = new Set();
+  const tierUniqueSets = {
+    gold: new Set(),
+    silver: new Set(),
+    bronze: new Set(),
+    sub25_or_unknown: new Set(),
+  };
+  const byTier = new Map();
+  const byBlocker = new Map();
+  const joinedRows = [];
+  const unjoinedRecentAudits = [];
+  const joinedGapValues = [];
+  let joinedEvents = 0;
+  let joinedMedalEvents = 0;
+  let cleanTradableEvents = 0;
+  let cleanMedalEvents = 0;
+  let executableEvents = 0;
+  let clean10Events = 0;
+  let clean30Events = 0;
+
+  for (const auditRow of auditRows || []) {
+    const payload = parseJsonObject(auditRow.payload_json);
+    const token = auditRow.token_ca || payload.token_ca || null;
+    if (token) auditTokenSet.add(String(token));
+    const gapStats = lottoQuoteGapStatsFromPayload(payload);
+    const join = token ? bestJoinCandidateForAudit(auditRow, missedByToken.get(String(token)), maxJoinDeltaSec) : null;
+    if (!join) {
+      if (unjoinedRecentAudits.length < recentLimit) {
+        unjoinedRecentAudits.push({
+          id: auditRow.id,
+          event_ts: auditRow.event_ts,
+          event_iso: auditRow.event_ts ? new Date(Number(auditRow.event_ts) * 1000).toISOString() : null,
+          token_ca: token,
+          symbol: auditRow.symbol || payload.symbol || null,
+          reason: String(auditRow.reason || payload.gate_reason || 'unknown'),
+          best_abs_quote_gap_pct: roundNullableNumber(gapStats.best_abs_quote_gap_pct, 3),
+          quote_executable_n: gapStats.executable_n,
+        });
+      }
+      continue;
+    }
+
+    const missed = join.row;
+    const trustedPeak = join.trusted_peak_pnl;
+    const tier = tierForPeakPnl(trustedPeak);
+    const cleanTradable = Number(missed.tradable_missed || 0) === 1
+      && Number(missed.would_stop_before_peak || 0) !== 1;
+    joinedEvents += 1;
+    if (token) joinedTokenSet.add(String(token));
+    if (trustedPeak >= 0.25) {
+      joinedMedalEvents += 1;
+      if (token) joinedMedalTokenSet.add(String(token));
+    }
+    if (trustedPeak >= 0.25 && cleanTradable) cleanMedalEvents += 1;
+    if (token && tierUniqueSets[tier]) tierUniqueSets[tier].add(String(token));
+    if (cleanTradable) {
+      cleanTradableEvents += 1;
+      if (token) cleanTradableTokenSet.add(String(token));
+    }
+    if (gapStats.executable) executableEvents += 1;
+    if (gapStats.clean10) clean10Events += 1;
+    if (gapStats.clean30) clean30Events += 1;
+    if (gapStats.best_abs_quote_gap_pct != null) joinedGapValues.push(gapStats.best_abs_quote_gap_pct);
+
+    if (!byTier.has(tier)) byTier.set(tier, emptyLottoWinnerGapGroup({ tier }));
+    const tierGroup = byTier.get(tier);
+    const blockerKey = [
+      missed.route || '-',
+      missed.component || missed.final_component || '-',
+      missed.reject_reason || missed.final_reason || '-',
+    ].join('|');
+    if (!byBlocker.has(blockerKey)) {
+      byBlocker.set(blockerKey, emptyLottoWinnerGapGroup({
+        route: missed.route || '-',
+        component: missed.component || missed.final_component || '-',
+        reject_reason: missed.reject_reason || missed.final_reason || '-',
+      }));
+    }
+    for (const group of [tierGroup, byBlocker.get(blockerKey)]) {
+      group.events += 1;
+      if (token) group.unique_tokens.add(String(token));
+      if (cleanTradable) group.clean_tradable_events += 1;
+      if (trustedPeak >= 0.25) group.medal_events += 1;
+      if (trustedPeak >= 0.25 && cleanTradable) group.clean_medal_events += 1;
+      if (tier === 'gold') group.gold_events += 1;
+      if (tier === 'silver') group.silver_events += 1;
+      if (tier === 'bronze') group.bronze_events += 1;
+      if (gapStats.executable) group.executable_events += 1;
+      if (gapStats.clean10) group.clean10_events += 1;
+      if (gapStats.clean30) group.clean30_events += 1;
+      if (gapStats.best_abs_quote_gap_pct != null) group.gap_values.push(gapStats.best_abs_quote_gap_pct);
+      group.peak_values.push(trustedPeak);
+    }
+
+    joinedRows.push({
+      audit_id: auditRow.id,
+      missed_id: missed.id ?? null,
+      token_ca: token,
+      symbol: auditRow.symbol || missed.symbol || payload.symbol || null,
+      audit_event_ts: auditRow.event_ts ?? null,
+      audit_event_iso: auditRow.event_ts ? new Date(Number(auditRow.event_ts) * 1000).toISOString() : null,
+      audit_signal_ts: auditRow.signal_ts ?? null,
+      missed_event_ts: missed.created_event_ts ?? missed.event_ts ?? missed.baseline_ts ?? null,
+      missed_signal_ts: missed.signal_ts ?? null,
+      join_basis: join.join_basis,
+      join_delta_sec: join.join_delta_sec,
+      route: missed.route || null,
+      component: missed.component || missed.final_component || null,
+      reject_reason: missed.reject_reason || missed.final_reason || null,
+      tradable_missed: missed.tradable_missed == null ? null : Number(missed.tradable_missed),
+      would_stop_before_peak: missed.would_stop_before_peak == null ? null : Number(missed.would_stop_before_peak),
+      clean_tradable: cleanTradable,
+      trusted_peak_pnl: roundNullableNumber(trustedPeak, 4),
+      trusted_peak_pnl_pct: roundNullableNumber(trustedPeak * 100, 2),
+      tier,
+      best_abs_quote_gap_pct: roundNullableNumber(gapStats.best_abs_quote_gap_pct, 3),
+      quote_executable_n: gapStats.executable_n,
+      clean10: gapStats.clean10,
+      clean30: gapStats.clean30,
+      audit_reason: String(auditRow.reason || payload.gate_reason || 'unknown'),
+      entry_mode_candidate: payload.entry_mode_candidate || null,
+    });
+  }
+
+  const topJoinedWinners = joinedRows
+    .slice()
+    .sort((a, b) => (b.trusted_peak_pnl || 0) - (a.trusted_peak_pnl || 0)
+      || (a.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) - (b.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))
+    .slice(0, topLimit);
+
+  return {
+    audit_schema_version: 'v2.7.0.lotto_quote_gap_winner_join.v1',
+    join_params: {
+      max_join_delta_sec: maxJoinDeltaSec,
+      recent_limit: recentLimit,
+      top_limit: topLimit,
+    },
+    summary: {
+      audit_events: auditRows.length,
+      audit_unique_tokens: auditTokenSet.size,
+      missed_rows: missedRows.length,
+      missed_unique_tokens: missedByToken.size,
+      joined_events: joinedEvents,
+      joined_unique_tokens: joinedTokenSet.size,
+      join_coverage_pct: auditRows.length ? roundNumber((joinedEvents / auditRows.length) * 100, 1) : null,
+      clean_tradable_joined_events: cleanTradableEvents,
+      clean_tradable_joined_unique: cleanTradableTokenSet.size,
+      joined_medal_events: joinedMedalEvents,
+      joined_medal_unique: joinedMedalTokenSet.size,
+      clean_medal_joined_events: cleanMedalEvents,
+      gold_events: Array.from(joinedRows).filter((row) => row.tier === 'gold').length,
+      gold_unique: tierUniqueSets.gold.size,
+      silver_events: Array.from(joinedRows).filter((row) => row.tier === 'silver').length,
+      silver_unique: tierUniqueSets.silver.size,
+      bronze_events: Array.from(joinedRows).filter((row) => row.tier === 'bronze').length,
+      bronze_unique: tierUniqueSets.bronze.size,
+      joined_executable_events: executableEvents,
+      joined_executable_rate_pct: joinedEvents ? roundNumber((executableEvents / joinedEvents) * 100, 1) : null,
+      joined_clean10_events: clean10Events,
+      joined_clean10_rate_pct: joinedEvents ? roundNumber((clean10Events / joinedEvents) * 100, 1) : null,
+      joined_clean30_events: clean30Events,
+      joined_clean30_rate_pct: joinedEvents ? roundNumber((clean30Events / joinedEvents) * 100, 1) : null,
+      best_gap_n: joinedGapValues.length,
+      median_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(joinedGapValues, 50), 3),
+      p90_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(joinedGapValues, 90), 3),
+      max_best_abs_quote_gap_pct: joinedGapValues.length ? roundNumber(Math.max(...joinedGapValues), 3) : null,
+      sample_warning: joinedEvents < 30 ? 'small_sample_quote_gap_winner_join' : null,
+    },
+    by_tier: Array.from(byTier.values())
+      .map(finalizeLottoWinnerGapGroup)
+      .sort((a, b) => ['gold', 'silver', 'bronze', 'sub25_or_unknown'].indexOf(a.tier)
+        - ['gold', 'silver', 'bronze', 'sub25_or_unknown'].indexOf(b.tier)),
+    by_blocker: Array.from(byBlocker.values())
+      .map(finalizeLottoWinnerGapGroup)
+      .sort((a, b) => b.clean_medal_events - a.clean_medal_events
+        || b.medal_events - a.medal_events
+        || b.clean10_events - a.clean10_events
+        || b.events - a.events),
+    top_joined_winners: topJoinedWinners,
+    unjoined_recent_audits: unjoinedRecentAudits,
+    note: 'Read-only audit join: joins LOTTO quote-gap measurement events to missed attribution by token and nearby signal/event time; it does not change entry decisions.',
+  };
+}
+
 function priceUnitAuditForTrade(row) {
   const entryAudit = parseJsonObject(row.entry_execution_audit_json);
   const exitAudit = parseJsonObject(row.exit_execution_audit_json);
@@ -6808,6 +7128,128 @@ const server = http.createServer(async (req, res) => {
           hours: boundedIntParam(url, 'hours', 2, 1, 24),
           limit,
           recent_limit: recentLimit,
+        },
+        query_ms: Date.now() - startedAt,
+        ...report,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/lotto-quote-gap-winner-join') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const limit = boundedIntParam(url, 'limit', 500, 1, 2000);
+      const missedLimit = boundedIntParam(url, 'missed_limit', 5000, 1, 20000);
+      const recentLimit = boundedIntParam(url, 'recent_limit', 25, 0, 100);
+      const topLimit = boundedIntParam(url, 'top_limit', 25, 1, 100);
+      const maxJoinDeltaSec = boundedIntParam(url, 'join_delta_sec', 3600, 60, 86400);
+      const requestedHours = boundedIntParam(url, 'hours', 2, 1, 72);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 72);
+      const missedSinceTs = Math.max(0, sinceTs - maxJoinDeltaSec);
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('paper_decision_events')) {
+        res.writeHead(404, apiJsonHeaders());
+        res.end(JSON.stringify({ error: 'paper_decision_events table not found' }));
+        return;
+      }
+      if (!tableNames.has('paper_missed_signal_attribution')) {
+        res.writeHead(404, apiJsonHeaders());
+        res.end(JSON.stringify({ error: 'paper_missed_signal_attribution table not found' }));
+        return;
+      }
+      const auditRows = paperDb.prepare(`
+        SELECT id, event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+               signal_ts, strategy_stage, route, component, event_type, decision,
+               reason, data_source, lifecycle_state, vitality_score, entry_bias, payload_json
+        FROM paper_decision_events
+        WHERE component = 'lotto_quote_gap_audit'
+          AND event_type = 'point_in_time_quote_curve'
+          AND event_ts >= @since
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @limit
+      `).all({ since: sinceTs, limit });
+      const auditTokens = Array.from(new Set(auditRows.map((row) => row.token_ca).filter(Boolean).map(String)));
+      let missedRows = [];
+      if (auditTokens.length > 0) {
+        const missedCols = getTableColumns(paperDb, 'paper_missed_signal_attribution');
+        const missedColumn = (name, fallback = 'NULL') => missedCols.has(name) ? `m.${name}` : fallback;
+        const missedEventTsExpr = `COALESCE(${[
+          missedCols.has('created_event_ts') ? 'm.created_event_ts' : null,
+          missedCols.has('signal_ts') ? 'm.signal_ts' : null,
+          missedCols.has('baseline_ts') ? 'm.baseline_ts' : null,
+          '0',
+        ].filter(Boolean).join(', ')})`;
+        const trustedPeakExpr = trustedMissedPeakSqlExpr(missedCols, 'm');
+        missedRows = paperDb.prepare(`
+          SELECT
+            ${missedCols.has('id') ? 'm.id' : 'm.rowid'} AS id,
+            ${missedColumn('created_event_ts')} AS created_event_ts,
+            m.token_ca,
+            COALESCE(${missedColumn('symbol')}, substr(m.token_ca, 1, 8), '?') AS symbol,
+            ${missedColumn('signal_ts')} AS signal_ts,
+            ${missedColumn('baseline_ts')} AS baseline_ts,
+            ${missedColumn('route')} AS route,
+            ${missedColumn('component')} AS component,
+            ${missedColumn('reject_reason')} AS reject_reason,
+            ${missedColumn('tradable_missed')} AS tradable_missed,
+            ${missedColumn('would_stop_before_peak')} AS would_stop_before_peak,
+            ${missedColumn('tradability_status')} AS tradability_status,
+            ${missedColumn('tradability_reason')} AS tradability_reason,
+            ${missedColumn('tradable_peak_pnl')} AS tradable_peak_pnl,
+            ${missedColumn('quote_clean_peak_pnl')} AS quote_clean_peak_pnl,
+            ${missedColumn('executable_peak_pnl')} AS executable_peak_pnl,
+            ${missedColumn('max_pnl_recorded')} AS max_pnl_recorded,
+            ${missedColumn('pnl_5m')} AS pnl_5m,
+            ${missedColumn('pnl_15m')} AS pnl_15m,
+            ${missedColumn('pnl_60m')} AS pnl_60m,
+            ${missedColumn('pnl_24h')} AS pnl_24h,
+            ${trustedPeakExpr} AS trusted_peak_pnl,
+            ${missedEventTsExpr} AS event_ts
+          FROM paper_missed_signal_attribution m
+          WHERE ${missedEventTsExpr} >= @missedSince
+            AND m.token_ca IN (${sqlInList(auditTokens)})
+          ORDER BY ${missedEventTsExpr} DESC, ${missedCols.has('id') ? 'm.id' : 'm.rowid'} DESC
+          LIMIT @missedLimit
+        `).all({ missedSince: missedSinceTs, missedLimit });
+      }
+      const report = buildLottoQuoteGapWinnerJoinReport(auditRows, missedRows, {
+        recentLimit,
+        topLimit,
+        maxJoinDeltaSec,
+      });
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: new Date(sinceTs * 1000).toISOString(),
+          missed_since_ts: missedSinceTs,
+          missed_since_iso: new Date(missedSinceTs * 1000).toISOString(),
+          hours: requestedHours,
+          limit,
+          missed_limit: missedLimit,
+          recent_limit: recentLimit,
+          top_limit: topLimit,
+          join_delta_sec: maxJoinDeltaSec,
+          max_window_hours: 72,
         },
         query_ms: Date.now() - startedAt,
         ...report,
