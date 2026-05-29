@@ -895,8 +895,10 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
     const rescue = missed.id != null ? fastLaneRescueByMissedId.get(Number(missed.id)) || null : null;
     const queue = token ? fastLaneQueueByToken.get(String(token)) || null : null;
     const fastLaneRescueState = rescue?.state || null;
-    const fastLaneLastStatus = rescue?.last_status || queue?.status || null;
-    const fastLaneLastReason = rescue?.last_reason || queue?.first_error || queue?.last_error || null;
+    const fastLaneRescueLastStatus = rescue?.last_status || null;
+    const fastLaneRescueLastReason = rescue?.last_reason || null;
+    const fastLaneLastStatus = fastLaneRescueLastStatus || queue?.status || null;
+    const fastLaneLastReason = fastLaneRescueLastReason || queue?.first_error || queue?.last_error || null;
     const fastLaneEntryBranch = rescue?.entry_branch || queue?.entry_branch || null;
     const fastLaneEntryModeHint = rescue?.entry_mode_hint || queue?.entry_mode_hint || payload.entry_mode_candidate || null;
     const fastLaneBlocker = rescue?.blocker || null;
@@ -994,7 +996,10 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
       clean30: gapStats.clean30,
       audit_reason: String(auditRow.reason || payload.gate_reason || 'unknown'),
       entry_mode_candidate: payload.entry_mode_candidate || null,
+      fast_lane_rescue_seen: Boolean(rescue),
       fast_lane_rescue_state: fastLaneRescueState,
+      fast_lane_rescue_last_status: fastLaneRescueLastStatus,
+      fast_lane_rescue_last_reason: fastLaneRescueLastReason,
       fast_lane_last_status: fastLaneLastStatus,
       fast_lane_last_reason: fastLaneLastReason,
       fast_lane_entry_branch: fastLaneEntryBranch,
@@ -1033,9 +1038,15 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
       || (a.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER) - (b.best_abs_quote_gap_pct ?? Number.MAX_SAFE_INTEGER))
     .slice(0, topLimit);
   for (const row of joinedRows) {
-    const recoveryState = row.fast_lane_rescue_state || 'unprocessed';
-    const fastLaneStatus = row.fast_lane_last_status || row.fast_lane_queue_status || '-';
-    const fastLaneReason = row.fast_lane_last_reason || row.fast_lane_queue_reason || '-';
+    const recoveryState = row.fast_lane_rescue_seen
+      ? (row.fast_lane_rescue_state || 'rescue_state_missing')
+      : 'unprocessed';
+    const fastLaneStatus = row.fast_lane_rescue_seen
+      ? (row.fast_lane_rescue_last_status || 'missing_status')
+      : (row.fast_lane_last_status || row.fast_lane_queue_status || '-');
+    const fastLaneReason = row.fast_lane_rescue_seen
+      ? (row.fast_lane_rescue_last_reason || 'missing_reason')
+      : (row.fast_lane_last_reason || row.fast_lane_queue_reason || '-');
     const entryBranch = row.fast_lane_entry_branch || '-';
     const entryModeHint = row.fast_lane_entry_mode_hint || '-';
     const recoveryKey = [recoveryState, fastLaneStatus, fastLaneReason, entryBranch, entryModeHint].join('|');

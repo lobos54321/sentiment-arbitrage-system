@@ -410,6 +410,7 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
   assert.equal(report.top_joined_winners[0].trusted_peak_pnl_pct, 125);
   assert.equal(report.top_unique_joined_winners.length, 3);
   assert.equal(report.top_unique_joined_winners[0].token_ca, 'TokenGold');
+  assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_seen, true);
   assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_state, 'queued');
   assert.equal(report.top_unique_joined_winners[0].fast_lane_entry_branch, 'tracking_ttl_reclaim_quote_clean_tiny_probe');
   assert.equal(report.by_recovery_state[0].rescue_state, 'queued');
