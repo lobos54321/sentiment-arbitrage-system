@@ -18,7 +18,7 @@ import time
 
 
 DEFAULT_LOCK_FILE = Path(os.environ.get("PAPER_SQLITE_WRITER_LOCK_FILE", "/tmp/paper_sqlite_single_writer.lock"))
-DEFAULT_TIMEOUT_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_TIMEOUT_SEC", "30"))
+DEFAULT_TIMEOUT_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_TIMEOUT_SEC", "90"))
 POLL_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_POLL_SEC", "0.025"))
 _PROCESS_WRITE_LOCK = threading.RLock()
 
@@ -48,9 +48,16 @@ class SQLiteSingleWriterLock:
                 return self
             except BlockingIOError:
                 if time.time() >= deadline:
+                    try:
+                        holder = self.lock_file.read_text(encoding="utf-8").strip()
+                    except OSError:
+                        holder = "unknown"
                     fh.close()
                     _PROCESS_WRITE_LOCK.release()
-                    raise TimeoutError(f"sqlite single-writer lock timeout name={self.name} file={self.lock_file}")
+                    raise TimeoutError(
+                        f"sqlite single-writer lock timeout name={self.name} "
+                        f"file={self.lock_file} holder={holder[:160]}"
+                    )
                 time.sleep(POLL_SEC)
 
     def __exit__(self, exc_type, exc, tb):

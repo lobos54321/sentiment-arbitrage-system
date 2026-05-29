@@ -112,7 +112,7 @@ RESONANCE_INDEXES = [
 
 def connect_db(path, *, readonly=False):
     db_path = Path(path)
-    timeout_sec = float(os.environ.get("SOURCE_RESONANCE_SQLITE_TIMEOUT_SEC", "60"))
+    timeout_sec = float(os.environ.get("SOURCE_RESONANCE_SQLITE_TIMEOUT_SEC", "15"))
     if readonly:
         uri = f"file:{db_path}?mode=ro"
         db = sqlite3.connect(uri, uri=True, timeout=timeout_sec)

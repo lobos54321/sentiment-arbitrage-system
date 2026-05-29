@@ -1528,3 +1528,33 @@ def test_missed_rescue_records_stale_clean_dog_state(tmp_path, monkeypatch):
     assert state["last_reason"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
     assert state["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
     assert json.loads(state["eligibility_json"])["last_tradable_fresh_ok"] is False
+
+
+def test_fast_lane_health_preserves_last_error_during_scanning_heartbeat(tmp_path, monkeypatch):
+    health_path = tmp_path / "paper-fast-lane-health.json"
+    paper_db_path = tmp_path / "paper.db"
+    monkeypatch.setenv("PAPER_FAST_LANE_HEALTH_PATH", str(health_path))
+    fast.FAST_LANE_HEALTH_STATE.update({
+        "missed_rescue_scan_count": 0,
+        "missed_rescue_error_count": 0,
+        "missed_rescue_last_result": None,
+        "missed_rescue_last_error": None,
+    })
+
+    fast.write_fast_lane_health(
+        paper_db_path=paper_db_path,
+        error=TimeoutError("sqlite single-writer lock timeout holder=123 paper"),
+        now_ts=1_780_000_000,
+    )
+    fast.write_fast_lane_health(
+        paper_db_path=paper_db_path,
+        worker_state="missed_rescue_scanning",
+        now_ts=1_780_000_010,
+    )
+
+    payload = json.loads(health_path.read_text(encoding="utf-8"))
+    assert payload["worker_state"] == "missed_rescue_scanning"
+    assert payload["missed_rescue"]["scan_count"] == 1
+    assert payload["missed_rescue"]["error_count"] == 1
+    assert payload["missed_rescue"]["last_error"]["type"] == "TimeoutError"
+    assert "holder=123" in payload["missed_rescue"]["last_error"]["message"]

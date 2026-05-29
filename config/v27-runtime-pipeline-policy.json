@@ -72,11 +72,11 @@
     {
       "pool_name": "paper_fast_lane_pool",
       "workload_class": "paper_fast_lane_candidate_scan",
-      "max_workers": 4,
+      "max_workers": 5,
       "reserved_capacity": 1,
       "checked_at": "2026-05-26T00:00:00Z",
       "source_file": "scripts/paper_fast_lane.py",
-      "source_anchor": "ThreadPoolExecutor(max_workers=args.concurrency + 2, thread_name_prefix=\"paper-fast\")"
+      "source_anchor": "ThreadPoolExecutor(max_workers=args.concurrency + 3, thread_name_prefix=\"paper-fast\")"
     }
   ]
 }

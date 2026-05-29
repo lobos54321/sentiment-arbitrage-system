@@ -255,7 +255,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-05-27T00:00:00Z",
-      "impact_hash": "f65f9ab5a63e5a58b5f0a2ef6b5971d266f85bce3ee6226d43f3f1849c6bff38",
+      "impact_hash": "30412e2ac24b3f7920049fa7163b23f52ee6b499ed46e22296153033d3d8665c",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -343,7 +343,7 @@
         "config/v27-threshold-catalog.json": "0f5a4de3fd712d17ac8c70adec5573514e8d56c99afbf0a59d46f06d549f91f3",
         "config/v27-training-dataset-manifest-policy.json": "815fba6c1648b34d7fcb6ee5e78d088bb698b2234daa2992d680ce0a4e912aa9",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
-        "scripts/paper_fast_lane.py": "4da26dc0934668855d5d16be2108709c3d059e353233e8ca1fbc1957bf8add2b",
+        "scripts/paper_fast_lane.py": "7f13a3786279f15410e1676f0a2d6be90e68004621c4e6dc13f0abce49e73496",
         "scripts/paper_trade_monitor.py": "4b5fbe69cdab29c113a62a598e33076ee6293c0b59b99725cabb4751c5b7165c",
         "scripts/telegram_lifecycle_markov.py": "13a32477b07d009ec2ee616e6d6aa25d67a8b00260185fe98267642a4b4942a1",
         "scripts/v27_basic_contract_readiness.py": "b83af3b6d4ce3ebcdb803d7203659005f2538f7119aee8bb6ba81e2fe005644c",
@@ -367,7 +367,7 @@
         "spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json": "a4754205a0553156d1044792a0539503cbeaaee426e1450768a8103c8e93892d",
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json": "c7cb351766a5b0d148afa54c5c8979a639c2a1dbf9d64e242c4d8f98b89596fc",
         "src/web/dashboard-server.js": "93bc0e31ae32aa69cebcbc8982c21ae1db7d9affb5bad2524d33eda930467d3f",
-        "test_paper_fast_lane.py": "b94cda2de644496db5f61ac7b23091073c22bdac8a481a151cfa4539efffedbd",
+        "test_paper_fast_lane.py": "f356a4c192e25c28fe3f50a831b16b0b0cd218b4f4c0f04f068ba2abe6270bd6",
         "test_telegram_lifecycle_markov.py": "8f0c0d3336232204d3e218eb85d5c3863c1159a309e2f9630cbbae2c4a1695a4",
         "test_v27_basic_contract_readiness.py": "7dfaa66fda6f81b2b45e8d3dd26bccc81a4b32cde20c9b297e5cfd29d83f6077",
         "test_v27_denominator_projection.py": "478d3efe02c6c559a7ef820cddf50c6fa58ee898becd03e032e85893e7d7e3a6",

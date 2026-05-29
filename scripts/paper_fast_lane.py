@@ -45,6 +45,8 @@ FAST_LANE_HEALTH_LOCK = threading.Lock()
 FAST_LANE_HEALTH_STATE = {
     "missed_rescue_scan_count": 0,
     "missed_rescue_error_count": 0,
+    "missed_rescue_last_result": None,
+    "missed_rescue_last_error": None,
 }
 
 FAST_LANE_POLICY_VERSION = os.environ.get("PAPER_FAST_LANE_POLICY_VERSION", "fast_lane_v1")
@@ -268,7 +270,7 @@ SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
 
 
 def connect_db(path, *, ensure_wal=True):
-    timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "60"))
+    timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "15"))
     db = sqlite3.connect(path, timeout=timeout_sec, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
@@ -378,6 +380,14 @@ def write_fast_lane_health(*, paper_db_path=None, missed_rescue_result=None, err
             FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"] += 1
         if error is not None:
             FAST_LANE_HEALTH_STATE["missed_rescue_error_count"] += 1
+            FAST_LANE_HEALTH_STATE["missed_rescue_last_error"] = {
+                "type": error.__class__.__name__,
+                "message": str(error)[:300],
+            }
+        elif missed_rescue_result is not None:
+            FAST_LANE_HEALTH_STATE["missed_rescue_last_error"] = None
+        if missed_rescue_result is not None:
+            FAST_LANE_HEALTH_STATE["missed_rescue_last_result"] = missed_rescue_result
         state = worker_state
         if not state:
             state = "scan_error" if error is not None else "scanned" if missed_rescue_result is not None else "starting"
@@ -390,15 +400,10 @@ def write_fast_lane_health(*, paper_db_path=None, missed_rescue_result=None, err
                 "last_scan_at": iso_utc_from_ts(now_ts),
                 "scan_count": FAST_LANE_HEALTH_STATE["missed_rescue_scan_count"],
                 "error_count": FAST_LANE_HEALTH_STATE["missed_rescue_error_count"],
-                "last_result": missed_rescue_health_counts(missed_rescue_result),
-                "last_error": (
-                    {
-                        "type": error.__class__.__name__,
-                        "message": str(error)[:300],
-                    }
-                    if error is not None
-                    else None
+                "last_result": missed_rescue_health_counts(
+                    FAST_LANE_HEALTH_STATE.get("missed_rescue_last_result")
                 ),
+                "last_error": FAST_LANE_HEALTH_STATE.get("missed_rescue_last_error"),
             },
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2790,7 +2795,7 @@ def run_worker(args):
         args.signal_db,
         args.concurrency,
     )
-    with ThreadPoolExecutor(max_workers=args.concurrency + 2, thread_name_prefix="paper-fast") as pool:
+    with ThreadPoolExecutor(max_workers=args.concurrency + 3, thread_name_prefix="paper-fast") as pool:
         pool.submit(premium_scan, args.signal_db, args.paper_db, stop_event, args.lookback_sec)
         pool.submit(source_resonance_scan, args.paper_db, stop_event)
         pool.submit(missed_rescue_scan, args.paper_db, stop_event)
