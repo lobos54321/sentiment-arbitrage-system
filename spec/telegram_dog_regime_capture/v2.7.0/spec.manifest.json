@@ -183,6 +183,7 @@
   ],
   "m0_freeze_modes": [
     "hard_gate_pass_tiny_probe",
+    "pre_pass_resonance_tiny_probe",
     "source_resonance_tiny_probe"
   ],
   "mvp_blocking_contracts": [

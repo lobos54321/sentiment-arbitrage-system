@@ -124,12 +124,12 @@
       "reason": "M0 freeze for v2.7.0: hard_gate direct paper entry is disabled; keep denominator/coverage attribution only."
     },
     "pre_pass_resonance_tiny_probe": {
-      "tier": "live",
+      "tier": "hard_shadow",
       "route": "LOTTO",
       "family": "paper_baseline_probe",
-      "paper_enabled": true,
+      "paper_enabled": false,
       "size_class": "tiny",
-      "reason": "Strict paper-only probe for pre-PASS Telegram + GMGN pre-seen LOTTO tokens; used to measure early-gold recall before hard-gate PASS."
+      "reason": "M0 freeze for v2.7.0: 24h/72h paper EV is negative; keep attribution-only until ignition quote-gap audit proves a tradable edge."
     },
     "ath_micro_reclaim_tiny_probe": {
       "tier": "hard_shadow",

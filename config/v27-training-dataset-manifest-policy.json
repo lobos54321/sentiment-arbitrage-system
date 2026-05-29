@@ -47,13 +47,13 @@
         "source_dog_label": "v2.7.0.seed",
         "trade_outcome_label": "v2.7.0.seed"
       },
-      "manifest_hash": "3e8f5083f1f29dd2560e93ad111cbead7a4157fa8b8aff3117a8aa50c1d00e99",
+      "manifest_hash": "766e2e517a2f97e52b12c9667af94ea9b7dca746545a3878cb575ae2e77fe16d",
       "metric_registry_hash": "c3e39b030787aa5d54b309abf3646865988f6c612bd3cfc30b6abd7e047c4b05",
       "observation_weights": {
         "sample:telegram_not_ath_reclaim_seed_001": 1.0
       },
       "observation_weights_hash": "d5d1cff7cf8c12d7c1d57aa8bf570279379be65a85caddc5c88a121e7f15a380",
-      "spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675",
+      "spec_hash": "ca3be0a8274e376c3e8500a41b57f27bdeb84223262a270866dbbc06e6d38b4b",
       "threshold_catalog_hash": "0f5a4de3fd712d17ac8c70adec5573514e8d56c99afbf0a59d46f06d549f91f3"
     }
   ]

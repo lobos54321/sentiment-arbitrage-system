@@ -37,7 +37,7 @@ def test_v27_manifest_has_stable_identity_and_rendered_views():
 
     rendered = manifest["rendered_views"]
     assert len(rendered) == 3
-    assert sum(view["lines"] for view in rendered) == 2043
+    assert sum(view["lines"] for view in rendered) == 2650
     assert all(len(view["sha256"]) == 64 for view in rendered)
     assert all((SPEC_PATH.parent / view["file"]).exists() for view in rendered)
 
@@ -56,6 +56,7 @@ def test_v27_manifest_tracks_m0_freeze_modes_and_high_risk_contracts():
 
     assert set(manifest["m0_freeze_modes"]) == {
         "hard_gate_pass_tiny_probe",
+        "pre_pass_resonance_tiny_probe",
         "source_resonance_tiny_probe",
     }
 
@@ -96,7 +97,7 @@ def test_v27_gap_register_carries_forward_adversarial_contracts():
     }
 
     assert gap_register["status"] == "machine_checkable_adversarial_gap_register"
-    assert len(gap_contracts) == 175
+    assert len(gap_contracts) == 244
     required = {
         "AggregateBoundaryContract",
         "ProviderByzantineQuorumContract",
@@ -122,18 +123,21 @@ def test_v27_spec_validator_computes_stable_hash_and_contract_coverage():
     assert result["spec_version"] == "2.7.0"
     assert result["section_count"] == 24
     assert result["required_contract_count"] == 77
-    assert result["catalog_contract_count"] == 213
-    assert result["gap_register_count"] == 175
-    assert result["spec_hash"] == "bbbad3551afe72dc104888529dff4f91a67524464f6a7e49ea7bfae46c3eef53"
+    assert result["catalog_contract_count"] == 282
+    assert result["gap_register_count"] == 244
+    assert result["spec_hash"] == "ca3be0a8274e376c3e8500a41b57f27bdeb84223262a270866dbbc06e6d38b4b"
 
 
 def test_v27_spec_validator_rejects_reopened_m0_direct_probe_modes(tmp_path):
     registry = json.loads(ENTRY_MODE_REGISTRY_PATH.read_text(encoding="utf-8"))
-    registry["modes"]["hard_gate_pass_tiny_probe"]["paper_enabled"] = True
-    registry["modes"]["hard_gate_pass_tiny_probe"]["tier"] = "live"
 
-    registry_path = tmp_path / "entry-mode-registry.json"
-    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    for mode in _load_manifest()["m0_freeze_modes"]:
+        reopened = json.loads(json.dumps(registry))
+        reopened["modes"][mode]["paper_enabled"] = True
+        reopened["modes"][mode]["tier"] = "live"
 
-    with pytest.raises(SpecValidationError, match="still paper-enabled"):
-        validate_all(SPEC_PATH, CATALOG_PATH, registry_path)
+        registry_path = tmp_path / f"{mode}.json"
+        registry_path.write_text(json.dumps(reopened), encoding="utf-8")
+
+        with pytest.raises(SpecValidationError, match="still paper-enabled"):
+            validate_all(SPEC_PATH, CATALOG_PATH, registry_path)

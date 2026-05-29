@@ -96,7 +96,7 @@ def test_entry_mode_registry_drives_shadow_only_defaults():
 def test_v27_m0_freezes_hard_gate_and_source_resonance_direct_probe_modes():
     db = _db()
 
-    for mode in ("hard_gate_pass_tiny_probe", "source_resonance_tiny_probe"):
+    for mode in ("hard_gate_pass_tiny_probe", "source_resonance_tiny_probe", "pre_pass_resonance_tiny_probe"):
         registry_entry = entry_mode_registry_entry(mode)
         decision = evaluate_entry_mode_quality(db, mode, now_ts=1000, force_live=True)
 
@@ -105,6 +105,18 @@ def test_v27_m0_freezes_hard_gate_and_source_resonance_direct_probe_modes():
         assert decision["decision"] == "shadow", mode
         assert decision["reason"] == "entry_mode_quality_shadow_only_mode", mode
         assert decision["registry_enforced"] is True
+
+
+def test_pre_pass_resonance_demote_is_registry_enforced_shadow_only():
+    db = _db()
+
+    decision = evaluate_entry_mode_quality(db, "pre_pass_resonance_tiny_probe", now_ts=1000, force_live=True)
+
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+    assert decision["shadow_only_mode"] is True
+    assert decision["registry"]["tier"] == "hard_shadow"
+    assert decision["registry_enforced"] is True
 
 
 def test_grey_zone_modes_are_registered_but_still_blocked_until_caps_exist():

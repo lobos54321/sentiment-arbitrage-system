@@ -357,6 +357,17 @@ PRE_PASS_RELAXED_CANARY_MIN_GAIN_PCT = float(os.environ.get('PRE_PASS_RELAXED_CA
 LOTTO_PROBE_SHADOW_ENABLED = os.environ.get('LOTTO_PROBE_SHADOW_ENABLED', 'true').lower() != 'false'
 LOTTO_PROBE_SHADOW_MIN_5M_PNL = float(os.environ.get('LOTTO_PROBE_SHADOW_MIN_5M_PNL', '0.20'))
 LOTTO_PROBE_SHADOW_SIZE_SOL = float(os.environ.get('LOTTO_PROBE_SHADOW_SIZE_SOL', '0.03'))
+LOTTO_QUOTE_GAP_AUDIT_ENABLED = os.environ.get('LOTTO_QUOTE_GAP_AUDIT_ENABLED', 'true').lower() != 'false'
+LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC = int(os.environ.get('LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC', '1800'))
+LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC = int(os.environ.get('LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC', '60'))
+LOTTO_QUOTE_GAP_AUDIT_TIMEOUT_SEC = float(os.environ.get('LOTTO_QUOTE_GAP_AUDIT_TIMEOUT_SEC', '8'))
+LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL = tuple(
+    sorted({
+        float(item.strip())
+        for item in os.environ.get('LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL', '0.01,0.05,0.10').split(',')
+        if item.strip()
+    })
+)
 EXPLOSIVE_CONTINUATION_SHADOW_ENABLED = os.environ.get('EXPLOSIVE_CONTINUATION_SHADOW_ENABLED', 'true').lower() != 'false'
 EXPLOSIVE_CONTINUATION_SHADOW_LOOKBACK_SEC = int(os.environ.get('EXPLOSIVE_CONTINUATION_SHADOW_LOOKBACK_SEC', str(2 * 60 * 60)))
 LOTTO_REAL_PROBE_ENABLED = os.environ.get('LOTTO_REAL_PROBE_ENABLED', 'true').lower() != 'false'
@@ -1617,6 +1628,237 @@ def _row_value(row, key, default=None):
         if isinstance(row, dict):
             return row.get(key, default)
         return default
+
+
+def _quote_gap_audit_size_key(size_sol):
+    return f"{float(size_sol):.3f}".rstrip('0').rstrip('.')
+
+
+def _lotto_quote_gap_audit_sizes(intent_size_sol=None):
+    sizes = list(LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL or ())
+    intent = _safe_float(intent_size_sol, None)
+    if intent is not None and intent > 0:
+        sizes.append(intent)
+    out = []
+    seen = set()
+    for size in sorted(sizes):
+        try:
+            value = float(size)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        key = round(value, 9)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _lotto_quote_gap_audit_recent(db, *, token_ca, signal_ts, reason, now_ts):
+    try:
+        row = db.execute(
+            """
+            SELECT event_ts
+            FROM paper_decision_events
+            WHERE component = 'lotto_quote_gap_audit'
+              AND event_type = 'point_in_time_quote_curve'
+              AND token_ca = ?
+              AND COALESCE(signal_ts, 0) = COALESCE(?, 0)
+              AND COALESCE(reason, '') = COALESCE(?, '')
+            ORDER BY event_ts DESC
+            LIMIT 1
+            """,
+            (token_ca, signal_ts, reason),
+        ).fetchone()
+    except Exception:
+        return False
+    if not row:
+        return False
+    last_ts = _safe_float(_row_value(row, 'event_ts'), None)
+    if last_ts is None:
+        return False
+    return float(now_ts) - last_ts < LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC
+
+
+def _lotto_quote_gap_curve(token_ca, *, lifecycle_id, mode, mark_price, sizes_sol):
+    curve = []
+    for size_sol in sizes_sol:
+        size_key = _quote_gap_audit_size_key(size_sol)
+        probe = _discovery_quote_probe(
+            token_ca,
+            lifecycle_id=lifecycle_id,
+            mode=mode,
+            stage_name=f'lotto_quote_gap_audit_probe_{size_key}sol',
+            amount_sol=size_sol,
+            timeout=LOTTO_QUOTE_GAP_AUDIT_TIMEOUT_SEC,
+            fast_lane_timeout=True,
+        )
+        quote_price = _safe_float(probe.get('effective_price'), None) if probe.get('success') else None
+        quote_gap_pct = calculate_entry_spread_pct(mark_price, quote_price)
+        curve.append({
+            'size_sol': size_sol,
+            'size_key': size_key,
+            'quote_executable': bool(probe.get('success')),
+            'quote_reason': probe.get('reason'),
+            'quote_price': quote_price,
+            'quote_gap_pct': quote_gap_pct,
+            'spread_pct': abs(quote_gap_pct) if quote_gap_pct is not None else None,
+            'latency_ms': probe.get('latency_ms'),
+            'route_available': probe.get('route_available'),
+            'execution': probe.get('execution'),
+        })
+    return curve
+
+
+def record_lotto_quote_gap_audit(
+    db,
+    w_entry,
+    *,
+    decision,
+    detail=None,
+    dex_snapshot=None,
+    live_concentration=None,
+    lifecycle=None,
+    gmgn_policy=None,
+    token_risk=None,
+    now_ts=None,
+    age_sec=None,
+):
+    """Append-only point-in-time quote-gap audit for LOTTO gate decisions.
+
+    This is measurement-only: it actively probes paper quotes across size tiers
+    but never creates a pending entry or paper trade.
+    """
+    if not LOTTO_QUOTE_GAP_AUDIT_ENABLED:
+        return {'recorded': False, 'reason': 'quote_gap_audit_disabled'}
+    w_entry = w_entry or {}
+    decision = decision or LottoDecision("wait", "unknown_lotto_decision", {})
+    detail = detail or {}
+    dex_snapshot = dex_snapshot or {}
+    token_ca = w_entry.get('ca') or w_entry.get('token_ca')
+    if not token_ca:
+        return {'recorded': False, 'reason': 'missing_token_ca'}
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    signal_ts = w_entry.get('signal_ts')
+    lifecycle_id = build_lifecycle_id(token_ca, signal_ts)
+    age = _safe_float(age_sec, None)
+    if age is None:
+        added_at = _safe_float(w_entry.get('added_at') or signal_ts, None)
+        age = max(0.0, now_ts - added_at) if added_at is not None else None
+    if age is not None and age > LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC:
+        return {'recorded': False, 'reason': 'candidate_too_old', 'age_sec': age}
+    if _lotto_quote_gap_audit_recent(
+        db,
+        token_ca=token_ca,
+        signal_ts=signal_ts,
+        reason=decision.reason,
+        now_ts=now_ts,
+    ):
+        return {'recorded': False, 'reason': 'deduped_recent_quote_gap_audit'}
+
+    price_usd = _first_number(dex_snapshot.get('price_usd'), dex_snapshot.get('priceUsd'))
+    sol_usd_error = None
+    try:
+        sol_usd = _safe_float(get_sol_price(), None)
+    except Exception as exc:
+        sol_usd = None
+        sol_usd_error = str(exc)
+    mark_price = (price_usd / sol_usd) if price_usd > 0 and sol_usd and sol_usd > 0 else None
+    intent_size = _safe_float(
+        detail.get('position_size_sol')
+        or detail.get('kelly_position_sol')
+        or w_entry.get('position_size_sol'),
+        None,
+    )
+    sizes = _lotto_quote_gap_audit_sizes(intent_size)
+    curve = _lotto_quote_gap_curve(
+        token_ca,
+        lifecycle_id=lifecycle_id,
+        mode=detail.get('entry_mode'),
+        mark_price=mark_price,
+        sizes_sol=sizes,
+    )
+    gap_by_size = {
+        item['size_key']: item.get('quote_gap_pct')
+        for item in curve
+    }
+    executable_by_size = {
+        item['size_key']: item.get('quote_executable')
+        for item in curve
+    }
+    activity = _discovery_activity_metrics(dex_snapshot, lifecycle)
+    payload = {
+        'audit_version': 'lotto_quote_gap_audit.v1',
+        'audit_stage': 'lotto_entry_gate_point_in_time',
+        'measurement_only': True,
+        'gate_decision': decision.action,
+        'gate_reason': decision.reason,
+        'entry_mode_candidate': detail.get('entry_mode'),
+        'intent_size_sol': intent_size,
+        'configured_size_curve_sol': list(LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL),
+        'size_curve_sol': sizes,
+        'quote_curve': curve,
+        'quote_gap_pct_by_size_sol': gap_by_size,
+        'quote_executable_by_size_sol': executable_by_size,
+        'mark_price': mark_price,
+        'mark_source': 'dexscreener_price_usd_over_sol_usd',
+        'price_usd': price_usd,
+        'sol_usd': sol_usd,
+        'sol_usd_error': sol_usd_error,
+        'candidate_age_sec': age,
+        'signal_ts': signal_ts,
+        'market_cap': _first_number(
+            dex_snapshot.get('market_cap'),
+            dex_snapshot.get('marketCap'),
+            dex_snapshot.get('fdv'),
+            w_entry.get('signal_mc'),
+        ),
+        'liquidity_usd': _first_number(dex_snapshot.get('liquidity_usd'), dex_snapshot.get('liquidityUsd')),
+        'activity': activity,
+        'live_concentration': live_concentration or {},
+        'gmgn_policy': gmgn_policy or {},
+        'token_risk': token_risk or {},
+        'decision_detail': {
+            key: detail.get(key)
+            for key in (
+                'mc_tier',
+                'dex_id',
+                'liquidity_unknown',
+                'entry_mode',
+                'position_size_sol',
+                'signal_super',
+                'newborn_momentum_tiny_scout_ok',
+                'concentrated_scout_ok',
+                'explosive_direct_scout_ok',
+            )
+            if key in detail
+        },
+    }
+    record_decision_event(
+        db,
+        component='lotto_quote_gap_audit',
+        event_type='point_in_time_quote_curve',
+        decision='measured',
+        reason=decision.reason,
+        token_ca=token_ca,
+        symbol=w_entry.get('symbol'),
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        signal_id=w_entry.get('premium_signal_id'),
+        route='LOTTO',
+        data_source='lotto_entry_gate+dexscreener+shadow_quote_curve',
+        payload=with_lifecycle_payload(payload, lifecycle),
+        event_ts=now_ts,
+    )
+    return {
+        'recorded': True,
+        'reason': 'quote_gap_audit_recorded',
+        'quote_curve_n': len(curve),
+        'quote_executable_n': sum(1 for item in curve if item.get('quote_executable')),
+        'gap_by_size': gap_by_size,
+    }
 
 
 def _lotto_not_ath_watch_created_ts(row, now_ts):
@@ -12161,16 +12403,31 @@ def _discovery_low_liquidity_activity_bypass(mode, *, liquidity_usd, activity=No
     }
 
 
-def _discovery_quote_probe(token_ca, *, lifecycle_id=None, mode=None, stage_name='discovery_quote_probe'):
+def _discovery_quote_probe(
+    token_ca,
+    *,
+    lifecycle_id=None,
+    mode=None,
+    stage_name='discovery_quote_probe',
+    amount_sol=None,
+    timeout=20,
+    fast_lane_timeout=False,
+):
     if not DISCOVERY_LOW_LIQ_QUOTE_PROBE_ENABLED:
         return {'attempted': False, 'success': False, 'reason': 'quote_probe_disabled'}
+    amount = _safe_float(amount_sol, PAPER_TINY_SCOUT_SIZE_SOL)
+    if amount <= 0:
+        amount = PAPER_TINY_SCOUT_SIZE_SOL
+    started_ms = int(time.time() * 1000)
     try:
         execution = simulate_entry_execution(
             token_ca,
-            PAPER_TINY_SCOUT_SIZE_SOL,
+            amount,
             stage_name,
             strategy_id=stage_name,
             lifecycle_id=lifecycle_id,
+            timeout=timeout,
+            fast_lane_timeout=fast_lane_timeout,
         )
     except Exception as exc:
         return {
@@ -12179,8 +12436,11 @@ def _discovery_quote_probe(token_ca, *, lifecycle_id=None, mode=None, stage_name
             'reason': 'quote_probe_exception',
             'error': str(exc),
             'entry_mode': mode,
+            'amount_sol': amount,
+            'latency_ms': int(time.time() * 1000) - started_ms,
         }
     execution = execution or {}
+    latency_ms = int(time.time() * 1000) - started_ms
     return {
         'attempted': True,
         'success': bool(execution.get('success')),
@@ -12189,6 +12449,9 @@ def _discovery_quote_probe(token_ca, *, lifecycle_id=None, mode=None, stage_name
         'quoted_out_amount_raw': execution.get('quotedOutAmountRaw'),
         'route_available': execution.get('routeAvailable'),
         'entry_mode': mode,
+        'amount_sol': amount,
+        'latency_ms': latency_ms,
+        'execution': build_execution_audit(execution),
     }
 
 
@@ -20141,6 +20404,31 @@ def run_monitor(db):
                             data_source='dexscreener+helius+signal',
                             payload=with_lifecycle_payload(_lotto_detail, _lotto_lifecycle),
                         )
+                        try:
+                            _quote_gap_audit = record_lotto_quote_gap_audit(
+                                db,
+                                w_entry,
+                                decision=_lotto_decision,
+                                detail=_lotto_detail,
+                                dex_snapshot=_lotto_dex,
+                                live_concentration=_lotto_live,
+                                lifecycle=_lotto_lifecycle,
+                                gmgn_policy=_gmgn_policy,
+                                token_risk=_token_risk,
+                                now_ts=now,
+                                age_sec=_lotto_age_sec,
+                            )
+                            if _quote_gap_audit.get('recorded'):
+                                log.info(
+                                    f"  [LOTTO_QUOTE_GAP_AUDIT] {w_entry['symbol']} "
+                                    f"reason={_lotto_decision.reason} curve_n={_quote_gap_audit.get('quote_curve_n')} "
+                                    f"quote_exec={_quote_gap_audit.get('quote_executable_n')}"
+                                )
+                        except Exception as _quote_gap_audit_err:
+                            log.debug(
+                                f"  [LOTTO_QUOTE_GAP_AUDIT] skipped for {w_entry.get('symbol')}: "
+                                f"{_quote_gap_audit_err}"
+                            )
                         try:
                             watchlist.update_scores(w_entry['id'], {}, eval_time=time.time())
                         except Exception:

@@ -548,7 +548,11 @@ def _m0_route_registry_ok(registry_path):
         return False, {"registry_present": False}
     modes = registry.get("modes") or {}
     frozen = {}
-    for mode in ("hard_gate_pass_tiny_probe", "source_resonance_tiny_probe"):
+    for mode in (
+        "hard_gate_pass_tiny_probe",
+        "pre_pass_resonance_tiny_probe",
+        "source_resonance_tiny_probe",
+    ):
         entry = modes.get(mode) or {}
         frozen[mode] = {
             "registered": bool(entry),

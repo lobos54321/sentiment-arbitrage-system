@@ -43,6 +43,8 @@ from paper_trade_monitor import (  # noqa: E402
     _hard_gate_pass_probe_entry_mode_quality_soft_override,
     _dog_catcher_branch_scout_quality_soft_override,
     _dog_catcher_branch_entry_mode_quality_override,
+    HARD_GATE_PASS_BASELINE_SOFT_ENTRY_MODE_QUALITY_REASONS,
+    DOG_CATCHER_BRANCH_ENTRY_MODE_QUALITY_REASONS,
     _dog_catcher_quote_anchor_detail,
     _dog_catcher_trail_quote_confirmation,
     _ath_dynamic_ttl_extension_detail,
@@ -450,6 +452,17 @@ def test_lotto_recovery_reason_mapping_splits_missed_blockers():
     assert _discovery_mode_for_lotto_reason("score_too_low") == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
 
 
+def test_entry_mode_quality_soft_override_allowlists_never_include_registry_shadow_reason():
+    registry_shadow_reason = "entry_mode_quality_shadow_only_mode"
+
+    assert registry_shadow_reason not in HARD_GATE_PASS_BASELINE_SOFT_ENTRY_MODE_QUALITY_REASONS
+    assert registry_shadow_reason not in DOG_CATCHER_BRANCH_ENTRY_MODE_QUALITY_REASONS
+    assert _hard_gate_pass_probe_entry_mode_quality_soft_override(
+        HARD_GATE_PASS_TINY_PROBE_MODE,
+        {"decision": "shadow", "reason": registry_shadow_reason, "shadow_only_mode": True},
+    ) is None
+
+
 def test_lotto_recovery_mode_uses_latest_blocker_over_original_reason():
     assert (
         _lotto_recovery_mode_for_blocker(
@@ -601,6 +614,171 @@ def test_lotto_not_ath_watch_shadow_confirms_without_live_pending(monkeypatch):
     assert all(row["quote_clean"] == 1 and row["snapshot_pass"] == 1 for row in snapshots)
 
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
+
+
+def test_lotto_quote_gap_audit_records_active_shadow_size_curve(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_ENABLED", True)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL", (0.01, 0.05, 0.10))
+    monkeypatch.setattr(monitor, "get_sol_price", lambda: 100.0)
+
+    calls = []
+
+    def fake_quote_probe(token_ca, **kwargs):
+        amount = kwargs["amount_sol"]
+        calls.append(amount)
+        mark_price = 0.0001
+        gap_by_amount = {
+            0.005: 1.5,
+            0.01: 2.0,
+            0.05: 8.0,
+            0.10: 20.0,
+        }
+        gap = gap_by_amount[round(amount, 3)]
+        return {
+            "attempted": True,
+            "success": True,
+            "reason": "quote_executable",
+            "effective_price": mark_price * (1.0 + gap / 100.0),
+            "latency_ms": int(amount * 1000),
+            "route_available": True,
+            "execution": {"success": True, "effectivePrice": mark_price * (1.0 + gap / 100.0)},
+        }
+
+    monkeypatch.setattr(monitor, "_discovery_quote_probe", fake_quote_probe)
+
+    result = monitor.record_lotto_quote_gap_audit(
+        db,
+        {
+            "ca": "DogToken",
+            "symbol": "DOG",
+            "signal_ts": 1000,
+            "premium_signal_id": 42,
+            "added_at": 995,
+            "signal_mc": 12345,
+        },
+        decision=monitor.LottoDecision("wait", "no_kline_low_volume", {"entry_mode": "newborn_momentum_tiny_scout"}),
+        detail={"entry_mode": "newborn_momentum_tiny_scout", "position_size_sol": 0.005, "mc_tier": "newborn_micro"},
+        dex_snapshot={
+            "price_usd": 0.01,
+            "liquidity_usd": 12000,
+            "vol_m5": 15000,
+            "buys_m5": 120,
+            "sells_m5": 60,
+            "price_change_m5": 9.5,
+        },
+        live_concentration={"top1_pct": 20, "top10_pct": 45},
+        lifecycle={"lifecycle_state": "NEWBORN", "vitality_score": 80, "entry_bias": "OBSERVE"},
+        gmgn_policy={"action": "allow"},
+        now_ts=1005,
+        age_sec=10,
+    )
+
+    assert result["recorded"] is True
+    assert sorted(round(value, 3) for value in calls) == [0.005, 0.01, 0.05, 0.1]
+    row = db.execute(
+        "SELECT component, event_type, decision, reason, payload_json FROM paper_decision_events"
+    ).fetchone()
+    assert row["component"] == "lotto_quote_gap_audit"
+    assert row["event_type"] == "point_in_time_quote_curve"
+    assert row["decision"] == "measured"
+    assert row["reason"] == "no_kline_low_volume"
+    payload = json.loads(row["payload_json"])
+    assert payload["measurement_only"] is True
+    assert payload["audit_stage"] == "lotto_entry_gate_point_in_time"
+    assert payload["intent_size_sol"] == 0.005
+    assert abs(payload["quote_gap_pct_by_size_sol"]["0.01"] - 2.0) < 1e-9
+    assert abs(payload["quote_gap_pct_by_size_sol"]["0.05"] - 8.0) < 1e-9
+    assert abs(payload["quote_gap_pct_by_size_sol"]["0.1"] - 20.0) < 1e-9
+    assert db.execute("SELECT COUNT(*) FROM paper_missed_signal_attribution").fetchone()[0] == 0
+
+
+def test_lotto_quote_gap_audit_dedupes_recent_same_reason(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_ENABLED", True)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL", (0.01,))
+    monkeypatch.setattr(monitor, "get_sol_price", lambda: 100.0)
+
+    calls = []
+
+    def fake_quote_probe(token_ca, **kwargs):
+        calls.append(kwargs["amount_sol"])
+        return {
+            "attempted": True,
+            "success": True,
+            "reason": "quote_executable",
+            "effective_price": 0.000102,
+            "latency_ms": 3,
+            "route_available": True,
+            "execution": {"success": True, "effectivePrice": 0.000102},
+        }
+
+    monkeypatch.setattr(monitor, "_discovery_quote_probe", fake_quote_probe)
+    common = {
+        "decision": monitor.LottoDecision("wait", "weak_buying_pressure", {}),
+        "detail": {"entry_mode": "lotto_concentrated_scout"},
+        "dex_snapshot": {"price_usd": 0.01, "liquidity_usd": 9000},
+        "now_ts": 1000,
+        "age_sec": 15,
+    }
+    w_entry = {"ca": "DogToken", "symbol": "DOG", "signal_ts": 1000, "premium_signal_id": 42}
+
+    first = monitor.record_lotto_quote_gap_audit(db, w_entry, **common)
+    second = monitor.record_lotto_quote_gap_audit(db, w_entry, **{**common, "now_ts": 1100})
+
+    assert first["recorded"] is True
+    assert second["recorded"] is False
+    assert second["reason"] == "deduped_recent_quote_gap_audit"
+    assert calls == [0.01]
+    assert db.execute("SELECT COUNT(*) FROM paper_decision_events").fetchone()[0] == 1
+
+
+def test_lotto_quote_gap_audit_keeps_quote_curve_when_sol_price_unavailable(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_decision_audit(db)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_ENABLED", True)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MAX_AGE_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_MIN_INTERVAL_SEC", 1800)
+    monkeypatch.setattr(monitor, "LOTTO_QUOTE_GAP_AUDIT_SIZES_SOL", (0.01,))
+    monkeypatch.setattr(monitor, "get_sol_price", lambda: (_ for _ in ()).throw(RuntimeError("sol api down")))
+
+    def fake_quote_probe(token_ca, **kwargs):
+        return {
+            "attempted": True,
+            "success": True,
+            "reason": "quote_executable",
+            "effective_price": 0.000102,
+            "latency_ms": 3,
+            "route_available": True,
+            "execution": {"success": True, "effectivePrice": 0.000102},
+        }
+
+    monkeypatch.setattr(monitor, "_discovery_quote_probe", fake_quote_probe)
+    result = monitor.record_lotto_quote_gap_audit(
+        db,
+        {"ca": "DogToken", "symbol": "DOG", "signal_ts": 1000},
+        decision=monitor.LottoDecision("wait", "no_kline_low_volume", {}),
+        detail={"entry_mode": "newborn_momentum_tiny_scout"},
+        dex_snapshot={"price_usd": 0.01},
+        now_ts=1000,
+        age_sec=10,
+    )
+
+    assert result["recorded"] is True
+    payload = json.loads(db.execute("SELECT payload_json FROM paper_decision_events").fetchone()[0])
+    assert payload["sol_usd"] is None
+    assert payload["sol_usd_error"] == "sol api down"
+    assert payload["quote_curve"][0]["quote_executable"] is True
+    assert payload["quote_curve"][0]["quote_gap_pct"] is None
 
 
 def test_lotto_not_ath_watch_historical_proxy_rejects_weak_first_reclaim():

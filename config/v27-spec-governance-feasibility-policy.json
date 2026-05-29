@@ -270,9 +270,9 @@
       "rendered_view_id": "rendered:v2.7.0-canonical-markdown",
       "renderer_version": "v2.7.0.render_canonical_spec.v1",
       "section_count": 24,
-      "source_spec_hash": "6361eb43c7a1996af6bd277280eba0409ebd5b9e93f9f7955e215220ae8d4675",
+      "source_spec_hash": "ca3be0a8274e376c3e8500a41b57f27bdeb84223262a270866dbbc06e6d38b4b",
       "threshold_id": "thr_rendered_spec_view_valid_rate_min",
-      "view_hash": "8661445fa8f89f64268d85a8bea5885b6134e48cddf906cfaad9eb6617139ff4"
+      "view_hash": "5029b28763c13a0605d518006f6a0f9dc161b91cf46b7462d0411153f98bd126"
     }
   ],
   "schema_version": "v2.7.0.spec_governance_feasibility_policy.v1",
