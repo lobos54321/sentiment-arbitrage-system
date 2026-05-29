@@ -77,6 +77,8 @@ FAST_ENTRY_PREMIUM_BATCH_LIMIT = int(os.environ.get("FAST_ENTRY_PREMIUM_BATCH_LI
 FAST_ENTRY_SOURCE_SCAN_LIMIT = int(os.environ.get("FAST_ENTRY_SOURCE_SCAN_LIMIT", "40"))
 FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_SEC", "30"))
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
+FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH", "500"))
+FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES", "20"))
 FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED = os.environ.get(
     "FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED",
     "false",
@@ -257,6 +259,27 @@ SMART_QUALITY_RECHECK_REASONS = {
 }
 
 MATRIX_TIMEOUT_RECHECK_REASONS = {
+    "matrices not yet aligned",
+}
+
+MISSED_RESCUE_EXACT_REASONS = {
+    "tracking_ttl_expired",
+    "not_ath_v17",
+    "not_ath_prebuy_kline_retry_expired",
+    "not_ath_prebuy_kline_block",
+    "entry_edge_spread_too_high",
+    "missing_trigger_or_quote",
+    "entry_edge_probe_missing_trigger_or_quote",
+    "pre_pass_signal_too_stale",
+    "weak_buying_pressure",
+    "no_kline_low_volume",
+    "negative_trend",
+    "chasing_top",
+    "trend_bearish_timeout",
+    "scout_quality_buy_pressure_weak",
+    "scout_quality_volume_low",
+    "scout_quality_tx_low",
+    "scout_quality_negative_trend",
     "matrices not yet aligned",
 }
 
@@ -2358,6 +2381,38 @@ def missed_rescue_entry_mode_hint(row, reason, branch):
     return "pre_pass_resonance_tiny_probe"
 
 
+def missed_rescue_reason_allowed(reason):
+    reason_l = str(reason or "").strip().lower()
+    if not reason_l:
+        return False
+    return (
+        reason_l in MISSED_RESCUE_EXACT_REASONS
+        or reason_l.startswith("lotto_stale_")
+        or reason_l.startswith("timeout (")
+        or reason_l.startswith("price_collapse")
+    )
+
+
+def missed_rescue_row_ts_values(row):
+    values = []
+    for key in ("first_tradable_ts", "created_event_ts", "signal_ts", "baseline_ts", "updated_at"):
+        ts = parse_datetime_ts(row_value(row, key))
+        if ts is not None and ts > 0:
+            values.append(float(ts))
+    return values
+
+
+def missed_rescue_row_in_scan_window(row, cutoff, backlog_cutoff):
+    ts_values = missed_rescue_row_ts_values(row)
+    if not ts_values:
+        return False
+    if any(ts >= cutoff for ts in ts_values):
+        return True
+    if not row_value(row, "processed_signature") and any(ts >= backlog_cutoff for ts in ts_values):
+        return True
+    return False
+
+
 def clean_dog_reclaim_state(status, reason):
     status_l = str(status or "").lower()
     reason_l = str(reason or "").lower()
@@ -2611,88 +2666,54 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
         FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
         FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
     )
-    time_exprs = missed_rescue_time_exprs(cols)
-    time_clause = timestamp_window_clause(time_exprs)
-    time_param_count = len(time_exprs) if time_exprs else 1
-    stop_before_peak_expr = "COALESCE(m.would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
-    active_window_clause = f"""
-            {time_clause}
-    """
-    unprocessed_backlog_clause = f"""
-            s.missed_attribution_id IS NULL
-            AND (
-              {time_clause}
-            )
-    """
     scan_limit = limit or FAST_ENTRY_MISSED_RESCUE_LIMIT
-    base_query = f"""
+    cursor_batch = max(scan_limit, FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH)
+    max_batches = max(1, FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES)
+    max_id = db.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM paper_missed_signal_attribution").fetchone()["max_id"]
+    cursor_id = int(max_id or 0) + 1
+    rows = []
+    for _ in range(max_batches):
+        candidates = db.execute(
+            f"""
         SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
                m.reject_reason, m.baseline_price, m.baseline_ts,
+               {optional_col(cols, 'created_event_ts')},
                {optional_col(cols, 'first_tradable_ts')},
                {optional_col(cols, 'tradable_missed', '0')},
                {optional_col(cols, 'would_stop_before_peak', '0')},
                {optional_col(cols, 'executable_peak_pnl', '0')},
                {'m.updated_at AS updated_at' if 'updated_at' in cols else 'NULL AS updated_at'},
                s.rescue_signature AS processed_signature
-        FROM paper_missed_signal_attribution m
+        FROM (
+          SELECT *
+          FROM paper_missed_signal_attribution
+          WHERE id < ?
+          ORDER BY id DESC
+          LIMIT ?
+        ) m
         LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
-        WHERE COALESCE({ 'm.tradable_missed' if 'tradable_missed' in cols else '0' }, 0) = 1
-          AND {stop_before_peak_expr} != 1
-          AND (
-            {active_window_clause}
-            OR ({unprocessed_backlog_clause})
-          )
-          AND (
-            m.reject_reason IN (
-              'tracking_ttl_expired',
-              'not_ath_v17',
-              'not_ath_prebuy_kline_retry_expired',
-              'not_ath_prebuy_kline_block',
-              'entry_edge_spread_too_high',
-              'missing_trigger_or_quote',
-              'entry_edge_probe_missing_trigger_or_quote',
-              'pre_pass_signal_too_stale',
-              'weak_buying_pressure',
-              'no_kline_low_volume',
-              'negative_trend',
-              'chasing_top',
-              'trend_bearish_timeout',
-              'scout_quality_buy_pressure_weak',
-              'scout_quality_volume_low',
-              'scout_quality_tx_low',
-              'scout_quality_negative_trend',
-              'matrices not yet aligned'
-            )
-            OR m.reject_reason LIKE 'lotto_stale_%'
-            OR m.reject_reason LIKE 'timeout (%'
-            OR m.reject_reason LIKE 'price_collapse%'
-          )
-          AND ({{priority_clause}})
-        ORDER BY m.id DESC
-        LIMIT ?
-        """
-    base_params = (
-        tuple([cutoff] * time_param_count)
-        + tuple([backlog_cutoff] * time_param_count)
-    )
-
-    def fetch_scan_rows(priority_clause, fetch_limit):
-        if fetch_limit <= 0:
-            return []
-        return db.execute(
-            base_query.format(priority_clause=priority_clause),
-            base_params + (fetch_limit,),
+        """,
+            (cursor_id, cursor_batch),
         ).fetchall()
-
-    rows = fetch_scan_rows(
-        "s.missed_attribution_id IS NULL OR COALESCE(s.rescue_signature, '') = ''",
-        scan_limit,
-    )
-    if FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED and len(rows) < scan_limit:
-        rows.extend(fetch_scan_rows(
-            "s.missed_attribution_id IS NOT NULL AND COALESCE(s.rescue_signature, '') != ''",
-            scan_limit - len(rows),
-        ))
+        if not candidates:
+            break
+        cursor_id = min(int(row["id"]) for row in candidates)
+        for row in candidates:
+            if len(rows) >= scan_limit:
+                break
+            if int(row_value(row, "tradable_missed", 0) or 0) != 1:
+                continue
+            if int(row_value(row, "would_stop_before_peak", 0) or 0) == 1:
+                continue
+            if not missed_rescue_reason_allowed(row_value(row, "reject_reason")):
+                continue
+            if row_value(row, "processed_signature") and not FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED:
+                continue
+            if not missed_rescue_row_in_scan_window(row, cutoff, backlog_cutoff):
+                continue
+            rows.append(row)
+        if len(rows) >= scan_limit:
+            break
     counts = {
         "rows": len(rows),
         "processed": 0,
