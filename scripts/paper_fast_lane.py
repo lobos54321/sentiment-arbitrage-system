@@ -2621,8 +2621,8 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
               {time_clause}
             )
     """
-    rows = db.execute(
-        f"""
+    scan_limit = limit or FAST_ENTRY_MISSED_RESCUE_LIMIT
+    base_query = f"""
         SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
                m.reject_reason, m.baseline_price, m.baseline_ts,
                {optional_col(cols, 'first_tradable_ts')},
@@ -2664,20 +2664,32 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
             OR m.reject_reason LIKE 'timeout (%'
             OR m.reject_reason LIKE 'price_collapse%'
           )
-        ORDER BY
-          CASE
-            WHEN s.missed_attribution_id IS NULL THEN 0
-            WHEN COALESCE(s.rescue_signature, '') = '' THEN 1
-            ELSE 2
-          END ASC,
-          {order_expr} ASC,
-          m.id ASC
+          AND ({{priority_clause}})
+        ORDER BY {order_expr} ASC, m.id ASC
         LIMIT ?
-        """,
+        """
+    base_params = (
         tuple([cutoff] * time_param_count)
         + tuple([backlog_cutoff] * time_param_count)
-        + (limit or FAST_ENTRY_MISSED_RESCUE_LIMIT,),
-    ).fetchall()
+    )
+
+    def fetch_scan_rows(priority_clause, fetch_limit):
+        if fetch_limit <= 0:
+            return []
+        return db.execute(
+            base_query.format(priority_clause=priority_clause),
+            base_params + (fetch_limit,),
+        ).fetchall()
+
+    rows = fetch_scan_rows(
+        "s.missed_attribution_id IS NULL OR COALESCE(s.rescue_signature, '') = ''",
+        scan_limit,
+    )
+    if len(rows) < scan_limit:
+        rows.extend(fetch_scan_rows(
+            "s.missed_attribution_id IS NOT NULL AND COALESCE(s.rescue_signature, '') != ''",
+            scan_limit - len(rows),
+        ))
     counts = {
         "rows": len(rows),
         "processed": 0,
