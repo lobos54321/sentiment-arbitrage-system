@@ -13,6 +13,7 @@ import {
   buildDogCatchGoalProgress,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
+  buildLottoQuoteGapAuditSummary,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   appendDashboardAuditEvent,
@@ -130,6 +131,71 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.equal(snapshot.db_files.find((row) => row.label === 'paper_trades').exists, true);
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
+});
+
+test('lotto quote gap audit summary reports size curve actionability', () => {
+  const rows = [
+    {
+      id: 2,
+      event_ts: 1_780_000_120,
+      token_ca: 'TokenB',
+      symbol: 'DOGB',
+      signal_ts: 1_780_000_100,
+      reason: 'lotto_timing_negative_m5',
+      decision: 'measured',
+      payload_json: JSON.stringify({
+        gate_decision: 'wait',
+        entry_mode_candidate: 'gmgn_clean_lotto_fast_lane',
+        intent_size_sol: 0.05,
+        mark_price: 0.0001,
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: 4, spread_pct: 4, latency_ms: 12 },
+          { size_key: '0.05', size_sol: 0.05, quote_executable: true, quote_gap_pct: 18, spread_pct: 18, latency_ms: 13 },
+          { size_key: '0.1', size_sol: 0.1, quote_executable: false, quote_reason: 'no_route' },
+        ],
+      }),
+    },
+    {
+      id: 1,
+      event_ts: 1_780_000_060,
+      token_ca: 'TokenA',
+      symbol: 'DOGA',
+      signal_ts: 1_780_000_000,
+      reason: 'lotto_fast_lane_ok',
+      decision: 'measured',
+      payload_json: JSON.stringify({
+        gate_decision: 'allow',
+        entry_mode_candidate: 'newborn_momentum_tiny_scout',
+        mark_price: null,
+        quote_curve: [
+          { size_key: '0.01', size_sol: 0.01, quote_executable: true, quote_gap_pct: null, spread_pct: null, latency_ms: 9 },
+          { size_key: '0.05', size_sol: 0.05, quote_executable: true, quote_gap_pct: null, spread_pct: null, latency_ms: 10 },
+        ],
+      }),
+    },
+  ];
+
+  const report = buildLottoQuoteGapAuditSummary(rows, { recentLimit: 2 });
+
+  assert.equal(report.audit_schema_version, 'v2.7.0.lotto_quote_gap_audit_summary.v1');
+  assert.equal(report.summary.events, 2);
+  assert.equal(report.summary.unique_tokens, 2);
+  assert.equal(report.summary.executable_events, 2);
+  assert.equal(report.summary.clean10_events, 1);
+  assert.equal(report.summary.clean30_events, 1);
+  assert.equal(report.summary.no_mark_price_events, 1);
+  assert.equal(report.summary.best_gap_n, 1);
+  assert.equal(report.summary.median_best_abs_quote_gap_pct, 4);
+  assert.deepEqual(report.by_size.map((row) => row.size_key), ['0.01', '0.05', '0.1']);
+  assert.equal(report.by_size[0].executable_rate_pct, 100);
+  assert.equal(report.by_size[0].gap_n, 1);
+  assert.equal(report.by_size[1].median_abs_quote_gap_pct, 18);
+  assert.equal(report.by_size[2].executable_rate_pct, 0);
+  assert.equal(report.by_reason[0].events, 1);
+  assert.equal(report.recent_events[0].best_abs_quote_gap_pct, 4);
+  assert.equal(report.recent_events[1].no_mark_price, true);
+  assert.equal(report.recent_events[1].best_abs_quote_gap_pct, null);
+  assert.equal(report.recent_events[1].quote_curve[0].quote_gap_pct, null);
 });
 
 test('dashboard audit events form a verifiable hash chain', () => {

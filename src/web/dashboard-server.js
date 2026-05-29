@@ -456,6 +456,184 @@ function roundNumber(value, digits = 3) {
   return Math.round(n * factor) / factor;
 }
 
+function percentileNumber(values, pct) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+  return sorted[idx];
+}
+
+function nullableFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function roundNullableNumber(value, digits = 3) {
+  const n = nullableFiniteNumber(value);
+  return n == null ? null : roundNumber(n, digits);
+}
+
+export function buildLottoQuoteGapAuditSummary(rows = [], options = {}) {
+  const recentLimit = Math.max(0, Math.min(Number(options.recentLimit || 25), 100));
+  const bySize = new Map();
+  const byReason = new Map();
+  const tokenSet = new Set();
+  let executableEvents = 0;
+  let clean10Events = 0;
+  let clean30Events = 0;
+  let noMarkPriceEvents = 0;
+  const eventBestGaps = [];
+  const recentEvents = [];
+
+  for (const row of rows || []) {
+    const payload = parseJsonObject(row.payload_json);
+    const curve = Array.isArray(payload.quote_curve) ? payload.quote_curve : [];
+    const token = row.token_ca || payload.token_ca || null;
+    if (token) tokenSet.add(token);
+    const reason = String(row.reason || payload.gate_reason || 'unknown');
+    if (!byReason.has(reason)) {
+      byReason.set(reason, {
+        reason,
+        events: 0,
+        unique_tokens: new Set(),
+        executable_events: 0,
+        clean10_events: 0,
+        clean30_events: 0,
+      });
+    }
+    const reasonRow = byReason.get(reason);
+    reasonRow.events += 1;
+    if (token) reasonRow.unique_tokens.add(token);
+
+    const executableItems = curve.filter((item) => item && item.quote_executable);
+    const gaps = executableItems
+      .map((item) => nullableFiniteNumber(item.quote_gap_pct))
+      .filter((value) => value != null);
+    const absGaps = gaps.map(Math.abs);
+    const bestAbsGap = absGaps.length ? Math.min(...absGaps) : null;
+    const eventExecutable = executableItems.length > 0;
+    if (eventExecutable) {
+      executableEvents += 1;
+      reasonRow.executable_events += 1;
+    }
+    if (bestAbsGap !== null) {
+      eventBestGaps.push(bestAbsGap);
+      if (bestAbsGap <= 10) {
+        clean10Events += 1;
+        reasonRow.clean10_events += 1;
+      }
+      if (bestAbsGap <= 30) {
+        clean30Events += 1;
+        reasonRow.clean30_events += 1;
+      }
+    }
+    if (payload.mark_price == null) noMarkPriceEvents += 1;
+
+    for (const item of curve) {
+      if (!item) continue;
+      const key = String(item.size_key || item.size_sol || 'unknown');
+      if (!bySize.has(key)) {
+        bySize.set(key, {
+          size_key: key,
+          size_sol: Number.isFinite(Number(item.size_sol)) ? Number(item.size_sol) : null,
+          probes: 0,
+          executable_n: 0,
+          gap_values: [],
+          abs_gap_values: [],
+        });
+      }
+      const sizeRow = bySize.get(key);
+      sizeRow.probes += 1;
+      if (item.quote_executable) sizeRow.executable_n += 1;
+      const gap = nullableFiniteNumber(item.quote_gap_pct);
+      if (gap != null) {
+        sizeRow.gap_values.push(gap);
+        sizeRow.abs_gap_values.push(Math.abs(gap));
+      }
+    }
+
+    if (recentEvents.length < recentLimit) {
+      recentEvents.push({
+        id: row.id,
+        event_ts: row.event_ts,
+        event_iso: row.event_ts ? new Date(Number(row.event_ts) * 1000).toISOString() : null,
+        token_ca: token,
+        symbol: row.symbol || null,
+        signal_ts: row.signal_ts ?? null,
+        reason,
+        gate_decision: payload.gate_decision || row.decision || null,
+        entry_mode_candidate: payload.entry_mode_candidate || null,
+        intent_size_sol: payload.intent_size_sol ?? null,
+        mark_price: payload.mark_price ?? null,
+        no_mark_price: payload.mark_price == null,
+        best_abs_quote_gap_pct: bestAbsGap == null ? null : roundNumber(bestAbsGap, 3),
+        quote_executable_n: executableItems.length,
+        quote_curve: curve.map((item) => ({
+          size_key: item.size_key,
+          size_sol: item.size_sol,
+          quote_executable: Boolean(item.quote_executable),
+          quote_reason: item.quote_reason || null,
+          quote_gap_pct: roundNullableNumber(item.quote_gap_pct, 3),
+          spread_pct: roundNullableNumber(item.spread_pct, 3),
+          latency_ms: item.latency_ms ?? null,
+        })),
+      });
+    }
+  }
+
+  const sizeRows = Array.from(bySize.values())
+    .map((item) => ({
+      size_key: item.size_key,
+      size_sol: item.size_sol,
+      probes: item.probes,
+      executable_n: item.executable_n,
+      executable_rate_pct: item.probes ? roundNumber((item.executable_n / item.probes) * 100, 1) : null,
+      gap_n: item.gap_values.length,
+      avg_quote_gap_pct: item.gap_values.length
+        ? roundNumber(item.gap_values.reduce((sum, value) => sum + value, 0) / item.gap_values.length, 3)
+        : null,
+      median_abs_quote_gap_pct: roundNullableNumber(percentileNumber(item.abs_gap_values, 50), 3),
+      p90_abs_quote_gap_pct: roundNullableNumber(percentileNumber(item.abs_gap_values, 90), 3),
+      max_abs_quote_gap_pct: item.abs_gap_values.length ? roundNumber(Math.max(...item.abs_gap_values), 3) : null,
+    }))
+    .sort((a, b) => (a.size_sol ?? Number.MAX_SAFE_INTEGER) - (b.size_sol ?? Number.MAX_SAFE_INTEGER));
+
+  const reasonRows = Array.from(byReason.values())
+    .map((item) => ({
+      reason: item.reason,
+      events: item.events,
+      unique_tokens: item.unique_tokens.size,
+      executable_events: item.executable_events,
+      clean10_events: item.clean10_events,
+      clean30_events: item.clean30_events,
+    }))
+    .sort((a, b) => b.events - a.events || b.executable_events - a.executable_events);
+
+  return {
+    audit_schema_version: 'v2.7.0.lotto_quote_gap_audit_summary.v1',
+    summary: {
+      events: rows.length,
+      unique_tokens: tokenSet.size,
+      executable_events: executableEvents,
+      executable_event_rate_pct: rows.length ? roundNumber((executableEvents / rows.length) * 100, 1) : null,
+      clean10_events: clean10Events,
+      clean10_event_rate_pct: rows.length ? roundNumber((clean10Events / rows.length) * 100, 1) : null,
+      clean30_events: clean30Events,
+      clean30_event_rate_pct: rows.length ? roundNumber((clean30Events / rows.length) * 100, 1) : null,
+      no_mark_price_events: noMarkPriceEvents,
+      best_gap_n: eventBestGaps.length,
+      median_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(eventBestGaps, 50), 3),
+      p90_best_abs_quote_gap_pct: roundNullableNumber(percentileNumber(eventBestGaps, 90), 3),
+      max_best_abs_quote_gap_pct: eventBestGaps.length ? roundNumber(Math.max(...eventBestGaps), 3) : null,
+      sample_warning: rows.length < 30 ? 'small_sample_quote_gap_audit' : null,
+    },
+    by_size: sizeRows,
+    by_reason: reasonRows,
+    recent_events: recentEvents,
+  };
+}
+
 function priceUnitAuditForTrade(row) {
   const entryAudit = parseJsonObject(row.entry_execution_audit_json);
   const exitAudit = parseJsonObject(row.exit_execution_audit_json);
@@ -6572,6 +6750,64 @@ const server = http.createServer(async (req, res) => {
       }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/lotto-quote-gap-audit') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const limit = boundedIntParam(url, 'limit', 200, 1, 1000);
+      const recentLimit = boundedIntParam(url, 'recent_limit', 25, 0, 100);
+      const sinceTs = boundedWindowedSinceTs(url, 2, 24);
+      paperDb = new Database(paperDbPath, { readonly: true });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('paper_decision_events')) {
+        res.writeHead(404, apiJsonHeaders());
+        res.end(JSON.stringify({ error: 'paper_decision_events table not found' }));
+        return;
+      }
+      const rows = paperDb.prepare(`
+        SELECT id, event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+               signal_ts, strategy_stage, route, component, event_type, decision,
+               reason, data_source, lifecycle_state, vitality_score, entry_bias, payload_json
+        FROM paper_decision_events
+        WHERE component = 'lotto_quote_gap_audit'
+          AND event_type = 'point_in_time_quote_curve'
+          AND event_ts >= @since
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @limit
+      `).all({ since: sinceTs, limit });
+      const report = buildLottoQuoteGapAuditSummary(rows, { recentLimit });
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        filters: {
+          since_ts: sinceTs,
+          since_iso: new Date(sinceTs * 1000).toISOString(),
+          hours: boundedIntParam(url, 'hours', 2, 1, 24),
+          limit,
+          recent_limit: recentLimit,
+        },
+        query_ms: Date.now() - startedAt,
+        ...report,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
       res.end(JSON.stringify({ error: e.message }));
     } finally {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
