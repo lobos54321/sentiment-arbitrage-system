@@ -1210,6 +1210,90 @@ def test_missed_rescue_prioritizes_unprocessed_rows_before_deduped_window(tmp_pa
     assert new_state is not None
 
 
+def test_missed_rescue_cursor_uses_rowid_when_id_is_not_primary_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC", 24 * 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC", 300)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH", 1)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES", 1)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            999, 'TokenOldProcessed', 'OLD', ?, 11, 'LOTTO', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, ?, 1, 0, 0.8,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 300, now - 300, now - 300, now - 30, now - 30),
+    )
+    db.commit()
+
+    first = fast.scan_missed_rescue_once(db, now_ts=now, limit=1)
+    assert first["processed"] == 1
+
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            10, 'TokenNewestRowid', 'NEW', ?, 12, 'LOTTO', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, ?, 1, 0, 0.9,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 200, now - 200, now - 200, now - 20, now - 20),
+    )
+    db.commit()
+
+    second = fast.scan_missed_rescue_once(db, now_ts=now + 1, limit=1)
+    new_state = db.execute(
+        """
+        SELECT token_ca, last_status
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 10
+        """
+    ).fetchone()
+
+    assert second["processed"] == 1
+    assert second["deduped"] == 0
+    assert second["cursor_batches"] == 1
+    assert second["cursor_candidates"] == 1
+    assert new_state["token_ca"] == "TokenNewestRowid"
+
+
 def test_missed_not_ath_kline_rescue_queues_lotto_reclaim_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
     monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)

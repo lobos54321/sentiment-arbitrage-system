@@ -79,6 +79,7 @@ FAST_ENTRY_SOURCE_LOOKBACK_SEC = int(os.environ.get("FAST_ENTRY_SOURCE_LOOKBACK_
 FAST_ENTRY_MISSED_RESCUE_LIMIT = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_LIMIT", "30"))
 FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH", "500"))
 FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES = int(os.environ.get("FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES", "20"))
+SQLITE_MAX_ROWID = 9223372036854775807
 FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED = os.environ.get(
     "FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED",
     "false",
@@ -2669,13 +2670,14 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
     scan_limit = limit or FAST_ENTRY_MISSED_RESCUE_LIMIT
     cursor_batch = max(scan_limit, FAST_ENTRY_MISSED_RESCUE_CURSOR_BATCH)
     max_batches = max(1, FAST_ENTRY_MISSED_RESCUE_MAX_CURSOR_BATCHES)
-    max_id = db.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM paper_missed_signal_attribution").fetchone()["max_id"]
-    cursor_id = int(max_id or 0) + 1
+    cursor_rowid = SQLITE_MAX_ROWID
     rows = []
+    batches_scanned = 0
+    candidates_seen = 0
     for _ in range(max_batches):
         candidates = db.execute(
             f"""
-        SELECT m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
+        SELECT m.scan_rowid, m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
                m.reject_reason, m.baseline_price, m.baseline_ts,
                {optional_col(cols, 'created_event_ts')},
                {optional_col(cols, 'first_tradable_ts')},
@@ -2685,19 +2687,21 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
                {'m.updated_at AS updated_at' if 'updated_at' in cols else 'NULL AS updated_at'},
                s.rescue_signature AS processed_signature
         FROM (
-          SELECT *
+          SELECT rowid AS scan_rowid, *
           FROM paper_missed_signal_attribution
-          WHERE id < ?
-          ORDER BY id DESC
+          WHERE rowid < ?
+          ORDER BY rowid DESC
           LIMIT ?
         ) m
         LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
         """,
-            (cursor_id, cursor_batch),
+            (cursor_rowid, cursor_batch),
         ).fetchall()
         if not candidates:
             break
-        cursor_id = min(int(row["id"]) for row in candidates)
+        batches_scanned += 1
+        candidates_seen += len(candidates)
+        cursor_rowid = min(int(row["scan_rowid"]) for row in candidates)
         for row in candidates:
             if len(rows) >= scan_limit:
                 break
@@ -2721,6 +2725,8 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
         "watch_only": 0,
         "counterfactual_only": 0,
         "deduped": 0,
+        "cursor_batches": batches_scanned,
+        "cursor_candidates": candidates_seen,
         "backlog_lookback_sec": int(max(
             FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
             FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
