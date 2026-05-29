@@ -183,6 +183,7 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeyp
     db = fast.connect_db(db_path)
     fast.init_fast_lane_schema(db)
     now = int(time.time())
+    entry_mode = "lotto_not_ath_reclaim_tiny_probe"
     db.execute(
         """
         CREATE TABLE paper_trades (
@@ -201,9 +202,9 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeyp
         db.execute(
             """
             INSERT INTO paper_trades(entry_mode, entry_branch, peak_pnl, pnl_pct, replay_source, entry_ts, exit_ts)
-            VALUES ('pre_pass_resonance_tiny_probe', 'pre_pass_resonance', 0.20, ?, 'paper_fast_lane', ?, ?)
+            VALUES (?, 'not_ath_reclaim_quote_clean_tiny_probe', 0.20, ?, 'paper_fast_lane', ?, ?)
             """,
-            (pnl, now - idx, now - idx + 1),
+            (entry_mode, pnl, now - idx, now - idx + 1),
         )
     db.commit()
     assert fast.enqueue_fast_entry(
@@ -214,7 +215,7 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeyp
         signal_ts=now,
         receive_ts=now,
         entry_branch="missing_trigger_or_quote",
-        entry_mode_hint="pre_pass_resonance_tiny_probe",
+        entry_mode_hint=entry_mode,
         now_ts=now,
     )
     row = fast.claim_queue_item(db, "worker-1")
@@ -1126,6 +1127,86 @@ def test_missed_rescue_scans_tradability_signature_not_only_new_ids(tmp_path, mo
     ).fetchone()
     assert "1.2" in row["rescue_signature"]
     assert row["last_status"] == "deduped"
+
+
+def test_missed_rescue_prioritizes_unprocessed_rows_before_deduped_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC", 24 * 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenOldDeduped', 'OLD', ?, 11, 'LOTTO', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, ?, 1, 0, 0.8,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 300, now - 300, now - 300, now - 30, now - 30),
+    )
+    db.commit()
+
+    first = fast.scan_missed_rescue_once(db, now_ts=now, limit=1)
+    assert first["processed"] == 1
+
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            2, 'TokenNewUnprocessed', 'NEW', ?, 12, 'LOTTO', 'discovery_tracking',
+            'tracking_ttl_expired', 1.0, ?, ?, ?, 1, 0, 0.9,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 200, now - 200, now - 200, now - 20, now - 20),
+    )
+    db.commit()
+
+    second = fast.scan_missed_rescue_once(db, now_ts=now + 1, limit=1)
+    new_state = db.execute(
+        """
+        SELECT last_status
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 2
+        """
+    ).fetchone()
+
+    assert second["processed"] == 1
+    assert second["deduped"] == 0
+    assert new_state is not None
 
 
 def test_missed_not_ath_kline_rescue_queues_lotto_reclaim_mode(tmp_path, monkeypatch):

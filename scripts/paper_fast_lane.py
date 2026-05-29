@@ -2664,7 +2664,14 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
             OR m.reject_reason LIKE 'timeout (%'
             OR m.reject_reason LIKE 'price_collapse%'
           )
-        ORDER BY {order_expr} ASC, m.id ASC
+        ORDER BY
+          CASE
+            WHEN s.missed_attribution_id IS NULL THEN 0
+            WHEN COALESCE(s.rescue_signature, '') = '' THEN 1
+            ELSE 2
+          END ASC,
+          {order_expr} ASC,
+          m.id ASC
         LIMIT ?
         """,
         tuple([cutoff] * time_param_count)

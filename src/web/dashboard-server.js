@@ -823,12 +823,183 @@ function updateLottoWinnerGapGroupFromJoinedRow(group, row) {
   if (trustedPeak != null) group.peak_values.push(trustedPeak);
 }
 
+const LOTTO_MISSED_RESCUE_ACTIVE_LOOKBACK_SEC = Math.max(
+  60,
+  Number(process.env.FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC || 8 * 60 * 60) || 8 * 60 * 60,
+);
+const LOTTO_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC = Math.max(
+  LOTTO_MISSED_RESCUE_ACTIVE_LOOKBACK_SEC,
+  Number(process.env.FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC || 24 * 60 * 60) || 24 * 60 * 60,
+);
+const LOTTO_MISSED_RESCUE_ALLOWED_REASONS = new Set([
+  'tracking_ttl_expired',
+  'not_ath_v17',
+  'not_ath_prebuy_kline_retry_expired',
+  'not_ath_prebuy_kline_block',
+  'entry_edge_spread_too_high',
+  'missing_trigger_or_quote',
+  'entry_edge_probe_missing_trigger_or_quote',
+  'pre_pass_signal_too_stale',
+  'weak_buying_pressure',
+  'no_kline_low_volume',
+  'negative_trend',
+  'chasing_top',
+  'trend_bearish_timeout',
+  'scout_quality_buy_pressure_weak',
+  'scout_quality_volume_low',
+  'scout_quality_tx_low',
+  'scout_quality_negative_trend',
+  'matrices not yet aligned',
+]);
+
+function lottoMissedRescueReasonAllowed(reason) {
+  const normalized = String(reason || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return LOTTO_MISSED_RESCUE_ALLOWED_REASONS.has(normalized)
+    || normalized.startsWith('lotto_stale_')
+    || normalized.startsWith('timeout (')
+    || normalized.startsWith('price_collapse');
+}
+
+function latestTimestampForMissedRescueScan(row) {
+  const candidates = [
+    row?.first_tradable_ts,
+    row?.created_event_ts,
+    row?.signal_ts,
+    row?.baseline_ts,
+    row?.updated_at,
+    row?.event_ts,
+    row?.missed_event_ts,
+  ]
+    .map(parseUnixishTime)
+    .filter((value) => value != null && value > 0);
+  return candidates.length ? Math.max(...candidates) : null;
+}
+
+function classifyMissedRescueScanCoverage(row, nowTs, { activeLookbackSec, backlogLookbackSec } = {}) {
+  const activeSec = Number(activeLookbackSec || LOTTO_MISSED_RESCUE_ACTIVE_LOOKBACK_SEC);
+  const backlogSec = Number(backlogLookbackSec || LOTTO_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC);
+  const scanTs = latestTimestampForMissedRescueScan(row);
+  const ageSec = scanTs == null ? null : Math.floor(Number(nowTs || Math.floor(Date.now() / 1000)) - scanTs);
+  const reasonAllowed = lottoMissedRescueReasonAllowed(row?.reject_reason);
+  const gapReasons = [];
+  if (!row?.clean_tradable) gapReasons.push('not_clean_tradable');
+  if (!reasonAllowed) gapReasons.push('reject_reason_not_in_missed_rescue_scan');
+  if (scanTs == null) {
+    gapReasons.push('missing_scanner_timestamp');
+  } else {
+    const active = ageSec <= activeSec;
+    const backlog = !row?.fast_lane_rescue_seen && ageSec <= backlogSec;
+    if (!active && !backlog) {
+      gapReasons.push(row?.fast_lane_rescue_seen
+        ? 'rescue_seen_outside_active_window'
+        : 'unprocessed_outside_backlog_window');
+    }
+  }
+  const window = scanTs == null
+    ? null
+    : (ageSec <= activeSec
+      ? 'active'
+      : (!row?.fast_lane_rescue_seen && ageSec <= backlogSec ? 'unprocessed_backlog' : 'outside_window'));
+  return {
+    eligible: gapReasons.length === 0,
+    window,
+    primary_gap_reason: gapReasons[0] || null,
+    gap_reasons: gapReasons,
+    scan_timestamp: scanTs,
+    scan_time_age_sec: ageSec,
+    reason_allowed: reasonAllowed,
+  };
+}
+
+function buildMissedRescueScannerCoverage(joinedRows, options = {}) {
+  const activeLookbackSec = Number(options.activeLookbackSec || LOTTO_MISSED_RESCUE_ACTIVE_LOOKBACK_SEC);
+  const backlogLookbackSec = Number(options.backlogLookbackSec || LOTTO_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC);
+  const cleanMedalTokens = new Set();
+  const eligibleTokens = new Set();
+  const gapTokens = new Set();
+  const byGap = new Map();
+  let cleanMedalEvents = 0;
+  let eligibleEvents = 0;
+  let gapEvents = 0;
+  let rescueSeenEvents = 0;
+  let rescueSeenUnique = 0;
+  const rescueSeenTokens = new Set();
+
+  for (const row of joinedRows || []) {
+    const medal = Number(row?.trusted_peak_pnl || 0) >= 0.25;
+    if (!row?.clean_tradable || !medal) continue;
+    cleanMedalEvents += 1;
+    if (row.token_ca) cleanMedalTokens.add(String(row.token_ca));
+    if (row.fast_lane_rescue_seen) {
+      rescueSeenEvents += 1;
+      if (row.token_ca) rescueSeenTokens.add(String(row.token_ca));
+    }
+    if (row.fast_lane_rescue_scan_eligible) {
+      eligibleEvents += 1;
+      if (row.token_ca) eligibleTokens.add(String(row.token_ca));
+    } else {
+      gapEvents += 1;
+      if (row.token_ca) gapTokens.add(String(row.token_ca));
+    }
+    const primaryGap = row.fast_lane_rescue_scan_eligible
+      ? 'scanner_eligible'
+      : (row.fast_lane_rescue_scan_primary_gap || 'scanner_gap_unknown');
+    const rescueBasis = row.fast_lane_rescue_seen
+      ? (row.fast_lane_rescue_match_basis || 'rescue_match_unknown')
+      : 'no_rescue_state';
+    const key = [
+      primaryGap,
+      row.fast_lane_rescue_scan_window || '-',
+      rescueBasis,
+      row.fast_lane_rescue_scan_reason_allowed ? 'reason_allowed' : 'reason_not_allowed',
+    ].join('|');
+    if (!byGap.has(key)) {
+      byGap.set(key, emptyLottoWinnerGapGroup({
+        scan_gap_reason: primaryGap,
+        scan_window: row.fast_lane_rescue_scan_window || null,
+        rescue_match_basis: rescueBasis,
+        reject_reason_allowed: Boolean(row.fast_lane_rescue_scan_reason_allowed),
+      }));
+    }
+    updateLottoWinnerGapGroupFromJoinedRow(byGap.get(key), row);
+  }
+  rescueSeenUnique = rescueSeenTokens.size;
+  return {
+    policy: {
+      active_lookback_sec: activeLookbackSec,
+      backlog_lookback_sec: backlogLookbackSec,
+      timestamp_fields: ['first_tradable_ts', 'created_event_ts', 'signal_ts', 'baseline_ts', 'updated_at'],
+      reason_policy: 'same allowlist/prefixes as scripts/paper_fast_lane.py scan_missed_rescue_once',
+    },
+    summary: {
+      clean_medal_joined_events: cleanMedalEvents,
+      clean_medal_joined_unique: cleanMedalTokens.size,
+      rescue_seen_events: rescueSeenEvents,
+      rescue_seen_unique: rescueSeenUnique,
+      scanner_eligible_events: eligibleEvents,
+      scanner_eligible_unique: eligibleTokens.size,
+      scanner_gap_events: gapEvents,
+      scanner_gap_unique: gapTokens.size,
+    },
+    by_scan_gap: Array.from(byGap.values())
+      .map(finalizeLottoWinnerGapGroup)
+      .sort((a, b) => b.clean_medal_unique - a.clean_medal_unique
+        || b.clean_medal_events - a.clean_medal_events
+        || String(a.scan_gap_reason || '').localeCompare(String(b.scan_gap_reason || ''))),
+  };
+}
+
 export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = [], options = {}) {
   const recentLimit = Math.max(0, Math.min(Number(options.recentLimit || 25), 100));
   const topLimit = Math.max(1, Math.min(Number(options.topLimit || recentLimit || 25), 100));
   const maxJoinDeltaSec = Math.max(60, Math.min(Number(options.maxJoinDeltaSec || 3600), 24 * 3600));
+  const nowTs = Number(options.nowTs || Math.floor(Date.now() / 1000));
   const fastLaneRescueByMissedId = options.fastLaneRescueByMissedId instanceof Map
     ? options.fastLaneRescueByMissedId
+    : new Map();
+  const fastLaneRescueByToken = options.fastLaneRescueByToken instanceof Map
+    ? options.fastLaneRescueByToken
     : new Map();
   const fastLaneQueueByToken = options.fastLaneQueueByToken instanceof Map
     ? options.fastLaneQueueByToken
@@ -892,7 +1063,12 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
     const tier = tierForPeakPnl(trustedPeak);
     const cleanTradable = Number(missed.tradable_missed || 0) === 1
       && Number(missed.would_stop_before_peak || 0) !== 1;
-    const rescue = missed.id != null ? fastLaneRescueByMissedId.get(Number(missed.id)) || null : null;
+    const rescueByMissedId = missed.id != null ? fastLaneRescueByMissedId.get(Number(missed.id)) || null : null;
+    const rescueByToken = token ? fastLaneRescueByToken.get(String(token)) || null : null;
+    const rescue = rescueByMissedId || rescueByToken || null;
+    const fastLaneRescueMatchBasis = rescueByMissedId
+      ? 'missed_attribution_id'
+      : (rescueByToken ? 'token_ca' : null);
     const queue = token ? fastLaneQueueByToken.get(String(token)) || null : null;
     const fastLaneRescueState = rescue?.state || null;
     const fastLaneRescueLastStatus = rescue?.last_status || null;
@@ -997,6 +1173,7 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
       audit_reason: String(auditRow.reason || payload.gate_reason || 'unknown'),
       entry_mode_candidate: payload.entry_mode_candidate || null,
       fast_lane_rescue_seen: Boolean(rescue),
+      fast_lane_rescue_match_basis: fastLaneRescueMatchBasis,
       fast_lane_rescue_state: fastLaneRescueState,
       fast_lane_rescue_last_status: fastLaneRescueLastStatus,
       fast_lane_rescue_last_reason: fastLaneRescueLastReason,
@@ -1010,6 +1187,16 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
       fast_lane_queue_updated_at: queue?.updated_at ?? null,
       fast_lane_queue_entry_branch: queue?.entry_branch ?? null,
       fast_lane_queue_source_type: queue?.source_type ?? null,
+    });
+    const scanCoverage = classifyMissedRescueScanCoverage(joinedRows[joinedRows.length - 1], nowTs);
+    Object.assign(joinedRows[joinedRows.length - 1], {
+      fast_lane_rescue_scan_eligible: scanCoverage.eligible,
+      fast_lane_rescue_scan_window: scanCoverage.window,
+      fast_lane_rescue_scan_primary_gap: scanCoverage.primary_gap_reason,
+      fast_lane_rescue_scan_gap_reasons: scanCoverage.gap_reasons,
+      fast_lane_rescue_scan_time_age_sec: scanCoverage.scan_time_age_sec,
+      fast_lane_rescue_scan_timestamp: scanCoverage.scan_timestamp,
+      fast_lane_rescue_scan_reason_allowed: scanCoverage.reason_allowed,
     });
   }
 
@@ -1119,6 +1306,7 @@ export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = 
         || b.clean10_events - a.clean10_events
         || b.events - a.events
         || String(a.rescue_state || '').localeCompare(String(b.rescue_state || ''))),
+    missed_rescue_scanner_coverage: buildMissedRescueScannerCoverage(joinedRows),
     top_joined_winners: topJoinedWinners,
     top_unique_joined_winners: topUniqueJoinedWinners,
     unjoined_recent_audits: unjoinedRecentAudits,
@@ -7373,6 +7561,8 @@ const server = http.createServer(async (req, res) => {
             COALESCE(${missedColumn('symbol')}, substr(m.token_ca, 1, 8), '?') AS symbol,
             ${missedColumn('signal_ts')} AS signal_ts,
             ${missedColumn('baseline_ts')} AS baseline_ts,
+            ${missedColumn('first_tradable_ts')} AS first_tradable_ts,
+            ${missedColumn('updated_at')} AS updated_at,
             ${missedColumn('route')} AS route,
             ${missedColumn('component')} AS component,
             ${missedColumn('reject_reason')} AS reject_reason,
@@ -7471,6 +7661,15 @@ const server = http.createServer(async (req, res) => {
           .filter((row) => row.missed_attribution_id != null)
           .map((row) => [Number(row.missed_attribution_id), row])
       );
+      const fastLaneRescueByToken = new Map();
+      for (const row of fastLaneRescueRows) {
+        if (!row.token_ca) continue;
+        const tokenKey = String(row.token_ca);
+        const current = fastLaneRescueByToken.get(tokenKey);
+        const rowTs = parseUnixishTime(row.updated_at || row.last_action_at || row.first_seen_at) || 0;
+        const currentTs = current ? (parseUnixishTime(current.updated_at || current.last_action_at || current.first_seen_at) || 0) : -1;
+        if (!current || rowTs >= currentTs) fastLaneRescueByToken.set(tokenKey, row);
+      }
       const fastLaneQueueByToken = new Map(
         fastLaneQueueRows
           .filter((row) => row.token_ca)
@@ -7481,6 +7680,7 @@ const server = http.createServer(async (req, res) => {
         topLimit,
         maxJoinDeltaSec,
         fastLaneRescueByMissedId,
+        fastLaneRescueByToken,
         fastLaneQueueByToken,
       });
       res.writeHead(200, apiJsonHeaders());

@@ -341,6 +341,7 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
     recentLimit: 2,
     topLimit: 3,
     maxJoinDeltaSec: 300,
+    nowTs: 1_780_000_200,
     fastLaneRescueByMissedId: new Map([
       [0, {
         missed_attribution_id: 0,
@@ -413,14 +414,78 @@ test('lotto quote gap winner join report ties clean audit gaps to confirmed winn
   assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_seen, true);
   assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_state, 'queued');
   assert.equal(report.top_unique_joined_winners[0].fast_lane_entry_branch, 'tracking_ttl_reclaim_quote_clean_tiny_probe');
+  assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_match_basis, 'missed_attribution_id');
+  assert.equal(report.top_unique_joined_winners[0].fast_lane_rescue_scan_eligible, true);
   assert.equal(report.by_recovery_state[0].rescue_state, 'queued');
   assert.equal(report.by_recovery_state[0].clean_medal_unique, 1);
   assert.equal(
     report.by_recovery_state.some((row) => row.rescue_state === 'stale' && row.fast_lane_status === 'watch_only'),
     true
   );
+  assert.equal(report.missed_rescue_scanner_coverage.summary.clean_medal_joined_events, 3);
+  assert.equal(report.missed_rescue_scanner_coverage.summary.scanner_eligible_events, 3);
+  assert.equal(report.missed_rescue_scanner_coverage.by_scan_gap[0].scan_gap_reason, 'scanner_eligible');
   assert.equal(report.unjoined_recent_audits[0].token_ca, 'TokenUnjoined');
   assert.equal(report.unjoined_recent_audits[0].best_abs_quote_gap_pct, 6);
+});
+
+test('lotto winner join can match token-only fast lane rescue state', () => {
+  const report = buildLottoQuoteGapWinnerJoinReport([
+    {
+      id: 1,
+      event_ts: 1_780_000_050,
+      token_ca: 'TokenLegacyRescue',
+      symbol: 'DOGLEG',
+      signal_ts: 1_780_000_010,
+      reason: 'lotto_quote_gap',
+      payload_json: JSON.stringify({
+        quote_curve: [
+          { size_key: '0.01', quote_executable: true, quote_gap_pct: 4 },
+        ],
+      }),
+    },
+  ], [
+    {
+      id: 22,
+      created_event_ts: 1_780_000_045,
+      token_ca: 'TokenLegacyRescue',
+      symbol: 'DOGLEG',
+      signal_ts: 1_780_000_008,
+      baseline_ts: 1_780_000_000,
+      route: 'LOTTO',
+      component: 'discovery_tracking',
+      reject_reason: 'tracking_ttl_expired',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 1.05,
+      quote_clean_peak_pnl: 1.01,
+      executable_peak_pnl: 1.1,
+    },
+  ], {
+    topLimit: 1,
+    maxJoinDeltaSec: 300,
+    nowTs: 1_780_000_100,
+    fastLaneRescueByToken: new Map([
+      ['TokenLegacyRescue', {
+        missed_attribution_id: null,
+        token_ca: 'TokenLegacyRescue',
+        state: 'queued',
+        last_status: 'queued',
+        last_reason: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+        updated_at: 1_780_000_080,
+      }],
+    ]),
+  });
+
+  const top = report.top_unique_joined_winners[0];
+  assert.equal(top.fast_lane_rescue_seen, true);
+  assert.equal(top.fast_lane_rescue_match_basis, 'token_ca');
+  assert.equal(top.fast_lane_rescue_state, 'queued');
+  assert.equal(top.fast_lane_rescue_last_status, 'queued');
+  assert.equal(top.fast_lane_rescue_scan_eligible, true);
+  assert.equal(report.by_recovery_state[0].rescue_state, 'queued');
+  assert.equal(report.missed_rescue_scanner_coverage.summary.rescue_seen_unique, 1);
 });
 
 test('dashboard audit events form a verifiable hash chain', () => {
