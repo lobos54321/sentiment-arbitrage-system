@@ -2614,7 +2614,6 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
     time_exprs = missed_rescue_time_exprs(cols)
     time_clause = timestamp_window_clause(time_exprs)
     time_param_count = len(time_exprs) if time_exprs else 1
-    order_expr = timestamp_order_expr(time_exprs)
     stop_before_peak_expr = "COALESCE(m.would_stop_before_peak, 0)" if "would_stop_before_peak" in cols else "0"
     active_window_clause = f"""
             {time_clause}
@@ -2669,7 +2668,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
             OR m.reject_reason LIKE 'price_collapse%'
           )
           AND ({{priority_clause}})
-        ORDER BY {order_expr} ASC, m.id ASC
+        ORDER BY m.id DESC
         LIMIT ?
         """
     base_params = (
