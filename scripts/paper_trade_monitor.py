@@ -953,6 +953,11 @@ def fatal_sqlite_malformed(exc, *, context, db_path=None, exit_fn=None):
     if not sqlite_malformed_error(exc):
         return False
     path = db_path or PAPER_DB
+    marker_payload = f"context={context}\nerror={exc}\n"
+    try:
+        Path(f"{path}.integrity_error").write_text(marker_payload[:4000], encoding="utf-8")
+    except Exception:
+        pass
     exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
     log.critical(
         "[SQLITE_MALFORMED] context=%s db=%s error=%s; exiting so preflight can quarantine and recreate a clean DB",

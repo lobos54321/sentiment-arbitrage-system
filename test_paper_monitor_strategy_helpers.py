@@ -3226,18 +3226,22 @@ def test_sqlite_malformed_detection_is_specific():
     assert not monitor.sqlite_malformed_error(ValueError("malformed randomness controls"))
 
 
-def test_fatal_sqlite_malformed_exits_with_configured_code():
+def test_fatal_sqlite_malformed_exits_with_configured_code(tmp_path):
     exit_codes = []
+    paper_db = tmp_path / "paper_trades.db"
 
     result = monitor.fatal_sqlite_malformed(
         sqlite3.DatabaseError("database disk image is malformed"),
         context="unit_test",
-        db_path="/tmp/paper_trades.db",
+        db_path=str(paper_db),
         exit_fn=exit_codes.append,
     )
 
     assert result is True
     assert exit_codes == [monitor.SQLITE_MALFORMED_EXIT_CODE]
+    marker = paper_db.with_suffix(".db.integrity_error")
+    assert marker.exists()
+    assert "context=unit_test" in marker.read_text(encoding="utf-8")
     assert monitor.fatal_sqlite_malformed(
         sqlite3.OperationalError("database is locked"),
         context="unit_test",

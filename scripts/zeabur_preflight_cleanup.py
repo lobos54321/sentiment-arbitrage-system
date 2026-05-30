@@ -171,6 +171,16 @@ def sqlite_header_invalid(path: Path) -> bool:
 def checkpoint_db(path: Path) -> None:
     if not path.exists():
         return
+    marker = path.with_suffix(path.suffix + ".integrity_error")
+    if path.name == "paper_trades.db" and marker.exists():
+        try:
+            marker_status = marker.read_text(encoding="utf-8", errors="replace")[:4000]
+        except Exception as exc:
+            marker_status = f"integrity marker present but unreadable: {exc}"
+        if should_quarantine(path, marker_status):
+            log(f"WARN existing integrity marker {path.name}: {marker_status.splitlines()[0] if marker_status else 'unknown'}")
+            quarantine_db_family(path, marker_status)
+            return
     if path.name == "paper_trades.db" and sqlite_header_invalid(path):
         reason = "file is not a database: invalid sqlite header"
         log(f"WARN checkpoint failed {path.name}: {reason}")

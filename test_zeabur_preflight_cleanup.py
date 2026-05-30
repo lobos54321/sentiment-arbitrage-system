@@ -57,3 +57,26 @@ def test_large_valid_db_skips_startup_quick_check_but_checkpoints(tmp_path, monk
 
     assert paper_db.exists()
     assert not paper_db.with_suffix(".db.integrity_error").exists()
+
+
+def test_existing_malformed_marker_quarantines_large_paper_db(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    paper_db = data_dir / "paper_trades.db"
+    paper_db.write_bytes(b"SQLite format 3\x00" + (b"x" * 128))
+    marker = paper_db.with_suffix(".db.integrity_error")
+    marker.write_text("context=pending_entry\nerror=database disk image is malformed\n", encoding="utf-8")
+
+    monkeypatch.setattr(preflight, "RECOVERY_DIR", data_dir / "recovery")
+    monkeypatch.setattr(preflight, "QUARANTINE_MALFORMED_PAPER_DB", True)
+    monkeypatch.setattr(preflight, "QUICK_CHECK_MAX_BYTES", 1)
+
+    preflight.checkpoint_db(paper_db)
+
+    assert not paper_db.exists()
+    assert not marker.exists()
+    recovery_dirs = list((data_dir / "recovery").glob("paper_trades_corrupt_*"))
+    assert len(recovery_dirs) == 1
+    recovery_dir = recovery_dirs[0]
+    assert (recovery_dir / "paper_trades.db").exists()
+    assert "pending_entry" in (recovery_dir / "paper_trades.db.integrity_error").read_text(encoding="utf-8")
