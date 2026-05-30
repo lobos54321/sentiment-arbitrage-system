@@ -123,6 +123,58 @@ def test_fast_queue_upgrades_existing_token_priority(tmp_path):
     assert row["entry_branch"] == "hard_gate_fast_clean"
 
 
+def test_fast_queue_promotes_recent_watch_observation_to_queued(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+
+    assert fast.record_fast_lane_observation(
+        db,
+        source_type="source_resonance_fast",
+        token_ca="TokenWatchUpgrade",
+        symbol="UP",
+        signal_ts=now,
+        receive_ts=now,
+        entry_branch="source_resonance_gmgn_fast",
+        priority=18,
+        status="watch_only",
+        reason="source_resonance_gmgn_only_watch_only",
+        now_ts=now,
+    )
+    promoted = fast.enqueue_fast_entry(
+        db,
+        source_type="ttl_final_reclaim_fast",
+        token_ca="TokenWatchUpgrade",
+        symbol="UP",
+        signal_ts=now + 1,
+        receive_ts=now + 1,
+        entry_branch="tracking_ttl_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="lotto_not_ath_reclaim_tiny_probe",
+        priority=18,
+        payload={"direct_fill_reason": "tracking_ttl_reclaim_quote_clean_tiny_probe"},
+        now_ts=now + 1,
+    )
+
+    assert promoted is True
+    row = db.execute(
+        """
+        SELECT status, priority, source_type, entry_branch, entry_mode_hint, last_error
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenWatchUpgrade'
+        """
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert row["priority"] == 18
+    assert row["source_type"] == "ttl_final_reclaim_fast"
+    assert row["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
+    assert row["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert row["last_error"] is None
+    claimed = fast.claim_queue_item(db, "worker-1")
+    assert claimed is not None
+    assert claimed["token_ca"] == "TokenWatchUpgrade"
+
+
 def test_queue_pressure_skips_low_priority_but_keeps_high_priority(tmp_path, monkeypatch):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)

@@ -663,8 +663,13 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                 return False
             existing = existing_recent_queue_row(db, token_ca, now_ts)
             if existing is not None:
-                if int(priority) < int(existing["priority"] or 999):
-                    new_status = "queued" if existing["status"] in ("watch_only", "counterfactual_only") else existing["status"]
+                existing_status = str(existing["status"] or "")
+                existing_priority = int(existing["priority"] or 999)
+                promote_inactive = existing_status in ("watch_only", "counterfactual_only")
+                improve_priority = int(priority) < existing_priority
+                if improve_priority or promote_inactive:
+                    new_status = "queued" if promote_inactive else existing_status
+                    new_priority = min(int(priority), existing_priority)
                     history = status_history_append(
                         existing["status_history_json"],
                         status=new_status,
@@ -686,7 +691,7 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                         WHERE id = ?
                         """,
                         (
-                            int(priority),
+                            new_priority,
                             source_type,
                             entry_mode_hint,
                             branch,
@@ -700,6 +705,8 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                         ),
                     )
                     db.commit()
+                    if promote_inactive:
+                        return True
                 return False
             db.execute(
                 """
