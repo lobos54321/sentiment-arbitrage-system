@@ -15,6 +15,7 @@ import {
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
   buildLottoQuoteGapWinnerJoinReport,
+  latestActionableFastLaneQueueByToken,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   appendDashboardAuditEvent,
@@ -486,6 +487,44 @@ test('lotto winner join can match token-only fast lane rescue state', () => {
   assert.equal(top.fast_lane_rescue_scan_eligible, true);
   assert.equal(report.by_recovery_state[0].rescue_state, 'queued');
   assert.equal(report.missed_rescue_scanner_coverage.summary.rescue_seen_unique, 1);
+});
+
+test('fast lane queue attribution prefers actionable rows over newer watch observations', () => {
+  const byToken = latestActionableFastLaneQueueByToken([
+    {
+      id: 12,
+      token_ca: 'TokenQueueRank',
+      status: 'watch_only',
+      entry_branch: 'source_resonance_gmgn_fast',
+      updated_at: 1_780_000_120,
+    },
+    {
+      id: 10,
+      token_ca: 'TokenQueueRank',
+      status: 'queued',
+      entry_branch: 'tracking_ttl_reclaim_quote_clean_tiny_probe',
+      updated_at: 1_780_000_080,
+    },
+    {
+      id: 22,
+      token_ca: 'TokenEnteredRank',
+      status: 'watch_only',
+      entry_branch: 'source_resonance_gmgn_fast',
+      updated_at: 1_780_000_130,
+    },
+    {
+      id: 21,
+      token_ca: 'TokenEnteredRank',
+      status: 'entered',
+      entry_branch: 'smart_entry_reclaim_quote_clean_tiny_probe',
+      updated_at: 1_780_000_070,
+    },
+  ]);
+
+  assert.equal(byToken.get('TokenQueueRank').status, 'queued');
+  assert.equal(byToken.get('TokenQueueRank').entry_branch, 'tracking_ttl_reclaim_quote_clean_tiny_probe');
+  assert.equal(byToken.get('TokenEnteredRank').status, 'entered');
+  assert.equal(byToken.get('TokenEnteredRank').entry_branch, 'smart_entry_reclaim_quote_clean_tiny_probe');
 });
 
 test('lotto missed rescue scanner coverage allows smart momentum fading reclaim reasons', () => {

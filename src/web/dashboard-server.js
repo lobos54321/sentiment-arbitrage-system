@@ -992,6 +992,42 @@ function buildMissedRescueScannerCoverage(joinedRows, options = {}) {
   };
 }
 
+function fastLaneQueueStatusRank(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (['queued', 'claimed', 'retry_watch'].includes(normalized)) return 0;
+  if (normalized === 'entered') return 1;
+  if (['quote_failed', 'rate_limited'].includes(normalized)) return 2;
+  if (['rejected', 'skipped'].includes(normalized)) return 3;
+  return 4;
+}
+
+export function latestActionableFastLaneQueueByToken(queueRows = []) {
+  const byToken = new Map();
+  for (const row of queueRows || []) {
+    if (!row?.token_ca) continue;
+    const token = String(row.token_ca);
+    const current = byToken.get(token);
+    if (!current) {
+      byToken.set(token, row);
+      continue;
+    }
+    const rowRank = fastLaneQueueStatusRank(row.status);
+    const currentRank = fastLaneQueueStatusRank(current.status);
+    const rowTs = parseUnixishTime(row.updated_at || row.created_at) || 0;
+    const currentTs = parseUnixishTime(current.updated_at || current.created_at) || 0;
+    const rowId = Number(row.id || 0);
+    const currentId = Number(current.id || 0);
+    if (
+      rowRank < currentRank
+      || (rowRank === currentRank && rowTs > currentTs)
+      || (rowRank === currentRank && rowTs === currentTs && rowId > currentId)
+    ) {
+      byToken.set(token, row);
+    }
+  }
+  return byToken;
+}
+
 export function buildLottoQuoteGapWinnerJoinReport(auditRows = [], missedRows = [], options = {}) {
   const recentLimit = Math.max(0, Math.min(Number(options.recentLimit || 25), 100));
   const topLimit = Math.max(1, Math.min(Number(options.topLimit || recentLimit || 25), 100));
@@ -7633,28 +7669,20 @@ const server = http.createServer(async (req, res) => {
             ? 'q.updated_at'
             : (queueCols.has('created_at') ? 'q.created_at' : 'q.id');
           fastLaneQueueRows = paperDb.prepare(`
-            WITH ranked AS (
-              SELECT
-                q.id,
-                q.token_ca,
-                ${queueColumn('status')} AS status,
-                ${queueColumn('last_error')} AS last_error,
-                ${queueColumn('first_error')} AS first_error,
-                ${queueColumn('source_type')} AS source_type,
-                ${queueColumn('entry_branch')} AS entry_branch,
-                ${queueColumn('entry_mode_hint')} AS entry_mode_hint,
-                ${queueColumn('created_at')} AS created_at,
-                ${queueColumn('updated_at', 'q.created_at')} AS updated_at,
-                ROW_NUMBER() OVER (
-                  PARTITION BY q.token_ca
-                  ORDER BY ${queueUpdatedExpr} DESC, q.id DESC
-                ) AS rn
-              FROM paper_fast_entry_queue q
-              WHERE q.token_ca IN (${sqlInList(auditTokens)})
-            )
-            SELECT *
-            FROM ranked
-            WHERE rn = 1
+            SELECT
+              q.id,
+              q.token_ca,
+              ${queueColumn('status')} AS status,
+              ${queueColumn('last_error')} AS last_error,
+              ${queueColumn('first_error')} AS first_error,
+              ${queueColumn('source_type')} AS source_type,
+              ${queueColumn('entry_branch')} AS entry_branch,
+              ${queueColumn('entry_mode_hint')} AS entry_mode_hint,
+              ${queueColumn('created_at')} AS created_at,
+              ${queueColumn('updated_at', 'q.created_at')} AS updated_at
+            FROM paper_fast_entry_queue q
+            WHERE q.token_ca IN (${sqlInList(auditTokens)})
+            ORDER BY q.token_ca ASC, ${queueUpdatedExpr} DESC, q.id DESC
           `).all();
         }
       }
@@ -7672,11 +7700,7 @@ const server = http.createServer(async (req, res) => {
         const currentTs = current ? (parseUnixishTime(current.updated_at || current.last_action_at || current.first_seen_at) || 0) : -1;
         if (!current || rowTs >= currentTs) fastLaneRescueByToken.set(tokenKey, row);
       }
-      const fastLaneQueueByToken = new Map(
-        fastLaneQueueRows
-          .filter((row) => row.token_ca)
-          .map((row) => [String(row.token_ca), row])
-      );
+      const fastLaneQueueByToken = latestActionableFastLaneQueueByToken(fastLaneQueueRows);
       const report = buildLottoQuoteGapWinnerJoinReport(auditRows, missedRows, {
         recentLimit,
         topLimit,
