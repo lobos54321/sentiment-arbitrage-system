@@ -84,6 +84,10 @@ FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED = os.environ.get(
     "FAST_ENTRY_MISSED_RESCUE_SCAN_PROCESSED",
     "false",
 ).lower() == "true"
+FAST_ENTRY_MISSED_RESCUE_RECORD_WATCH_OBSERVATIONS = os.environ.get(
+    "FAST_ENTRY_MISSED_RESCUE_RECORD_WATCH_OBSERVATIONS",
+    "false",
+).lower() == "true"
 FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY", "8"))
 FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY", "12"))
 FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
@@ -2533,8 +2537,10 @@ def missed_rescue_priority(row, branch):
     return 35
 
 
-def process_missed_rescue_row(db, row, *, now_ts=None):
+def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=None):
     now_ts = int(now_ts if now_ts is not None else time.time())
+    if record_watch_observation is None:
+        record_watch_observation = FAST_ENTRY_MISSED_RESCUE_RECORD_WATCH_OBSERVATIONS
     reason = str(row["reject_reason"] or "missed_rescue")
     rescue_created_ts = now_ts
     original_signal_ts = row["signal_ts"] or row["baseline_ts"] or row["first_tradable_ts"] or rescue_created_ts
@@ -2603,23 +2609,25 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
             policy.get("reason"),
         )
     if not policy.get("pass"):
-        inserted = record_fast_lane_observation(
-            db,
-            source_type=source_type,
-            token_ca=row["token_ca"],
-            symbol=row["symbol"],
-            signal_ts=original_signal_ts,
-            receive_ts=original_signal_ts,
-            recorded_ts=row["baseline_ts"],
-            entry_mode_hint=entry_mode_hint,
-            entry_branch=branch,
-            trigger_price=row["baseline_price"],
-            priority=priority,
-            payload=payload,
-            status=policy.get("status") or "counterfactual_only",
-            reason=policy.get("reason"),
-            now_ts=now_ts,
-        )
+        inserted = False
+        if record_watch_observation:
+            inserted = record_fast_lane_observation(
+                db,
+                source_type=source_type,
+                token_ca=row["token_ca"],
+                symbol=row["symbol"],
+                signal_ts=original_signal_ts,
+                receive_ts=original_signal_ts,
+                recorded_ts=row["baseline_ts"],
+                entry_mode_hint=entry_mode_hint,
+                entry_branch=branch,
+                trigger_price=row["baseline_price"],
+                priority=priority,
+                payload=payload,
+                status=policy.get("status") or "counterfactual_only",
+                reason=policy.get("reason"),
+                now_ts=now_ts,
+            )
         if inserted:
             log.info("[FAST_COUNTERFACTUAL] missed-rescue token=%s reason=%s policy=%s", row["token_ca"], reason, policy.get("reason"))
         return {
@@ -2766,6 +2774,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True, 
             payload=result.get("payload"),
             eligibility=result.get("eligibility"),
         )
+        db.commit()
     if counts["processed"]:
         db.commit()
     return counts

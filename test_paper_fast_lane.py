@@ -1435,11 +1435,19 @@ def test_missed_rescue_backfills_unprocessed_clean_dog_backlog(tmp_path, monkeyp
         WHERE missed_attribution_id = 1
         """
     ).fetchone()
+    queue_count = db.execute(
+        """
+        SELECT COUNT(*)
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenBacklog'
+        """
+    ).fetchone()[0]
 
     assert first["processed"] == 1
     assert first["watch_only"] == 1
     assert first["backlog_lookback_sec"] == 24 * 3600
     assert second["processed"] == 0
+    assert queue_count == 0
     assert state["state"] == "stale"
     assert state["last_status"] == "watch_only"
     assert state["last_reason"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
