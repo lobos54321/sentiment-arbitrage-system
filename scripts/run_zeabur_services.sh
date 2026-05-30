@@ -29,6 +29,16 @@ fi
 echo "[STARTUP] Running volume preflight cleanup..."
 python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
 
+if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ]; then
+  echo "[STARTUP] Running paper DB retention..."
+  PAPER_DB=/app/data/paper_trades.db \
+  PAPER_DB_RETENTION_MODE="${PAPER_DB_RETENTION_MODE:-apply}" \
+  PAPER_DB_RETENTION_ARCHIVE_DIR="${PAPER_DB_RETENTION_ARCHIVE_DIR:-/app/data/archive/paper-db-retention}" \
+  python3 scripts/paper_db_retention.py 2>&1 | tee -a /app/data/paper-db-retention.log || true
+else
+  echo "[STARTUP] Paper DB retention disabled."
+fi
+
 echo "[STARTUP] Starting redis-server..."
 redis-server --bind 127.0.0.1 --port 6379 --save '' --appendonly no \
   --dir /app/data --logfile /app/logs/redis.log --daemonize no &

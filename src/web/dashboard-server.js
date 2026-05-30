@@ -1841,6 +1841,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     'node.log',
     'paper-trader.log',
     'paper-fast-lane.log',
+    'paper-db-retention.log',
     'paper-review-snapshot.log',
     'source-resonance.log',
     'gmgn-scout.log',
@@ -1876,6 +1877,7 @@ export function buildStorageHealthSnapshot(options = {}) {
     log_files: logFiles,
     integrity_error: includeFileStats ? readTinyText(`${paperDbPath}.integrity_error`) : null,
     preflight_tail: includePreflightTail ? readTinyText(join(dataDir, 'preflight.log'), 4000) : null,
+    retention_tail: includePreflightTail ? readTinyText(join(dataDir, 'paper-db-retention.log'), 4000) : null,
   };
 }
 

@@ -118,6 +118,7 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   fs.writeFileSync(paper, 'sqlite-placeholder');
   fs.writeFileSync(`${paper}.integrity_error`, 'malformed page');
   fs.writeFileSync(join(dir, 'preflight.log'), '[preflight] checkpoint failed');
+  fs.writeFileSync(join(dir, 'paper-db-retention.log'), '[retention] archived');
 
   const snapshot = buildStorageHealthSnapshot({
     projectRoot: dir,
@@ -133,6 +134,7 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.equal(snapshot.db_files.find((row) => row.label === 'paper_trades').exists, true);
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
+  assert.match(snapshot.retention_tail, /archived/);
 });
 
 test('lotto quote gap audit summary reports size curve actionability', () => {

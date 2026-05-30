@@ -31,6 +31,7 @@ LOG_NAMES = [
     "runtime.log",
     "paper-trader.log",
     "paper-fast-lane.log",
+    "paper-db-retention.log",
     "paper-review-snapshot.log",
     "source-resonance.log",
     "gmgn-scout.log",
