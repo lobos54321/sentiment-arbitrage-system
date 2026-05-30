@@ -33,32 +33,47 @@ class SQLiteSingleWriterLock:
         self._fh_stack = []
 
     def __enter__(self):
-        _PROCESS_WRITE_LOCK.acquire()
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = self.lock_file.open("a+", encoding="utf-8")
         deadline = time.time() + max(0.0, self.timeout_sec)
-        while True:
-            try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fh.seek(0)
-                fh.truncate()
-                fh.write(f"{os.getpid()} {self.name} {time.time():.3f}\n")
-                fh.flush()
-                self._fh_stack.append(fh)
-                return self
-            except BlockingIOError:
-                if time.time() >= deadline:
-                    try:
-                        holder = self.lock_file.read_text(encoding="utf-8").strip()
-                    except OSError:
-                        holder = "unknown"
-                    fh.close()
-                    _PROCESS_WRITE_LOCK.release()
-                    raise TimeoutError(
-                        f"sqlite single-writer lock timeout name={self.name} "
-                        f"file={self.lock_file} holder={holder[:160]}"
-                    )
-                time.sleep(POLL_SEC)
+        acquired_process_lock = _PROCESS_WRITE_LOCK.acquire(timeout=max(0.0, deadline - time.time()))
+        if not acquired_process_lock:
+            raise TimeoutError(
+                f"sqlite single-writer process lock timeout name={self.name} "
+                f"file={self.lock_file}"
+            )
+        fh = None
+        try:
+            self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+            fh = self.lock_file.open("a+", encoding="utf-8")
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fh.seek(0)
+                    fh.truncate()
+                    fh.write(f"{os.getpid()} {self.name} {time.time():.3f}\n")
+                    fh.flush()
+                    self._fh_stack.append(fh)
+                    return self
+                except BlockingIOError:
+                    if time.time() >= deadline:
+                        try:
+                            holder = self.lock_file.read_text(encoding="utf-8").strip()
+                        except OSError:
+                            holder = "unknown"
+                        fh.close()
+                        fh = None
+                        _PROCESS_WRITE_LOCK.release()
+                        acquired_process_lock = False
+                        raise TimeoutError(
+                            f"sqlite single-writer lock timeout name={self.name} "
+                            f"file={self.lock_file} holder={holder[:160]}"
+                        )
+                    time.sleep(POLL_SEC)
+        except BaseException:
+            if fh is not None:
+                fh.close()
+            if acquired_process_lock:
+                _PROCESS_WRITE_LOCK.release()
+            raise
 
     def __exit__(self, exc_type, exc, tb):
         try:

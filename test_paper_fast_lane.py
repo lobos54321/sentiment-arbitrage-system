@@ -2,8 +2,10 @@ import sqlite3
 import time
 import json
 import datetime as dt
+import threading
 
 from scripts import paper_fast_lane as fast
+from scripts.sqlite_write_coordinator import SQLiteSingleWriterLock
 
 
 def write_mode_readiness(path, *, highest_allowed_mode="normal_tiny", blocked_modes=()):
@@ -1724,3 +1726,42 @@ def test_fast_lane_health_preserves_last_error_during_scanning_heartbeat(tmp_pat
     assert payload["missed_rescue"]["error_count"] == 1
     assert payload["missed_rescue"]["last_error"]["type"] == "TimeoutError"
     assert "holder=123" in payload["missed_rescue"]["last_error"]["message"]
+
+
+def test_sqlite_writer_lock_times_out_on_process_lock_contention(tmp_path):
+    lock_path = tmp_path / "paper-writer.lock"
+    entered = threading.Event()
+    release = threading.Event()
+    holder_errors = []
+
+    def hold_lock():
+        try:
+            with SQLiteSingleWriterLock("holder", lock_file=lock_path, timeout_sec=1.0):
+                entered.set()
+                release.wait(1.0)
+        except BaseException as exc:
+            holder_errors.append(exc)
+            entered.set()
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert entered.wait(1.0)
+    assert holder_errors == []
+
+    try:
+        try:
+            with SQLiteSingleWriterLock("contender", lock_file=lock_path, timeout_sec=0.05):
+                pass
+        except TimeoutError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected process lock timeout")
+
+        assert "sqlite single-writer process lock timeout" in message
+        assert "contender" in message
+    finally:
+        release.set()
+        holder.join(1.0)
+
+    assert not holder.is_alive()
+    assert holder_errors == []
