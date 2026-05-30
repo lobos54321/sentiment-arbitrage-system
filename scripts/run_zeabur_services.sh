@@ -91,6 +91,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
 (
   while true; do
     echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/paper-trader.log
+    set +e
     PAPER_DB=/app/data/paper_trades.db \
     KLINE_DB=/app/data/kline_cache.db \
     SENTIMENT_DB=/app/data/sentiment_arb.db \
@@ -100,8 +101,10 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE="${V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE:-ultra_tiny}" \
     PYTHONUNBUFFERED=1 \
     python3 scripts/paper_trade_monitor.py 2>&1 | tee -a /app/data/paper-trader.log
-    EXIT_CODE=$?
-    echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in 15s" | tee -a /app/data/paper-trader.log
+    EXIT_CODE=${PIPESTATUS[0]}
+    set -e
+    echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/paper-trader.log
+    python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
     sleep 15
   done
 ) &

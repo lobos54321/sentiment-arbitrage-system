@@ -937,6 +937,37 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 log = logging.getLogger('paper_trade')
+SQLITE_MALFORMED_EXIT_CODE = int(os.environ.get('PAPER_SQLITE_MALFORMED_EXIT_CODE', '70'))
+
+
+def sqlite_malformed_error(exc):
+    message = str(exc or '').lower()
+    return (
+        'database disk image is malformed' in message
+        or 'disk image is malformed' in message
+        or 'file is not a database' in message
+    )
+
+
+def fatal_sqlite_malformed(exc, *, context, db_path=None, exit_fn=None):
+    if not sqlite_malformed_error(exc):
+        return False
+    path = db_path or PAPER_DB
+    exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
+    log.critical(
+        "[SQLITE_MALFORMED] context=%s db=%s error=%s; exiting so preflight can quarantine and recreate a clean DB",
+        context,
+        path,
+        exc,
+        exc_info=exc_info,
+    )
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    (exit_fn or os._exit)(SQLITE_MALFORMED_EXIT_CODE)
+    return True
 
 
 # === Strategy Config ===
@@ -16055,6 +16086,12 @@ def run_due_missed_attribution_update(
         _MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
         return {'updated': updated, 'skipped': False, 'reason': 'updated'}
     except Exception as exc:
+        if sqlite_malformed_error(exc):
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
         if sqlite_locked_error(exc):
             try:
                 db.rollback()
@@ -19123,6 +19160,7 @@ def run_monitor(db):
                     db.commit()
                     log.info(f"  [FAST_LANE_SYNC] adopted {adopted} external open paper positions")
             except Exception as sync_err:
+                fatal_sqlite_malformed(sync_err, context='fast_lane_sync')
                 log.warning(f"  [FAST_LANE_SYNC] failed: {sync_err}")
         pending_priority = (
             smart_entry_result_ready(pending_entries)
@@ -19380,6 +19418,7 @@ def run_monitor(db):
                 except Exception as _ath_probe_live_err:
                     log.debug(f"  [ATH_PROBE_LIVE] scan failed: {_ath_probe_live_err}")
             except Exception as _missed_err:
+                fatal_sqlite_malformed(_missed_err, context='missed_attribution_update')
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
             last_missed_attribution_update = now
 
@@ -20067,6 +20106,7 @@ def run_monitor(db):
                             )
                     last_progress = time.time()
             except Exception as e:
+                fatal_sqlite_malformed(e, context='signal_check')
                 log.error(f"Signal check error: {e}")
 
         pending_priority = (
@@ -21205,6 +21245,7 @@ def run_monitor(db):
                         f"reason={eval_res.get('action_reason', 'unknown')}"
                     )
             except Exception as e:
+                fatal_sqlite_malformed(e, context='watchlist_evaluation')
                 log.error(f"Watchlist evaluation error for {w_entry.get('symbol')}: {e}", exc_info=True)
         
         if watching_entries:
@@ -23415,6 +23456,7 @@ def run_monitor(db):
                     last_progress = time.time()
                     time.sleep(0.2)
                 except Exception as e:
+                    fatal_sqlite_malformed(e, context='pending_entry')
                     # Safety net: always pop to prevent infinite retry loop
                     pending_entries.pop(lifecycle_id, None)
                     log.error(f"  Pending entry error for {pending.get('symbol', lifecycle_id)}: {e}")

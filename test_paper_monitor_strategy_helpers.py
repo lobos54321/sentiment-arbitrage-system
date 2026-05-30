@@ -3219,6 +3219,53 @@ def test_missed_attribution_db_lock_uses_backoff(monkeypatch):
     assert skipped["reason"] == "database_locked_backoff_active"
 
 
+def test_sqlite_malformed_detection_is_specific():
+    assert monitor.sqlite_malformed_error(sqlite3.DatabaseError("database disk image is malformed"))
+    assert monitor.sqlite_malformed_error(sqlite3.DatabaseError("file is not a database"))
+    assert not monitor.sqlite_malformed_error(sqlite3.OperationalError("database is locked"))
+    assert not monitor.sqlite_malformed_error(ValueError("malformed randomness controls"))
+
+
+def test_fatal_sqlite_malformed_exits_with_configured_code():
+    exit_codes = []
+
+    result = monitor.fatal_sqlite_malformed(
+        sqlite3.DatabaseError("database disk image is malformed"),
+        context="unit_test",
+        db_path="/tmp/paper_trades.db",
+        exit_fn=exit_codes.append,
+    )
+
+    assert result is True
+    assert exit_codes == [monitor.SQLITE_MALFORMED_EXIT_CODE]
+    assert monitor.fatal_sqlite_malformed(
+        sqlite3.OperationalError("database is locked"),
+        context="unit_test",
+        exit_fn=exit_codes.append,
+    ) is False
+    assert exit_codes == [monitor.SQLITE_MALFORMED_EXIT_CODE]
+
+
+def test_missed_attribution_malformed_db_is_not_lock_backoff(monkeypatch):
+    monkeypatch.setattr(monitor, "_MISSED_ATTRIBUTION_BACKOFF_UNTIL", 0.0)
+    monkeypatch.setattr(monitor, "_MISSED_ATTRIBUTION_LOCK_FAILURES", 0)
+
+    def malformed_update(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(monitor, "update_due_missed_attributions", malformed_update)
+    db = sqlite3.connect(":memory:")
+    try:
+        monitor.run_due_missed_attribution_update(db, now=100)
+    except sqlite3.DatabaseError as exc:
+        assert monitor.sqlite_malformed_error(exc)
+    else:
+        raise AssertionError("malformed sqlite error should propagate")
+
+    assert monitor._MISSED_ATTRIBUTION_LOCK_FAILURES == 0
+    assert monitor._MISSED_ATTRIBUTION_BACKOFF_UNTIL == 0.0
+
+
 def test_hard_gate_pass_tiny_probe_requires_gmgn_pre_seen(monkeypatch):
     monkeypatch.setattr(monitor, "_hard_gate_pass_probe_arm_ts", [])
     monkeypatch.setattr(monitor, "_hard_gate_pass_probe_cooldown", {})
