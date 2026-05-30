@@ -488,6 +488,52 @@ test('lotto winner join can match token-only fast lane rescue state', () => {
   assert.equal(report.missed_rescue_scanner_coverage.summary.rescue_seen_unique, 1);
 });
 
+test('lotto missed rescue scanner coverage allows smart momentum fading reclaim reasons', () => {
+  const report = buildLottoQuoteGapWinnerJoinReport([
+    {
+      id: 1,
+      event_ts: 1_780_000_080,
+      token_ca: 'TokenMomentumDog',
+      symbol: 'MDOG',
+      signal_ts: 1_780_000_040,
+      reason: 'lotto_quote_gap',
+      payload_json: JSON.stringify({
+        quote_curve: [
+          { size_key: '0.01', quote_executable: true, quote_gap_pct: 7 },
+        ],
+      }),
+    },
+  ], [
+    {
+      id: 11,
+      created_event_ts: 1_780_000_070,
+      token_ca: 'TokenMomentumDog',
+      symbol: 'MDOG',
+      signal_ts: 1_780_000_040,
+      baseline_ts: 1_780_000_020,
+      route: 'LOTTO',
+      component: 'smart_entry',
+      reject_reason: 'momentum_fading',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 0.42,
+      quote_clean_peak_pnl: 0.4,
+      executable_peak_pnl: 0.425,
+      pnl_24h: 0.4,
+    },
+  ], {
+    maxJoinDeltaSec: 300,
+    nowTs: 1_780_000_100,
+  });
+
+  const top = report.top_unique_joined_winners[0];
+  assert.equal(top.reject_reason, 'momentum_fading');
+  assert.equal(top.fast_lane_rescue_scan_eligible, true);
+  assert.equal(report.missed_rescue_scanner_coverage.summary.scanner_eligible_events, 1);
+  assert.equal(report.missed_rescue_scanner_coverage.by_scan_gap[0].scan_gap_reason, 'scanner_eligible');
+  assert.equal(report.missed_rescue_scanner_coverage.by_scan_gap[0].reject_reason_allowed, true);
+});
+
 test('dashboard audit events form a verifiable hash chain', () => {
   const first = buildDashboardAuditEvent({
     audit_event_id: 'audit-1',

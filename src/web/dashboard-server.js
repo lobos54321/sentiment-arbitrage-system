@@ -840,6 +840,7 @@ const LOTTO_MISSED_RESCUE_ALLOWED_REASONS = new Set([
   'missing_trigger_or_quote',
   'entry_edge_probe_missing_trigger_or_quote',
   'pre_pass_signal_too_stale',
+  'momentum_fading',
   'weak_buying_pressure',
   'no_kline_low_volume',
   'negative_trend',
