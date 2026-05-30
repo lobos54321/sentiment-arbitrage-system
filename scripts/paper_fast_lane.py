@@ -329,6 +329,10 @@ def optional_col(cols, name, default="NULL"):
     return name if name in cols else f"{default} AS {name}"
 
 
+def optional_prefixed_col(cols, name, default="NULL", prefix="m"):
+    return f"{prefix}.{name} AS {name}" if name in cols else f"{default} AS {name}"
+
+
 def unixish_sql_expr(column):
     return (
         f"CASE WHEN COALESCE({column}, 0) > 1000000000000 "
@@ -395,6 +399,8 @@ def missed_rescue_health_counts(result):
         "watch_only",
         "counterfactual_only",
         "deduped",
+        "cursor_batches",
+        "cursor_candidates",
         "backlog_lookback_sec",
     )
     return {key: int(result.get(key) or 0) for key in keys}
@@ -2655,10 +2661,14 @@ def process_missed_rescue_row(db, row, *, now_ts=None):
     }
 
 
-def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
+def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True, progress=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
+    if progress:
+        progress("schema")
     if ensure_schema:
         init_fast_lane_schema(db)
+    if progress:
+        progress("table_check")
     if not table_exists(db, "paper_missed_signal_attribution"):
         return {"rows": 0, "processed": 0, "queued": 0, "watch_only": 0, "counterfactual_only": 0, "deduped": 0}
     cols = table_columns(db, "paper_missed_signal_attribution")
@@ -2675,25 +2685,24 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
     batches_scanned = 0
     candidates_seen = 0
     for _ in range(max_batches):
+        if progress:
+            progress("cursor_querying")
         candidates = db.execute(
             f"""
-        SELECT m.scan_rowid, m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
+        SELECT m.rowid AS scan_rowid, m.id, m.token_ca, m.symbol, m.signal_ts, m.signal_id, m.route, m.component,
                m.reject_reason, m.baseline_price, m.baseline_ts,
-               {optional_col(cols, 'created_event_ts')},
-               {optional_col(cols, 'first_tradable_ts')},
-               {optional_col(cols, 'tradable_missed', '0')},
-               {optional_col(cols, 'would_stop_before_peak', '0')},
-               {optional_col(cols, 'executable_peak_pnl', '0')},
+               {optional_prefixed_col(cols, 'created_event_ts')},
+               {optional_prefixed_col(cols, 'first_tradable_ts')},
+               {optional_prefixed_col(cols, 'tradable_missed', '0')},
+               {optional_prefixed_col(cols, 'would_stop_before_peak', '0')},
+               {optional_prefixed_col(cols, 'executable_peak_pnl', '0')},
                {'m.updated_at AS updated_at' if 'updated_at' in cols else 'NULL AS updated_at'},
                s.rescue_signature AS processed_signature
-        FROM (
-          SELECT rowid AS scan_rowid, *
-          FROM paper_missed_signal_attribution
-          WHERE rowid < ?
-          ORDER BY rowid DESC
-          LIMIT ?
-        ) m
+        FROM paper_missed_signal_attribution m
         LEFT JOIN paper_fast_missed_rescue_state s ON s.missed_attribution_id = m.id
+        WHERE m.rowid < ?
+        ORDER BY m.rowid DESC
+        LIMIT ?
         """,
             (cursor_rowid, cursor_batch),
         ).fetchall()
@@ -2718,6 +2727,8 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
             rows.append(row)
         if len(rows) >= scan_limit:
             break
+    if progress:
+        progress("processing_rows")
     counts = {
         "rows": len(rows),
         "processed": 0,
@@ -2731,7 +2742,7 @@ def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True):
             FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC,
             FAST_ENTRY_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC,
         )),
-    }
+        }
     for row in rows:
         signature = missed_rescue_signature(row)
         if row["processed_signature"] == signature:
@@ -2767,7 +2778,10 @@ def missed_rescue_scan(paper_db_path, stop_event):
             write_fast_lane_health(paper_db_path=paper_db_path, worker_state="missed_rescue_connecting")
             db = connect_db(paper_db_path, ensure_wal=False)
             write_fast_lane_health(paper_db_path=paper_db_path, worker_state="missed_rescue_scanning")
-            result = scan_missed_rescue_once(db, ensure_schema=False)
+            def progress(phase):
+                write_fast_lane_health(paper_db_path=paper_db_path, worker_state=f"missed_rescue_{phase}")
+
+            result = scan_missed_rescue_once(db, ensure_schema=False, progress=progress)
             write_fast_lane_health(paper_db_path=paper_db_path, missed_rescue_result=result)
         except Exception as exc:
             write_fast_lane_health(paper_db_path=paper_db_path, error=exc)
