@@ -834,6 +834,7 @@ const LOTTO_MISSED_RESCUE_BACKLOG_LOOKBACK_SEC = Math.max(
 const LOTTO_MISSED_RESCUE_ALLOWED_REASONS = new Set([
   'tracking_ttl_expired',
   'not_ath_v17',
+  'lotto_mc_0',
   'not_ath_prebuy_kline_retry_expired',
   'not_ath_prebuy_kline_block',
   'entry_edge_spread_too_high',

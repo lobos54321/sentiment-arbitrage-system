@@ -268,6 +268,10 @@ MATRIX_TIMEOUT_RECHECK_REASONS = {
     "matrices not yet aligned",
 }
 
+LOTTO_MISSING_MC_RECHECK_REASONS = {
+    "lotto_mc_0",
+}
+
 MISSED_RESCUE_EXACT_REASONS = {
     "tracking_ttl_expired",
     "not_ath_v17",
@@ -287,6 +291,7 @@ MISSED_RESCUE_EXACT_REASONS = {
     "scout_quality_tx_low",
     "scout_quality_negative_trend",
     "matrices not yet aligned",
+    "lotto_mc_0",
 }
 
 DEGRADED_CANARY_BRANCHES = {
@@ -2401,6 +2406,7 @@ def missed_rescue_reason_allowed(reason):
         reason_l in MISSED_RESCUE_EXACT_REASONS
         or reason_l in SMART_QUALITY_RECHECK_REASONS
         or reason_l in MATRIX_TIMEOUT_RECHECK_REASONS
+        or reason_l in LOTTO_MISSING_MC_RECHECK_REASONS
         or reason_l.startswith("lotto_stale_")
         or reason_l.startswith("timeout (")
         or reason_l.startswith("price_collapse")
@@ -2556,6 +2562,9 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
         branch = "pre_pass_stale_reclaim_quote_clean_tiny_probe"
     elif reason_l == "not_ath_v17":
         source_type = "not_ath_reclaim_fast"
+        branch = "not_ath_reclaim_quote_clean_tiny_probe"
+    elif reason_l in LOTTO_MISSING_MC_RECHECK_REASONS:
+        source_type = "lotto_missing_mc_reclaim_fast"
         branch = "not_ath_reclaim_quote_clean_tiny_probe"
     elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
         source_type = "not_ath_reclaim_fast"

@@ -534,6 +534,51 @@ test('lotto missed rescue scanner coverage allows smart momentum fading reclaim 
   assert.equal(report.missed_rescue_scanner_coverage.by_scan_gap[0].reject_reason_allowed, true);
 });
 
+test('lotto missed rescue scanner coverage allows exact missing market cap reclaim reason', () => {
+  const report = buildLottoQuoteGapWinnerJoinReport([
+    {
+      id: 1,
+      event_ts: 1_780_000_080,
+      token_ca: 'TokenMissingMc',
+      symbol: 'MMC',
+      signal_ts: 1_780_000_040,
+      reason: 'lotto_quote_gap',
+      payload_json: JSON.stringify({
+        quote_curve: [
+          { size_key: '0.01', quote_executable: true, quote_gap_pct: 9 },
+        ],
+      }),
+    },
+  ], [
+    {
+      id: 12,
+      created_event_ts: 1_780_000_070,
+      token_ca: 'TokenMissingMc',
+      symbol: 'MMC',
+      signal_ts: 1_780_000_040,
+      baseline_ts: 1_780_000_020,
+      route: 'LOTTO',
+      component: 'lotto_entry_gate',
+      reject_reason: 'lotto_mc_0',
+      tradable_missed: 1,
+      would_stop_before_peak: 0,
+      tradable_peak_pnl: 0.72,
+      quote_clean_peak_pnl: 0.7,
+      executable_peak_pnl: 0.728,
+      pnl_24h: 0.7,
+    },
+  ], {
+    maxJoinDeltaSec: 300,
+    nowTs: 1_780_000_100,
+  });
+
+  const top = report.top_unique_joined_winners[0];
+  assert.equal(top.reject_reason, 'lotto_mc_0');
+  assert.equal(top.fast_lane_rescue_scan_eligible, true);
+  assert.equal(report.missed_rescue_scanner_coverage.summary.scanner_eligible_events, 1);
+  assert.equal(report.missed_rescue_scanner_coverage.by_scan_gap[0].reject_reason_allowed, true);
+});
+
 test('dashboard audit events form a verifiable hash chain', () => {
   const first = buildDashboardAuditEvent({
     audit_event_id: 'audit-1',

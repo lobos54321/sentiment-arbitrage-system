@@ -1583,6 +1583,71 @@ def test_missed_not_ath_v17_rescue_queues_lotto_reclaim_mode(tmp_path, monkeypat
     assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
 
 
+def test_missed_lotto_missing_mc_rescue_queues_clean_reclaim(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenMissingMc', 'MMC', ?, 11, 'LOTTO', 'lotto_entry_gate',
+            'lotto_mc_0', 1.0, ?, ?, ?, 1, 0, 0.728,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 120, now - 120, now - 120, now - 20, now),
+    )
+    db.commit()
+
+    assert fast.missed_rescue_reason_allowed("lotto_mc_0")
+    assert not fast.missed_rescue_reason_allowed("lotto_mc_500000")
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    queue = db.execute(
+        """
+        SELECT source_type, entry_branch, entry_mode_hint, status, priority
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenMissingMc'
+        """
+    ).fetchone()
+
+    assert result["queued"] == 1
+    assert queue["source_type"] == "lotto_missing_mc_reclaim_fast"
+    assert queue["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
+    assert queue["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert queue["status"] == "queued"
+    assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
+
+
 def test_missed_pre_pass_stale_rescue_queues_clean_reclaim(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
     monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
