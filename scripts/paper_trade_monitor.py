@@ -400,9 +400,22 @@ LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS = {
     'not_ath_prebuy_kline_block',
     'not_ath_prebuy_kline_unknown_data_blocked',
     'not_ath_prebuy_kline_retry_expired',
+    # winner-join evidence (2026-05-30): the missing-market-cap expire killed a
+    # quote-clean +72.9% silver dog. Observe-only here (no live gate change).
+    'lotto_mc_0',
 }
 LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL = ', '.join(
     f"'{reason}'" for reason in sorted(LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS)
+)
+# Dynamic-suffix blocker families that also feed the shadow (prefix matched).
+# winner-join evidence (2026-05-30): lotto_stale_* (age just past the 30-min
+# cutoff) is the dominant killer of quote-clean medal dogs (5/7). Observe-only.
+LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES = ('lotto_stale_',)
+# SQL match fragment over the `m.reject_reason` column used by the watch-shadow
+# candidate queries. Prefixes are hard-coded constants (no injection risk).
+LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_MATCH = ' '.join(
+    [f"m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})"]
+    + [f"OR m.reject_reason LIKE '{prefix}%'" for prefix in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES]
 )
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))
@@ -1899,6 +1912,11 @@ def _lotto_not_ath_watch_max_recovery_pnl(row):
 
 def _lotto_not_ath_watch_parent_blocker(row):
     reason = str(_row_value(row, 'reject_reason') or 'not_ath_v17').strip().lower()
+    # Normalize dynamic-suffix stale reasons (lotto_stale_2174s -> lotto_stale)
+    # so shadow snapshots dedup/group by a stable parent_blocker label.
+    for prefix in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES:
+        if reason.startswith(prefix):
+            return prefix.rstrip('_')
     return reason if reason in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKERS else 'not_ath_v17'
 
 
@@ -2364,7 +2382,7 @@ def _record_lotto_not_ath_watch_relaxed_observation_snapshots(db, *, now_ts, lim
             FROM paper_missed_signal_attribution m
             WHERE m.route = 'LOTTO'
               AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-              AND m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
+              AND ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_MATCH})
               AND m.baseline_price IS NOT NULL
               AND m.created_event_ts >= ?
               AND m.created_event_ts <= ?
@@ -2449,7 +2467,7 @@ def record_lotto_not_ath_watch_shadow_candidates(db, *, now_ts, limit=60):
             FROM paper_missed_signal_attribution m
             WHERE m.route = 'LOTTO'
               AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-              AND m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
+              AND ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_MATCH})
               AND m.baseline_price IS NOT NULL
               AND m.created_event_ts >= ?
               AND NOT EXISTS (
