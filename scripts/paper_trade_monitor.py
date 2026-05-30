@@ -415,7 +415,7 @@ LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES = ('lotto_stale_',)
 # candidate queries. Prefixes are hard-coded constants (no injection risk).
 LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_MATCH = ' '.join(
     [f"m.reject_reason IN ({LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_SQL})"]
-    + [f"OR m.reject_reason LIKE '{prefix}%'" for prefix in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES]
+    + [f"OR m.reject_reason GLOB '{prefix}*'" for prefix in LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_PREFIXES]
 )
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED = os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_ENABLED', 'true').lower() != 'false'
 LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL = float(os.environ.get('LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_SIZE_SOL', str(PAPER_TINY_SCOUT_SIZE_SOL)))

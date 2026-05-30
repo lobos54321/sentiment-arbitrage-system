@@ -38,11 +38,23 @@ export const NOT_ATH_WATCH_PARENT_BLOCKERS = [
   'not_ath_prebuy_kline_block',
   'not_ath_prebuy_kline_unknown_data_blocked',
   'not_ath_prebuy_kline_retry_expired',
+  'lotto_mc_0',
+  'lotto_stale',
 ];
 
-const NOT_ATH_WATCH_PARENT_BLOCKER_SQL = NOT_ATH_WATCH_PARENT_BLOCKERS
+export const NOT_ATH_WATCH_MISSED_REJECT_REASONS = NOT_ATH_WATCH_PARENT_BLOCKERS
+  .filter((reason) => reason !== 'lotto_stale');
+
+export const NOT_ATH_WATCH_MISSED_REJECT_PREFIXES = ['lotto_stale_'];
+
+export const NOT_ATH_WATCH_PARENT_BLOCKER_SQL = NOT_ATH_WATCH_PARENT_BLOCKERS
   .map((reason) => `'${reason}'`)
   .join(', ');
+
+export const NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL = [
+  `m.reject_reason IN (${NOT_ATH_WATCH_MISSED_REJECT_REASONS.map((reason) => `'${reason}'`).join(', ')})`,
+  ...NOT_ATH_WATCH_MISSED_REJECT_PREFIXES.map((prefix) => `m.reject_reason GLOB '${prefix}*'`),
+].join(' OR ');
 
 function hasTable(db, name) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
@@ -211,7 +223,7 @@ function relaxedShadowCohortSql({ sinceTs, trustedPeakExpr }) {
       FROM paper_missed_signal_attribution m
       WHERE m.route = 'LOTTO'
         AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-        AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
+        AND (${NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL})
         AND m.baseline_price IS NOT NULL
         ${missedWhereSql}
     ),

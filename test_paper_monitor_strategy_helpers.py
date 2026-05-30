@@ -616,6 +616,34 @@ def test_lotto_not_ath_watch_shadow_confirms_without_live_pending(monkeypatch):
     assert record_lotto_not_ath_watch_shadow_candidates(db, now_ts=1360, limit=10) == 0
 
 
+def test_lotto_not_ath_watch_parent_blocker_match_is_exact_for_stale_prefix():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE m (reject_reason TEXT)")
+    db.executemany(
+        "INSERT INTO m (reject_reason) VALUES (?)",
+        [
+            ("lotto_stale_2174s",),
+            ("lotto_mc_0",),
+            ("lotto_mc_500000",),
+            ("lottoXstaleY2174s",),
+        ],
+    )
+
+    rows = db.execute(
+        f"""
+        SELECT reject_reason
+        FROM m
+        WHERE {monitor.LOTTO_NOT_ATH_WATCH_PARENT_BLOCKER_MATCH}
+        ORDER BY reject_reason
+        """
+    ).fetchall()
+
+    matched = {row["reject_reason"] for row in rows}
+    assert matched == {"lotto_mc_0", "lotto_stale_2174s"}
+    assert monitor._lotto_not_ath_watch_parent_blocker({"reject_reason": "lotto_stale_2174s"}) == "lotto_stale"
+
+
 def test_lotto_quote_gap_audit_records_active_shadow_size_curve(monkeypatch):
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row

@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 
-import { buildNotAthRelaxedShadowCohorts } from '../src/web/not-ath-watch-shadow-utils.js';
+import {
+  buildNotAthRelaxedShadowCohorts,
+  NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL,
+  NOT_ATH_WATCH_PARENT_BLOCKERS,
+} from '../src/web/not-ath-watch-shadow-utils.js';
 
 function makeDb() {
   const db = new Database(':memory:');
@@ -185,6 +189,79 @@ test('not-ath relaxed shadow cohorts separate strict pass from wider recall', ()
   assert.equal(byCohort.relaxed_age_window.gold_n, 1);
   assert.equal(report.top_hits[0].symbol, 'LATE');
   assert.equal(report.top_hits[0].max_pnl, 1.5);
+
+  db.close();
+});
+
+test('not-ath relaxed shadow cohorts include lotto stale and mc0 families', () => {
+  const db = makeDb();
+
+  insertSnapshot(db, {
+    token_ca: 'StaleCA',
+    symbol: 'STALE',
+    signal_ts: 700,
+    snapshot_ts: 1000,
+    horizon_sec: 1800,
+    parent_blocker: 'lotto_stale',
+  });
+  insertMissed(db, {
+    token_ca: 'StaleCA',
+    symbol: 'STALE',
+    signal_ts: 700,
+    reject_reason: 'lotto_stale_2174s',
+    max_pnl_recorded: 0.62,
+    tradable_peak_pnl: 0.62,
+  });
+
+  insertSnapshot(db, {
+    token_ca: 'Mc0CA',
+    symbol: 'MC0',
+    signal_ts: 800,
+    snapshot_ts: 1000,
+    horizon_sec: 0,
+    parent_blocker: 'lotto_mc_0',
+  });
+  insertMissed(db, {
+    token_ca: 'Mc0CA',
+    symbol: 'MC0',
+    signal_ts: 800,
+    reject_reason: 'lotto_mc_0',
+    max_pnl_recorded: 0.73,
+    tradable_peak_pnl: 0.73,
+  });
+
+  insertSnapshot(db, {
+    token_ca: 'WeirdCA',
+    symbol: 'WEIRD',
+    signal_ts: 900,
+    snapshot_ts: 1000,
+    horizon_sec: 0,
+    parent_blocker: 'lottoXstaleY',
+  });
+  insertMissed(db, {
+    token_ca: 'WeirdCA',
+    symbol: 'WEIRD',
+    signal_ts: 900,
+    reject_reason: 'lottoXstaleY2174s',
+    max_pnl_recorded: 1.5,
+    tradable_peak_pnl: 1.5,
+  });
+
+  const matchedRejects = db.prepare(`
+    SELECT reject_reason
+    FROM paper_missed_signal_attribution m
+    WHERE (${NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL})
+    ORDER BY reject_reason
+  `).all().map((row) => row.reject_reason);
+  const report = buildNotAthRelaxedShadowCohorts(db, { limit: 20 });
+  const topSymbols = report.top_hits.map((row) => row.symbol);
+
+  assert.deepEqual(matchedRejects, ['lotto_mc_0', 'lotto_stale_2174s']);
+  assert.equal(NOT_ATH_WATCH_PARENT_BLOCKERS.includes('lotto_stale'), true);
+  assert.equal(NOT_ATH_WATCH_PARENT_BLOCKERS.includes('lotto_mc_0'), true);
+  assert.equal(topSymbols.includes('STALE'), true);
+  assert.equal(topSymbols.includes('MC0'), true);
+  assert.equal(topSymbols.includes('WEIRD'), false);
 
   db.close();
 });

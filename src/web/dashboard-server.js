@@ -35,6 +35,8 @@ import {
 import {
   buildNotAthRelaxedShadowCohorts,
   NOT_ATH_WATCH_PARENT_BLOCKERS,
+  NOT_ATH_WATCH_PARENT_BLOCKER_SQL,
+  NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL,
 } from './not-ath-watch-shadow-utils.js';
 import {
   buildPremiumSignalOutcomeAudit,
@@ -63,9 +65,6 @@ const PAPER_REPORT_COOLDOWN_MS = Math.max(
   0,
   parseInt(process.env.PAPER_REPORT_COOLDOWN_MS || '5000', 10) || 5000
 );
-const NOT_ATH_WATCH_PARENT_BLOCKER_SQL = NOT_ATH_WATCH_PARENT_BLOCKERS
-  .map((reason) => `'${reason}'`)
-  .join(', ');
 let paperReportBusy = false;
 let paperReportCooldownUntil = 0;
 
@@ -9367,7 +9366,7 @@ const server = http.createServer(async (req, res) => {
           FROM paper_missed_signal_attribution m
           WHERE m.route = 'LOTTO'
             AND m.component IN ('upstream_gate', 'lotto_entry_gate')
-            AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
+            AND (${NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL})
             AND m.baseline_price IS NOT NULL
             ${whereSql}
         ),
@@ -9540,7 +9539,7 @@ const server = http.createServer(async (req, res) => {
               ON m.token_ca = t.token_ca
              AND COALESCE(m.signal_ts, 0) = COALESCE(t.signal_ts, 0)
              AND m.route = 'LOTTO'
-             AND m.reject_reason IN (${NOT_ATH_WATCH_PARENT_BLOCKER_SQL})
+             AND (${NOT_ATH_WATCH_MISSED_REJECT_MATCH_SQL})
           ),
           one AS (
             SELECT * FROM joined WHERE rn = 1
