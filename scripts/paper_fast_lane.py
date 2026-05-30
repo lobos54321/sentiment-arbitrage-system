@@ -253,6 +253,7 @@ CLEAN_DOG_RECLAIM_BRANCHES = {
 }
 
 SMART_QUALITY_RECHECK_REASONS = {
+    "momentum_fading",
     "weak_buying_pressure",
     "no_kline_low_volume",
     "negative_trend",
@@ -2398,6 +2399,8 @@ def missed_rescue_reason_allowed(reason):
         return False
     return (
         reason_l in MISSED_RESCUE_EXACT_REASONS
+        or reason_l in SMART_QUALITY_RECHECK_REASONS
+        or reason_l in MATRIX_TIMEOUT_RECHECK_REASONS
         or reason_l.startswith("lotto_stale_")
         or reason_l.startswith("timeout (")
         or reason_l.startswith("price_collapse")
