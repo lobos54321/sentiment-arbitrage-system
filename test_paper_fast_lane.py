@@ -385,7 +385,19 @@ def test_process_queue_item_enters_lotto_not_ath_reclaim_when_gates_pass(tmp_pat
             "routePlan": [],
         }
 
+    def fake_markov_forecast(_db, pending, **_kwargs):
+        forecast = {
+            "entry_mode": pending.get("entry_mode"),
+            "policy_version": fast.ptm.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            "sample_n": fast.ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+            "p_absorb_peak30": 0.30,
+            "p_absorb_stop_before_peak": 0.10,
+        }
+        forecast["gate"] = fast.ptm._lotto_reclaim_markov_gate(pending.get("entry_mode"), forecast)
+        return forecast
+
     monkeypatch.setattr(fast.ptm, "simulate_entry_execution", fake_execution)
+    monkeypatch.setattr(fast.ptm, "attach_lotto_reclaim_markov_forecast", fake_markov_forecast)
     assert fast.enqueue_fast_entry(
         db,
         source_type="ttl_final_reclaim_fast",

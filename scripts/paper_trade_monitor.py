@@ -632,6 +632,12 @@ LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N = max(0, int(os.environ.get('LOTTO_MICRO
 LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB', '0.12'))
 LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB', '0.55'))
 LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE', '0.02'))
+LOTTO_RECLAIM_COHORT_MARKOV_ENABLED = os.environ.get('LOTTO_RECLAIM_COHORT_MARKOV_ENABLED', 'true').lower() != 'false'
+LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC = int(os.environ.get('LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC', str(7 * 24 * 60 * 60)))
+LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES = max(
+    100,
+    int(os.environ.get('LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES', '2000')),
+)
 LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC = int(os.environ.get('LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC', str(14 * 24 * 60 * 60)))
 LOTTO_RECLAIM_MARKOV_EVENT_LIMIT = max(100, int(os.environ.get('LOTTO_RECLAIM_MARKOV_EVENT_LIMIT', '5000')))
 LOTTO_RECLAIM_MARKOV_POLICY_VERSION = os.environ.get('LOTTO_RECLAIM_MARKOV_POLICY_VERSION', 'lotto_reclaim_markov_canary_v1')
@@ -3623,13 +3629,496 @@ def _markov_reclaim_events_from_decisions(db, *, now_ts):
     return events
 
 
+def _lotto_reclaim_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or '').strip().lower()
+    if text in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if text in {'0', 'false', 'no', 'n', 'off', 'none', 'null', ''}:
+        return False
+    return False
+
+
+def _lotto_reclaim_first_present(row, payload, names):
+    payload = payload or {}
+    for name in names:
+        value = _row_value(row, name, None)
+        if value is not None:
+            return value
+        if isinstance(payload, dict) and payload.get(name) is not None:
+            return payload.get(name)
+    return None
+
+
+def _lotto_reclaim_table_columns(db, table):
+    try:
+        return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _lotto_reclaim_select_rows(db, table, wanted, *, where_sql=None, params=(), order_sql=None):
+    columns = _lotto_reclaim_table_columns(db, table)
+    if not columns:
+        return []
+    select_exprs = [
+        f"{name} AS {name}" if name in columns else f"NULL AS {name}"
+        for name in wanted
+    ]
+    sql = f"SELECT {', '.join(select_exprs)} FROM {table}"
+    if where_sql:
+        sql += f" WHERE {where_sql}"
+    if order_sql:
+        sql += f" ORDER BY {order_sql}"
+    try:
+        return db.execute(sql, tuple(params or ())).fetchall()
+    except Exception:
+        return []
+
+
+def _lotto_reclaim_payload_merge(*items):
+    merged = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        merged.update(item)
+        for nested_key in (
+            'lotto_state',
+            'entryDecision',
+            'entry_decision',
+            'activity',
+            'dex_snapshot',
+            'source_detail',
+            'dog_catcher_detail',
+            'entry_mode_quality',
+            'lotto_recovery_gate',
+            'quote_probe',
+            'markov_features',
+        ):
+            nested = item.get(nested_key)
+            if isinstance(nested, dict):
+                merged.update(nested)
+        lotto_state = item.get('lotto_state')
+        if isinstance(lotto_state, dict):
+            entry_decision = lotto_state.get('entryDecision')
+            if isinstance(entry_decision, dict):
+                merged.update(entry_decision)
+    return merged
+
+
+def _lotto_reclaim_quote_bucket(row=None, payload=None):
+    payload = payload or {}
+    for key in (
+        'recovery_quote_clean',
+        'quote_clean',
+        'quote_clean_seen',
+        'source_quote_clean_seen',
+        'two_quote_clean_snapshots',
+        'final_reclaim_quote_executable',
+        'ttl_final_reclaim_quote_clean',
+        'tradable_missed',
+        'quote_executable',
+    ):
+        if _lotto_reclaim_bool(payload.get(key)) or _lotto_reclaim_bool(_row_value(row, key, None)):
+            return 'quote_clean'
+    status = str(
+        _row_value(row, 'tradability_status', None)
+        or payload.get('tradability_status')
+        or payload.get('quote_status')
+        or ''
+    ).lower()
+    if 'tradable' in status and 'untradable' not in status and 'not_tradable' not in status:
+        return 'quote_clean'
+    branch_text = ' '.join(
+        str(value or '').lower()
+        for value in (
+            payload.get('entry_branch'),
+            payload.get('entryBranch'),
+            payload.get('source_reject_reason'),
+            payload.get('reject_reason'),
+            payload.get('reason'),
+        )
+    )
+    if 'quote_clean' in branch_text or 'quote clean' in branch_text:
+        return 'quote_clean'
+    gap = _safe_float(
+        payload.get('quote_gap_pct')
+        or payload.get('max_quote_gap_pct')
+        or payload.get('entry_quote_gap_pct')
+        or payload.get('quote_gap')
+        or _row_value(row, 'quote_gap_pct', None)
+        or _row_value(row, 'max_quote_gap_pct', None),
+        None,
+    )
+    if gap is None:
+        return 'quote_unknown'
+    gap = abs(gap * 100.0 if abs(gap) <= 2.0 else gap)
+    if gap <= 10:
+        return 'quote_clean10'
+    if gap <= 30:
+        return 'quote_clean30'
+    return 'quote_dirty'
+
+
+def _lotto_reclaim_momentum_bucket(payload):
+    payload = payload or {}
+    pc_m5 = _safe_float(
+        payload.get('price_change_m5')
+        or payload.get('pc_m5')
+        or payload.get('pnl_5m')
+        or payload.get('m5_pnl'),
+        None,
+    )
+    bs = _safe_float(
+        payload.get('buy_sell_ratio')
+        or payload.get('bs')
+        or payload.get('buySellRatio'),
+        None,
+    )
+    tx_m5 = _safe_float(payload.get('tx_m5') or payload.get('tx5m'), None)
+    strong = (
+        pc_m5 is not None
+        and pc_m5 >= 2.0
+        and (bs is None or bs >= 1.15)
+        and (tx_m5 is None or tx_m5 >= 40)
+    )
+    weak = (
+        (pc_m5 is not None and pc_m5 < 0)
+        or (bs is not None and bs < 1.05)
+        or (tx_m5 is not None and tx_m5 < 20)
+    )
+    if strong:
+        return 'momentum_strong'
+    if weak:
+        return 'momentum_weak'
+    return 'momentum_neutral_or_unknown'
+
+
+def _lotto_reclaim_candidate_features(entry_mode, *, pending=None, row=None, payload=None, lifecycle=None, force_quote_clean=False):
+    entry_mode = str(entry_mode or '')
+    payload = _lotto_reclaim_payload_merge(payload or {}, pending or {}, lifecycle or {})
+    quote_bucket = 'quote_clean' if force_quote_clean else _lotto_reclaim_quote_bucket(row, payload)
+    return {
+        'entry_mode': entry_mode,
+        'quote_clean_bucket': quote_bucket,
+        'momentum_bucket': _lotto_reclaim_momentum_bucket(payload),
+    }
+
+
+def _lotto_reclaim_cohort_keys(features):
+    entry_mode = str((features or {}).get('entry_mode') or '')
+    quote_bucket = str((features or {}).get('quote_clean_bucket') or 'quote_unknown')
+    momentum_bucket = str((features or {}).get('momentum_bucket') or 'momentum_neutral_or_unknown')
+    return [
+        f'entry_quote_momentum:{entry_mode}|{quote_bucket}|{momentum_bucket}',
+        f'entry_quote:{entry_mode}|{quote_bucket}',
+        f'quote_momentum:{quote_bucket}|{momentum_bucket}',
+        f'quote:{quote_bucket}',
+        f'entry_mode:{entry_mode}',
+        'global',
+    ]
+
+
+def _lotto_reclaim_entry_mode_for_reason(reason, component=None):
+    reason_l = str(reason or '').lower()
+    component_l = str(component or '').lower()
+    if reason_l.startswith('lotto_stale_') or reason_l == 'lotto_mc_0':
+        return LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    mapped = _discovery_mode_for_lotto_reason(reason_l)
+    if mapped in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        return mapped
+    if 'not_ath' in component_l or 'not_ath' in reason_l or reason_l.startswith('tracking_ttl'):
+        return LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    if 'micro_reclaim' in component_l or 'runner_watch' in reason_l or 'dead_cat' in reason_l:
+        return LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE
+    return None
+
+
+def _lotto_reclaim_training_outcomes_from_missed(db, *, now_ts, since_ts):
+    wanted = (
+        'id',
+        'created_event_ts',
+        'token_ca',
+        'symbol',
+        'signal_ts',
+        'route',
+        'component',
+        'reject_reason',
+        'baseline_ts',
+        'tradability_status',
+        'tradable_missed',
+        'tradable_peak_pnl',
+        'executable_peak_pnl',
+        'quote_clean_peak_pnl',
+        'theoretical_peak_pnl',
+        'time_to_peak_sec',
+        'would_stop_before_peak',
+        'first_tradable_ts',
+        'first_tradable_pnl',
+        'pnl_5m',
+        'pnl_15m',
+        'pnl_60m',
+        'pnl_24h',
+        'max_pnl_recorded',
+        'market_cap',
+        'signal_mc',
+        'baseline_mc',
+        'liquidity_usd',
+        'last_liquidity',
+        'payload_json',
+    )
+    rows = _lotto_reclaim_select_rows(
+        db,
+        'paper_missed_signal_attribution',
+        wanted,
+        where_sql='created_event_ts >= ? AND created_event_ts <= ?',
+        params=(since_ts, now_ts),
+        order_sql='created_event_ts DESC, id DESC LIMIT %d' % LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES,
+    )
+    outcomes = []
+    for row in rows:
+        payload = _safe_json_loads(_row_value(row, 'payload_json'))
+        route = str(_row_value(row, 'route') or payload.get('route') or '').upper()
+        if route and route not in {'LOTTO', 'NEW_TRENDING', 'TTL_FINAL_RECLAIM_FAST', 'NOT_ATH_RECLAIM_FAST'}:
+            continue
+        decision_ts = _safe_float(
+            _lotto_reclaim_first_present(
+                row,
+                payload,
+                ('first_tradable_ts', 'baseline_ts', 'signal_ts', 'created_event_ts'),
+            ),
+            None,
+        )
+        if decision_ts is None:
+            continue
+        reason = _row_value(row, 'reject_reason') or payload.get('reject_reason') or payload.get('reason')
+        component = _row_value(row, 'component') or payload.get('component')
+        entry_mode = _lotto_reclaim_entry_mode_for_reason(reason, component)
+        if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+            continue
+        peak = _markov_ratio(
+            _lotto_reclaim_first_present(
+                row,
+                payload,
+                (
+                    'tradable_peak_pnl',
+                    'executable_peak_pnl',
+                    'quote_clean_peak_pnl',
+                    'theoretical_peak_pnl',
+                    'max_pnl_recorded',
+                    'pnl_24h',
+                    'pnl_60m',
+                    'pnl_15m',
+                    'pnl_5m',
+                ),
+            ),
+            None,
+        )
+        stop = _lotto_reclaim_bool(_row_value(row, 'would_stop_before_peak', payload.get('would_stop_before_peak')))
+        time_to_peak = _safe_float(_row_value(row, 'time_to_peak_sec'), None)
+        if time_to_peak is not None and time_to_peak >= 0:
+            known_ts = float(decision_ts) + float(time_to_peak)
+        elif peak is not None or stop:
+            known_ts = float(decision_ts) + 24 * 60 * 60
+        else:
+            continue
+        if known_ts > now_ts:
+            continue
+        if peak is None and not stop:
+            continue
+        merged_payload = {
+            **payload,
+            'entry_mode': entry_mode,
+            'entry_branch': payload.get('entry_branch') or reason,
+            'reject_reason': reason,
+            'component': component,
+            'market_cap': _lotto_reclaim_first_present(row, payload, ('market_cap', 'signal_mc', 'baseline_mc')),
+            'liquidity_usd': _lotto_reclaim_first_present(row, payload, ('liquidity_usd', 'last_liquidity')),
+            'pnl_5m': _row_value(row, 'pnl_5m'),
+            'tradable_missed': _row_value(row, 'tradable_missed'),
+            'tradability_status': _row_value(row, 'tradability_status'),
+        }
+        if peak is not None and peak >= 0.30 and not stop:
+            outcome_state = 'PEAK30'
+        elif stop:
+            outcome_state = 'STOP_BEFORE_PEAK'
+        else:
+            outcome_state = 'TERMINAL_DEAD'
+        outcomes.append({
+            'source': 'paper_missed_signal_attribution',
+            'known_ts': known_ts,
+            'decision_ts': decision_ts,
+            'token_ca': _row_value(row, 'token_ca') or payload.get('token_ca'),
+            'outcome_state': outcome_state,
+            'features': _lotto_reclaim_candidate_features(entry_mode, row=row, payload=merged_payload),
+        })
+    return outcomes
+
+
+def _lotto_reclaim_training_outcomes_from_trades(db, *, now_ts, since_ts):
+    wanted = (
+        'id',
+        'token_ca',
+        'symbol',
+        'entry_ts',
+        'exit_ts',
+        'exit_reason',
+        'pnl_pct',
+        'peak_pnl',
+        'signal_route',
+        'signal_type',
+        'entry_mode',
+        'entry_branch',
+        'replay_source',
+        'monitor_state_json',
+        'entry_execution_audit_json',
+    )
+    rows = _lotto_reclaim_select_rows(
+        db,
+        'paper_trades',
+        wanted,
+        where_sql='entry_ts >= ? AND entry_ts <= ? AND exit_ts IS NOT NULL AND exit_ts <= ?',
+        params=(since_ts, now_ts, now_ts),
+        order_sql='exit_ts DESC, entry_ts DESC, id DESC LIMIT %d' % LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES,
+    )
+    outcomes = []
+    for row in rows:
+        entry_mode = str(_row_value(row, 'entry_mode') or '')
+        if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES and not (
+            entry_mode.startswith('lotto_') and 'reclaim' in entry_mode
+        ):
+            continue
+        route = str(_row_value(row, 'signal_route') or _row_value(row, 'signal_type') or '').upper()
+        if route and route not in {'LOTTO', 'NEW_TRENDING', 'TTL_FINAL_RECLAIM_FAST', 'NOT_ATH_RECLAIM_FAST'}:
+            continue
+        entry_ts = _safe_float(_row_value(row, 'entry_ts'), None)
+        exit_ts = _safe_float(_row_value(row, 'exit_ts'), None)
+        if entry_ts is None or exit_ts is None or exit_ts > now_ts:
+            continue
+        monitor_state = _safe_json_loads(_row_value(row, 'monitor_state_json'))
+        audit = _safe_json_loads(_row_value(row, 'entry_execution_audit_json'))
+        payload = {
+            **monitor_state,
+            **audit,
+            'entry_mode': entry_mode,
+            'entry_branch': _row_value(row, 'entry_branch') or monitor_state.get('entry_branch') or audit.get('entry_branch'),
+        }
+        outcomes.append({
+            'source': 'paper_trades',
+            'known_ts': exit_ts,
+            'decision_ts': entry_ts,
+            'token_ca': _row_value(row, 'token_ca'),
+            'outcome_state': _markov_reclaim_outcome_state(
+                _row_value(row, 'peak_pnl'),
+                _row_value(row, 'pnl_pct'),
+                _row_value(row, 'exit_reason'),
+            ),
+            'features': _lotto_reclaim_candidate_features(
+                entry_mode,
+                row=row,
+                payload=payload,
+                force_quote_clean=True,
+            ),
+        })
+    return outcomes
+
+
+def _lotto_reclaim_cohort_counts(training_outcomes):
+    counts_by_key = defaultdict(Counter)
+    for outcome in training_outcomes:
+        state = canonical_markov_state(outcome.get('outcome_state')) or str(outcome.get('outcome_state') or '')
+        if not state:
+            continue
+        for key in _lotto_reclaim_cohort_keys(outcome.get('features') or {}):
+            counts_by_key[key][state] += 1
+    return counts_by_key
+
+
+def _lotto_reclaim_forecast_from_counts(counts, *, entry_mode, features, cohort_key=None, cohort_backoff_rank=None, now_ts=None, event_count=0):
+    sample_n = int(sum((counts or Counter()).values()))
+    if sample_n <= 0:
+        p_peak = p_stop = p_stale = p_toxic = p_crash = 0.0
+    else:
+        p_peak = float(counts.get('PEAK30', 0)) / sample_n
+        p_stop = float(counts.get('STOP_BEFORE_PEAK', 0)) / sample_n
+        p_stale = float(counts.get('STALE_DEAD', 0)) / sample_n
+        p_toxic = float(counts.get('TOXIC_DEAD', 0)) / sample_n
+        p_crash = float(counts.get('CRASH_DEAD', 0)) / sample_n
+    return {
+        'entry_mode': entry_mode,
+        'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        'model_role': 'lotto_reclaim_canary_gate_wrapper',
+        'base_model_entry_gate_allowed': False,
+        'model_family': 'lotto_reclaim_cohort_empirical_absorbing_markov_runtime',
+        'model_snapshot_id': f"lotto_reclaim_cohort_markov_runtime_{int(now_ts or time.time())}",
+        'start_state': 'RECLAIM_CONFIRMED',
+        'cohort_key': cohort_key,
+        'cohort_backoff_rank': cohort_backoff_rank,
+        'cohort_features': features,
+        'sample_n': sample_n,
+        'event_count': int(event_count or sample_n),
+        'lookback_sec': LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC,
+        'p_absorb_peak30': p_peak,
+        'p_absorb_stop_before_peak': p_stop,
+        'p_absorb_stale_dead': p_stale,
+        'p_absorb_toxic_dead': p_toxic,
+        'p_absorb_crash_dead': p_crash,
+        'unresolved_probability_after_horizon': 0.0,
+    }
+
+
+def _lotto_reclaim_cohort_markov_forecast(db, *, entry_mode, pending=None, lifecycle=None, now_ts=None):
+    now_ts = float(now_ts or time.time())
+    since_ts = max(0.0, now_ts - LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC)
+    pending = pending or {}
+    features = _lotto_reclaim_candidate_features(
+        entry_mode,
+        pending=pending,
+        payload=pending.get('markov_features') if isinstance(pending.get('markov_features'), dict) else None,
+        lifecycle=lifecycle,
+    )
+    training = []
+    training.extend(_lotto_reclaim_training_outcomes_from_missed(db, now_ts=now_ts, since_ts=since_ts))
+    training.extend(_lotto_reclaim_training_outcomes_from_trades(db, now_ts=now_ts, since_ts=since_ts))
+    counts_by_key = _lotto_reclaim_cohort_counts(training)
+    best_key = 'global'
+    best_rank = len(_lotto_reclaim_cohort_keys(features)) - 1
+    best_counts = counts_by_key.get(best_key, Counter())
+    best_sample_n = int(sum(best_counts.values()))
+    for rank, key in enumerate(_lotto_reclaim_cohort_keys(features)):
+        counts = counts_by_key.get(key, Counter())
+        sample_n = int(sum(counts.values()))
+        if sample_n > best_sample_n:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            best_sample_n = sample_n
+        if sample_n >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            break
+    return _lotto_reclaim_forecast_from_counts(
+        best_counts,
+        entry_mode=entry_mode,
+        features=features,
+        cohort_key=best_key,
+        cohort_backoff_rank=best_rank,
+        now_ts=now_ts,
+        event_count=len(training),
+    )
+
+
 def _lotto_reclaim_markov_gate(entry_mode, forecast):
     entry_mode = str(entry_mode or '')
-    if entry_mode != LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
+    if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
         return {
             'gated': False,
             'pass': True,
-            'reason': 'markov_observation_only',
+            'reason': 'markov_not_reclaim_mode',
             'entry_mode': entry_mode,
             'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
         }
@@ -3637,7 +4126,7 @@ def _lotto_reclaim_markov_gate(entry_mode, forecast):
         return {
             'gated': True,
             'pass': True,
-            'reason': 'lotto_micro_reclaim_markov_gate_disabled',
+            'reason': 'lotto_reclaim_markov_gate_disabled',
             'entry_mode': entry_mode,
             'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
         }
@@ -3646,7 +4135,7 @@ def _lotto_reclaim_markov_gate(entry_mode, forecast):
         return {
             'gated': True,
             'pass': False,
-            'reason': 'lotto_micro_reclaim_markov_forecast_error',
+            'reason': 'lotto_reclaim_markov_forecast_error',
             'entry_mode': entry_mode,
             'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
             'error': forecast.get('error'),
@@ -3667,13 +4156,26 @@ def _lotto_reclaim_markov_gate(entry_mode, forecast):
         and p_stop <= LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB
         and edge >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE
     )
-    reason = 'lotto_micro_reclaim_markov_gate_pass' if passed else 'lotto_micro_reclaim_markov_gate_block'
+    if sample_n < LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N:
+        bucket = 'insufficient'
+    elif passed:
+        bucket = 'green'
+    elif p_peak30 < LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB or edge < 0:
+        bucket = 'red'
+    else:
+        bucket = 'yellow'
+    reason = (
+        'lotto_reclaim_cohort_markov_green'
+        if passed
+        else f'lotto_reclaim_cohort_markov_{bucket}_block'
+    )
     return {
         'gated': True,
         'pass': passed,
         'reason': reason,
         'entry_mode': entry_mode,
         'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        'markov_bucket': bucket,
         'sample_n': sample_n,
         'p_absorb_peak30': p_peak30,
         'p_absorb_stop_before_peak': p_stop,
@@ -3687,6 +4189,40 @@ def build_lotto_reclaim_markov_forecast(db, *, entry_mode, pending=None, lifecyc
     if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
         return None
     now_ts = float(now_ts or time.time())
+    pending = pending or {}
+    lifecycle = lifecycle or {}
+    if LOTTO_RECLAIM_COHORT_MARKOV_ENABLED:
+        try:
+            forecast = _lotto_reclaim_cohort_markov_forecast(
+                db,
+                entry_mode=entry_mode,
+                pending=pending,
+                lifecycle=lifecycle,
+                now_ts=now_ts,
+            )
+            forecast['candidate'] = {
+                'token_ca': pending.get('token_ca'),
+                'symbol': pending.get('symbol'),
+                'entry_branch': pending.get('entry_branch'),
+                'source_reject_reason': pending.get('source_reject_reason'),
+            }
+            forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+            return forecast
+        except Exception as exc:
+            forecast = {
+                'entry_mode': entry_mode,
+                'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+                'model_role': 'lotto_reclaim_canary_gate_wrapper',
+                'base_model_entry_gate_allowed': False,
+                'model_family': 'lotto_reclaim_cohort_empirical_absorbing_markov_runtime',
+                'start_state': 'RECLAIM_CONFIRMED',
+                'sample_n': 0,
+                'event_count': 0,
+                'lookback_sec': LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC,
+                'error': str(exc),
+            }
+            forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+            return forecast
     if build_markov_lifecycle_forecast_snapshot is None:
         forecast = {
             'entry_mode': entry_mode,
@@ -3700,8 +4236,6 @@ def build_lotto_reclaim_markov_forecast(db, *, entry_mode, pending=None, lifecyc
         forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
         return forecast
 
-    pending = pending or {}
-    lifecycle = lifecycle or {}
     start_state = canonical_markov_state(lifecycle.get('lifecycle_state')) if isinstance(lifecycle, dict) else None
     if start_state in {'PEAK30', 'STOP_BEFORE_PEAK', 'STALE_DEAD', 'TOXIC_DEAD', 'CRASH_DEAD', 'TERMINAL_DEAD'}:
         start_state = None

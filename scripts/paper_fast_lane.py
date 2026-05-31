@@ -2013,6 +2013,10 @@ def process_queue_item(db, row, owner):
     signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
     lifecycle_id = ptm.build_lifecycle_id(token_ca, signal_ts)
     entry_size_sol = fast_entry_size_sol_for_mode(mode)
+    try:
+        queue_payload = json.loads(row_value(row, "payload_json") or "{}") or {}
+    except Exception:
+        queue_payload = {}
     mode_gate = evaluate_runtime_mode_gate(
         entry_mode=mode,
         entry_branch="paper_fast_lane",
@@ -2057,7 +2061,14 @@ def process_queue_item(db, row, owner):
         "signal_route": row["source_type"],
         "entry_branch": branch,
         "source_component": "paper_fast_lane",
-        "source_reject_reason": row_value(row, "source_reject_reason") or branch,
+        "source_reject_reason": queue_payload.get("reject_reason") or row_value(row, "source_reject_reason") or branch,
+        "markov_features": {
+            **queue_payload,
+            "entry_branch": branch,
+            "source_reject_reason": queue_payload.get("reject_reason") or branch,
+            "source_type": row["source_type"],
+            "entry_mode_hint": row_value(row, "entry_mode_hint"),
+        },
     }
     markov_reclaim_forecast = ptm.attach_lotto_reclaim_markov_forecast(
         db,

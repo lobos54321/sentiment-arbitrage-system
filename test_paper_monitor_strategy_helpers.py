@@ -3910,8 +3910,9 @@ def test_lotto_micro_reclaim_canary_requires_markov_gate_pass():
 
     assert allowed is False
     assert decision["decision"] == "shadow"
-    assert decision["reason"] == "lotto_micro_reclaim_markov_gate_block"
+    assert decision["reason"] == "lotto_reclaim_cohort_markov_red_block"
     assert decision["markov_reclaim_gate"]["gated"] is True
+    assert decision["markov_reclaim_gate"]["markov_bucket"] == "red"
 
 
 def test_lotto_micro_reclaim_canary_allows_when_markov_gate_passes():
@@ -3937,7 +3938,139 @@ def test_lotto_micro_reclaim_canary_allows_when_markov_gate_passes():
 
     assert allowed is True
     assert decision["decision"] == "allow_live"
-    assert decision["markov_reclaim_gate"]["reason"] == "lotto_micro_reclaim_markov_gate_pass"
+    assert decision["markov_reclaim_gate"]["reason"] == "lotto_reclaim_cohort_markov_green"
+    assert decision["markov_reclaim_gate"]["markov_bucket"] == "green"
+
+
+def test_lotto_not_ath_reclaim_canary_also_requires_markov_green():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    block_forecast = {
+        "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.04,
+        "p_absorb_stop_before_peak": 0.25,
+    }
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        token_ca="TokenNotAth",
+        symbol="NOTATH",
+        event_ts=1000,
+        data_source="pending_entry+paper_trades",
+        markov_reclaim_forecast=block_forecast,
+    )
+
+    assert allowed is False
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "lotto_reclaim_cohort_markov_red_block"
+    assert decision["markov_reclaim_gate"]["gated"] is True
+
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    pass_forecast = {
+        "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.25,
+        "p_absorb_stop_before_peak": 0.10,
+    }
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        token_ca="TokenNotAth2",
+        symbol="NOTATH2",
+        event_ts=1300,
+        data_source="pending_entry+paper_trades",
+        markov_reclaim_forecast=pass_forecast,
+    )
+
+    assert allowed is True
+    assert decision["decision"] == "allow_live"
+    assert decision["markov_reclaim_gate"]["reason"] == "lotto_reclaim_cohort_markov_green"
+
+
+def test_lotto_reclaim_runtime_markov_prefers_matching_green_cohort():
+    db = _revival_canary_db()
+    now_ts = 1_800_000
+    db.execute("DROP TABLE IF EXISTS paper_missed_signal_attribution")
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_event_ts REAL,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts REAL,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            first_tradable_ts REAL,
+            tradability_status TEXT,
+            tradable_missed INTEGER,
+            tradable_peak_pnl REAL,
+            time_to_peak_sec REAL,
+            would_stop_before_peak INTEGER,
+            pnl_5m REAL,
+            payload_json TEXT
+        )
+        """
+    )
+    for idx in range(monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N):
+        winner = idx < 16
+        first_tradable_ts = now_ts - 3 * 24 * 60 * 60 - idx
+        db.execute(
+            """
+            INSERT INTO paper_missed_signal_attribution(
+                created_event_ts, token_ca, symbol, signal_ts, route, component,
+                reject_reason, first_tradable_ts, tradability_status, tradable_missed,
+                tradable_peak_pnl, time_to_peak_sec, would_stop_before_peak, pnl_5m,
+                payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                first_tradable_ts,
+                f"Token{idx}",
+                "DOG",
+                first_tradable_ts,
+                "LOTTO",
+                "lotto_entry_gate",
+                "tracking_ttl_expired",
+                first_tradable_ts,
+                "tradable",
+                1,
+                0.45 if winner else 0.05,
+                1800,
+                0 if winner else 1,
+                5.0,
+                json.dumps({"price_change_m5": 5.0, "buy_sell_ratio": 1.25, "tx_m5": 80}),
+            ),
+        )
+
+    forecast = monitor.build_lotto_reclaim_markov_forecast(
+        db,
+        entry_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        pending={
+            "token_ca": "LiveToken",
+            "symbol": "LIVE",
+            "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            "markov_features": {
+                "recovery_quote_clean": True,
+                "price_change_m5": 5.0,
+                "buy_sell_ratio": 1.25,
+                "tx_m5": 80,
+            },
+        },
+        now_ts=now_ts,
+    )
+
+    assert forecast["model_family"] == "lotto_reclaim_cohort_empirical_absorbing_markov_runtime"
+    assert forecast["cohort_key"].startswith("entry_quote_momentum:")
+    assert forecast["sample_n"] == monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N
+    assert forecast["gate"]["pass"] is True
+    assert forecast["gate"]["markov_bucket"] == "green"
 
 
 def test_revival_canary_gate_ignores_mixed_policy_history_and_kills_tagged_loss_budget():
