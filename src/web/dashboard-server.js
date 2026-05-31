@@ -7761,6 +7761,83 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
     return;
+  } else if (url.pathname === '/api/paper/lotto-reclaim-markov-backtest') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let releasePaperReport;
+    try {
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const days = boundedIntParam(url, 'days', 7, 1, 30);
+      const minSample = boundedIntParam(url, 'min_sample', 20, 0, 5000);
+      const includeRows = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_rows') || '').toLowerCase());
+      const parseBoundedFloat = (name, defaultValue, minValue, maxValue) => {
+        const raw = Number.parseFloat(url.searchParams.get(name) || String(defaultValue));
+        const value = Number.isFinite(raw) ? raw : defaultValue;
+        return Math.max(minValue, Math.min(value, maxValue));
+      };
+      const args = [
+        'scripts/backtest_lotto_reclaim_markov.py',
+        '--db', paperDbPath,
+        '--days', String(days),
+        '--min-sample', String(minSample),
+        '--min-peak30-prob', String(parseBoundedFloat('min_peak30_prob', 0.12, 0, 1)),
+        '--max-stop-prob', String(parseBoundedFloat('max_stop_prob', 0.55, 0, 1)),
+        '--min-edge', String(parseBoundedFloat('min_edge', 0.02, -1, 1)),
+        '--json',
+      ];
+      if (includeRows) args.push('--include-rows');
+      execFile('python3', args, {
+        cwd: projectRoot,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          PAPER_DB: paperDbPath,
+        },
+        timeout: Math.max(5000, boundedIntParam(url, 'timeout_ms', 60000, 5000, 180000)),
+        maxBuffer: 30 * 1024 * 1024,
+      }, (error, stdout, stderr) => {
+        try { if (releasePaperReport) releasePaperReport(); } catch {}
+        if (error) {
+          res.writeHead(500, apiJsonHeaders());
+          res.end(JSON.stringify({
+            error: error.message,
+            stderr: String(stderr || '').slice(-4000),
+            query_ms: Date.now() - startedAt,
+          }, null, 2));
+          return;
+        }
+        try {
+          const report = JSON.parse(String(stdout || '{}'));
+          res.writeHead(200, apiJsonHeaders());
+          res.end(JSON.stringify({
+            generated_at: new Date().toISOString(),
+            endpoint: url.pathname,
+            query_ms: Date.now() - startedAt,
+            ...report,
+          }, null, 2));
+        } catch (parseError) {
+          res.writeHead(500, apiJsonHeaders());
+          res.end(JSON.stringify({
+            error: `failed_to_parse_backtest_json: ${parseError.message}`,
+            stdout: String(stdout || '').slice(0, 4000),
+            stderr: String(stderr || '').slice(-4000),
+            query_ms: Date.now() - startedAt,
+          }, null, 2));
+        }
+      });
+    } catch (e) {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
