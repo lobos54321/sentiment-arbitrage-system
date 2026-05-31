@@ -103,16 +103,16 @@ def _insert_trade(db, token, entry_ts, *, peak, pnl=None, mode="lotto_micro_recl
     )
 
 
-def _insert_missed_candidate(db, token, ts, *, peak, stop=0, reason="tracking_ttl_expired"):
+def _insert_missed_candidate(db, token, ts, *, peak, stop=0, reason="tracking_ttl_expired", time_to_peak=None):
     db.execute(
         """
         INSERT INTO paper_missed_signal_attribution(
             created_event_ts, token_ca, symbol, signal_ts, route, component, reject_reason,
             baseline_ts, tradability_status, tradable_missed, tradable_peak_pnl,
-            would_stop_before_peak, first_tradable_ts, payload_json
-        ) VALUES (?, ?, ?, ?, 'LOTTO', 'discovery_tracking', ?, ?, 'tradable_reclaim', 1, ?, ?, ?, '{}')
+            time_to_peak_sec, would_stop_before_peak, first_tradable_ts, payload_json
+        ) VALUES (?, ?, ?, ?, 'LOTTO', 'discovery_tracking', ?, ?, 'tradable_reclaim', 1, ?, ?, ?, ?, '{}')
         """,
-        (ts, token, token[:6], ts, reason, ts, peak, stop, ts),
+        (ts, token, token[:6], ts, reason, ts, peak, time_to_peak, stop, ts),
     )
 
 
@@ -166,6 +166,24 @@ def test_lotto_reclaim_markov_backtest_buckets_green_when_past_path_wins(tmp_pat
     assert row["markov_bucket"] == "green"
     assert row["forecast"]["p_absorb_peak30"] == 1.0
     assert report["by_markov_bucket"]["green"]["peak30_before_stop_rate"] == 1.0
+
+
+def test_lotto_reclaim_markov_backtest_can_train_from_known_missed_outcomes(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _db(db_path)
+    _insert_missed_candidate(db, "PastMissedWinner", 100, peak=0.60, time_to_peak=60)
+    _insert_missed_candidate(db, "CandidateD", 1_000, peak=0.45)
+    db.commit()
+    db.close()
+
+    report = build_backtest_report(db_path, since_ts=900, until_ts=1_200, min_sample=1, include_rows=True)
+
+    assert report["paired_sample_n"] == 1
+    row = report["rows"][0]
+    assert row["token_ca"] == "CandidateD"
+    assert row["markov_bucket"] == "green"
+    assert row["forecast"]["sample_n"] == 1
+    assert row["forecast"]["cohort_key"].startswith("entry_quote")
 
 
 def test_lotto_reclaim_markov_backtest_groups_blocker_families(tmp_path):

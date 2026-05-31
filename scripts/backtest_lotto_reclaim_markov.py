@@ -15,7 +15,7 @@ import math
 import sqlite3
 import sys
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -325,6 +325,12 @@ def _candidate_from_missed(row: sqlite3.Row) -> Candidate | None:
         None,
     )
     stop = _as_bool(_row_value(row, "would_stop_before_peak"))
+    time_to_peak = _safe_float(_row_value(row, "time_to_peak_sec"), None)
+    outcome_known_ts_value = None
+    if time_to_peak is not None and time_to_peak >= 0:
+        outcome_known_ts_value = float(decision_ts) + float(time_to_peak)
+    elif peak is not None or stop is not None:
+        outcome_known_ts_value = float(decision_ts) + 24 * 60 * 60
     token_ca = str(_row_value(row, "token_ca") or payload.get("token_ca") or "")
     if not token_ca:
         return None
@@ -353,6 +359,7 @@ def _candidate_from_missed(row: sqlite3.Row) -> Candidate | None:
         source_payload={
             "reason": reason,
             "component": component,
+            "outcome_known_ts": outcome_known_ts_value,
             "tradability_status": _row_value(row, "tradability_status"),
             "tradable_missed": _row_value(row, "tradable_missed"),
         },
@@ -401,7 +408,7 @@ def _candidate_from_trade(row: sqlite3.Row) -> Candidate | None:
         decision_ts=float(decision_ts),
         entry_mode=entry_mode,
         blocker_family=blocker_family(reason),
-        quote_clean_bucket="quote_filled",
+        quote_clean_bucket="quote_clean",
         mc_bucket=mc_bucket(payload.get("signal_mc") or payload.get("marketCap") or payload.get("market_cap")),
         momentum_bucket=momentum_bucket(payload),
         liquidity_bucket=liquidity_bucket(payload.get("liquidity_usd") or payload.get("last_liquidity")),
@@ -595,6 +602,49 @@ def load_training_outcomes(
     since_ts: float,
     until_ts: float,
 ) -> list[Candidate]:
+    missed_wanted = (
+        "id",
+        "created_event_ts",
+        "token_ca",
+        "symbol",
+        "signal_ts",
+        "route",
+        "component",
+        "reject_reason",
+        "baseline_ts",
+        "tradability_status",
+        "tradable_missed",
+        "tradable_peak_pnl",
+        "time_to_peak_sec",
+        "would_stop_before_peak",
+        "first_tradable_ts",
+        "first_tradable_pnl",
+        "pnl_5m",
+        "pnl_15m",
+        "pnl_60m",
+        "pnl_24h",
+        "max_pnl_recorded",
+        "payload_json",
+    )
+    outcomes: list[Candidate] = []
+    missed_scan_limit = 50_000
+    for row in _select_rows(
+        db,
+        "paper_missed_signal_attribution",
+        missed_wanted,
+        where_sql="created_event_ts >= ? AND created_event_ts <= ?",
+        params=(since_ts, until_ts, missed_scan_limit),
+        order_sql="created_event_ts DESC, id DESC LIMIT ?",
+    ):
+        candidate = _candidate_from_missed(row)
+        if not candidate:
+            continue
+        if outcome_known_ts(candidate) > until_ts:
+            continue
+        if candidate.peak_pnl is None and candidate.pnl_proxy is None and not candidate.stop_before_peak:
+            continue
+        outcomes.append(candidate)
+
     trade_wanted = (
         "id",
         "token_ca",
@@ -612,7 +662,6 @@ def load_training_outcomes(
         "monitor_state_json",
         "entry_execution_audit_json",
     )
-    outcomes: list[Candidate] = []
     for row in _select_rows(
         db,
         "paper_trades",
@@ -628,7 +677,11 @@ def load_training_outcomes(
 
 
 def outcome_known_ts(candidate: Candidate) -> float:
-    return float(_safe_float((candidate.source_payload or {}).get("exit_ts"), candidate.decision_ts) or candidate.decision_ts)
+    payload = candidate.source_payload or {}
+    known_ts = _safe_float(payload.get("outcome_known_ts"), None)
+    if known_ts is None:
+        known_ts = _safe_float(payload.get("exit_ts"), candidate.decision_ts)
+    return float(known_ts or candidate.decision_ts)
 
 
 def outcome_state(candidate: Candidate) -> str:
@@ -646,7 +699,25 @@ def outcome_state(candidate: Candidate) -> str:
     return "TERMINAL_DEAD"
 
 
-def forecast_from_outcome_counts(counts: Counter, candidate: Candidate) -> dict[str, Any]:
+def cohort_count_keys(candidate: Candidate) -> list[str]:
+    return [
+        f"entry_quote_momentum:{candidate.entry_mode}|{candidate.quote_clean_bucket}|{candidate.momentum_bucket}",
+        f"entry_quote:{candidate.entry_mode}|{candidate.quote_clean_bucket}",
+        f"quote_momentum:{candidate.quote_clean_bucket}|{candidate.momentum_bucket}",
+        f"quote:{candidate.quote_clean_bucket}",
+        f"entry_mode:{candidate.entry_mode}",
+        "global",
+    ]
+
+
+def forecast_from_outcome_counts(
+    counts: Counter,
+    candidate: Candidate,
+    *,
+    model_family: str = "lotto_reclaim_empirical_absorbing_markov_fast",
+    cohort_key: str | None = None,
+    cohort_backoff_rank: int | None = None,
+) -> dict[str, Any]:
     sample_n = int(sum(counts.values()))
     if sample_n <= 0:
         p_peak = p_stop = p_stale = p_toxic = p_crash = 0.0
@@ -661,9 +732,11 @@ def forecast_from_outcome_counts(counts: Counter, candidate: Candidate) -> dict[
         "policy_version": ptm.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
         "model_role": "lotto_reclaim_walk_forward_backtest",
         "base_model_entry_gate_allowed": False,
-        "model_family": "lotto_reclaim_empirical_absorbing_markov_fast",
+        "model_family": model_family,
         "model_snapshot_id": f"lotto_reclaim_empirical_backtest_{int(candidate.decision_ts)}",
         "start_state": "RECLAIM_CONFIRMED",
+        "cohort_key": cohort_key,
+        "cohort_backoff_rank": cohort_backoff_rank,
         "sample_n": sample_n,
         "event_count": sample_n,
         "p_absorb_peak30": p_peak,
@@ -673,6 +746,38 @@ def forecast_from_outcome_counts(counts: Counter, candidate: Candidate) -> dict[
         "p_absorb_crash_dead": p_crash,
         "unresolved_probability_after_horizon": 0.0,
     }
+
+
+def forecast_from_cohort_counts(
+    counts_by_key: Mapping[str, Counter],
+    candidate: Candidate,
+    *,
+    min_sample: int,
+) -> dict[str, Any]:
+    best_key = "global"
+    best_rank = len(cohort_count_keys(candidate)) - 1
+    best_counts = counts_by_key.get(best_key, Counter())
+    best_sample_n = int(sum(best_counts.values()))
+    for rank, key in enumerate(cohort_count_keys(candidate)):
+        counts = counts_by_key.get(key, Counter())
+        sample_n = int(sum(counts.values()))
+        if sample_n > best_sample_n:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            best_sample_n = sample_n
+        if sample_n >= min_sample:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            break
+    return forecast_from_outcome_counts(
+        best_counts,
+        candidate,
+        model_family="lotto_reclaim_cohort_empirical_absorbing_markov_fast",
+        cohort_key=best_key,
+        cohort_backoff_rank=best_rank,
+    )
 
 
 def markov_bucket(
@@ -770,6 +875,7 @@ def build_backtest_report(
         training_outcomes = load_training_outcomes(db, since_ts=training_since_ts, until_ts=now_ts)
     rows: list[dict[str, Any]] = []
     outcome_counts: Counter = Counter()
+    cohort_outcome_counts: dict[str, Counter] = defaultdict(Counter)
     outcome_index = 0
     for candidate in candidates:
         if full_markov:
@@ -779,9 +885,17 @@ def build_backtest_report(
                 outcome_index < len(training_outcomes)
                 and outcome_known_ts(training_outcomes[outcome_index]) < candidate.decision_ts
             ):
-                outcome_counts[outcome_state(training_outcomes[outcome_index])] += 1
+                outcome = training_outcomes[outcome_index]
+                state = outcome_state(outcome)
+                outcome_counts[state] += 1
+                for key in cohort_count_keys(outcome):
+                    cohort_outcome_counts[key][state] += 1
                 outcome_index += 1
-            forecast = forecast_from_outcome_counts(outcome_counts, candidate)
+            forecast = forecast_from_cohort_counts(
+                cohort_outcome_counts or {"global": outcome_counts},
+                candidate,
+                min_sample=min_sample,
+            )
         bucket = markov_bucket(
             forecast,
             min_sample=min_sample,
@@ -813,6 +927,8 @@ def build_backtest_report(
                     "edge_peak30_minus_stop": (p_peak - p_stop) if p_peak is not None and p_stop is not None else None,
                     "error": forecast.get("error"),
                     "model_snapshot_id": forecast.get("model_snapshot_id"),
+                    "cohort_key": forecast.get("cohort_key"),
+                    "cohort_backoff_rank": forecast.get("cohort_backoff_rank"),
                 },
                 "outcome": {
                     "peak_pnl": candidate.peak_pnl,
