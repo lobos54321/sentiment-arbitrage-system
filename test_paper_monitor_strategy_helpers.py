@@ -4287,6 +4287,110 @@ def test_revival_canary_gate_ignores_mixed_policy_history_and_kills_tagged_loss_
     assert second["policy_health"]["closed_trades"] == 1
 
 
+def test_revival_canary_lotto_green_budget_ignores_other_markov_buckets_while_learning():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    red_gate = {
+        "gated": True,
+        "pass": False,
+        "markov_bucket": "red",
+        "reason": "lotto_reclaim_cohort_markov_red_block",
+    }
+    green_gate = {
+        "gated": True,
+        "pass": True,
+        "markov_bucket": "green",
+        "reason": "lotto_reclaim_cohort_markov_green",
+    }
+    db.execute(
+        """
+        INSERT INTO paper_trades(
+            token_ca, entry_mode, entry_ts, exit_ts, exit_reason, pnl_pct,
+            position_size_sol, monitor_state_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "RedBucketLoss",
+            LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            1000,
+            1060,
+            "guardian_hard_sl",
+            -0.90,
+            PAPER_TINY_SCOUT_SIZE_SOL,
+            json.dumps({
+                "revivalCanary": True,
+                "policyVersion": REVIVAL_CANARY_POLICY_VERSION,
+                "markovReclaimForecast": {"gate": red_gate},
+            }),
+        ),
+    )
+
+    unbucketed = evaluate_revival_canary_gate(
+        db,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        now_ts=1200,
+    )
+    assert unbucketed["pass"] is False
+    assert unbucketed["reason"] == "revival_canary_loss_budget_hit"
+
+    green = evaluate_revival_canary_gate(
+        db,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        now_ts=1200,
+        markov_reclaim_gate=green_gate,
+    )
+    assert green["pass"] is True
+    assert green["reason"] == "revival_canary_policy_sampling"
+    assert green["markov_bucket"] == "green"
+    assert green["policy_health"]["budget_scope"] == "entry_mode_markov_bucket"
+    assert green["policy_health"]["closed_trades"] == 0
+
+
+def test_revival_canary_lotto_green_learning_budget_keeps_quote_guard_hard_stop():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    green_gate = {
+        "gated": True,
+        "pass": True,
+        "markov_bucket": "green",
+        "reason": "lotto_reclaim_cohort_markov_green",
+    }
+    for idx in range(monitor.REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS):
+        db.execute(
+            """
+            INSERT INTO paper_trades(
+                token_ca, entry_mode, entry_ts, exit_ts, exit_reason, pnl_pct,
+                position_size_sol, monitor_state_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"GreenQuoteStop{idx}",
+                LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+                1000 + idx,
+                1060 + idx,
+                "probe_quote_guard_stop",
+                -0.01,
+                PAPER_TINY_SCOUT_SIZE_SOL,
+                json.dumps({
+                    "revivalCanary": True,
+                    "policyVersion": REVIVAL_CANARY_POLICY_VERSION,
+                    "markovReclaimForecast": {"gate": green_gate},
+                }),
+            ),
+        )
+
+    blocked = evaluate_revival_canary_gate(
+        db,
+        LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        now_ts=1200,
+        markov_reclaim_gate=green_gate,
+    )
+    assert blocked["pass"] is False
+    assert blocked["reason"] == "revival_canary_quote_guard_stop_limit"
+    assert blocked["policy_health"]["learning_budget_active"] is True
+    assert blocked["policy_health"]["quote_guard_stops"] == monitor.REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS
+
+
 def test_entry_mode_quality_uses_revival_canary_policy_gate_for_selected_modes():
     db = _revival_canary_db()
     monitor._REVIVAL_CANARY_ARM_TS.clear()

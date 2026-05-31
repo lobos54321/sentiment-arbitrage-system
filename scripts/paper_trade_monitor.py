@@ -721,6 +721,14 @@ REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES = max(1, int(os.environ.get('REVIVAL_CANAR
 REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS = max(1, int(os.environ.get('REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS', '3')))
 REVIVAL_CANARY_GAP_ALERT_PCT = max(0.0, float(os.environ.get('REVIVAL_CANARY_GAP_ALERT_PCT', '30.0')))
 REVIVAL_CANARY_MAX_GAP_ALERTS = max(1, int(os.environ.get('REVIVAL_CANARY_MAX_GAP_ALERTS', '2')))
+REVIVAL_CANARY_MARKOV_BUCKET_BUDGET_ENABLED = os.environ.get('REVIVAL_CANARY_MARKOV_BUCKET_BUDGET_ENABLED', 'true').lower() != 'false'
+REVIVAL_CANARY_PAPER_LEARNING_BUDGET_ENABLED = os.environ.get('REVIVAL_CANARY_PAPER_LEARNING_BUDGET_ENABLED', 'true').lower() != 'false'
+REVIVAL_CANARY_PAPER_LEARNING_MIN_CLOSED = max(0, int(os.environ.get('REVIVAL_CANARY_PAPER_LEARNING_MIN_CLOSED', '30')))
+REVIVAL_CANARY_PAPER_LEARNING_BUCKETS = {
+    item.strip().lower()
+    for item in os.environ.get('REVIVAL_CANARY_PAPER_LEARNING_BUCKETS', 'green').split(',')
+    if item.strip()
+}
 _REVIVAL_CANARY_ARM_TS = deque(maxlen=500)
 ATH_HIGH_MC_TINY_PROBE_ENABLED = os.environ.get('ATH_HIGH_MC_TINY_PROBE_ENABLED', 'true').lower() != 'false'
 ATH_HIGH_MC_TINY_PROBE_MAX_MC = float(os.environ.get('ATH_HIGH_MC_TINY_PROBE_MAX_MC', str(ATH_UNCERTAINTY_TINY_SCOUT_RUNNER_MAX_MC)))
@@ -3237,7 +3245,48 @@ def _revival_canary_trade_payload(row):
     return monitor_state if monitor_state else audit
 
 
-def _revival_canary_trade_rows(db, entry_mode, *, limit=200):
+def _revival_canary_payload_markov_bucket(payload):
+    if not isinstance(payload, dict):
+        return None
+    forecasts = [
+        payload.get('markovReclaimForecast'),
+        payload.get('markov_reclaim_forecast'),
+        payload.get('forecast'),
+    ]
+    detail = payload.get('revivalCanaryDetail') or payload.get('revival_canary_detail')
+    if isinstance(detail, dict):
+        forecasts.extend([
+            detail.get('markovReclaimForecast'),
+            detail.get('markov_reclaim_forecast'),
+        ])
+    for forecast in forecasts:
+        if not isinstance(forecast, dict):
+            continue
+        gate = forecast.get('gate')
+        candidates = [gate, forecast]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            bucket = candidate.get('markov_bucket') or candidate.get('markovBucket')
+            if bucket:
+                return str(bucket).lower()
+    bucket = payload.get('markov_bucket') or payload.get('markovBucket')
+    return str(bucket).lower() if bucket else None
+
+
+def _revival_canary_markov_bucket(entry_mode, markov_reclaim_gate=None):
+    entry_mode = str(entry_mode or '')
+    if not REVIVAL_CANARY_MARKOV_BUCKET_BUDGET_ENABLED:
+        return None
+    if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        return None
+    if not isinstance(markov_reclaim_gate, dict):
+        return None
+    bucket = markov_reclaim_gate.get('markov_bucket') or markov_reclaim_gate.get('markovBucket')
+    return str(bucket).lower() if bucket else None
+
+
+def _revival_canary_trade_rows(db, entry_mode, *, limit=200, markov_bucket=None):
     columns = _paper_trade_columns(db)
     if not columns or 'entry_mode' not in columns:
         return []
@@ -3279,12 +3328,25 @@ def _revival_canary_trade_rows(db, entry_mode, *, limit=200):
             or payload.get('policyVersion') == REVIVAL_CANARY_POLICY_VERSION
             or payload.get('policy_version') == REVIVAL_CANARY_POLICY_VERSION
         ):
+            if markov_bucket and _revival_canary_payload_markov_bucket(payload) != markov_bucket:
+                continue
             tagged.append(row)
     return tagged
 
 
-def _revival_canary_policy_health(db, entry_mode):
-    rows = _revival_canary_trade_rows(db, entry_mode)
+def _revival_canary_policy_health(db, entry_mode, *, markov_bucket=None):
+    entry_mode = str(entry_mode or '')
+    markov_bucket = str(markov_bucket or '').lower() or None
+    bucket_scope = (
+        bool(markov_bucket)
+        and REVIVAL_CANARY_MARKOV_BUCKET_BUDGET_ENABLED
+        and entry_mode in LOTTO_RECLAIM_MARKOV_ENTRY_MODES
+    )
+    rows = _revival_canary_trade_rows(
+        db,
+        entry_mode,
+        markov_bucket=markov_bucket if bucket_scope else None,
+    )
     total_loss_sol = 0.0
     consecutive_losses = 0
     quote_guard_stops = 0
@@ -3331,9 +3393,17 @@ def _revival_canary_policy_health(db, entry_mode):
     if consecutive_losses < 0:
         consecutive_losses = 0
 
+    learning_budget_active = (
+        REVIVAL_CANARY_PAPER_LEARNING_BUDGET_ENABLED
+        and bucket_scope
+        and markov_bucket in REVIVAL_CANARY_PAPER_LEARNING_BUCKETS
+        and closed < REVIVAL_CANARY_PAPER_LEARNING_MIN_CLOSED
+    )
     detail = {
         'entry_mode': entry_mode,
         'policy_version': REVIVAL_CANARY_POLICY_VERSION,
+        'budget_scope': 'entry_mode_markov_bucket' if bucket_scope else 'entry_mode',
+        'markov_bucket': markov_bucket,
         'closed_trades': closed,
         'wins': wins,
         'losses': losses,
@@ -3345,17 +3415,32 @@ def _revival_canary_policy_health(db, entry_mode):
         'max_consecutive_losses': REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES,
         'max_quote_guard_stops': REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS,
         'max_gap_alerts': REVIVAL_CANARY_MAX_GAP_ALERTS,
+        'learning_budget_active': learning_budget_active,
+        'learning_min_closed_trades': REVIVAL_CANARY_PAPER_LEARNING_MIN_CLOSED,
+        'learning_buckets': sorted(REVIVAL_CANARY_PAPER_LEARNING_BUCKETS),
         'pass': True,
         'reason': 'revival_canary_policy_health_ok',
     }
-    if REVIVAL_CANARY_MAX_LOSS_SOL and total_loss_sol >= REVIVAL_CANARY_MAX_LOSS_SOL:
-        detail.update({'pass': False, 'reason': 'revival_canary_loss_budget_hit'})
-    elif consecutive_losses >= REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES:
-        detail.update({'pass': False, 'reason': 'revival_canary_loss_streak_hit'})
-    elif quote_guard_stops >= REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS:
+    if quote_guard_stops >= REVIVAL_CANARY_MAX_QUOTE_GUARD_STOPS:
         detail.update({'pass': False, 'reason': 'revival_canary_quote_guard_stop_limit'})
     elif gap_alerts >= REVIVAL_CANARY_MAX_GAP_ALERTS:
         detail.update({'pass': False, 'reason': 'revival_canary_quote_gap_limit'})
+    elif (
+        REVIVAL_CANARY_MAX_LOSS_SOL
+        and total_loss_sol >= REVIVAL_CANARY_MAX_LOSS_SOL
+        and not learning_budget_active
+    ):
+        detail.update({'pass': False, 'reason': 'revival_canary_loss_budget_hit'})
+    elif consecutive_losses >= REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES and not learning_budget_active:
+        detail.update({'pass': False, 'reason': 'revival_canary_loss_streak_hit'})
+    elif learning_budget_active and (
+        (REVIVAL_CANARY_MAX_LOSS_SOL and total_loss_sol >= REVIVAL_CANARY_MAX_LOSS_SOL)
+        or consecutive_losses >= REVIVAL_CANARY_MAX_CONSECUTIVE_LOSSES
+    ):
+        detail.update({
+            'reason': 'revival_canary_learning_budget_collecting',
+            'learning_budget_override': True,
+        })
     return detail
 
 
@@ -3399,7 +3484,7 @@ def _revival_canary_recent_counts(db, now_ts):
     }
 
 
-def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None):
+def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None, markov_reclaim_gate=None):
     entry_mode = str(entry_mode or '')
     eligible = is_revival_canary_mode(entry_mode)
     detail = {
@@ -3419,7 +3504,8 @@ def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None):
     now_ts = float(now_ts or time.time())
     counts = _revival_canary_recent_counts(db, now_ts)
     mode_count = int(counts.get('by_mode_1h', {}).get(entry_mode, 0))
-    health = _revival_canary_policy_health(db, entry_mode)
+    markov_bucket = _revival_canary_markov_bucket(entry_mode, markov_reclaim_gate)
+    health = _revival_canary_policy_health(db, entry_mode, markov_bucket=markov_bucket)
     detail.update({
         'rate_counts': counts,
         'mode_count_1h': mode_count,
@@ -3427,6 +3513,7 @@ def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None):
         'max_global_per_hour': REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR,
         'policy_health': health,
         'token_ca': token_ca,
+        'markov_bucket': markov_bucket,
     })
     if REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR and counts.get('global_count_1h', 0) >= REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR:
         detail.update({'pass': False, 'reason': 'revival_canary_global_rate_limited'})
@@ -14244,6 +14331,7 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
         entry_mode,
         token_ca=token_ca,
         now_ts=event_ts or time.time(),
+        markov_reclaim_gate=markov_reclaim_gate,
     )
     if canary_gate.get('eligible'):
         allowed = bool(canary_gate.get('pass'))
@@ -14306,6 +14394,7 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             log.info(
                 f"  [REVIVAL_CANARY] allow {symbol or token_ca}: "
                 f"mode={entry_mode} policy={REVIVAL_CANARY_POLICY_VERSION} "
+                f"bucket={canary_gate.get('markov_bucket') or 'na'} "
                 f"rate={canary_gate.get('mode_count_1h')}/{REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR}"
             )
             return True, decision
@@ -14320,6 +14409,8 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             f"streak={(canary_gate.get('policy_health') or {}).get('consecutive_losses')} "
             f"quote_stops={(canary_gate.get('policy_health') or {}).get('quote_guard_stops')} "
             f"gap_alerts={(canary_gate.get('policy_health') or {}).get('gap_alerts')} "
+            f"bucket={canary_gate.get('markov_bucket') or 'na'} "
+            f"budget_scope={(canary_gate.get('policy_health') or {}).get('budget_scope')} "
             f"rate={canary_gate.get('mode_count_1h')}/{REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR}"
         )
         return False, decision

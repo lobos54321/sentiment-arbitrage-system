@@ -23,6 +23,7 @@ import {
   boundedIntParam,
   boundedWindowedSinceTs,
   dogCatchGoalFromLiveSnapshot,
+  livePaperQueryGuard,
   missedRecoverySummaryFromLiveSnapshot,
   readPaperFastLaneHealth,
   readV27DenominatorReadModelHealth,
@@ -1218,6 +1219,47 @@ test('boundedWindowedSinceTs supports explicit 24h review windows', () => {
   const since = boundedWindowedSinceTs(url, 2, 24, { nowSec: 100_000 });
 
   assert.equal(since, 100_000 - 24 * 3600);
+});
+
+test('livePaperQueryGuard rejects wide or oversized live paper queries', () => {
+  const wide = livePaperQueryGuard(
+    new URL('https://example.test/api/paper/mode-ev?hours=6&limit=500'),
+    '/api/paper/mode-ev',
+    { nowSec: 100_000, defaultHours: 2, maxHours: 2, defaultLimit: 500, maxLimit: 1000 }
+  );
+  assert.equal(wide.allowed, false);
+  assert.equal(wide.error, 'live_paper_query_window_too_wide');
+  assert.equal(wide.max_hours, 2);
+
+  const large = livePaperQueryGuard(
+    new URL('https://example.test/api/paper/mode-ev?hours=2&limit=5000'),
+    '/api/paper/mode-ev',
+    { nowSec: 100_000, defaultHours: 2, maxHours: 2, defaultLimit: 500, maxLimit: 1000 }
+  );
+  assert.equal(large.allowed, false);
+  assert.equal(large.error, 'live_paper_query_limit_too_large');
+  assert.equal(large.max_limit, 1000);
+});
+
+test('livePaperQueryGuard allows bounded 2h live paper query and computes since', () => {
+  const guard = livePaperQueryGuard(
+    new URL('https://example.test/api/paper/mode-ev?hours=2&limit=800&bootstrap_iterations=2500'),
+    '/api/paper/mode-ev',
+    {
+      nowSec: 100_000,
+      defaultHours: 2,
+      maxHours: 2,
+      defaultLimit: 500,
+      maxLimit: 1000,
+      maxBootstrapIterations: 3000,
+    }
+  );
+
+  assert.equal(guard.allowed, true);
+  assert.equal(guard.window_hours, 2);
+  assert.equal(guard.since_ts, 100_000 - 2 * 3600);
+  assert.equal(guard.limit, 800);
+  assert.equal(guard.bootstrap_iterations, 2500);
 });
 
 test('paper report gate rejects concurrent and cooldown requests', () => {

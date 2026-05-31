@@ -200,6 +200,83 @@ export function boundedWindowedSinceTs(url, defaultHours = 1, maxHours = 2, opti
   return nowSec - hours * 3600;
 }
 
+function parseWindowHoursParam(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const match = raw.match(/^(\d+)\s*([hd])$/);
+  if (!match) return null;
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return match[2] === 'd' ? amount * 24 : amount;
+}
+
+export function livePaperQueryGuard(url, endpoint, options = {}) {
+  const nowSec = Number.isFinite(options.nowSec) ? options.nowSec : Math.floor(Date.now() / 1000);
+  const defaultHours = Math.max(1, Number.parseInt(String(options.defaultHours ?? 2), 10) || 2);
+  const maxHours = Math.max(1, Number.parseInt(String(options.maxHours ?? 2), 10) || 2);
+  const defaultLimit = Math.max(1, Number.parseInt(String(options.defaultLimit ?? 500), 10) || 500);
+  const maxLimit = Math.max(1, Number.parseInt(String(options.maxLimit ?? 1000), 10) || 1000);
+  const defaultBootstrapIterations = Math.max(
+    1,
+    Number.parseInt(String(options.defaultBootstrapIterations ?? 1000), 10) || 1000
+  );
+  const maxBootstrapIterations = Math.max(
+    1,
+    Number.parseInt(String(options.maxBootstrapIterations ?? 3000), 10) || 3000
+  );
+  const explicitSince = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+  const requestedHoursFromSince = explicitSince ? Math.max(0, (nowSec - explicitSince) / 3600) : null;
+  const requestedHours = requestedHoursFromSince
+    ?? parseWindowHoursParam(url.searchParams.get('window'))
+    ?? (Number.parseInt(url.searchParams.get('hours') || String(defaultHours), 10) || defaultHours);
+  const requestedLimit = Number.parseInt(url.searchParams.get('limit') || String(defaultLimit), 10) || defaultLimit;
+  const requestedBootstrapIterations = Number.parseInt(
+    url.searchParams.get('bootstrap_iterations') || String(defaultBootstrapIterations),
+    10
+  ) || defaultBootstrapIterations;
+  if (requestedHours > maxHours) {
+    return {
+      allowed: false,
+      error: 'live_paper_query_window_too_wide',
+      endpoint,
+      requested_hours: Number(requestedHours.toFixed(3)),
+      max_hours: maxHours,
+      hint: 'Use the materialized endpoint for larger windows, or retry live with hours<=2.',
+    };
+  }
+  if (requestedLimit > maxLimit) {
+    return {
+      allowed: false,
+      error: 'live_paper_query_limit_too_large',
+      endpoint,
+      requested_limit: requestedLimit,
+      max_limit: maxLimit,
+      hint: `Retry with limit<=${maxLimit}.`,
+    };
+  }
+  if (requestedBootstrapIterations > maxBootstrapIterations) {
+    return {
+      allowed: false,
+      error: 'live_paper_query_bootstrap_too_large',
+      endpoint,
+      requested_bootstrap_iterations: requestedBootstrapIterations,
+      max_bootstrap_iterations: maxBootstrapIterations,
+      hint: `Retry with bootstrap_iterations<=${maxBootstrapIterations}.`,
+    };
+  }
+  const boundedHours = Math.max(1, Math.min(requestedHours || defaultHours, maxHours));
+  return {
+    allowed: true,
+    endpoint,
+    window_hours: boundedHours,
+    since_ts: explicitSince || Math.floor(nowSec - boundedHours * 3600),
+    limit: Math.max(1, Math.min(requestedLimit, maxLimit)),
+    bootstrap_iterations: Math.max(1, Math.min(requestedBootstrapIterations, maxBootstrapIterations)),
+    max_hours: maxHours,
+    max_limit: maxLimit,
+    max_bootstrap_iterations: maxBootstrapIterations,
+  };
+}
+
 export function resetPaperReportGateForTest() {
   paperReportBusy = false;
   paperReportCooldownUntil = 0;
@@ -256,6 +333,16 @@ function beginLivePaperReport(res, endpoint) {
     retry_after_ms: gate.retry_after_ms,
   }));
   return null;
+}
+
+function rejectLivePaperQuery(res, guard) {
+  res.writeHead(202, apiJsonHeaders());
+  res.end(JSON.stringify({
+    available: false,
+    materialized: true,
+    live_query: false,
+    ...guard,
+  }, null, 2));
 }
 
 function missedAttributionTimeWhere(sinceTs, alias = '') {
@@ -7377,11 +7464,23 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     let releasePaperReport;
     try {
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 500,
+        maxLimit: 1000,
+        defaultBootstrapIterations: 1000,
+        maxBootstrapIterations: 3000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
       const startedAt = Date.now();
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '10000', 10) || 10000, 20000));
-      const sinceTs = reportSinceTs(url, '72h');
+      const limit = liveGuard.limit;
+      const sinceTs = liveGuard.since_ts;
       const clean = String(url.searchParams.get('clean') || 'all').toLowerCase() === 'quote' ? 'quote' : 'all';
       const quoteGapMaxPctRaw = Number(url.searchParams.get('quote_gap_max_pct') || '8');
       const extraCostPctRaw = Number(url.searchParams.get('extra_cost_pct') || '0');
@@ -7392,7 +7491,7 @@ const server = http.createServer(async (req, res) => {
       const revivalCanary = ['1', 'true', 'yes'].includes(revivalCanaryRaw)
         ? true
         : (['0', 'false', 'no'].includes(revivalCanaryRaw) ? false : null);
-      const bootstrapIterations = Math.max(250, Math.min(parseInt(url.searchParams.get('bootstrap_iterations') || '3000', 10) || 3000, 10000));
+      const bootstrapIterations = Math.max(250, liveGuard.bootstrap_iterations);
       paperDb = new Database(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
       if (!hasTable) {
@@ -7851,9 +7950,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 10000));
-      const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+      let limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') || '1000', 10) || 1000, 10000));
+      let sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
       const requestedHours = Number.parseInt(url.searchParams.get('hours') || '0', 10);
       const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
         || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
@@ -7882,6 +7982,20 @@ const server = http.createServer(async (req, res) => {
         }, null, 2));
         return;
       }
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 1000,
+        maxLimit: 1000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      limit = liveGuard.limit;
+      sinceTs = liveGuard.since_ts;
       paperDb = new Database(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
       if (!hasTable) {
@@ -8057,6 +8171,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
@@ -10236,6 +10351,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const live = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase());
+    let paperDb;
+    let releasePaperReport;
     try {
       const requestedHours = boundedIntParam(url, 'hours', 24, 1, 72);
       const sinceTs = Math.floor(Date.now() / 1000) - requestedHours * 3600;
@@ -10267,10 +10384,21 @@ const server = http.createServer(async (req, res) => {
         }, null, 2));
         return;
       }
-      let paperDb;
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 1000,
+        maxLimit: 1000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
-      const progress = buildDogCatchGoalProgress(paperDb, tableNames, sinceTs, {
+      const progress = buildDogCatchGoalProgress(paperDb, tableNames, liveGuard.since_ts, {
         targetCatchRate: Number(url.searchParams.get('target_capture') || 0.60),
         targetWinRate: Number(url.searchParams.get('target_win_rate') || 0.55),
         targetRoi: Number(url.searchParams.get('target_roi') || 2.0),
@@ -10281,15 +10409,18 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
-        window_hours: requestedHours,
+        window_hours: liveGuard.window_hours,
+        requested_window_hours: requestedHours,
         materialized: false,
         live_query: true,
         ...progress,
       }, null, 2));
-      try { if (paperDb) paperDb.close(); } catch {}
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/fast-lane') {
@@ -10301,10 +10432,24 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
-      const hours = boundedIntParam(url, 'hours', 6, 1, 72);
-      const sinceTs = Math.floor(Date.now() / 1000) - hours * 3600;
-      paperDb = new Database(paperDbPath, { readonly: true });
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 1000,
+        maxLimit: 1000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const hours = liveGuard.window_hours;
+      const sinceTs = liveGuard.since_ts;
+      const requestedHours = Number.parseInt(url.searchParams.get('hours') || String(hours), 10) || hours;
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -10519,6 +10664,7 @@ const server = http.createServer(async (req, res) => {
         db_path: paperDbPath,
         available: tableNames.has('paper_fast_entry_queue'),
         window_hours: hours,
+        requested_window_hours: requestedHours,
         queue_status: queueStatus,
         branch_summary: branchSummary,
         reason_summary: reasonSummary,
@@ -10533,6 +10679,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
