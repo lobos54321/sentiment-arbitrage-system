@@ -99,6 +99,36 @@ function runVolumePreflightOnce() {
   }
 }
 
+function runPaperDbRetentionPreflightOnce() {
+  if (!envFlag('PAPER_DB_RETENTION_ENABLED', true)) return;
+  const dataDir = process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
+  const script = join(process.cwd(), 'scripts', 'paper_db_retention.py');
+  if (!fs.existsSync(script)) return;
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const logPath = join(dataDir, 'paper-db-retention.log');
+    fs.appendFileSync(logPath, `[node-retention] ${new Date().toISOString()} starting ${script}\n`);
+    const result = spawnSync('python3', [script], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PAPER_DB: process.env.PAPER_DB || join(dataDir, 'paper_trades.db'),
+        PAPER_DB_RETENTION_MODE: process.env.PAPER_DB_RETENTION_MODE || 'apply',
+        PAPER_DB_RETENTION_ARCHIVE_DIR: process.env.PAPER_DB_RETENTION_ARCHIVE_DIR || join(dataDir, 'archive', 'paper-db-retention'),
+        PYTHONUNBUFFERED: '1',
+      },
+      encoding: 'utf8',
+      timeout: Number(process.env.PAPER_DB_RETENTION_TIMEOUT_MS || 90000),
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    if (result.stdout) fs.appendFileSync(logPath, result.stdout);
+    if (result.stderr) fs.appendFileSync(logPath, result.stderr);
+    fs.appendFileSync(logPath, `[node-retention] ${new Date().toISOString()} exit status=${result.status} signal=${result.signal || ''} error=${result.error?.message || ''}\n`);
+  } catch (error) {
+    console.error('[node-retention] failed:', error?.message || error);
+  }
+}
+
 function runV27EventLogRecoveryPreflightOnce() {
   if (!envFlag('V27_EVENT_LOG_RECOVERY_PREFLIGHT_ENABLED', true)) return;
   const script = join(process.cwd(), 'scripts', 'v27_event_log_recover.py');
@@ -1681,6 +1711,7 @@ class PremiumChannelSystem {
 
 export async function main() {
   runVolumePreflightOnce();
+  runPaperDbRetentionPreflightOnce();
   runV27EventLogRecoveryPreflightOnce();
 
   const mode = process.argv.includes('--premium') || process.env.PREMIUM_MODE_ENABLED === 'true'
