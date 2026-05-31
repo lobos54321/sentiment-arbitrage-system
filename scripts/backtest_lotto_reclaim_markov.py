@@ -33,6 +33,7 @@ from telegram_lifecycle_markov import build_lifecycle_forecast_snapshot  # noqa:
 SCHEMA_VERSION = "v2.7.0.lotto_reclaim_markov_backtest.v1"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_DAYS = 7
+DEFAULT_MAX_TRAINING_OUTCOMES = 5_000
 MICRO_REASONS = {
     "weak_buying_pressure",
     "momentum_fading",
@@ -601,6 +602,7 @@ def load_training_outcomes(
     *,
     since_ts: float,
     until_ts: float,
+    max_missed_rows: int = DEFAULT_MAX_TRAINING_OUTCOMES,
 ) -> list[Candidate]:
     missed_wanted = (
         "id",
@@ -627,7 +629,7 @@ def load_training_outcomes(
         "payload_json",
     )
     outcomes: list[Candidate] = []
-    missed_scan_limit = 50_000
+    missed_scan_limit = max(100, min(int(max_missed_rows), 50_000))
     for row in _select_rows(
         db,
         "paper_missed_signal_attribution",
@@ -854,6 +856,7 @@ def build_backtest_report(
     min_edge: float = ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE,
     include_rows: bool = False,
     max_candidates: int | None = None,
+    max_training_outcomes: int = DEFAULT_MAX_TRAINING_OUTCOMES,
     full_markov: bool = False,
 ) -> dict[str, Any]:
     db_path = Path(db_path)
@@ -872,7 +875,12 @@ def build_backtest_report(
     else:
         first_candidate_ts = candidates[0].decision_ts if candidates else since_ts
         training_since_ts = float(first_candidate_ts) - ptm.LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC
-        training_outcomes = load_training_outcomes(db, since_ts=training_since_ts, until_ts=now_ts)
+        training_outcomes = load_training_outcomes(
+            db,
+            since_ts=training_since_ts,
+            until_ts=now_ts,
+            max_missed_rows=max_training_outcomes,
+        )
     rows: list[dict[str, Any]] = []
     outcome_counts: Counter = Counter()
     cohort_outcome_counts: dict[str, Counter] = defaultdict(Counter)
@@ -960,6 +968,7 @@ def build_backtest_report(
         "candidate_count_before_limit": total_candidates,
         "candidate_scan_limited": max_candidates is not None and max_candidates > 0,
         "candidate_raw_scan_limit": candidate_raw_scan_limit(max_candidates),
+        "max_training_outcomes": max_training_outcomes,
         "training_mode": "full_lifecycle_markov" if full_markov else "fast_empirical_absorbing_markov",
         "training_event_count": len(training_events) if full_markov else len(training_outcomes),
         "paired_sample_n": len(rows),
@@ -1039,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-edge", type=float, default=ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE)
     parser.add_argument("--include-rows", action="store_true")
     parser.add_argument("--max-candidates", type=int, default=None)
+    parser.add_argument("--max-training-outcomes", type=int, default=DEFAULT_MAX_TRAINING_OUTCOMES)
     parser.add_argument("--full-markov", action="store_true", help="Use the slower full lifecycle Markov snapshot per candidate")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     parser.add_argument("--json-out", default=None, help="Write full JSON report to a file")
@@ -1055,6 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
         min_edge=args.min_edge,
         include_rows=args.include_rows,
         max_candidates=args.max_candidates,
+        max_training_outcomes=args.max_training_outcomes,
         full_markov=args.full_markov,
     )
     if args.json_out:

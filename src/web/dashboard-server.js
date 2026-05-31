@@ -7777,6 +7777,7 @@ const server = http.createServer(async (req, res) => {
       const days = boundedIntParam(url, 'days', 7, 1, 30);
       const minSample = boundedIntParam(url, 'min_sample', 20, 0, 5000);
       const maxCandidates = boundedIntParam(url, 'max_candidates', 1000, 1, 10000);
+      const maxTrainingOutcomes = boundedIntParam(url, 'max_training_outcomes', 5000, 100, 50000);
       const includeRows = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_rows') || '').toLowerCase());
       const parseBoundedFloat = (name, defaultValue, minValue, maxValue) => {
         const raw = Number.parseFloat(url.searchParams.get(name) || String(defaultValue));
@@ -7792,6 +7793,7 @@ const server = http.createServer(async (req, res) => {
         '--max-stop-prob', String(parseBoundedFloat('max_stop_prob', 0.55, 0, 1)),
         '--min-edge', String(parseBoundedFloat('min_edge', 0.02, -1, 1)),
         '--max-candidates', String(maxCandidates),
+        '--max-training-outcomes', String(maxTrainingOutcomes),
         '--json',
       ];
       if (includeRows) args.push('--include-rows');
