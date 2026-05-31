@@ -619,7 +619,8 @@ def active_queue_depth(db):
 def existing_recent_queue_row(db, token_ca, now_ts):
     return db.execute(
         """
-        SELECT id, priority, status, entry_branch, status_history_json, first_error, first_error_at
+        SELECT id, priority, status, entry_branch, status_history_json,
+               first_error, first_error_at, last_error
         FROM paper_fast_entry_queue
         WHERE token_ca = ?
           AND updated_at >= ?
@@ -632,6 +633,87 @@ def existing_recent_queue_row(db, token_ca, now_ts):
         """,
         (token_ca, now_ts - FAST_ENTRY_QUEUE_DEDUPE_SEC),
     ).fetchone()
+
+
+def queue_row_reactivation_allowed(status, source_type=None, branch=None):
+    status_l = str(status or "").lower()
+    if status_l in {"watch_only", "counterfactual_only", "expired"}:
+        return True
+    source_l = str(source_type or "").lower()
+    branch_l = str(branch or "").lower()
+    reclaim_like = (
+        branch_l in CLEAN_DOG_RECLAIM_BRANCHES
+        or any(marker in source_l or marker in branch_l for marker in ("rescue", "reclaim", "recovery", "stale_refresh"))
+    )
+    return reclaim_like and status_l in {"rejected", "quote_failed", "skipped", "rate_limited"}
+
+
+def reactivate_queue_row(
+    db,
+    existing,
+    *,
+    source_type,
+    entry_mode_hint,
+    branch,
+    hard_gate_status=None,
+    source_resonance_cohort=None,
+    payload=None,
+    priority=50,
+    session=None,
+    now_ts=None,
+):
+    if existing is None or not queue_row_reactivation_allowed(existing["status"], source_type, branch):
+        return False
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    existing_priority = int(existing["priority"] or 999)
+    new_priority = min(int(priority), existing_priority)
+    first_error = existing["first_error"] or existing["last_error"]
+    first_error_at = existing["first_error_at"] if first_error else None
+    history = status_history_append(
+        existing["status_history_json"],
+        status="queued",
+        error=None,
+        now_ts=now_ts,
+    )
+    db.execute(
+        """
+        UPDATE paper_fast_entry_queue
+        SET priority = ?, source_type = ?, entry_mode_hint = ?, entry_branch = ?,
+            hard_gate_status = COALESCE(?, hard_gate_status),
+            source_resonance_cohort = COALESCE(?, source_resonance_cohort),
+            payload_json = ?,
+            status = 'queued',
+            claimed_by = NULL,
+            claimed_at = NULL,
+            last_error = NULL,
+            first_error = ?,
+            first_error_at = ?,
+            status_history_json = ?,
+            market_session = COALESCE(market_session, ?),
+            decision_deadline_ts = ?,
+            quote_deadline_ts = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            new_priority,
+            source_type,
+            entry_mode_hint,
+            branch,
+            hard_gate_status,
+            source_resonance_cohort,
+            json.dumps(payload or {}, ensure_ascii=False),
+            first_error,
+            first_error_at,
+            history,
+            session,
+            now_ts + FAST_ENTRY_RETRY_LATENCY_SEC,
+            now_ts + FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+            now_ts,
+            existing["id"],
+        ),
+    )
+    return db.execute("SELECT changes() AS c").fetchone()["c"] > 0
 
 
 def candidate_is_too_stale(receive_ts, now_ts, source_type):
@@ -665,27 +747,35 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
             if existing is not None:
                 existing_status = str(existing["status"] or "")
                 existing_priority = int(existing["priority"] or 999)
-                promote_inactive = existing_status in ("watch_only", "counterfactual_only")
+                promote_inactive = queue_row_reactivation_allowed(existing_status, source_type, branch)
                 improve_priority = int(priority) < existing_priority
-                if improve_priority or promote_inactive:
-                    new_status = "queued" if promote_inactive else existing_status
-                    new_priority = min(int(priority), existing_priority)
-                    history = status_history_append(
-                        existing["status_history_json"],
-                        status=new_status,
-                        error=None,
+                if promote_inactive:
+                    promoted = reactivate_queue_row(
+                        db,
+                        existing,
+                        source_type=source_type,
+                        entry_mode_hint=entry_mode_hint,
+                        branch=branch,
+                        hard_gate_status=hard_gate_status,
+                        source_resonance_cohort=source_resonance_cohort,
+                        payload=payload,
+                        priority=priority,
+                        session=session,
                         now_ts=now_ts,
                     )
+                    db.commit()
+                    if promoted:
+                        return True
+                elif improve_priority:
+                    new_priority = min(int(priority), existing_priority)
+                    history = status_history_append(existing["status_history_json"], status=existing_status, now_ts=now_ts)
                     db.execute(
                         """
                         UPDATE paper_fast_entry_queue
                         SET priority = ?, source_type = ?, entry_mode_hint = ?, entry_branch = ?,
                             hard_gate_status = COALESCE(?, hard_gate_status),
                             source_resonance_cohort = COALESCE(?, source_resonance_cohort),
-                            payload_json = ?,
-                            status = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN 'queued' ELSE status END,
-                            last_error = CASE WHEN status IN ('watch_only', 'counterfactual_only') THEN NULL ELSE last_error END,
-                            status_history_json = ?,
+                            payload_json = ?, status_history_json = ?,
                             market_session = COALESCE(market_session, ?),
                             updated_at = ?
                         WHERE id = ?
@@ -705,8 +795,6 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                         ),
                     )
                     db.commit()
-                    if promote_inactive:
-                        return True
                 return False
             db.execute(
                 """
@@ -743,6 +831,30 @@ def enqueue_fast_entry(db, *, source_type, token_ca, symbol=None, signal_ts=None
                 ),
             )
             inserted = db.execute("SELECT changes() AS c").fetchone()["c"] > 0
+            if not inserted:
+                existing_key = db.execute(
+                    """
+                    SELECT id, priority, status, entry_branch, status_history_json,
+                           first_error, first_error_at, last_error
+                    FROM paper_fast_entry_queue
+                    WHERE queue_key = ?
+                    """,
+                    (key,),
+                ).fetchone()
+                if reactivate_queue_row(
+                    db,
+                    existing_key,
+                    source_type=source_type,
+                    entry_mode_hint=entry_mode_hint,
+                    branch=branch,
+                    hard_gate_status=hard_gate_status,
+                    source_resonance_cohort=source_resonance_cohort,
+                    payload=payload,
+                    priority=priority,
+                    session=session,
+                    now_ts=now_ts,
+                ):
+                    inserted = True
             db.commit()
         return inserted
     except sqlite3.OperationalError as exc:
@@ -1514,7 +1626,12 @@ def mark_queue(db, row_id, status, error=None):
     with SQLITE_WRITE_LOCK:
         now_ts = time.time()
         row = db.execute(
-            "SELECT first_error, first_error_at, status_history_json FROM paper_fast_entry_queue WHERE id = ?",
+            """
+            SELECT first_error, first_error_at, status_history_json,
+                   token_ca, source_type, entry_branch
+            FROM paper_fast_entry_queue
+            WHERE id = ?
+            """,
             (row_id,),
         ).fetchone()
         first_error = (row["first_error"] if row else None) or error
@@ -1530,6 +1647,16 @@ def mark_queue(db, row_id, status, error=None):
             (status, error, first_error, first_error_at, history, now_ts, row_id),
         )
         db.commit()
+    if row:
+        log.info(
+            "[FAST_QUEUE_STATUS] id=%s token=%s source=%s branch=%s status=%s reason=%s",
+            row_id,
+            row["token_ca"],
+            row["source_type"],
+            row["entry_branch"],
+            status,
+            error,
+        )
 
 
 def refresh_retry_watch(db, *, now_ts=None):
@@ -1818,6 +1945,8 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
             ),
         )
         trade_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        db.commit()
+    try:
         ptm.record_decision_event(
             db,
             component="paper_fast_lane",
@@ -1843,6 +1972,8 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
             },
         )
         db.commit()
+    except Exception:
+        log.debug("fast lane entry audit failed token=%s trade_id=%s", token_ca, trade_id, exc_info=True)
     return trade_id
 
 

@@ -175,6 +175,62 @@ def test_fast_queue_promotes_recent_watch_observation_to_queued(tmp_path):
     assert claimed["token_ca"] == "TokenWatchUpgrade"
 
 
+def test_fast_queue_reactivates_old_reclaim_watch_observation_queue_key(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    signal_ts = now - 600
+
+    assert fast.record_fast_lane_observation(
+        db,
+        source_type="ttl_final_reclaim_fast",
+        token_ca="TokenOldWatch",
+        symbol="OLD",
+        signal_ts=signal_ts,
+        receive_ts=signal_ts,
+        entry_branch="tracking_ttl_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="lotto_not_ath_reclaim_tiny_probe",
+        priority=18,
+        status="watch_only",
+        reason="clean_dog_reclaim_recovery_tradable_signal_stale_watch_only",
+        now_ts=now - fast.FAST_ENTRY_QUEUE_DEDUPE_SEC - 10,
+    )
+
+    promoted = fast.enqueue_fast_entry(
+        db,
+        source_type="ttl_final_reclaim_fast",
+        token_ca="TokenOldWatch",
+        symbol="OLD",
+        signal_ts=signal_ts,
+        receive_ts=signal_ts,
+        entry_branch="tracking_ttl_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="lotto_not_ath_reclaim_tiny_probe",
+        priority=fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY,
+        payload={"direct_fill_reason": "tracking_ttl_reclaim_quote_clean_tiny_probe"},
+        now_ts=now,
+    )
+
+    assert promoted is True
+    row = db.execute(
+        """
+        SELECT status, priority, source_type, entry_branch, entry_mode_hint,
+               last_error, first_error, status_history_json
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenOldWatch'
+        """
+    ).fetchone()
+    assert row["status"] == "queued"
+    assert row["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
+    assert row["source_type"] == "ttl_final_reclaim_fast"
+    assert row["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
+    assert row["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert row["last_error"] is None
+    assert row["first_error"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
+    history = json.loads(row["status_history_json"])
+    assert history[-1]["status"] == "queued"
+
+
 def test_queue_pressure_skips_low_priority_but_keeps_high_priority(tmp_path, monkeypatch):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)
@@ -309,6 +365,70 @@ def test_process_queue_item_blocks_when_v27_mode_readiness_missing(tmp_path, mon
     ).fetchone()
     assert queue["status"] == "watch_only"
     assert queue["last_error"] == "v27_mode_readiness_missing"
+
+
+def test_process_queue_item_enters_lotto_not_ath_reclaim_when_gates_pass(tmp_path, monkeypatch):
+    monkeypatch.setenv("V27_MODE_READINESS_PATH", str(write_mode_readiness(tmp_path / "mode_readiness.json")))
+    fast.evaluate_entry_mode_quality.__globals__["_SHADOW_UNTIL"].clear()
+    db_path = tmp_path / "paper.db"
+    db = fast.ptm.init_paper_db(str(db_path))
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+
+    def fake_execution(*_args, **_kwargs):
+        return {
+            "success": True,
+            "effectivePrice": 0.000001,
+            "quotedOutAmountRaw": "2000000",
+            "outputDecimals": 6,
+            "quoteTs": now * 1000,
+            "routePlan": [],
+        }
+
+    monkeypatch.setattr(fast.ptm, "simulate_entry_execution", fake_execution)
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="ttl_final_reclaim_fast",
+        token_ca="TokenEnter",
+        symbol="ENT",
+        signal_ts=now - 1200,
+        receive_ts=now - 1200,
+        entry_branch="tracking_ttl_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="lotto_not_ath_reclaim_tiny_probe",
+        trigger_price=0.000001,
+        priority=fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY,
+        payload={
+            "tradable_missed": 1,
+            "would_stop_before_peak": 0,
+            "recovery_quote_clean": True,
+            "last_tradable_ts": now,
+            "last_clean_quote_ts": now,
+            "executable_peak_pnl": 0.8,
+            "route": "LOTTO",
+        },
+        now_ts=now,
+    )
+    row = fast.claim_queue_item(db, "worker-1")
+
+    fast.process_queue_item(db, row, "worker-1")
+
+    queue = db.execute(
+        "SELECT status, last_error FROM paper_fast_entry_queue WHERE token_ca = 'TokenEnter'"
+    ).fetchone()
+    trade = db.execute(
+        """
+        SELECT replay_source, entry_mode, entry_branch, signal_route, position_size_sol
+        FROM paper_trades
+        WHERE token_ca = 'TokenEnter'
+        """
+    ).fetchone()
+    assert queue["status"] == "entered"
+    assert queue["last_error"] is None
+    assert trade["replay_source"] == "paper_fast_lane"
+    assert trade["entry_mode"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert trade["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
+    assert trade["signal_route"] == "ttl_final_reclaim_fast"
+    assert trade["position_size_sol"] <= fast.FAST_ENTRY_SIZE_SOL
 
 
 def test_entry_guard_rejects_hard_drift():
