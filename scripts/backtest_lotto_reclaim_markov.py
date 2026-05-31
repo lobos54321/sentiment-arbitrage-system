@@ -418,8 +418,22 @@ def _candidate_from_trade(row: sqlite3.Row) -> Candidate | None:
     )
 
 
-def load_candidates(db: sqlite3.Connection, *, since_ts: float, until_ts: float | None = None) -> list[Candidate]:
+def candidate_raw_scan_limit(limit: int | None) -> int | None:
+    if limit is None or int(limit) <= 0:
+        return None
+    return min(50_000, max(1_000, int(limit) * 10))
+
+
+def load_candidates(
+    db: sqlite3.Connection,
+    *,
+    since_ts: float,
+    until_ts: float | None = None,
+    limit: int | None = None,
+) -> list[Candidate]:
     candidates: list[Candidate] = []
+    raw_limit = candidate_raw_scan_limit(limit)
+    missed_scan_since_ts = max(0.0, float(since_ts) - 24 * 60 * 60)
     missed_wanted = (
         "id",
         "created_event_ts",
@@ -444,16 +458,29 @@ def load_candidates(db: sqlite3.Connection, *, since_ts: float, until_ts: float 
         "max_pnl_recorded",
         "payload_json",
     )
+    missed_where = "created_event_ts >= ?"
+    missed_params: tuple[Any, ...] = (missed_scan_since_ts,)
+    if until_ts is not None:
+        missed_where += " AND created_event_ts <= ?"
+        missed_params = (*missed_params, until_ts)
+    missed_order = "created_event_ts ASC, id ASC"
+    if raw_limit is not None:
+        missed_order = "created_event_ts DESC, id DESC LIMIT ?"
+        missed_params = (*missed_params, raw_limit)
     for row in _select_rows(
         db,
         "paper_missed_signal_attribution",
         missed_wanted,
-        where_sql="COALESCE(first_tradable_ts, baseline_ts, signal_ts, created_event_ts) >= ?",
-        params=(since_ts,),
-        order_sql="COALESCE(first_tradable_ts, baseline_ts, signal_ts, created_event_ts) ASC, id ASC",
+        where_sql=missed_where,
+        params=missed_params,
+        order_sql=missed_order,
     ):
         candidate = _candidate_from_missed(row)
-        if candidate and (until_ts is None or candidate.decision_ts <= until_ts):
+        if (
+            candidate
+            and candidate.decision_ts >= since_ts
+            and (until_ts is None or candidate.decision_ts <= until_ts)
+        ):
             candidates.append(candidate)
 
     trade_wanted = (
@@ -473,16 +500,25 @@ def load_candidates(db: sqlite3.Connection, *, since_ts: float, until_ts: float 
         "monitor_state_json",
         "entry_execution_audit_json",
     )
+    trade_where = "entry_ts >= ?"
+    trade_params: tuple[Any, ...] = (since_ts,)
+    if until_ts is not None:
+        trade_where += " AND entry_ts <= ?"
+        trade_params = (*trade_params, until_ts)
+    trade_order = "entry_ts ASC, id ASC"
+    if raw_limit is not None:
+        trade_order = "entry_ts DESC, id DESC LIMIT ?"
+        trade_params = (*trade_params, raw_limit)
     for row in _select_rows(
         db,
         "paper_trades",
         trade_wanted,
-        where_sql="entry_ts >= ?",
-        params=(since_ts,),
-        order_sql="entry_ts ASC, id ASC",
+        where_sql=trade_where,
+        params=trade_params,
+        order_sql=trade_order,
     ):
         candidate = _candidate_from_trade(row)
-        if candidate and (until_ts is None or candidate.decision_ts <= until_ts):
+        if candidate:
             candidates.append(candidate)
 
     deduped: dict[tuple[str, str, int, str, str], Candidate] = {}
@@ -720,7 +756,7 @@ def build_backtest_report(
     db.row_factory = sqlite3.Row
     now_ts = float(until_ts or time.time())
     since_ts = float(since_ts if since_ts is not None else now_ts - int(days) * 24 * 60 * 60)
-    candidates = load_candidates(db, since_ts=since_ts, until_ts=until_ts)
+    candidates = load_candidates(db, since_ts=since_ts, until_ts=until_ts, limit=max_candidates)
     total_candidates = len(candidates)
     if max_candidates is not None and max_candidates > 0:
         candidates = candidates[-int(max_candidates):]
@@ -806,6 +842,8 @@ def build_backtest_report(
         },
         "candidate_count": len(candidates),
         "candidate_count_before_limit": total_candidates,
+        "candidate_scan_limited": max_candidates is not None and max_candidates > 0,
+        "candidate_raw_scan_limit": candidate_raw_scan_limit(max_candidates),
         "training_mode": "full_lifecycle_markov" if full_markov else "fast_empirical_absorbing_markov",
         "training_event_count": len(training_events) if full_markov else len(training_outcomes),
         "paired_sample_n": len(rows),
