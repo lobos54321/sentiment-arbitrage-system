@@ -33,7 +33,7 @@ from telegram_lifecycle_markov import build_lifecycle_forecast_snapshot  # noqa:
 SCHEMA_VERSION = "v2.7.0.lotto_reclaim_markov_backtest.v1"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_DAYS = 7
-DEFAULT_MAX_TRAINING_OUTCOMES = 5_000
+DEFAULT_MAX_TRAINING_OUTCOMES = 2_000
 MICRO_REASONS = {
     "weak_buying_pressure",
     "momentum_fading",
