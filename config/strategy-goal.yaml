@@ -1,0 +1,26 @@
+schema_version: v1.strategy_reflection_goal
+
+business_goal:
+  primary: catch_gold_silver_bronze_dogs
+  mode: paper
+  target_capture_rate_gold_silver: 0.55
+  target_winner_clean_quote_recall: 0.60
+  target_peak30_capture: 0.30
+
+risk_limits:
+  max_daily_loss_sol: 0.05
+  max_canary_loss_streak: 3
+  max_drawdown_pct: 8
+  min_sample_n_before_promotion: 30
+
+reflection:
+  cadence: every_24h_or_20_closed_trades
+  one_variable_only: true
+  shadow_first: true
+  evidence_windows_hours: [24, 72, 168]
+
+candidate_scope:
+  default_entry_mode: lotto_not_ath_reclaim_tiny_probe
+  allowed_entry_modes: [lotto_not_ath_reclaim_tiny_probe, lotto_micro_reclaim_tiny_probe]
+  allowed_variables: [markov_green_required, quote_clean_max_gap_pct, max_canary_per_hour, position_size_sol, stale_reclaim_max_age_sec, mc0_gate_fallback_enabled]
+  forbidden_actions: [live_trade, multi_variable_change, full_open_without_canary, unverified_external_signal]

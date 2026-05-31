@@ -6,6 +6,7 @@ data/*.db
 data/*.db-journal
 data/*.json
 data/reviews/
+data/strategy_reflection/
 !data/paper-strategy-registry.json
 npm-debug.log
 .DS_Store
