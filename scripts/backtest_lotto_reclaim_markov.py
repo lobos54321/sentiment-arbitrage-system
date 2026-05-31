@@ -26,6 +26,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import paper_trade_monitor as ptm  # noqa: E402
+from telegram_lifecycle_markov import build_lifecycle_forecast_snapshot  # noqa: E402
 
 
 SCHEMA_VERSION = "v2.7.0.lotto_reclaim_markov_backtest.v1"
@@ -495,6 +496,61 @@ def load_candidates(db: sqlite3.Connection, *, since_ts: float, until_ts: float 
     return sorted(deduped.values(), key=lambda item: (item.decision_ts, item.candidate_id))
 
 
+def load_training_events(db: sqlite3.Connection, *, until_ts: float) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    events.extend(ptm._markov_reclaim_events_from_trades(db, now_ts=until_ts))
+    events.extend(ptm._markov_reclaim_events_from_decisions(db, now_ts=until_ts))
+    return events
+
+
+def forecast_from_events(
+    events: list[dict[str, Any]],
+    candidate: Candidate,
+) -> dict[str, Any]:
+    try:
+        snapshot = build_lifecycle_forecast_snapshot(
+            events,
+            start_state="RECLAIM_CONFIRMED",
+            cutoff_ts=candidate.decision_ts,
+            horizons=(1, 2, 3, 5, 15),
+            max_absorption_steps=60,
+            model_snapshot_id=f"lotto_reclaim_markov_backtest_{int(candidate.decision_ts)}",
+        )
+        absorption = snapshot.get("absorption_forecast") or {}
+        p_peak = _safe_float(absorption.get("p_absorb_peak30"), 0.0) or 0.0
+        p_stop = _safe_float(absorption.get("p_absorb_stop_before_peak"), 0.0) or 0.0
+        return {
+            "entry_mode": candidate.entry_mode,
+            "policy_version": ptm.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            "model_role": "lotto_reclaim_walk_forward_backtest",
+            "base_model_entry_gate_allowed": False,
+            "model_family": snapshot.get("model_family"),
+            "model_snapshot_id": snapshot.get("model_snapshot_id"),
+            "start_state": snapshot.get("start_state"),
+            "sample_n": int(snapshot.get("sample_n") or 0),
+            "event_count": len(events),
+            "p_absorb_peak30": p_peak,
+            "p_absorb_stop_before_peak": p_stop,
+            "p_absorb_stale_dead": _safe_float(absorption.get("p_absorb_stale_dead"), 0.0) or 0.0,
+            "p_absorb_toxic_dead": _safe_float(absorption.get("p_absorb_toxic_dead"), 0.0) or 0.0,
+            "p_absorb_crash_dead": _safe_float(absorption.get("p_absorb_crash_dead"), 0.0) or 0.0,
+            "unresolved_probability_after_horizon": _safe_float(
+                absorption.get("unresolved_probability_after_horizon"),
+                0.0,
+            ) or 0.0,
+        }
+    except Exception as exc:
+        return {
+            "entry_mode": candidate.entry_mode,
+            "policy_version": ptm.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            "model_role": "lotto_reclaim_walk_forward_backtest",
+            "base_model_entry_gate_allowed": False,
+            "sample_n": 0,
+            "event_count": len(events),
+            "error": str(exc),
+        }
+
+
 def markov_bucket(
     forecast: Mapping[str, Any] | None,
     *,
@@ -568,6 +624,7 @@ def build_backtest_report(
     max_stop_prob: float = ptm.LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB,
     min_edge: float = ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE,
     include_rows: bool = False,
+    max_candidates: int | None = None,
 ) -> dict[str, Any]:
     db_path = Path(db_path)
     db = sqlite3.connect(str(db_path))
@@ -575,20 +632,13 @@ def build_backtest_report(
     now_ts = float(until_ts or time.time())
     since_ts = float(since_ts if since_ts is not None else now_ts - int(days) * 24 * 60 * 60)
     candidates = load_candidates(db, since_ts=since_ts, until_ts=until_ts)
+    total_candidates = len(candidates)
+    if max_candidates is not None and max_candidates > 0:
+        candidates = candidates[-int(max_candidates):]
+    training_events = load_training_events(db, until_ts=now_ts)
     rows: list[dict[str, Any]] = []
     for candidate in candidates:
-        forecast = ptm.build_lotto_reclaim_markov_forecast(
-            db,
-            entry_mode=candidate.entry_mode,
-            pending={
-                "token_ca": candidate.token_ca,
-                "symbol": candidate.symbol,
-                "entry_mode": candidate.entry_mode,
-                "entry_branch": candidate.blocker_family,
-                "source_reject_reason": candidate.blocker_family,
-            },
-            now_ts=candidate.decision_ts,
-        ) or {}
+        forecast = forecast_from_events(training_events, candidate)
         bucket = markov_bucket(
             forecast,
             min_sample=min_sample,
@@ -648,6 +698,8 @@ def build_backtest_report(
             "min_edge": min_edge,
         },
         "candidate_count": len(candidates),
+        "candidate_count_before_limit": total_candidates,
+        "training_event_count": len(training_events),
         "paired_sample_n": len(rows),
         "overall": _summary(rows),
         "by_markov_bucket": _group_summary(rows, "markov_bucket"),
@@ -724,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-stop-prob", type=float, default=ptm.LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB)
     parser.add_argument("--min-edge", type=float, default=ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE)
     parser.add_argument("--include-rows", action="store_true")
+    parser.add_argument("--max-candidates", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     parser.add_argument("--json-out", default=None, help="Write full JSON report to a file")
     args = parser.parse_args(argv)
@@ -738,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
         max_stop_prob=args.max_stop_prob,
         min_edge=args.min_edge,
         include_rows=args.include_rows,
+        max_candidates=args.max_candidates,
     )
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
