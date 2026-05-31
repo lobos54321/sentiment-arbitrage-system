@@ -82,7 +82,7 @@ def _db(path):
     return db
 
 
-def _insert_trade(db, token, entry_ts, *, peak, pnl=None, mode="lotto_micro_reclaim_tiny_probe"):
+def _insert_trade(db, token, entry_ts, *, peak, pnl=None, mode="lotto_micro_reclaim_tiny_probe", exit_delay=600):
     db.execute(
         """
         INSERT INTO paper_trades(
@@ -94,7 +94,7 @@ def _insert_trade(db, token, entry_ts, *, peak, pnl=None, mode="lotto_micro_recl
             token,
             token[:6],
             entry_ts,
-            entry_ts + 600,
+            entry_ts + exit_delay,
             "take_profit" if peak >= 0.30 else "hard_sl",
             pnl if pnl is not None else peak,
             peak,
@@ -129,6 +129,23 @@ def test_lotto_reclaim_markov_backtest_uses_only_past_training_rows(tmp_path):
     assert report["paired_sample_n"] == 1
     row = report["rows"][0]
     assert row["token_ca"] == "CandidateA"
+    assert row["forecast"]["sample_n"] == 0
+    assert row["markov_bucket"] == "insufficient"
+
+
+def test_lotto_reclaim_markov_backtest_uses_only_known_outcomes(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _db(db_path)
+    _insert_trade(db, "PastEntryFutureExit", 500, peak=0.80, exit_delay=700)
+    _insert_missed_candidate(db, "CandidateKnownOnly", 1_000, peak=0.50)
+    db.commit()
+    db.close()
+
+    report = build_backtest_report(db_path, since_ts=900, until_ts=1_300, min_sample=1, include_rows=True)
+
+    assert report["paired_sample_n"] == 1
+    row = report["rows"][0]
+    assert row["token_ca"] == "CandidateKnownOnly"
     assert row["forecast"]["sample_n"] == 0
     assert row["markov_bucket"] == "insufficient"
 

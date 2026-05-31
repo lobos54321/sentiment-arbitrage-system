@@ -15,6 +15,7 @@ import math
 import sqlite3
 import sys
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -410,6 +411,7 @@ def _candidate_from_trade(row: sqlite3.Row) -> Candidate | None:
         stop_before_peak=bool(stop),
         source_payload={
             "entry_branch": reason,
+            "exit_ts": _row_value(row, "exit_ts"),
             "exit_reason": _row_value(row, "exit_reason"),
             "replay_source": _row_value(row, "replay_source"),
         },
@@ -551,6 +553,92 @@ def forecast_from_events(
         }
 
 
+def load_training_outcomes(
+    db: sqlite3.Connection,
+    *,
+    since_ts: float,
+    until_ts: float,
+) -> list[Candidate]:
+    trade_wanted = (
+        "id",
+        "token_ca",
+        "symbol",
+        "entry_ts",
+        "exit_ts",
+        "exit_reason",
+        "pnl_pct",
+        "peak_pnl",
+        "signal_route",
+        "signal_type",
+        "entry_mode",
+        "entry_branch",
+        "replay_source",
+        "monitor_state_json",
+        "entry_execution_audit_json",
+    )
+    outcomes: list[Candidate] = []
+    for row in _select_rows(
+        db,
+        "paper_trades",
+        trade_wanted,
+        where_sql="entry_ts >= ? AND entry_ts <= ? AND exit_ts IS NOT NULL AND exit_ts <= ?",
+        params=(since_ts, until_ts, until_ts),
+        order_sql="exit_ts ASC, entry_ts ASC, id ASC",
+    ):
+        candidate = _candidate_from_trade(row)
+        if candidate:
+            outcomes.append(candidate)
+    return sorted(outcomes, key=lambda item: (outcome_known_ts(item), item.decision_ts, item.candidate_id))
+
+
+def outcome_known_ts(candidate: Candidate) -> float:
+    return float(_safe_float((candidate.source_payload or {}).get("exit_ts"), candidate.decision_ts) or candidate.decision_ts)
+
+
+def outcome_state(candidate: Candidate) -> str:
+    exit_reason = str((candidate.source_payload or {}).get("exit_reason") or "").lower()
+    if candidate.peak30_before_stop:
+        return "PEAK30"
+    if any(marker in exit_reason for marker in ("rug", "toxic", "honeypot", "blacklist")):
+        return "TOXIC_DEAD"
+    if any(marker in exit_reason for marker in ("crash", "panic", "rug_pull")):
+        return "CRASH_DEAD"
+    if any(marker in exit_reason for marker in ("timeout", "stale", "no_follow", "expired")):
+        return "STALE_DEAD"
+    if candidate.stop_before_peak or (candidate.pnl_proxy is not None and candidate.pnl_proxy <= 0):
+        return "STOP_BEFORE_PEAK"
+    return "TERMINAL_DEAD"
+
+
+def forecast_from_outcome_counts(counts: Counter, candidate: Candidate) -> dict[str, Any]:
+    sample_n = int(sum(counts.values()))
+    if sample_n <= 0:
+        p_peak = p_stop = p_stale = p_toxic = p_crash = 0.0
+    else:
+        p_peak = float(counts.get("PEAK30", 0)) / sample_n
+        p_stop = float(counts.get("STOP_BEFORE_PEAK", 0)) / sample_n
+        p_stale = float(counts.get("STALE_DEAD", 0)) / sample_n
+        p_toxic = float(counts.get("TOXIC_DEAD", 0)) / sample_n
+        p_crash = float(counts.get("CRASH_DEAD", 0)) / sample_n
+    return {
+        "entry_mode": candidate.entry_mode,
+        "policy_version": ptm.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "model_role": "lotto_reclaim_walk_forward_backtest",
+        "base_model_entry_gate_allowed": False,
+        "model_family": "lotto_reclaim_empirical_absorbing_markov_fast",
+        "model_snapshot_id": f"lotto_reclaim_empirical_backtest_{int(candidate.decision_ts)}",
+        "start_state": "RECLAIM_CONFIRMED",
+        "sample_n": sample_n,
+        "event_count": sample_n,
+        "p_absorb_peak30": p_peak,
+        "p_absorb_stop_before_peak": p_stop,
+        "p_absorb_stale_dead": p_stale,
+        "p_absorb_toxic_dead": p_toxic,
+        "p_absorb_crash_dead": p_crash,
+        "unresolved_probability_after_horizon": 0.0,
+    }
+
+
 def markov_bucket(
     forecast: Mapping[str, Any] | None,
     *,
@@ -625,6 +713,7 @@ def build_backtest_report(
     min_edge: float = ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE,
     include_rows: bool = False,
     max_candidates: int | None = None,
+    full_markov: bool = False,
 ) -> dict[str, Any]:
     db_path = Path(db_path)
     db = sqlite3.connect(str(db_path))
@@ -635,10 +724,28 @@ def build_backtest_report(
     total_candidates = len(candidates)
     if max_candidates is not None and max_candidates > 0:
         candidates = candidates[-int(max_candidates):]
-    training_events = load_training_events(db, until_ts=now_ts)
+    training_events: list[dict[str, Any]] = []
+    training_outcomes: list[Candidate] = []
+    if full_markov:
+        training_events = load_training_events(db, until_ts=now_ts)
+    else:
+        first_candidate_ts = candidates[0].decision_ts if candidates else since_ts
+        training_since_ts = float(first_candidate_ts) - ptm.LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC
+        training_outcomes = load_training_outcomes(db, since_ts=training_since_ts, until_ts=now_ts)
     rows: list[dict[str, Any]] = []
+    outcome_counts: Counter = Counter()
+    outcome_index = 0
     for candidate in candidates:
-        forecast = forecast_from_events(training_events, candidate)
+        if full_markov:
+            forecast = forecast_from_events(training_events, candidate)
+        else:
+            while (
+                outcome_index < len(training_outcomes)
+                and outcome_known_ts(training_outcomes[outcome_index]) < candidate.decision_ts
+            ):
+                outcome_counts[outcome_state(training_outcomes[outcome_index])] += 1
+                outcome_index += 1
+            forecast = forecast_from_outcome_counts(outcome_counts, candidate)
         bucket = markov_bucket(
             forecast,
             min_sample=min_sample,
@@ -699,7 +806,8 @@ def build_backtest_report(
         },
         "candidate_count": len(candidates),
         "candidate_count_before_limit": total_candidates,
-        "training_event_count": len(training_events),
+        "training_mode": "full_lifecycle_markov" if full_markov else "fast_empirical_absorbing_markov",
+        "training_event_count": len(training_events) if full_markov else len(training_outcomes),
         "paired_sample_n": len(rows),
         "overall": _summary(rows),
         "by_markov_bucket": _group_summary(rows, "markov_bucket"),
@@ -777,6 +885,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-edge", type=float, default=ptm.LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE)
     parser.add_argument("--include-rows", action="store_true")
     parser.add_argument("--max-candidates", type=int, default=None)
+    parser.add_argument("--full-markov", action="store_true", help="Use the slower full lifecycle Markov snapshot per candidate")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text summary")
     parser.add_argument("--json-out", default=None, help="Write full JSON report to a file")
     args = parser.parse_args(argv)
@@ -792,6 +901,7 @@ def main(argv: list[str] | None = None) -> int:
         min_edge=args.min_edge,
         include_rows=args.include_rows,
         max_candidates=args.max_candidates,
+        full_markov=args.full_markov,
     )
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
