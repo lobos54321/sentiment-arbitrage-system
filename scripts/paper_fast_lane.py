@@ -1023,6 +1023,16 @@ def source_to_mode_and_stage(row):
     return "pre_pass_resonance_tiny_probe", "lotto"
 
 
+def fast_entry_size_sol_for_mode(mode):
+    mode = str(mode or "")
+    if mode in {
+        ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        ptm.LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    }:
+        return ptm.revival_canary_size_sol_for_mode(mode)
+    return FAST_ENTRY_SIZE_SOL
+
+
 def row_payload(row):
     try:
         raw = row_value(row, "payload_json")
@@ -1733,8 +1743,11 @@ def open_position_cap_allows(db):
     return int(row["c"] or 0) < FAST_ENTRY_MAX_OPEN_POSITIONS
 
 
-def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_ts_ms):
+def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_ts_ms,
+                       default_size_sol=None, entry_mode=None):
     now_ts = time.time()
+    default_size_sol = float(default_size_sol if default_size_sol is not None else FAST_ENTRY_SIZE_SOL)
+    entry_mode = str(entry_mode or row_value(row, "entry_mode_hint") or "")
     source_type = str(row_value(row, "source_type", "") or "")
     branch = str(row_value(row, "entry_branch", "") or "")
     quote_anchored_reclaim = any(
@@ -1761,7 +1774,7 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
         "original_signal_age_sec": max(0.0, now_ts - receive_ts),
         "fast_lane_queue_age_sec": max(0.0, now_ts - created_ts),
         "quote_drift_pct": drift_pct,
-        "position_size_sol": FAST_ENTRY_SIZE_SOL,
+        "position_size_sol": default_size_sol,
     }
     if status_is_hard_reject(row_value(row, "hard_gate_status")):
         detail.update({"pass": False, "reason": "fast_lane_hard_reject_status"})
@@ -1778,10 +1791,15 @@ def entry_guard_detail(row, quote_price, *, quote_request_ts_ms, quote_response_
         detail["position_size_sol"] = FAST_ENTRY_DEGRADED_SIZE_SOL
     if quote_anchored_reclaim and detail.get("pass") and detail["signal_age_sec"] > FAST_ENTRY_HARD_STALE_SEC:
         detail["reason"] = "fast_lane_reclaim_quote_anchored_stale_signal"
-        detail["position_size_sol"] = FAST_ENTRY_DEGRADED_SIZE_SOL
-    if detail.get("pass") and branch in DEGRADED_CANARY_BRANCHES:
+        if entry_mode != ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE:
+            detail["position_size_sol"] = FAST_ENTRY_DEGRADED_SIZE_SOL
+    if (
+        detail.get("pass")
+        and branch in DEGRADED_CANARY_BRANCHES
+        and entry_mode != ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE
+    ):
         detail["position_size_sol"] = min(
-            float(detail.get("position_size_sol") or FAST_ENTRY_SIZE_SOL),
+            float(detail.get("position_size_sol") or default_size_sol),
             FAST_ENTRY_DEGRADED_SIZE_SOL,
         )
         detail["canary_branch"] = branch
@@ -1862,6 +1880,7 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         "quotePrimaryRequired": True,
         "entryLatencyAudit": latency_audit,
         "fastLaneGuard": guard,
+        "markovReclaimForecast": guard.get("markov_reclaim_forecast"),
         "sourceType": row["source_type"],
         "sourceResonanceCohort": row["source_resonance_cohort"],
         "hardGateStatus": row["hard_gate_status"],
@@ -1888,6 +1907,7 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         "paperOnly": True,
         "quotePrimaryRequired": True,
         "fastLane": True,
+        "markovReclaimForecast": guard.get("markov_reclaim_forecast"),
     })
 
     with SQLITE_WRITE_LOCK:
@@ -1969,6 +1989,7 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
                 "guard": guard,
                 "entry_latency_audit": latency_audit,
                 "quote_primary_required": True,
+                "markov_reclaim_forecast": guard.get("markov_reclaim_forecast"),
             },
         )
         db.commit()
@@ -1988,17 +2009,19 @@ def process_queue_item(db, row, owner):
         return
     mode, stage = source_to_mode_and_stage(row)
     branch = str(row_value(row, "entry_branch", "") or row_value(row, "source_type", "") or "")
+    token_ca = row["token_ca"]
+    signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
+    lifecycle_id = ptm.build_lifecycle_id(token_ca, signal_ts)
+    entry_size_sol = fast_entry_size_sol_for_mode(mode)
     mode_gate = evaluate_runtime_mode_gate(
         entry_mode=mode,
         entry_branch="paper_fast_lane",
-        position_size_sol=FAST_ENTRY_SIZE_SOL,
+        position_size_sol=entry_size_sol,
     )
     if not mode_gate.get("pass"):
         reason = mode_gate.get("reason") or "v27_runtime_mode_not_allowed"
         mark_queue(db, row["id"], "watch_only", reason)
         try:
-            token_ca = row["token_ca"]
-            signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
             ptm.record_decision_event(
                 db,
                 component="v27_runtime_mode_gate",
@@ -2023,13 +2046,40 @@ def process_queue_item(db, row, owner):
         except Exception:
             pass
         return
-    entry_mode_quality = evaluate_entry_mode_quality(db, mode, now_ts=now_ts)
-    if entry_mode_quality.get("decision") == "shadow":
+    pending_context = {
+        "token_ca": token_ca,
+        "symbol": row["symbol"],
+        "entry_mode": mode,
+        "scout_mode": mode,
+        "paper_only_scout": True,
+        "kelly_position_sol": entry_size_sol,
+        "signal_type": row["source_type"],
+        "signal_route": row["source_type"],
+        "entry_branch": branch,
+        "source_component": "paper_fast_lane",
+        "source_reject_reason": row_value(row, "source_reject_reason") or branch,
+    }
+    markov_reclaim_forecast = ptm.attach_lotto_reclaim_markov_forecast(
+        db,
+        pending_context,
+        now_ts=now_ts,
+    )
+    entry_mode_live_allowed, entry_mode_quality = ptm._entry_mode_quality_allows_live(
+        db,
+        entry_mode=mode,
+        token_ca=token_ca,
+        symbol=row["symbol"],
+        lifecycle_id=lifecycle_id,
+        signal_ts=signal_ts,
+        route=row["source_type"],
+        event_ts=now_ts,
+        data_source="paper_fast_lane+paper_trades",
+        markov_reclaim_forecast=markov_reclaim_forecast,
+    )
+    if not entry_mode_live_allowed:
         reason = entry_mode_quality.get("reason") or "entry_mode_quality_shadow"
         mark_queue(db, row["id"], "watch_only", reason)
         try:
-            token_ca = row["token_ca"]
-            signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
             ptm.record_decision_event(
                 db,
                 component="entry_mode_quality",
@@ -2086,9 +2136,6 @@ def process_queue_item(db, row, owner):
     if not open_position_cap_allows(db):
         mark_queue(db, row["id"], "rate_limited", "fast_lane_open_position_cap")
         return
-    token_ca = row["token_ca"]
-    signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
-    lifecycle_id = ptm.build_lifecycle_id(token_ca, signal_ts)
     if open_or_recent_trade_exists(db, token_ca, now_ts=now_ts):
         mark_queue(db, row["id"], "skipped", "open_or_recent_trade_exists")
         return
@@ -2099,7 +2146,7 @@ def process_queue_item(db, row, owner):
         quote_request_ts_ms = int(time.time() * 1000)
         execution = ptm.simulate_entry_execution(
             token_ca,
-            FAST_ENTRY_SIZE_SOL,
+            entry_size_sol,
             stage,
             strategy_id="paper-fast-lane-v1",
             lifecycle_id=lifecycle_id,
@@ -2121,6 +2168,8 @@ def process_queue_item(db, row, owner):
             float(quote_price),
             quote_request_ts_ms=quote_request_ts_ms,
             quote_response_ts_ms=quote_response_ts_ms,
+            default_size_sol=entry_size_sol,
+            entry_mode=mode,
         )
         if not guard.get("pass"):
             status = "retry_watch" if "retry" in str(guard.get("reason")) else "rejected"
@@ -2142,8 +2191,8 @@ def process_queue_item(db, row, owner):
             )
             db.commit()
             return
-        requested_size_sol = float(guard.get("position_size_sol") or FAST_ENTRY_SIZE_SOL)
-        if abs(requested_size_sol - FAST_ENTRY_SIZE_SOL) > 1e-9:
+        requested_size_sol = float(guard.get("position_size_sol") or entry_size_sol)
+        if abs(requested_size_sol - entry_size_sol) > 1e-9:
             quote_request_ts_ms = int(time.time() * 1000)
             execution = ptm.simulate_entry_execution(
                 token_ca,
@@ -2169,6 +2218,8 @@ def process_queue_item(db, row, owner):
                 float(quote_price),
                 quote_request_ts_ms=quote_request_ts_ms,
                 quote_response_ts_ms=quote_response_ts_ms,
+                default_size_sol=entry_size_sol,
+                entry_mode=mode,
             )
             guard["position_size_sol"] = requested_size_sol
             if not guard.get("pass"):
@@ -2181,6 +2232,9 @@ def process_queue_item(db, row, owner):
         if not open_position_cap_allows(db):
             mark_queue(db, row["id"], "rate_limited", "fast_lane_open_position_cap_after_quote")
             return
+        if markov_reclaim_forecast:
+            guard["markov_reclaim_forecast"] = markov_reclaim_forecast
+            guard["markov_reclaim_gate"] = markov_reclaim_forecast.get("gate")
         trade_id = insert_fast_paper_trade(
             db,
             row,

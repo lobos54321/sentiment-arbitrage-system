@@ -147,11 +147,12 @@
       "reason": "Controlled post-d162c067 paper-only forward sample; lifetime EV is policy-mixed, so collect clean canary data with quote guards and auto-kill caps."
     },
     "lotto_micro_reclaim_tiny_probe": {
-      "tier": "hard_shadow",
+      "tier": "revival_canary",
       "route": "LOTTO",
       "family": "reclaim_tiny",
-      "paper_enabled": false,
-      "reason": "Largest negative tiny reclaim sample; keep stopped."
+      "paper_enabled": true,
+      "size_class": "ultra_tiny",
+      "reason": "Markov-gated ultra-tiny canary only: open at 0.001 SOL when recent reclaim lifecycle transitions show enough peak30 probability and bounded stop-before-peak risk."
     },
     "momentum_direct_entry": {
       "tier": "hard_shadow",

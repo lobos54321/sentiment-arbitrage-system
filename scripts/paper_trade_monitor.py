@@ -90,6 +90,17 @@ from entry_mode_registry import entry_mode_registry_entry
 from entry_mode_quality import evaluate_entry_mode_quality
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
+try:
+    from telegram_lifecycle_markov import (
+        build_lifecycle_forecast_snapshot as build_markov_lifecycle_forecast_snapshot,
+        canonical_state as canonical_markov_state,
+    )
+except Exception:
+    build_markov_lifecycle_forecast_snapshot = None
+
+    def canonical_markov_state(_value):
+        return None
+
 from lotto_engine import (
     LOTTO_POSITION_SIZE_SOL,
     LOTTO_STRATEGY_ID,
@@ -615,6 +626,15 @@ LOTTO_MICRO_RECLAIM_MIN_BOUNCE_PCT = float(os.environ.get('LOTTO_MICRO_RECLAIM_M
 LOTTO_MICRO_RECLAIM_MIN_BS = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_BS', '1.20'))
 LOTTO_MICRO_RECLAIM_MIN_VOL_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_VOL_M5', '4000'))
 LOTTO_MICRO_RECLAIM_MIN_TX_M5 = float(os.environ.get('LOTTO_MICRO_RECLAIM_MIN_TX_M5', '40'))
+LOTTO_MICRO_RECLAIM_MARKOV_CANARY_SIZE_SOL = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_CANARY_SIZE_SOL', '0.001'))
+LOTTO_MICRO_RECLAIM_MARKOV_GATE_ENABLED = os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_GATE_ENABLED', 'true').lower() != 'false'
+LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N = max(0, int(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N', '20')))
+LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB', '0.12'))
+LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB', '0.55'))
+LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE = float(os.environ.get('LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE', '0.02'))
+LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC = int(os.environ.get('LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC', str(14 * 24 * 60 * 60)))
+LOTTO_RECLAIM_MARKOV_EVENT_LIMIT = max(100, int(os.environ.get('LOTTO_RECLAIM_MARKOV_EVENT_LIMIT', '5000')))
+LOTTO_RECLAIM_MARKOV_POLICY_VERSION = os.environ.get('LOTTO_RECLAIM_MARKOV_POLICY_VERSION', 'lotto_reclaim_markov_canary_v1')
 LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES = max(1, int(os.environ.get('LOTTO_LOW_LIQ_RECLAIM_MIN_QUOTE_SUCCESSES', '2')))
 LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED = os.environ.get('LOTTO_STRICT_RECOVERY_FOLLOW_THROUGH_ENABLED', 'true').lower() != 'false'
 LOTTO_STRICT_RECOVERY_MIN_BS = float(os.environ.get('LOTTO_STRICT_RECOVERY_MIN_BS', '1.35'))
@@ -677,6 +697,7 @@ REVIVAL_CANARY_MODES = {
             LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
             ATH_UNCERTAINTY_TINY_SCOUT_MODE,
             LOTTO_LOW_LIQUIDITY_RECLAIM_TINY_PROBE_MODE,
+            LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
         ]),
     ).split(',')
     if item.strip()
@@ -3093,6 +3114,12 @@ def is_revival_canary_mode(entry_mode):
     return str(entry_mode or '') in REVIVAL_CANARY_MODES
 
 
+def revival_canary_size_sol_for_mode(entry_mode):
+    if str(entry_mode or '') == LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
+        return min(PAPER_TINY_SCOUT_SIZE_SOL, LOTTO_MICRO_RECLAIM_MARKOV_CANARY_SIZE_SOL)
+    return PAPER_TINY_SCOUT_SIZE_SOL
+
+
 def _revival_canary_entry_mode(pending):
     pending = pending or {}
     lotto_state = pending.get('lotto_state') or {}
@@ -3134,13 +3161,14 @@ def apply_revival_canary_to_pending(pending, registry_entry=None, now_ts=None):
     pending['registry_tier_at_entry'] = registry_entry.get('tier') or 'revival_canary'
     pending['registry_reason_at_entry'] = registry_entry.get('reason')
     pending['revival_canary_started_at'] = now_ts or time.time()
+    size_cap_sol = revival_canary_size_sol_for_mode(entry_mode)
     if pending.get('kelly_position_sol') is not None:
         pending['kelly_position_sol'] = min(
-            _safe_float(pending.get('kelly_position_sol'), PAPER_TINY_SCOUT_SIZE_SOL),
-            PAPER_TINY_SCOUT_SIZE_SOL,
+            _safe_float(pending.get('kelly_position_sol'), size_cap_sol),
+            size_cap_sol,
         )
     else:
-        pending['kelly_position_sol'] = PAPER_TINY_SCOUT_SIZE_SOL
+        pending['kelly_position_sol'] = size_cap_sol
 
     lotto_state = pending.get('lotto_state')
     if isinstance(lotto_state, dict):
@@ -3152,8 +3180,8 @@ def apply_revival_canary_to_pending(pending, registry_entry=None, now_ts=None):
         lotto_state['registryTierAtEntry'] = pending['registry_tier_at_entry']
         lotto_state['parentEntryMode'] = parent_mode
         lotto_state['positionSizeSol'] = min(
-            _safe_float(lotto_state.get('positionSizeSol'), PAPER_TINY_SCOUT_SIZE_SOL),
-            PAPER_TINY_SCOUT_SIZE_SOL,
+            _safe_float(lotto_state.get('positionSizeSol'), size_cap_sol),
+            size_cap_sol,
         )
         entry_decision = lotto_state.setdefault('entryDecision', {})
         if isinstance(entry_decision, dict):
@@ -3165,8 +3193,8 @@ def apply_revival_canary_to_pending(pending, registry_entry=None, now_ts=None):
             entry_decision['registry_tier_at_entry'] = pending['registry_tier_at_entry']
             entry_decision['parent_entry_mode'] = parent_mode
             entry_decision['position_size_sol'] = min(
-                _safe_float(entry_decision.get('position_size_sol'), PAPER_TINY_SCOUT_SIZE_SOL),
-                PAPER_TINY_SCOUT_SIZE_SOL,
+                _safe_float(entry_decision.get('position_size_sol'), size_cap_sol),
+                size_cap_sol,
             )
 
     return {
@@ -3397,6 +3425,402 @@ def evaluate_revival_canary_gate(db, entry_mode, *, token_ca=None, now_ts=None):
     else:
         detail.update({'pass': True, 'reason': 'revival_canary_policy_sampling'})
     return detail
+
+
+LOTTO_RECLAIM_MARKOV_ENTRY_MODES = {
+    LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+    LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+}
+
+
+def _markov_ratio(value, default=0.0):
+    ratio = _safe_float(value, default)
+    if ratio is None:
+        return default
+    if abs(ratio) > 2.0:
+        ratio = ratio / 100.0
+    return ratio
+
+
+def _markov_reclaim_event(events, *, key, ts, state, event_id, token_ca=None, **extra):
+    state = canonical_markov_state(state)
+    if not state:
+        return
+    event = {
+        'token_lifecycle_key': key or f"solana:{token_ca or 'unknown'}:unknown_pool",
+        'lifecycle_epoch': 0,
+        'lifecycle_state': state,
+        'decision_available_at': float(ts or time.time()),
+        'event_id': event_id,
+        'token_ca': token_ca,
+    }
+    event.update({k: v for k, v in extra.items() if v is not None})
+    events.append(event)
+
+
+def _markov_reclaim_outcome_state(peak_pnl, pnl_pct, exit_reason):
+    peak = _markov_ratio(peak_pnl, 0.0)
+    pnl = _markov_ratio(pnl_pct, 0.0)
+    reason = str(exit_reason or '').lower()
+    if peak >= 0.30:
+        return 'PEAK30'
+    if any(marker in reason for marker in ('rug', 'toxic', 'honeypot', 'blacklist')):
+        return 'TOXIC_DEAD'
+    if any(marker in reason for marker in ('crash', 'panic', 'rug_pull')):
+        return 'CRASH_DEAD'
+    if any(marker in reason for marker in ('timeout', 'stale', 'no_follow', 'expired')):
+        return 'STALE_DEAD'
+    if pnl <= 0:
+        return 'STOP_BEFORE_PEAK'
+    return 'TERMINAL_DEAD'
+
+
+def _markov_reclaim_events_from_trades(db, *, now_ts):
+    columns = _paper_trade_columns(db)
+    if not {'entry_ts', 'entry_mode'}.issubset(columns):
+        return []
+    keys = [
+        'id',
+        'token_ca',
+        'lifecycle_id',
+        'entry_mode',
+        'entry_ts',
+        'exit_ts',
+        'exit_reason',
+        'pnl_pct',
+        'peak_pnl',
+        'signal_route',
+        'replay_source',
+    ]
+    select_exprs = [f"{key} AS {key}" if key in columns else f"NULL AS {key}" for key in keys]
+    cutoff = float(now_ts or time.time()) - LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC
+    mode_terms = ["entry_mode LIKE '%reclaim%'", "entry_mode LIKE '%tiny_probe%'", "entry_mode LIKE '%tiny_scout%'"]
+    if 'replay_source' in columns:
+        mode_terms.append("replay_source = 'paper_fast_lane'")
+    order_expr = "COALESCE(exit_ts, entry_ts, 0) DESC" if 'exit_ts' in columns else "entry_ts DESC"
+    try:
+        rows = db.execute(
+            f"""
+            SELECT {', '.join(select_exprs)}
+            FROM paper_trades
+            WHERE entry_ts >= ?
+              AND ({' OR '.join(mode_terms)})
+            ORDER BY {order_expr}
+            LIMIT ?
+            """,
+            (cutoff, LOTTO_RECLAIM_MARKOV_EVENT_LIMIT),
+        ).fetchall()
+    except Exception:
+        return []
+
+    events = []
+    for row in rows:
+        token_ca = _row_value(row, 'token_ca')
+        entry_ts = _safe_float(_row_value(row, 'entry_ts'), None)
+        if entry_ts is None:
+            continue
+        trade_id = _row_value(row, 'id') or f"{token_ca}:{entry_ts}"
+        key = _row_value(row, 'lifecycle_id') or f"trade:{token_ca}:{trade_id}"
+        base_payload = {
+            'source': 'paper_trades',
+            'entry_mode': _row_value(row, 'entry_mode'),
+            'route': _row_value(row, 'signal_route'),
+        }
+        _markov_reclaim_event(events, key=key, ts=entry_ts - 3, state='TRADABLE_CLEAN', event_id=f"trade:{trade_id}:tradable", token_ca=token_ca, **base_payload)
+        _markov_reclaim_event(events, key=key, ts=entry_ts - 2, state='RECLAIM_FORMING', event_id=f"trade:{trade_id}:forming", token_ca=token_ca, **base_payload)
+        _markov_reclaim_event(events, key=key, ts=entry_ts - 1, state='RECLAIM_CONFIRMED', event_id=f"trade:{trade_id}:confirmed", token_ca=token_ca, **base_payload)
+        _markov_reclaim_event(events, key=key, ts=entry_ts, state='TINY_ENTERED', event_id=f"trade:{trade_id}:entered", token_ca=token_ca, **base_payload)
+        exit_ts = _safe_float(_row_value(row, 'exit_ts'), None)
+        if exit_ts is not None:
+            outcome_state = _markov_reclaim_outcome_state(
+                _row_value(row, 'peak_pnl'),
+                _row_value(row, 'pnl_pct'),
+                _row_value(row, 'exit_reason'),
+            )
+            _markov_reclaim_event(
+                events,
+                key=key,
+                ts=max(exit_ts, entry_ts + 1),
+                state=outcome_state,
+                event_id=f"trade:{trade_id}:outcome",
+                token_ca=token_ca,
+                peak_pnl=_markov_ratio(_row_value(row, 'peak_pnl'), 0.0),
+                pnl_pct=_markov_ratio(_row_value(row, 'pnl_pct'), 0.0),
+                exit_reason=_row_value(row, 'exit_reason'),
+                **base_payload,
+            )
+    return events
+
+
+def _markov_state_from_decision_event(row, payload):
+    state = canonical_markov_state(_row_value(row, 'lifecycle_state'))
+    if state:
+        return state
+    for key in ('lifecycle_state', 'lifecycleState', 'state'):
+        state = canonical_markov_state(payload.get(key))
+        if state:
+            return state
+    component = str(_row_value(row, 'component') or '')
+    if component == 'markov_reclaim':
+        return None
+    event_type = str(_row_value(row, 'event_type') or '')
+    decision = str(_row_value(row, 'decision') or '').lower()
+    reason = str(_row_value(row, 'reason') or '').lower()
+    entry_mode = str(payload.get('entry_mode') or payload.get('entryMode') or '')
+    if component == 'execution_api' and event_type == 'entry_quote' and decision in {'filled_paper', 'fill', 'filled'}:
+        return 'TINY_ENTERED'
+    if component in {'entry_execution_eligibility', 'entry_decision_contract'} and decision in {'pass', 'allow', 'ready', 'enter'}:
+        return 'RECLAIM_CONFIRMED'
+    if component in {'lotto_quote_gap_audit', 'lotto_not_ath_watch_shadow'}:
+        return 'TRADABLE_CLEAN'
+    if 'reclaim' in entry_mode or 'reclaim' in reason:
+        if decision in {'pass', 'allow', 'pending', 'ready'}:
+            return 'RECLAIM_CONFIRMED'
+        if decision in {'wait', 'watch_only', 'shadow', 'block', 'reject'}:
+            return 'OBSERVE_ONLY'
+    return None
+
+
+def _markov_reclaim_events_from_decisions(db, *, now_ts):
+    cutoff = float(now_ts or time.time()) - LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC
+    try:
+        rows = db.execute(
+            """
+            SELECT id, event_ts, token_ca, lifecycle_id, component, event_type, decision,
+                   reason, route, lifecycle_state, payload_json
+            FROM paper_decision_events
+            WHERE event_ts >= ?
+            ORDER BY event_ts DESC
+            LIMIT ?
+            """,
+            (cutoff, LOTTO_RECLAIM_MARKOV_EVENT_LIMIT),
+        ).fetchall()
+    except Exception:
+        return []
+    events = []
+    for row in rows:
+        payload = _safe_json_loads(_row_value(row, 'payload_json'))
+        state = _markov_state_from_decision_event(row, payload)
+        if not state:
+            continue
+        token_ca = _row_value(row, 'token_ca')
+        key = _row_value(row, 'lifecycle_id') or f"decision:{token_ca or 'unknown'}"
+        _markov_reclaim_event(
+            events,
+            key=key,
+            ts=_row_value(row, 'event_ts'),
+            state=state,
+            event_id=f"decision:{_row_value(row, 'id')}",
+            token_ca=token_ca,
+            source='paper_decision_events',
+            component=_row_value(row, 'component'),
+            event_type=_row_value(row, 'event_type'),
+            decision=_row_value(row, 'decision'),
+            reason=_row_value(row, 'reason'),
+            route=_row_value(row, 'route'),
+            entry_mode=payload.get('entry_mode') or payload.get('entryMode'),
+        )
+    return events
+
+
+def _lotto_reclaim_markov_gate(entry_mode, forecast):
+    entry_mode = str(entry_mode or '')
+    if entry_mode != LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE:
+        return {
+            'gated': False,
+            'pass': True,
+            'reason': 'markov_observation_only',
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        }
+    if not LOTTO_MICRO_RECLAIM_MARKOV_GATE_ENABLED:
+        return {
+            'gated': True,
+            'pass': True,
+            'reason': 'lotto_micro_reclaim_markov_gate_disabled',
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        }
+    forecast = forecast or {}
+    if forecast.get('error'):
+        return {
+            'gated': True,
+            'pass': False,
+            'reason': 'lotto_micro_reclaim_markov_forecast_error',
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            'error': forecast.get('error'),
+        }
+    sample_n = int(_safe_float(forecast.get('sample_n'), 0) or 0)
+    p_peak30 = _safe_float(forecast.get('p_absorb_peak30'), 0.0) or 0.0
+    p_stop = _safe_float(forecast.get('p_absorb_stop_before_peak'), 0.0) or 0.0
+    edge = p_peak30 - p_stop
+    thresholds = {
+        'min_sample_n': LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        'min_peak30_prob': LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB,
+        'max_stop_before_peak_prob': LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB,
+        'min_edge': LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE,
+    }
+    passed = (
+        sample_n >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N
+        and p_peak30 >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_PEAK30_PROB
+        and p_stop <= LOTTO_MICRO_RECLAIM_MARKOV_MAX_STOP_PROB
+        and edge >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_EDGE
+    )
+    reason = 'lotto_micro_reclaim_markov_gate_pass' if passed else 'lotto_micro_reclaim_markov_gate_block'
+    return {
+        'gated': True,
+        'pass': passed,
+        'reason': reason,
+        'entry_mode': entry_mode,
+        'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        'sample_n': sample_n,
+        'p_absorb_peak30': p_peak30,
+        'p_absorb_stop_before_peak': p_stop,
+        'edge_peak30_minus_stop': edge,
+        'thresholds': thresholds,
+    }
+
+
+def build_lotto_reclaim_markov_forecast(db, *, entry_mode, pending=None, lifecycle=None, now_ts=None):
+    entry_mode = str(entry_mode or '')
+    if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        return None
+    now_ts = float(now_ts or time.time())
+    if build_markov_lifecycle_forecast_snapshot is None:
+        forecast = {
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            'model_role': 'lotto_reclaim_canary_gate_wrapper',
+            'base_model_entry_gate_allowed': False,
+            'start_state': 'RECLAIM_CONFIRMED',
+            'sample_n': 0,
+            'error': 'markov_module_unavailable',
+        }
+        forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+        return forecast
+
+    pending = pending or {}
+    lifecycle = lifecycle or {}
+    start_state = canonical_markov_state(lifecycle.get('lifecycle_state')) if isinstance(lifecycle, dict) else None
+    if start_state in {'PEAK30', 'STOP_BEFORE_PEAK', 'STALE_DEAD', 'TOXIC_DEAD', 'CRASH_DEAD', 'TERMINAL_DEAD'}:
+        start_state = None
+    start_state = start_state or 'RECLAIM_CONFIRMED'
+    try:
+        events = []
+        events.extend(_markov_reclaim_events_from_trades(db, now_ts=now_ts))
+        events.extend(_markov_reclaim_events_from_decisions(db, now_ts=now_ts))
+        snapshot = build_markov_lifecycle_forecast_snapshot(
+            events,
+            start_state=start_state,
+            cutoff_ts=now_ts,
+            horizons=(1, 2, 3, 5, 15),
+            max_absorption_steps=60,
+            model_snapshot_id=f"lotto_reclaim_markov_v1_{int(now_ts)}",
+        )
+        absorption = snapshot.get('absorption_forecast') or {}
+        forecast = {
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            'model_role': 'lotto_reclaim_canary_gate_wrapper',
+            'base_model_entry_gate_allowed': False,
+            'model_family': snapshot.get('model_family'),
+            'model_snapshot_id': snapshot.get('model_snapshot_id'),
+            'start_state': start_state,
+            'sample_n': int(snapshot.get('sample_n') or 0),
+            'event_count': len(events),
+            'lookback_sec': LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC,
+            'p_absorb_peak30': _safe_float(absorption.get('p_absorb_peak30'), 0.0) or 0.0,
+            'p_absorb_stop_before_peak': _safe_float(absorption.get('p_absorb_stop_before_peak'), 0.0) or 0.0,
+            'p_absorb_stale_dead': _safe_float(absorption.get('p_absorb_stale_dead'), 0.0) or 0.0,
+            'p_absorb_toxic_dead': _safe_float(absorption.get('p_absorb_toxic_dead'), 0.0) or 0.0,
+            'p_absorb_crash_dead': _safe_float(absorption.get('p_absorb_crash_dead'), 0.0) or 0.0,
+            'unresolved_probability_after_horizon': _safe_float(
+                absorption.get('unresolved_probability_after_horizon'),
+                0.0,
+            ) or 0.0,
+            'candidate': {
+                'token_ca': pending.get('token_ca'),
+                'symbol': pending.get('symbol'),
+                'entry_branch': pending.get('entry_branch'),
+                'source_reject_reason': pending.get('source_reject_reason'),
+            },
+        }
+        forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+        return forecast
+    except Exception as exc:
+        forecast = {
+            'entry_mode': entry_mode,
+            'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+            'model_role': 'lotto_reclaim_canary_gate_wrapper',
+            'base_model_entry_gate_allowed': False,
+            'start_state': start_state,
+            'sample_n': 0,
+            'error': str(exc),
+        }
+        forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+        return forecast
+
+
+def attach_lotto_reclaim_markov_forecast(db, pending, *, lifecycle=None, now_ts=None):
+    pending = pending or {}
+    entry_mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '')
+    forecast = build_lotto_reclaim_markov_forecast(
+        db,
+        entry_mode=entry_mode,
+        pending=pending,
+        lifecycle=lifecycle,
+        now_ts=now_ts,
+    )
+    if not forecast:
+        return None
+    pending['markov_reclaim_forecast'] = forecast
+    pending['lotto_markov_reclaim_forecast'] = forecast
+    lotto_state = pending.get('lotto_state')
+    if isinstance(lotto_state, dict):
+        lotto_state['markovReclaimForecast'] = forecast
+        entry_decision = lotto_state.get('entryDecision')
+        if isinstance(entry_decision, dict):
+            entry_decision['markov_reclaim_forecast'] = forecast
+    return forecast
+
+
+def _record_lotto_reclaim_markov_forecast(
+    db,
+    *,
+    forecast,
+    entry_mode,
+    token_ca=None,
+    symbol=None,
+    lifecycle_id=None,
+    signal_ts=None,
+    signal_id=None,
+    route=None,
+    event_ts=None,
+    data_source='paper_trades',
+):
+    if not forecast:
+        return
+    gate = forecast.get('gate') or _lotto_reclaim_markov_gate(entry_mode, forecast)
+    try:
+        record_decision_event(
+            db,
+            component='markov_reclaim',
+            event_type='entry_gate' if gate.get('gated') else 'entry_feature',
+            decision='allow' if gate.get('pass') else 'observe',
+            reason=gate.get('reason') or 'lotto_reclaim_markov_forecast',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            data_source=data_source,
+            payload=forecast,
+            event_ts=event_ts,
+        )
+    except Exception as exc:
+        log.debug(f"  [MARKOV_RECLAIM] record failed: {exc}")
 
 
 def build_paper_tiny_scout_dex_fallback_entry_execution(pending, amount_sol, failed_execution=None, sol_price=None):
@@ -12948,7 +13372,39 @@ def _record_entry_mode_quality_decision(
 
 def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=None, lifecycle_id=None,
                                     signal_ts=None, signal_id=None, route=None, event_ts=None,
-                                    data_source='paper_trades', force_live=False):
+                                    data_source='paper_trades', force_live=False,
+                                    markov_reclaim_forecast=None):
+    if markov_reclaim_forecast is None and str(entry_mode or '') in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        markov_reclaim_forecast = build_lotto_reclaim_markov_forecast(
+            db,
+            entry_mode=entry_mode,
+            pending={
+                'token_ca': token_ca,
+                'symbol': symbol,
+                'entry_mode': entry_mode,
+            },
+            now_ts=event_ts or time.time(),
+        )
+    markov_reclaim_gate = (
+        (markov_reclaim_forecast or {}).get('gate')
+        or _lotto_reclaim_markov_gate(entry_mode, markov_reclaim_forecast)
+        if str(entry_mode or '') in LOTTO_RECLAIM_MARKOV_ENTRY_MODES
+        else None
+    )
+    if markov_reclaim_forecast:
+        _record_lotto_reclaim_markov_forecast(
+            db,
+            forecast=markov_reclaim_forecast,
+            entry_mode=entry_mode,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_ts=event_ts,
+            data_source=data_source,
+        )
     canary_gate = evaluate_revival_canary_gate(
         db,
         entry_mode,
@@ -12969,6 +13425,14 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             'quote_guard_version': QUOTE_GUARD_POLICY_VERSION,
             'paper_only': True,
         }
+        if markov_reclaim_forecast:
+            decision['markov_reclaim_forecast'] = markov_reclaim_forecast
+        if markov_reclaim_gate:
+            decision['markov_reclaim_gate'] = markov_reclaim_gate
+        if allowed and markov_reclaim_gate and markov_reclaim_gate.get('gated') and not markov_reclaim_gate.get('pass'):
+            allowed = False
+            decision['decision'] = 'shadow'
+            decision['reason'] = markov_reclaim_gate.get('reason') or 'lotto_reclaim_markov_gate_block'
         _record_entry_mode_quality_decision(
             db,
             decision=decision,
@@ -13032,6 +13496,16 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
         now_ts=event_ts or time.time(),
         force_live=force_live,
     )
+    if markov_reclaim_forecast:
+        decision = {**decision, 'markov_reclaim_forecast': markov_reclaim_forecast}
+    if markov_reclaim_gate:
+        decision = {**decision, 'markov_reclaim_gate': markov_reclaim_gate}
+    if markov_reclaim_gate and markov_reclaim_gate.get('gated') and not markov_reclaim_gate.get('pass'):
+        decision = {
+            **decision,
+            'decision': 'shadow',
+            'reason': markov_reclaim_gate.get('reason') or 'lotto_reclaim_markov_gate_block',
+        }
     hard_gate_quality_override = _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision)
     if hard_gate_quality_override:
         _record_entry_mode_quality_decision(
@@ -14658,6 +15132,14 @@ def process_discovery_tracking_candidates(
                 _candidate_pending_context,
                 entry_mode=mode,
             )
+        markov_reclaim_forecast = attach_lotto_reclaim_markov_forecast(
+            db,
+            _candidate_pending_context,
+            lifecycle=lifecycle,
+            now_ts=now_ts,
+        )
+        if markov_reclaim_forecast:
+            detail['markov_reclaim_forecast'] = markov_reclaim_forecast
         detail['post_exit_reclaim_entry_mode_force_live'] = post_exit_reclaim_force_live
         live_allowed, entry_mode_quality = _entry_mode_quality_allows_live(
             db,
@@ -14671,6 +15153,7 @@ def process_discovery_tracking_candidates(
             event_ts=now_ts,
             data_source='discovery_tracking+paper_trades',
             force_live=bool(post_exit_reclaim_force_live.get('pass')),
+            markov_reclaim_forecast=markov_reclaim_forecast,
         )
         detail['entry_mode_quality'] = entry_mode_quality
         if not live_allowed:
@@ -22137,6 +22620,12 @@ def run_monitor(db):
                             entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
                             route=_pending_signal_route or pending.get('signal_type'),
                         )
+                        _markov_reclaim_forecast = attach_lotto_reclaim_markov_forecast(
+                            db,
+                            pending,
+                            lifecycle=_entry_timing_lifecycle,
+                            now_ts=now,
+                        )
                         if _entry_mode_force_live.get('pass'):
                             pending['entry_mode_quality_force_live'] = _entry_mode_force_live
                             log.info(
@@ -22169,6 +22658,7 @@ def run_monitor(db):
                             event_ts=now,
                             data_source='pending_entry+paper_trades',
                             force_live=bool(_entry_mode_force_live.get('pass')),
+                            markov_reclaim_forecast=_markov_reclaim_forecast,
                         )
                         if _entry_mode_force_live.get('pass'):
                             _entry_mode_quality['force_live_detail'] = _entry_mode_force_live
@@ -23186,6 +23676,8 @@ def run_monitor(db):
                         _monitor_state['lottoRecoveryFamily'] = pending.get('lotto_recovery_family')
                         _monitor_state['parentBlockReason'] = pending.get('parent_block_reason')
                         _monitor_state['recoveryProbeReason'] = pending.get('recovery_probe_reason')
+                    if pending.get('markov_reclaim_forecast'):
+                        _monitor_state['markovReclaimForecast'] = pending.get('markov_reclaim_forecast')
                     if _pending_lotto_state:
                         _monitor_state['lottoState'] = _pending_lotto_state
                     _signal_ts_store = normalize_signal_ts_seconds(pending.get('signal_ts')) or pending.get('signal_ts')
@@ -23252,6 +23744,7 @@ def run_monitor(db):
                                 'parentEntryMode': pending.get('parent_entry_mode'),
                                 'executionScope': pending.get('execution_scope'),
                                 'paperOnlyScout': bool(pending.get('paper_only_scout')),
+                                'markovReclaimForecast': pending.get('markov_reclaim_forecast'),
                                 'syntheticPaperEntry': execution.get('syntheticPaperEntry'),
                                 'syntheticEntryReason': execution.get('syntheticEntryReason'),
                                 'syntheticEntrySource': execution.get('syntheticEntrySource'),

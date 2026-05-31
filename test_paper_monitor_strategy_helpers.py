@@ -3867,6 +3867,79 @@ def test_revival_canary_pending_tags_policy_and_caps_size():
     assert pending["kelly_position_sol"] == PAPER_TINY_SCOUT_SIZE_SOL
 
 
+def test_lotto_micro_revival_canary_uses_ultra_tiny_size():
+    pending = {
+        "token_ca": "TokenCA",
+        "symbol": "MICRO",
+        "signal_type": "LOTTO",
+        "entry_mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        "kelly_position_sol": 0.05,
+    }
+
+    detail = apply_revival_canary_to_pending(
+        pending,
+        {"tier": "revival_canary", "reason": "test"},
+        now_ts=1000,
+    )
+
+    assert detail["pass"] is True
+    assert pending["revival_canary"] is True
+    assert pending["kelly_position_sol"] == monitor.LOTTO_MICRO_RECLAIM_MARKOV_CANARY_SIZE_SOL
+
+
+def test_lotto_micro_reclaim_canary_requires_markov_gate_pass():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    block_forecast = {
+        "entry_mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.03,
+        "p_absorb_stop_before_peak": 0.35,
+    }
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        token_ca="TokenMicro",
+        symbol="MICRO",
+        event_ts=1000,
+        data_source="pending_entry+paper_trades",
+        markov_reclaim_forecast=block_forecast,
+    )
+
+    assert allowed is False
+    assert decision["decision"] == "shadow"
+    assert decision["reason"] == "lotto_micro_reclaim_markov_gate_block"
+    assert decision["markov_reclaim_gate"]["gated"] is True
+
+
+def test_lotto_micro_reclaim_canary_allows_when_markov_gate_passes():
+    db = _revival_canary_db()
+    monitor._REVIVAL_CANARY_ARM_TS.clear()
+    pass_forecast = {
+        "entry_mode": LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.30,
+        "p_absorb_stop_before_peak": 0.10,
+    }
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        token_ca="TokenMicro",
+        symbol="MICRO",
+        event_ts=1000,
+        data_source="pending_entry+paper_trades",
+        markov_reclaim_forecast=pass_forecast,
+    )
+
+    assert allowed is True
+    assert decision["decision"] == "allow_live"
+    assert decision["markov_reclaim_gate"]["reason"] == "lotto_micro_reclaim_markov_gate_pass"
+
+
 def test_revival_canary_gate_ignores_mixed_policy_history_and_kills_tagged_loss_budget():
     db = _revival_canary_db()
     monitor._REVIVAL_CANARY_ARM_TS.clear()

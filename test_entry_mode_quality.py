@@ -139,6 +139,7 @@ def test_revival_canary_modes_are_registry_enabled_for_forward_sampling():
         "ath_uncertainty_tiny_scout",
         "lotto_not_ath_reclaim_tiny_probe",
         "lotto_low_liquidity_reclaim_tiny_probe",
+        "lotto_micro_reclaim_tiny_probe",
     ):
         registry_entry = entry_mode_registry_entry(mode)
         decision = evaluate_entry_mode_quality(db, mode, now_ts=1000)
@@ -157,13 +158,13 @@ def test_momentum_direct_entry_is_registry_hard_shadow():
     assert decision["registry"]["tier"] == "hard_shadow"
 
 
-def test_lotto_micro_reclaim_is_shadow_only_by_default():
+def test_lotto_micro_reclaim_is_registry_enabled_for_markov_gated_canary():
     db = _db()
 
     decision = evaluate_entry_mode_quality(db, "lotto_micro_reclaim_tiny_probe", now_ts=1000)
 
-    assert decision["decision"] == "shadow"
-    assert decision["reason"] == "entry_mode_quality_shadow_only_mode"
+    assert decision["decision"] == "allow_live"
+    assert decision["registry"]["tier"] == "revival_canary"
 
 
 def test_observed_tiny_modes_are_shadow_only_by_default():

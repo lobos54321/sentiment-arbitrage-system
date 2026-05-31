@@ -293,7 +293,7 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeyp
     db = fast.connect_db(db_path)
     fast.init_fast_lane_schema(db)
     now = int(time.time())
-    entry_mode = "lotto_not_ath_reclaim_tiny_probe"
+    entry_mode = "pre_pass_resonance_tiny_probe"
     db.execute(
         """
         CREATE TABLE paper_trades (
@@ -336,7 +336,7 @@ def test_process_queue_item_respects_entry_mode_quality_shadow(tmp_path, monkeyp
         "SELECT status, last_error FROM paper_fast_entry_queue WHERE token_ca = 'TokenQuality'"
     ).fetchone()
     assert queue["status"] == "watch_only"
-    assert queue["last_error"] == "entry_mode_quality_tail_loss"
+    assert queue["last_error"] == "entry_mode_quality_shadow_only_mode"
 
 
 def test_process_queue_item_blocks_when_v27_mode_readiness_missing(tmp_path, monkeypatch):
@@ -428,7 +428,7 @@ def test_process_queue_item_enters_lotto_not_ath_reclaim_when_gates_pass(tmp_pat
     assert trade["entry_mode"] == "lotto_not_ath_reclaim_tiny_probe"
     assert trade["entry_branch"] == "tracking_ttl_reclaim_quote_clean_tiny_probe"
     assert trade["signal_route"] == "ttl_final_reclaim_fast"
-    assert trade["position_size_sol"] <= fast.FAST_ENTRY_SIZE_SOL
+    assert trade["position_size_sol"] == fast.ptm.PAPER_TINY_SCOUT_SIZE_SOL
 
 
 def test_entry_guard_rejects_hard_drift():
