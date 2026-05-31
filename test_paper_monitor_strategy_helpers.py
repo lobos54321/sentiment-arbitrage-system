@@ -4073,6 +4073,167 @@ def test_lotto_reclaim_runtime_markov_prefers_matching_green_cohort():
     assert forecast["gate"]["markov_bucket"] == "green"
 
 
+def test_markov_position_advice_maps_green_to_patient_hold_and_red_to_risk_actions():
+    green = {
+        "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.42,
+        "p_absorb_stop_before_peak": 0.08,
+    }
+    green["gate"] = monitor._lotto_reclaim_markov_gate(LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE, green)
+
+    advice = monitor._markov_position_advice_from_forecast(
+        green,
+        current_pnl=0.18,
+        peak_pnl=0.22,
+        held_sec=180,
+        exit_matrix={"action": "hold", "reason": "matrix_hold"},
+    )
+
+    assert advice["decision"] == "hold_patiently"
+    assert advice["markov_bucket"] == "green"
+    assert advice["suggested_controls"]["trail_bias"] == "loosen"
+    assert advice["applied_to_exit"] is False
+
+    red = {
+        "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        "policy_version": monitor.LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        "sample_n": monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N,
+        "p_absorb_peak30": 0.03,
+        "p_absorb_stop_before_peak": 0.70,
+    }
+    red["gate"] = monitor._lotto_reclaim_markov_gate(LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE, red)
+
+    profit_advice = monitor._markov_position_advice_from_forecast(
+        red,
+        current_pnl=0.12,
+        peak_pnl=0.20,
+        held_sec=240,
+        exit_matrix={"action": "hold", "reason": "matrix_hold"},
+    )
+    loss_advice = monitor._markov_position_advice_from_forecast(
+        red,
+        current_pnl=-0.02,
+        peak_pnl=0.12,
+        held_sec=240,
+        exit_matrix={"action": "hold", "reason": "matrix_hold"},
+    )
+
+    assert profit_advice["decision"] == "take_partial"
+    assert profit_advice["suggested_controls"]["trail_bias"] == "tighten"
+    assert loss_advice["decision"] == "early_exit_watch"
+    assert loss_advice["reason"] == "markov_position_red_stop_risk"
+
+
+def test_markov_position_advice_due_uses_interval_or_large_pnl_move():
+    pos = _DummyPos(entry_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE)
+    pos.entry_ts = 1_000
+    pos.monitor_state["markovPositionAdviceTs"] = 1_100
+    pos.monitor_state["markovPositionAdvicePnl"] = 0.10
+
+    assert monitor._markov_position_advice_due(pos, current_pnl=0.11, now_ts=1_105) is False
+    assert monitor._markov_position_advice_due(pos, current_pnl=0.11, now_ts=1_130) is True
+    assert monitor._markov_position_advice_due(pos, current_pnl=0.20, now_ts=1_105) is True
+
+
+def test_record_lotto_reclaim_position_markov_advice_is_shadow_only_event():
+    db = _revival_canary_db()
+    monitor._LOTTO_RECLAIM_POSITION_COHORT_CACHE.clear()
+    now_ts = 1_800_000
+    db.execute("DROP TABLE IF EXISTS paper_missed_signal_attribution")
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_event_ts REAL,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts REAL,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            first_tradable_ts REAL,
+            tradability_status TEXT,
+            tradable_missed INTEGER,
+            tradable_peak_pnl REAL,
+            time_to_peak_sec REAL,
+            would_stop_before_peak INTEGER,
+            pnl_5m REAL,
+            payload_json TEXT
+        )
+        """
+    )
+    for idx in range(monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N):
+        winner = idx < 16
+        first_tradable_ts = now_ts - 3 * 24 * 60 * 60 - idx
+        db.execute(
+            """
+            INSERT INTO paper_missed_signal_attribution(
+                created_event_ts, token_ca, symbol, signal_ts, route, component,
+                reject_reason, first_tradable_ts, tradability_status, tradable_missed,
+                tradable_peak_pnl, time_to_peak_sec, would_stop_before_peak, pnl_5m,
+                payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                first_tradable_ts,
+                f"TokenAdvice{idx}",
+                "DOG",
+                first_tradable_ts,
+                "LOTTO",
+                "lotto_entry_gate",
+                "tracking_ttl_expired",
+                first_tradable_ts,
+                "tradable",
+                1,
+                0.45 if winner else 0.05,
+                1800,
+                0 if winner else 1,
+                5.0,
+                json.dumps({"price_change_m5": 5.0, "buy_sell_ratio": 1.25, "tx_m5": 80}),
+            ),
+        )
+    pos = _DummyPos(entry_mode=LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE)
+    pos.entry_ts = now_ts - 120
+    pos.monitor_state["markovReclaimForecast"] = {
+        "cohort_features": {
+            "entry_mode": LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            "quote_clean_bucket": "quote_clean",
+            "momentum_bucket": "momentum_strong",
+        }
+    }
+
+    advice = monitor.record_lotto_reclaim_position_markov_advice(
+        db,
+        pos,
+        current_pnl=0.10,
+        peak_pnl=0.16,
+        exit_matrix={"action": "hold", "reason": "matrix_hold", "current_pnl": 0.10},
+        w_entry={"signal_route": "LOTTO"},
+        now_ts=now_ts,
+    )
+
+    assert advice["decision"] == "hold_patiently"
+    assert advice["shadow_only"] is True
+    assert advice["applied_to_exit"] is False
+    assert pos.monitor_state["markovPositionAdviceDecision"] == "hold_patiently"
+    row = db.execute(
+        """
+        SELECT component, event_type, decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE component = 'markov_position_advice'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    assert row["event_type"] == "shadow_decision"
+    assert row["decision"] == "hold_patiently"
+    assert payload["shadow_only"] is True
+    assert payload["forecast"]["gate"]["markov_bucket"] == "green"
+
+
 def test_revival_canary_gate_ignores_mixed_policy_history_and_kills_tagged_loss_budget():
     db = _revival_canary_db()
     monitor._REVIVAL_CANARY_ARM_TS.clear()

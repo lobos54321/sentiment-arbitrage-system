@@ -638,6 +638,12 @@ LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES = max(
     100,
     int(os.environ.get('LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES', '2000')),
 )
+MARKOV_POSITION_ADVICE_ENABLED = os.environ.get('MARKOV_POSITION_ADVICE_ENABLED', 'true').lower() != 'false'
+MARKOV_POSITION_ADVICE_INTERVAL_SEC = max(5, int(os.environ.get('MARKOV_POSITION_ADVICE_INTERVAL_SEC', '15')))
+MARKOV_POSITION_ADVICE_CACHE_SEC = max(10, int(os.environ.get('MARKOV_POSITION_ADVICE_CACHE_SEC', '60')))
+MARKOV_POSITION_ADVICE_MIN_HELD_SEC = max(0, int(os.environ.get('MARKOV_POSITION_ADVICE_MIN_HELD_SEC', '10')))
+MARKOV_POSITION_ADVICE_IMMEDIATE_PNL_MOVE = float(os.environ.get('MARKOV_POSITION_ADVICE_IMMEDIATE_PNL_MOVE', '0.08'))
+MARKOV_POSITION_ADVICE_CRASH_RISK_PROB = float(os.environ.get('MARKOV_POSITION_ADVICE_CRASH_RISK_PROB', '0.25'))
 LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC = int(os.environ.get('LOTTO_RECLAIM_MARKOV_LOOKBACK_SEC', str(14 * 24 * 60 * 60)))
 LOTTO_RECLAIM_MARKOV_EVENT_LIMIT = max(100, int(os.environ.get('LOTTO_RECLAIM_MARKOV_EVENT_LIMIT', '5000')))
 LOTTO_RECLAIM_MARKOV_POLICY_VERSION = os.environ.get('LOTTO_RECLAIM_MARKOV_POLICY_VERSION', 'lotto_reclaim_markov_canary_v1')
@@ -4037,6 +4043,74 @@ def _lotto_reclaim_cohort_counts(training_outcomes):
     return counts_by_key
 
 
+_LOTTO_RECLAIM_POSITION_COHORT_CACHE = {}
+
+
+def _lotto_reclaim_training_outcomes(db, *, now_ts, since_ts):
+    training = []
+    training.extend(_lotto_reclaim_training_outcomes_from_missed(db, now_ts=now_ts, since_ts=since_ts))
+    training.extend(_lotto_reclaim_training_outcomes_from_trades(db, now_ts=now_ts, since_ts=since_ts))
+    return training
+
+
+def _lotto_reclaim_cached_cohort_counts(db, *, now_ts=None):
+    now_ts = float(now_ts or time.time())
+    db_key = None
+    try:
+        db_key = str(db.execute("PRAGMA database_list").fetchone()[2] or f"memory:{id(db)}")
+    except Exception:
+        db_key = f"unknown:{id(db)}"
+    cache_key = (
+        db_key,
+        LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC,
+        LOTTO_RECLAIM_COHORT_MARKOV_MAX_TRAINING_OUTCOMES,
+    )
+    cached = _LOTTO_RECLAIM_POSITION_COHORT_CACHE.get(cache_key)
+    if cached and (now_ts - float(cached.get('built_at') or 0.0)) < MARKOV_POSITION_ADVICE_CACHE_SEC:
+        return cached
+    since_ts = max(0.0, now_ts - LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC)
+    training = _lotto_reclaim_training_outcomes(db, now_ts=now_ts, since_ts=since_ts)
+    cached = {
+        'built_at': now_ts,
+        'since_ts': since_ts,
+        'counts_by_key': _lotto_reclaim_cohort_counts(training),
+        'event_count': len(training),
+        'lookback_sec': LOTTO_RECLAIM_COHORT_MARKOV_LOOKBACK_SEC,
+        'cache_ttl_sec': MARKOV_POSITION_ADVICE_CACHE_SEC,
+    }
+    _LOTTO_RECLAIM_POSITION_COHORT_CACHE[cache_key] = cached
+    return cached
+
+
+def _lotto_reclaim_forecast_from_cohort_counts(counts_by_key, *, entry_mode, features, now_ts=None, event_count=0):
+    best_key = 'global'
+    best_rank = len(_lotto_reclaim_cohort_keys(features)) - 1
+    best_counts = (counts_by_key or {}).get(best_key, Counter())
+    best_sample_n = int(sum(best_counts.values()))
+    for rank, key in enumerate(_lotto_reclaim_cohort_keys(features)):
+        counts = (counts_by_key or {}).get(key, Counter())
+        sample_n = int(sum(counts.values()))
+        if sample_n > best_sample_n:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            best_sample_n = sample_n
+        if sample_n >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N:
+            best_key = key
+            best_rank = rank
+            best_counts = counts
+            break
+    return _lotto_reclaim_forecast_from_counts(
+        best_counts,
+        entry_mode=entry_mode,
+        features=features,
+        cohort_key=best_key,
+        cohort_backoff_rank=best_rank,
+        now_ts=now_ts,
+        event_count=event_count,
+    )
+
+
 def _lotto_reclaim_forecast_from_counts(counts, *, entry_mode, features, cohort_key=None, cohort_backoff_rank=None, now_ts=None, event_count=0):
     sample_n = int(sum((counts or Counter()).values()))
     if sample_n <= 0:
@@ -4080,33 +4154,11 @@ def _lotto_reclaim_cohort_markov_forecast(db, *, entry_mode, pending=None, lifec
         payload=pending.get('markov_features') if isinstance(pending.get('markov_features'), dict) else None,
         lifecycle=lifecycle,
     )
-    training = []
-    training.extend(_lotto_reclaim_training_outcomes_from_missed(db, now_ts=now_ts, since_ts=since_ts))
-    training.extend(_lotto_reclaim_training_outcomes_from_trades(db, now_ts=now_ts, since_ts=since_ts))
-    counts_by_key = _lotto_reclaim_cohort_counts(training)
-    best_key = 'global'
-    best_rank = len(_lotto_reclaim_cohort_keys(features)) - 1
-    best_counts = counts_by_key.get(best_key, Counter())
-    best_sample_n = int(sum(best_counts.values()))
-    for rank, key in enumerate(_lotto_reclaim_cohort_keys(features)):
-        counts = counts_by_key.get(key, Counter())
-        sample_n = int(sum(counts.values()))
-        if sample_n > best_sample_n:
-            best_key = key
-            best_rank = rank
-            best_counts = counts
-            best_sample_n = sample_n
-        if sample_n >= LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N:
-            best_key = key
-            best_rank = rank
-            best_counts = counts
-            break
-    return _lotto_reclaim_forecast_from_counts(
-        best_counts,
+    training = _lotto_reclaim_training_outcomes(db, now_ts=now_ts, since_ts=since_ts)
+    return _lotto_reclaim_forecast_from_cohort_counts(
+        _lotto_reclaim_cohort_counts(training),
         entry_mode=entry_mode,
         features=features,
-        cohort_key=best_key,
-        cohort_backoff_rank=best_rank,
         now_ts=now_ts,
         event_count=len(training),
     )
@@ -4355,6 +4407,254 @@ def _record_lotto_reclaim_markov_forecast(
         )
     except Exception as exc:
         log.debug(f"  [MARKOV_RECLAIM] record failed: {exc}")
+
+
+def _position_lotto_reclaim_entry_mode(pos):
+    state = getattr(pos, 'monitor_state', None) or {}
+    mode = str(
+        state.get('entryMode')
+        or state.get('entry_mode')
+        or state.get('parentEntryMode')
+        or getattr(pos, 'entry_mode', '')
+        or ''
+    )
+    return mode if mode in LOTTO_RECLAIM_MARKOV_ENTRY_MODES else None
+
+
+def _lotto_reclaim_position_features(pos, *, entry_mode, exit_matrix=None, w_entry=None):
+    state = getattr(pos, 'monitor_state', None) or {}
+    entry_forecast = state.get('markovReclaimForecast') or state.get('markov_reclaim_forecast') or {}
+    if isinstance(entry_forecast, dict) and isinstance(entry_forecast.get('cohort_features'), dict):
+        features = dict(entry_forecast.get('cohort_features') or {})
+        features['entry_mode'] = entry_mode
+        return features
+    payload = {
+        **(state if isinstance(state, dict) else {}),
+        **(exit_matrix if isinstance(exit_matrix, dict) else {}),
+        **(w_entry if isinstance(w_entry, dict) else {}),
+        'entry_mode': entry_mode,
+        'entry_branch': state.get('entryBranch') if isinstance(state, dict) else None,
+        'quote_clean': bool(state.get('entryQuotePrice') or state.get('quotePeakPnl')) if isinstance(state, dict) else False,
+    }
+    return _lotto_reclaim_candidate_features(entry_mode, payload=payload)
+
+
+def _markov_position_state_label(*, current_pnl=None, peak_pnl=None, held_sec=None):
+    current_pnl = _safe_float(current_pnl, 0.0) or 0.0
+    peak_pnl = _safe_float(peak_pnl, 0.0) or 0.0
+    held_sec = _safe_float(held_sec, 0.0) or 0.0
+    drawdown = max(0.0, peak_pnl - current_pnl)
+    if current_pnl >= 0.30:
+        return 'PEAK30_ACTIVE'
+    if peak_pnl >= 0.30:
+        return 'POST_PEAK_PULLBACK' if drawdown >= 0.10 else 'POST_PEAK_HOLD'
+    if current_pnl <= -0.08:
+        return 'STOP_RISK'
+    if peak_pnl >= 0.12 and drawdown >= 0.08:
+        return 'PRE_PEAK_PULLBACK'
+    if held_sec <= 60:
+        return 'TINY_ENTERED'
+    if current_pnl > 0:
+        return 'RECLAIM_FORMING'
+    return 'RECLAIM_CONFIRMED'
+
+
+def _markov_position_advice_due(pos, *, current_pnl=None, now_ts=None):
+    if not MARKOV_POSITION_ADVICE_ENABLED:
+        return False
+    entry_mode = _position_lotto_reclaim_entry_mode(pos)
+    if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        return False
+    now_ts = float(now_ts or time.time())
+    held_sec = max(0.0, now_ts - float(getattr(pos, 'entry_ts', now_ts) or now_ts))
+    if held_sec < MARKOV_POSITION_ADVICE_MIN_HELD_SEC:
+        return False
+    state = getattr(pos, 'monitor_state', None) or {}
+    last_ts = _safe_float(state.get('markovPositionAdviceTs'), None)
+    last_pnl = _safe_float(state.get('markovPositionAdvicePnl'), None)
+    current_pnl = _safe_float(current_pnl, None)
+    if last_ts is None:
+        return True
+    if now_ts - last_ts >= MARKOV_POSITION_ADVICE_INTERVAL_SEC:
+        return True
+    if (
+        current_pnl is not None
+        and last_pnl is not None
+        and abs(current_pnl - last_pnl) >= MARKOV_POSITION_ADVICE_IMMEDIATE_PNL_MOVE
+    ):
+        return True
+    return False
+
+
+def _markov_position_advice_from_forecast(forecast, *, current_pnl=None, peak_pnl=None, held_sec=None, exit_matrix=None):
+    forecast = forecast or {}
+    gate = forecast.get('gate') or _lotto_reclaim_markov_gate(forecast.get('entry_mode'), forecast)
+    current_pnl = _safe_float(current_pnl, 0.0) or 0.0
+    peak_pnl = _safe_float(peak_pnl, 0.0) or 0.0
+    held_sec = _safe_float(held_sec, 0.0) or 0.0
+    p_peak = _safe_float(forecast.get('p_absorb_peak30'), 0.0) or 0.0
+    p_stop = _safe_float(forecast.get('p_absorb_stop_before_peak'), 0.0) or 0.0
+    p_stale = _safe_float(forecast.get('p_absorb_stale_dead'), 0.0) or 0.0
+    p_toxic = _safe_float(forecast.get('p_absorb_toxic_dead'), 0.0) or 0.0
+    p_crash = _safe_float(forecast.get('p_absorb_crash_dead'), 0.0) or 0.0
+    edge = p_peak - p_stop
+    bucket = gate.get('markov_bucket') or ('green' if gate.get('pass') else 'red')
+    drawdown = max(0.0, peak_pnl - current_pnl)
+    lifecycle_state = _markov_position_state_label(
+        current_pnl=current_pnl,
+        peak_pnl=peak_pnl,
+        held_sec=held_sec,
+    )
+    if forecast.get('error'):
+        decision = 'normal_hold'
+        reason = 'markov_position_forecast_error'
+        controls = {'trail_bias': 'normal', 'timeout_bias': 'normal'}
+    elif int(_safe_float(forecast.get('sample_n'), 0) or 0) < LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N:
+        decision = 'normal_hold'
+        reason = 'markov_position_insufficient_sample'
+        controls = {'trail_bias': 'normal', 'timeout_bias': 'normal'}
+    elif (p_toxic + p_crash) >= MARKOV_POSITION_ADVICE_CRASH_RISK_PROB:
+        decision = 'force_exit_risk'
+        reason = 'markov_position_crash_toxic_risk'
+        controls = {'trail_bias': 'tighten', 'timeout_bias': 'shorten', 'exit_bias': 'strong'}
+    elif bucket == 'green':
+        decision = 'hold_patiently'
+        reason = 'markov_position_green_runner_bias'
+        controls = {
+            'trail_bias': 'loosen',
+            'timeout_bias': 'extend',
+            'partial_sell_bias': 'reduce' if current_pnl >= 0.30 else 'normal',
+        }
+    elif bucket == 'red':
+        if current_pnl >= 0.08:
+            decision = 'take_partial'
+            reason = 'markov_position_red_lock_profit_bias'
+            controls = {'trail_bias': 'tighten', 'timeout_bias': 'shorten', 'suggested_sell_pct': 0.5}
+        elif current_pnl <= 0 or drawdown >= 0.10:
+            decision = 'early_exit_watch'
+            reason = 'markov_position_red_stop_risk'
+            controls = {'trail_bias': 'tighten', 'timeout_bias': 'shorten'}
+        else:
+            decision = 'tighten_trail'
+            reason = 'markov_position_red_tighten_trail'
+            controls = {'trail_bias': 'tighten', 'timeout_bias': 'shorten'}
+    elif p_stale >= 0.40 and held_sec >= 20 * 60:
+        decision = 'early_exit_watch'
+        reason = 'markov_position_stale_risk'
+        controls = {'trail_bias': 'tighten', 'timeout_bias': 'shorten'}
+    else:
+        decision = 'normal_hold'
+        reason = 'markov_position_yellow_normal_hold'
+        controls = {'trail_bias': 'normal', 'timeout_bias': 'normal'}
+    return {
+        'schema_version': 'v1.markov_position_advice.shadow',
+        'shadow_only': True,
+        'applied_to_exit': False,
+        'decision': decision,
+        'reason': reason,
+        'markov_bucket': bucket,
+        'lifecycle_state': lifecycle_state,
+        'current_pnl': current_pnl,
+        'peak_pnl': peak_pnl,
+        'drawdown_from_peak': drawdown,
+        'held_sec': held_sec,
+        'p_absorb_peak30': p_peak,
+        'p_absorb_stop_before_peak': p_stop,
+        'p_absorb_stale_dead': p_stale,
+        'p_absorb_toxic_dead': p_toxic,
+        'p_absorb_crash_dead': p_crash,
+        'edge_peak30_minus_stop': edge,
+        'suggested_controls': controls,
+        'exit_matrix_action': (exit_matrix or {}).get('action') if isinstance(exit_matrix, dict) else None,
+        'exit_matrix_reason': (exit_matrix or {}).get('reason') if isinstance(exit_matrix, dict) else None,
+    }
+
+
+def record_lotto_reclaim_position_markov_advice(
+    db,
+    pos,
+    *,
+    current_pnl=None,
+    peak_pnl=None,
+    exit_matrix=None,
+    w_entry=None,
+    lifecycle=None,
+    now_ts=None,
+    data_source='paper_position_monitor',
+):
+    now_ts = float(now_ts or time.time())
+    entry_mode = _position_lotto_reclaim_entry_mode(pos)
+    if entry_mode not in LOTTO_RECLAIM_MARKOV_ENTRY_MODES:
+        return None
+    if not _markov_position_advice_due(pos, current_pnl=current_pnl, now_ts=now_ts):
+        return None
+    cache = _lotto_reclaim_cached_cohort_counts(db, now_ts=now_ts)
+    features = _lotto_reclaim_position_features(pos, entry_mode=entry_mode, exit_matrix=exit_matrix, w_entry=w_entry)
+    forecast = _lotto_reclaim_forecast_from_cohort_counts(
+        cache.get('counts_by_key') or {},
+        entry_mode=entry_mode,
+        features=features,
+        now_ts=now_ts,
+        event_count=cache.get('event_count') or 0,
+    )
+    forecast['candidate'] = {
+        'token_ca': getattr(pos, 'token_ca', None),
+        'symbol': getattr(pos, 'symbol', None),
+        'entry_mode': entry_mode,
+        'trade_id': getattr(pos, 'trade_id', None),
+    }
+    forecast['cache'] = {
+        'built_at': cache.get('built_at'),
+        'since_ts': cache.get('since_ts'),
+        'cache_ttl_sec': cache.get('cache_ttl_sec'),
+    }
+    forecast['gate'] = _lotto_reclaim_markov_gate(entry_mode, forecast)
+    held_sec = max(0.0, now_ts - float(getattr(pos, 'entry_ts', now_ts) or now_ts))
+    advice = _markov_position_advice_from_forecast(
+        forecast,
+        current_pnl=current_pnl,
+        peak_pnl=peak_pnl,
+        held_sec=held_sec,
+        exit_matrix=exit_matrix,
+    )
+    payload = {
+        **advice,
+        'entry_mode': entry_mode,
+        'forecast': forecast,
+        'cohort_features': features,
+        'policy_version': LOTTO_RECLAIM_MARKOV_POLICY_VERSION,
+        'advice_interval_sec': MARKOV_POSITION_ADVICE_INTERVAL_SEC,
+        'cache_ttl_sec': MARKOV_POSITION_ADVICE_CACHE_SEC,
+    }
+    state = dict(getattr(pos, 'monitor_state', None) or {})
+    state['markovPositionAdvice'] = payload
+    state['markovPositionAdviceTs'] = now_ts
+    state['markovPositionAdvicePnl'] = _safe_float(current_pnl, None)
+    state['markovPositionAdviceDecision'] = advice.get('decision')
+    state['markovPositionAdviceReason'] = advice.get('reason')
+    pos.monitor_state = state
+    try:
+        record_decision_event(
+            db,
+            component='markov_position_advice',
+            event_type='shadow_decision',
+            decision=advice.get('decision') or 'normal_hold',
+            reason=advice.get('reason') or 'markov_position_advice',
+            token_ca=getattr(pos, 'token_ca', None),
+            symbol=getattr(pos, 'symbol', None),
+            lifecycle_id=getattr(pos, 'lifecycle_id', None),
+            trade_id=getattr(pos, 'trade_id', None),
+            signal_ts=getattr(pos, 'signal_ts', None),
+            signal_id=getattr(pos, 'premium_signal_id', None),
+            strategy_stage=getattr(pos, 'strategy_stage', None),
+            route=(w_entry or {}).get('signal_route') or state.get('signalRoute') or getattr(pos, 'signal_type', None),
+            data_source=data_source,
+            payload=with_lifecycle_payload(payload, lifecycle),
+            event_ts=now_ts,
+        )
+    except Exception as exc:
+        log.debug(f"  [MARKOV_POSITION] advice record failed for {getattr(pos, 'symbol', None)}: {exc}")
+    return payload
 
 
 def build_paper_tiny_scout_dex_fallback_entry_execution(pending, amount_sol, failed_execution=None, sol_price=None):
@@ -24753,6 +25053,27 @@ def run_monitor(db):
                         # Read back in-memory state from ExitMatrix → Position (persist across cycles)
                         if exit_matrix.get('_trail_factor') is not None:
                             pos.trail_factor = exit_matrix['_trail_factor']
+
+                        markov_position_advice = record_lotto_reclaim_position_markov_advice(
+                            db,
+                            pos,
+                            current_pnl=exit_matrix.get('current_pnl'),
+                            peak_pnl=peak_state.get('trusted_peak_pnl', pos.peak_pnl),
+                            exit_matrix=exit_matrix,
+                            w_entry=w_entry,
+                            lifecycle=lifecycles.get(pos.lifecycle_id),
+                            now_ts=time.time(),
+                            data_source=pre_src,
+                        )
+                        if markov_position_advice:
+                            log.info(
+                                f"  [MARKOV_POSITION] {pos.symbol}/{pos.strategy_stage} "
+                                f"advice={markov_position_advice.get('decision')} "
+                                f"bucket={markov_position_advice.get('markov_bucket')} "
+                                f"p30={_safe_float(markov_position_advice.get('p_absorb_peak30'), 0.0):.2f} "
+                                f"pstop={_safe_float(markov_position_advice.get('p_absorb_stop_before_peak'), 0.0):.2f} "
+                                f"reason={markov_position_advice.get('reason')}"
+                            )
 
                         exit_eval = {
                             'ok': True,
