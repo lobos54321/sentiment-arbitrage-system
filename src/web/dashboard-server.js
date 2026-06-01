@@ -2226,7 +2226,7 @@ export function buildNotAthReclaimFunnelReport(database, tableNames, sinceTs, op
              ${optionalSqlCol(queueCols, 'payload_json')},
              ${optionalSqlCol(queueCols, 'market_session', "'unknown'")}
       FROM paper_fast_entry_queue
-      ORDER BY ${updatedExpr} DESC, id DESC
+      ORDER BY id DESC
       LIMIT @limit
     `).all({ limit });
     for (const row of queueRows) {
