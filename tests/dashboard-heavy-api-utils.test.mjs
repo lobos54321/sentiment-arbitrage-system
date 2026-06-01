@@ -11,6 +11,7 @@ import {
   buildApiResponseErrorShape,
   buildV27ManualEvidenceApiResponse,
   buildDogCatchGoalProgress,
+  buildNotAthReclaimFunnelReport,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
@@ -738,6 +739,227 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
   assert.equal(health.missed_rescue.scan_count, 3);
   assert.equal(health.missed_rescue.last_result.processed, 12);
   assert.equal(health.missed_rescue.last_error, null);
+});
+
+test('not ATH reclaim funnel summarizes Markov green through queue and trade outcomes', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE paper_decision_events (
+      id INTEGER PRIMARY KEY,
+      event_ts REAL,
+      signal_id INTEGER,
+      token_ca TEXT,
+      symbol TEXT,
+      lifecycle_id TEXT,
+      trade_id INTEGER,
+      signal_ts INTEGER,
+      strategy_stage TEXT,
+      route TEXT,
+      component TEXT,
+      event_type TEXT,
+      decision TEXT,
+      reason TEXT,
+      data_source TEXT,
+      payload_json TEXT
+    );
+    CREATE TABLE paper_fast_entry_queue (
+      id INTEGER PRIMARY KEY,
+      created_at REAL,
+      updated_at REAL,
+      token_ca TEXT,
+      symbol TEXT,
+      source_type TEXT,
+      entry_mode_hint TEXT,
+      entry_branch TEXT,
+      status TEXT,
+      last_error TEXT,
+      first_error TEXT,
+      payload_json TEXT,
+      market_session TEXT
+    );
+    CREATE TABLE paper_trades (
+      id INTEGER PRIMARY KEY,
+      symbol TEXT,
+      token_ca TEXT,
+      lifecycle_id TEXT,
+      entry_ts REAL,
+      exit_ts REAL,
+      exit_reason TEXT,
+      pnl_pct REAL,
+      trusted_peak_pnl REAL,
+      quote_peak_pnl REAL,
+      mark_peak_pnl REAL,
+      peak_trust_status TEXT,
+      position_size_sol REAL,
+      signal_route TEXT,
+      entry_mode TEXT,
+      entry_branch TEXT,
+      replay_source TEXT,
+      entry_execution_audit_json TEXT
+    );
+  `);
+  const now = 1_780_000_000;
+  const insertDecision = db.prepare(`
+    INSERT INTO paper_decision_events (
+      id, event_ts, token_ca, symbol, lifecycle_id, component, event_type,
+      decision, reason, data_source, payload_json
+    ) VALUES (
+      @id, @event_ts, @token_ca, @symbol, @lifecycle_id, @component, @event_type,
+      @decision, @reason, @data_source, @payload_json
+    )
+  `);
+  insertDecision.run({
+    id: 1,
+    event_ts: now - 500,
+    token_ca: 'TokenB',
+    symbol: 'TB',
+    lifecycle_id: 'life-b',
+    component: 'markov_reclaim',
+    event_type: 'entry_gate',
+    decision: 'allow',
+    reason: 'lotto_reclaim_cohort_markov_green',
+    data_source: 'not_ath_reclaim_fast',
+    payload_json: JSON.stringify({
+      gate: {
+        entry_mode: 'lotto_not_ath_reclaim_tiny_probe',
+        markov_bucket: 'green',
+        pass: true,
+      },
+    }),
+  });
+  insertDecision.run({
+    id: 2,
+    event_ts: now - 450,
+    token_ca: 'TokenB',
+    symbol: 'TB',
+    lifecycle_id: 'life-b',
+    component: 'revival_canary',
+    event_type: 'entry_preview',
+    decision: 'allow',
+    reason: 'revival_canary_markov_green',
+    data_source: 'not_ath_reclaim_fast',
+    payload_json: JSON.stringify({
+      entry_mode: 'lotto_not_ath_reclaim_tiny_probe',
+      revival_canary: { markov_bucket: 'green' },
+    }),
+  });
+  insertDecision.run({
+    id: 3,
+    event_ts: now - 420,
+    token_ca: 'TokenA',
+    symbol: 'TA',
+    lifecycle_id: 'life-a',
+    component: 'paper_fast_lane',
+    event_type: 'branch_circuit',
+    decision: 'watch_only',
+    reason: 'branch_circuit_catastrophic_loss',
+    data_source: 'not_ath_reclaim_fast',
+    payload_json: JSON.stringify({
+      entry_branch: 'not_ath_reclaim_quote_clean_tiny_probe',
+    }),
+  });
+  insertDecision.run({
+    id: 4,
+    event_ts: now - 360,
+    token_ca: 'TokenB',
+    symbol: 'TB',
+    lifecycle_id: 'life-b',
+    component: 'paper_fast_lane',
+    event_type: 'branch_circuit_learning_bypass',
+    decision: 'allow',
+    reason: 'branch_circuit_learning_bypass_markov_green_tiny_canary',
+    data_source: 'not_ath_reclaim_fast',
+    payload_json: JSON.stringify({
+      entry_mode: 'lotto_not_ath_reclaim_tiny_probe',
+      learning_bypass: {
+        entry_branch: 'not_ath_reclaim_quote_clean_tiny_probe',
+        markov_bucket: 'green',
+      },
+    }),
+  });
+
+  const insertQueue = db.prepare(`
+    INSERT INTO paper_fast_entry_queue (
+      id, created_at, updated_at, token_ca, symbol, source_type, entry_mode_hint,
+      entry_branch, status, last_error, first_error, payload_json, market_session
+    ) VALUES (
+      @id, @created_at, @updated_at, @token_ca, @symbol, @source_type, @entry_mode_hint,
+      @entry_branch, @status, @last_error, @first_error, @payload_json, @market_session
+    )
+  `);
+  insertQueue.run({
+    id: 1,
+    created_at: now - 320,
+    updated_at: now - 300,
+    token_ca: 'TokenA',
+    symbol: 'TA',
+    source_type: 'not_ath_reclaim_fast',
+    entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+    entry_branch: 'not_ath_reclaim_quote_clean_tiny_probe',
+    status: 'rejected',
+    last_error: 'fast_lane_quote_drift_hard_reject',
+    first_error: 'fast_lane_quote_drift_hard_reject',
+    payload_json: '{}',
+    market_session: 'test',
+  });
+  insertQueue.run({
+    id: 2,
+    created_at: now - 280,
+    updated_at: now - 260,
+    token_ca: 'TokenB',
+    symbol: 'TB',
+    source_type: 'not_ath_reclaim_fast',
+    entry_mode_hint: 'lotto_not_ath_reclaim_tiny_probe',
+    entry_branch: 'not_ath_reclaim_quote_clean_tiny_probe',
+    status: 'entered',
+    last_error: null,
+    first_error: null,
+    payload_json: '{}',
+    market_session: 'test',
+  });
+
+  db.prepare(`
+    INSERT INTO paper_trades (
+      id, symbol, token_ca, lifecycle_id, entry_ts, exit_ts, exit_reason,
+      pnl_pct, trusted_peak_pnl, quote_peak_pnl, mark_peak_pnl, peak_trust_status,
+      position_size_sol, signal_route, entry_mode, entry_branch, replay_source,
+      entry_execution_audit_json
+    ) VALUES (
+      7, 'TB', 'TokenB', 'life-b', @entry_ts, @exit_ts, 'guardian_gap_crash',
+      0.6362, 1.8565, 1.8565, 1.40, 'trusted_quote',
+      0.001, 'not_ath_reclaim_fast', 'lotto_not_ath_reclaim_tiny_probe',
+      'not_ath_reclaim_quote_clean_tiny_probe', 'paper_fast_lane',
+      '{"success":true}'
+    )
+  `).run({ entry_ts: now - 240, exit_ts: now - 120 });
+
+  const report = buildNotAthReclaimFunnelReport(
+    db,
+    new Set(['paper_decision_events', 'paper_fast_entry_queue', 'paper_trades']),
+    now - 3600,
+    { nowTs: now, limit: 100 },
+  );
+
+  assert.equal(report.summary.markov_green_unique, 1);
+  assert.equal(report.summary.canary_allow_unique, 1);
+  assert.equal(report.summary.branch_block_unique, 1);
+  assert.equal(report.summary.branch_bypass_unique, 1);
+  assert.equal(report.summary.queued_unique, 2);
+  assert.equal(report.summary.quote_drift_reject_unique, 1);
+  assert.equal(report.summary.entered_unique, 1);
+  assert.equal(report.summary.closed_unique, 1);
+  assert.equal(report.summary.peak100_unique, 1);
+  assert.equal(report.summary.quote_attempt_to_entered_pct, 50);
+  assert.deepEqual(report.by_markov_bucket, [{ key: 'green', n: 3 }]);
+  assert.equal(report.queue_reason_summary[0].key, 'entered:none');
+  assert.equal(report.trade_summary.closed, 1);
+  assert.equal(report.trade_summary.win_rate_pct, 100);
+  assert.equal(report.trade_summary.avg_pnl_pct, 63.62);
+  assert.equal(report.trade_summary.avg_peak_pnl_pct, 185.65);
+  assert.equal(report.trade_summary.peak100_n, 1);
+  assert.equal(report.trade_summary.est_pnl_sol, 0.000636);
+  assert.equal(report.trade_summary.entry_quote_success_rate_pct, 100);
+  db.close();
 });
 
 test('v27 read model health exposes materialized verifier result', () => {

@@ -555,6 +555,12 @@ function percentileNumber(values, pct) {
   return sorted[idx];
 }
 
+function ratioToPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n * 100;
+}
+
 function nullableFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
@@ -1990,6 +1996,443 @@ function trustedTradePeakSqlExpr(cols, qualifier = '') {
 function markTradePeakSqlExpr(cols, qualifier = '') {
   if (cols.has('mark_peak_pnl')) return `COALESCE(${sqlCol('mark_peak_pnl', qualifier)}, 0)`;
   return cols.has('peak_pnl') ? `COALESCE(${sqlCol('peak_pnl', qualifier)}, 0)` : '0';
+}
+
+function optionalSqlCol(cols, name, fallback = 'NULL', alias = name) {
+  return cols.has(name) ? name : `${fallback} AS ${alias}`;
+}
+
+function funnelEntityKey(row) {
+  return row?.token_ca ? String(row.token_ca) : (row?.lifecycle_id ? `lifecycle:${row.lifecycle_id}` : null);
+}
+
+function addFunnelStage(stage, row) {
+  stage.events += 1;
+  const key = funnelEntityKey(row);
+  if (key) stage.entities.add(key);
+  if (row?.token_ca) stage.tokens.add(String(row.token_ca));
+}
+
+function makeFunnelStage(stage, label) {
+  return {
+    stage,
+    label,
+    events: 0,
+    entities: new Set(),
+    tokens: new Set(),
+  };
+}
+
+function serializeFunnelStage(stage) {
+  return {
+    stage: stage.stage,
+    label: stage.label,
+    events: stage.events,
+    unique_entities: stage.entities.size,
+    unique_tokens: stage.tokens.size,
+  };
+}
+
+function incrementCounter(map, key, amount = 1) {
+  const label = String(key || 'unknown');
+  map.set(label, (map.get(label) || 0) + amount);
+}
+
+function counterToRows(map, limit = 50) {
+  return Array.from(map.entries())
+    .map(([key, n]) => ({ key, n }))
+    .sort((a, b) => Number(b.n || 0) - Number(a.n || 0) || String(a.key).localeCompare(String(b.key)))
+    .slice(0, limit);
+}
+
+function extractMarkovGate(payload = {}) {
+  const candidates = [
+    payload.gate,
+    payload.markov_reclaim_gate,
+    payload.markovReclaimGate,
+    payload.markov_reclaim_forecast?.gate,
+    payload.markovReclaimForecast?.gate,
+    payload.lotto_markov_reclaim_forecast?.gate,
+    payload.revival_canary?.markov_reclaim_gate,
+    payload.revival_canary?.markovReclaimGate,
+    payload.revival_canary?.markov_reclaim_forecast?.gate,
+    payload.revival_canary?.markovReclaimForecast?.gate,
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate === 'object' && !Array.isArray(candidate)) || {};
+}
+
+function extractFunnelEventMode(row, payload = {}) {
+  const gate = extractMarkovGate(payload);
+  const value = firstValue(
+    payload.entry_mode,
+    payload.entryMode,
+    payload.scout_mode,
+    payload.scoutMode,
+    payload.entryModeHint,
+    payload.entry_mode_hint,
+    gate.entry_mode,
+    gate.entryMode,
+    payload.revival_canary?.entry_mode,
+    payload.revival_canary?.entryMode,
+    payload.revival_canary?.entry_mode_hint,
+    payload.revival_canary?.entryModeHint,
+    row.entry_mode_hint,
+    ''
+  );
+  return value == null ? '' : String(value);
+}
+
+function extractFunnelEventBranch(row, payload = {}) {
+  const gate = extractMarkovGate(payload);
+  const value = firstValue(
+    payload.entry_branch,
+    payload.entryBranch,
+    payload.queue_entry_branch,
+    payload.queueEntryBranch,
+    payload.revival_canary?.entry_branch,
+    payload.revival_canary?.entryBranch,
+    payload.learning_bypass?.entry_branch,
+    payload.learning_bypass?.entryBranch,
+    gate.entry_branch,
+    gate.entryBranch,
+    row.entry_branch,
+    ''
+  );
+  return value == null ? '' : String(value);
+}
+
+function extractMarkovBucket(payload = {}) {
+  const gate = extractMarkovGate(payload);
+  const value = firstValue(
+    gate.markov_bucket,
+    gate.markovBucket,
+    payload.markov_bucket,
+    payload.markovBucket,
+    payload.revival_canary?.markov_bucket,
+    payload.revival_canary?.markovBucket,
+    payload.learning_bypass?.markov_bucket,
+    payload.learning_bypass?.markovBucket,
+    ''
+  );
+  return value == null ? '' : String(value).toLowerCase();
+}
+
+function isTargetNotAthReclaim({ mode, branch, sourceType, reason }, target) {
+  const modeText = String(mode || '');
+  const branchText = String(branch || '');
+  const sourceText = String(sourceType || '');
+  const reasonText = String(reason || '');
+  return (
+    modeText === target.entryMode
+    || branchText === target.entryBranch
+    || sourceText === 'not_ath_reclaim_fast'
+    || reasonText === target.entryBranch
+  );
+}
+
+export function buildNotAthReclaimFunnelReport(database, tableNames, sinceTs, options = {}) {
+  const target = {
+    entryMode: options.entryMode || 'lotto_not_ath_reclaim_tiny_probe',
+    entryBranch: options.entryBranch || 'not_ath_reclaim_quote_clean_tiny_probe',
+  };
+  const limit = Math.max(1, Math.min(Number.parseInt(String(options.limit ?? 5000), 10) || 5000, 20000));
+  const nowTs = Number.isFinite(options.nowTs) ? Number(options.nowTs) : Math.floor(Date.now() / 1000);
+  const since = Number.isFinite(Number(sinceTs)) ? Number(sinceTs) : nowTs - 6 * 3600;
+  const stages = {
+    markov_green: makeFunnelStage('markov_green', 'Markov green forecast/gate'),
+    canary_allow: makeFunnelStage('canary_allow', 'Revival canary allowed or previewed'),
+    branch_block: makeFunnelStage('branch_block', 'Branch circuit blocked'),
+    branch_bypass: makeFunnelStage('branch_bypass', 'Branch circuit learning bypass'),
+    queued: makeFunnelStage('queued', 'Fast-lane queue seen'),
+    quote_drift_reject: makeFunnelStage('quote_drift_reject', 'Rejected by quote drift guard'),
+    entered: makeFunnelStage('entered', 'Paper entry filled'),
+    closed: makeFunnelStage('closed', 'Closed paper trade'),
+    peak30: makeFunnelStage('peak30', 'Reached +30% trusted peak'),
+    peak50: makeFunnelStage('peak50', 'Reached +50% trusted peak'),
+    peak100: makeFunnelStage('peak100', 'Reached +100% trusted peak'),
+  };
+  const byMarkovBucket = new Map();
+  const canaryReasons = new Map();
+  const branchReasons = new Map();
+  const queueStatus = new Map();
+  const queueReasons = new Map();
+  const recentEvents = [];
+  const recentQueue = [];
+  const recentTrades = [];
+
+  if (tableNames.has('paper_decision_events')) {
+    const rows = database.prepare(`
+      SELECT id, event_ts, signal_id, token_ca, symbol, lifecycle_id, trade_id,
+             signal_ts, strategy_stage, route, component, event_type, decision,
+             reason, data_source, payload_json
+      FROM paper_decision_events
+      WHERE event_ts >= @since
+        AND component IN ('markov_reclaim', 'revival_canary', 'paper_fast_lane', 'entry_mode_quality')
+      ORDER BY event_ts DESC, id DESC
+      LIMIT @limit
+    `).all({ since, limit });
+    for (const row of rows) {
+      const payload = parseJsonObject(row.payload_json);
+      const mode = extractFunnelEventMode(row, payload);
+      const branch = extractFunnelEventBranch(row, payload);
+      const sourceType = firstValue(payload.queue_source_type, payload.source_type, payload.signal_type, row.data_source);
+      if (!isTargetNotAthReclaim({ mode, branch, sourceType, reason: row.reason }, target)) continue;
+
+      const bucket = extractMarkovBucket(payload);
+      const component = String(row.component || '');
+      const eventType = String(row.event_type || '');
+      const decision = String(row.decision || '');
+      if (bucket) incrementCounter(byMarkovBucket, bucket);
+      if (component === 'markov_reclaim') {
+        if (bucket === 'green' || decision === 'allow') addFunnelStage(stages.markov_green, row);
+      } else if (component === 'revival_canary') {
+        incrementCounter(canaryReasons, row.reason);
+        if (decision === 'allow' || eventType === 'entry_allow' || eventType === 'entry_preview') {
+          addFunnelStage(stages.canary_allow, row);
+        }
+      } else if (component === 'paper_fast_lane' && eventType === 'branch_circuit') {
+        incrementCounter(branchReasons, row.reason);
+        addFunnelStage(stages.branch_block, row);
+      } else if (component === 'paper_fast_lane' && eventType === 'branch_circuit_learning_bypass') {
+        incrementCounter(branchReasons, row.reason);
+        addFunnelStage(stages.branch_bypass, row);
+      }
+      if (recentEvents.length < 40) {
+        recentEvents.push({
+          id: row.id,
+          event_ts: row.event_ts,
+          token_ca: row.token_ca,
+          symbol: row.symbol,
+          component: row.component,
+          event_type: row.event_type,
+          decision: row.decision,
+          reason: row.reason,
+          entry_mode: mode || null,
+          entry_branch: branch || null,
+          markov_bucket: bucket || null,
+        });
+      }
+    }
+  }
+
+  if (tableNames.has('paper_fast_entry_queue')) {
+    const queueCols = getTableColumns(database, 'paper_fast_entry_queue');
+    const updatedExpr = queueCols.has('updated_at') ? 'updated_at' : 'created_at';
+    const queueRows = database.prepare(`
+      SELECT id, created_at, ${optionalSqlCol(queueCols, 'updated_at', 'created_at')},
+             token_ca, symbol, source_type, entry_mode_hint, entry_branch,
+             status, ${optionalSqlCol(queueCols, 'last_error')},
+             ${optionalSqlCol(queueCols, 'first_error')},
+             ${optionalSqlCol(queueCols, 'payload_json')},
+             ${optionalSqlCol(queueCols, 'market_session', "'unknown'")}
+      FROM paper_fast_entry_queue
+      WHERE (created_at >= @since OR ${updatedExpr} >= @since)
+        AND (
+          entry_branch = @entryBranch
+          OR entry_mode_hint = @entryMode
+          OR source_type = 'not_ath_reclaim_fast'
+        )
+      ORDER BY ${updatedExpr} DESC, id DESC
+      LIMIT @limit
+    `).all({ since, entryBranch: target.entryBranch, entryMode: target.entryMode, limit });
+    for (const row of queueRows) {
+      addFunnelStage(stages.queued, row);
+      incrementCounter(queueStatus, row.status);
+      const reason = firstValue(row.first_error, row.last_error, 'none');
+      incrementCounter(queueReasons, `${row.status || 'unknown'}:${reason}`);
+      if (reason === 'fast_lane_quote_drift_hard_reject') addFunnelStage(stages.quote_drift_reject, row);
+      if (row.status === 'entered') addFunnelStage(stages.entered, row);
+      if (recentQueue.length < 40) {
+        recentQueue.push({
+          id: row.id,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          token_ca: row.token_ca,
+          symbol: row.symbol,
+          source_type: row.source_type,
+          entry_mode_hint: row.entry_mode_hint,
+          entry_branch: row.entry_branch,
+          status: row.status,
+          reason,
+          market_session: row.market_session,
+        });
+      }
+    }
+  }
+
+  const tradeSummary = {
+    total: 0,
+    open: 0,
+    closed: 0,
+    wins: 0,
+    losses: 0,
+    peak30_n: 0,
+    peak50_n: 0,
+    peak100_n: 0,
+    total_pnl_pct: 0,
+    total_peak_pct: 0,
+    pnl_n: 0,
+    peak_n: 0,
+    est_pnl_sol: 0,
+    entry_quote_success_n: 0,
+    entry_quote_failure_n: 0,
+  };
+  if (tableNames.has('paper_trades')) {
+    const tradeCols = getTableColumns(database, 'paper_trades');
+    const branchFilter = tradeCols.has('entry_branch') ? 'OR entry_branch = @entryBranch' : '';
+    const modeFilter = tradeCols.has('entry_mode') ? 'OR entry_mode = @entryMode' : '';
+    const routeFilter = tradeCols.has('signal_route') ? "OR signal_route = 'not_ath_reclaim_fast'" : '';
+    const tradeRows = database.prepare(`
+      SELECT id, symbol, token_ca, lifecycle_id, entry_ts, exit_ts, exit_reason,
+             ${tradeCols.has('pnl_pct') ? 'pnl_pct' : 'NULL AS pnl_pct'},
+             ${trustedTradePeakSqlExpr(tradeCols)} AS peak_pnl,
+             ${markTradePeakSqlExpr(tradeCols)} AS mark_peak_pnl,
+             ${optionalSqlCol(tradeCols, 'peak_trust_status', "'legacy_peak'")},
+             ${optionalSqlCol(tradeCols, 'position_size_sol')},
+             ${optionalSqlCol(tradeCols, 'signal_route')},
+             ${optionalSqlCol(tradeCols, 'entry_mode')},
+             ${optionalSqlCol(tradeCols, 'entry_branch')},
+             ${optionalSqlCol(tradeCols, 'entry_execution_audit_json')}
+      FROM paper_trades
+      WHERE entry_ts >= @since
+        AND (
+          0
+          ${branchFilter}
+          ${modeFilter}
+          ${routeFilter}
+        )
+      ORDER BY entry_ts DESC, id DESC
+      LIMIT @limit
+    `).all({ since, entryBranch: target.entryBranch, entryMode: target.entryMode, limit });
+    for (const row of tradeRows) {
+      addFunnelStage(stages.entered, row);
+      tradeSummary.total += 1;
+      const closed = row.exit_ts != null || row.exit_reason != null;
+      if (closed) {
+        tradeSummary.closed += 1;
+        addFunnelStage(stages.closed, row);
+      } else {
+        tradeSummary.open += 1;
+      }
+      const pnl = Number(row.pnl_pct);
+      if (Number.isFinite(pnl)) {
+        tradeSummary.pnl_n += 1;
+        tradeSummary.total_pnl_pct += ratioToPct(pnl);
+        if (closed && pnl > 0) tradeSummary.wins += 1;
+        if (closed && pnl <= 0) tradeSummary.losses += 1;
+        if (row.position_size_sol != null) tradeSummary.est_pnl_sol += pnl * Number(row.position_size_sol || 0);
+      }
+      const peak = Number(row.peak_pnl);
+      if (Number.isFinite(peak)) {
+        tradeSummary.peak_n += 1;
+        tradeSummary.total_peak_pct += ratioToPct(peak);
+        if (peak >= 0.30) {
+          tradeSummary.peak30_n += 1;
+          addFunnelStage(stages.peak30, row);
+        }
+        if (peak >= 0.50) {
+          tradeSummary.peak50_n += 1;
+          addFunnelStage(stages.peak50, row);
+        }
+        if (peak >= 1.00) {
+          tradeSummary.peak100_n += 1;
+          addFunnelStage(stages.peak100, row);
+        }
+      }
+      const audit = parseJsonObject(row.entry_execution_audit_json);
+      if (audit.success === true || audit.routeAvailable === true) tradeSummary.entry_quote_success_n += 1;
+      if (audit.success === false || audit.routeAvailable === false || audit.failureReason) tradeSummary.entry_quote_failure_n += 1;
+      if (recentTrades.length < 40) {
+        recentTrades.push({
+          id: row.id,
+          token_ca: row.token_ca,
+          symbol: row.symbol,
+          entry_ts: row.entry_ts,
+          exit_ts: row.exit_ts,
+          exit_reason: row.exit_reason,
+          signal_route: row.signal_route,
+          entry_mode: row.entry_mode,
+          entry_branch: row.entry_branch,
+          position_size_sol: row.position_size_sol,
+          pnl_pct: Number.isFinite(pnl) ? roundNumber(ratioToPct(pnl), 2) : null,
+          peak_pnl_pct: Number.isFinite(peak) ? roundNumber(ratioToPct(peak), 2) : null,
+          mark_peak_pnl_pct: row.mark_peak_pnl == null ? null : roundNumber(ratioToPct(row.mark_peak_pnl), 2),
+          peak_trust_status: row.peak_trust_status || null,
+        });
+      }
+    }
+  }
+
+  const serializedStages = Object.values(stages).map(serializeFunnelStage);
+  const stageByName = Object.fromEntries(serializedStages.map((stage) => [stage.stage, stage]));
+  const quoteAttempts = stageByName.quote_drift_reject.unique_tokens + stageByName.entered.unique_tokens;
+  const markovGreen = stageByName.markov_green.unique_tokens;
+  const canaryAllow = stageByName.canary_allow.unique_tokens;
+  const entered = stageByName.entered.unique_tokens;
+  const closed = stageByName.closed.unique_tokens;
+  return {
+    schema_version: 'v2.7.0.not_ath_reclaim_funnel.v1',
+    target,
+    filters: {
+      since_ts: since,
+      since_iso: new Date(since * 1000).toISOString(),
+      limit,
+    },
+    available: {
+      paper_decision_events: tableNames.has('paper_decision_events'),
+      paper_fast_entry_queue: tableNames.has('paper_fast_entry_queue'),
+      paper_trades: tableNames.has('paper_trades'),
+    },
+    summary: {
+      markov_green_unique: markovGreen,
+      canary_allow_unique: canaryAllow,
+      branch_block_unique: stageByName.branch_block.unique_tokens,
+      branch_bypass_unique: stageByName.branch_bypass.unique_tokens,
+      queued_unique: stageByName.queued.unique_tokens,
+      quote_drift_reject_unique: stageByName.quote_drift_reject.unique_tokens,
+      entered_unique: entered,
+      closed_unique: closed,
+      peak30_unique: stageByName.peak30.unique_tokens,
+      peak50_unique: stageByName.peak50.unique_tokens,
+      peak100_unique: stageByName.peak100.unique_tokens,
+      markov_green_to_entered_pct: markovGreen ? roundNumber((entered / markovGreen) * 100, 1) : null,
+      canary_allow_to_entered_pct: canaryAllow ? roundNumber((entered / canaryAllow) * 100, 1) : null,
+      quote_attempt_to_entered_pct: quoteAttempts ? roundNumber((entered / quoteAttempts) * 100, 1) : null,
+    },
+    stages: serializedStages,
+    by_markov_bucket: counterToRows(byMarkovBucket),
+    canary_reason_summary: counterToRows(canaryReasons),
+    branch_reason_summary: counterToRows(branchReasons),
+    queue_status_summary: counterToRows(queueStatus),
+    queue_reason_summary: counterToRows(queueReasons),
+    trade_summary: {
+      total: tradeSummary.total,
+      open: tradeSummary.open,
+      closed: tradeSummary.closed,
+      wins: tradeSummary.wins,
+      losses: tradeSummary.losses,
+      win_rate_pct: tradeSummary.closed ? roundNumber((tradeSummary.wins / tradeSummary.closed) * 100, 1) : null,
+      avg_pnl_pct: tradeSummary.pnl_n ? roundNumber(tradeSummary.total_pnl_pct / tradeSummary.pnl_n, 2) : null,
+      avg_peak_pnl_pct: tradeSummary.peak_n ? roundNumber(tradeSummary.total_peak_pct / tradeSummary.peak_n, 2) : null,
+      peak30_n: tradeSummary.peak30_n,
+      peak50_n: tradeSummary.peak50_n,
+      peak100_n: tradeSummary.peak100_n,
+      est_pnl_sol: roundNumber(tradeSummary.est_pnl_sol, 6),
+      entry_quote_success_n: tradeSummary.entry_quote_success_n,
+      entry_quote_failure_n: tradeSummary.entry_quote_failure_n,
+      entry_quote_success_rate_pct: (tradeSummary.entry_quote_success_n + tradeSummary.entry_quote_failure_n)
+        ? roundNumber((tradeSummary.entry_quote_success_n / (tradeSummary.entry_quote_success_n + tradeSummary.entry_quote_failure_n)) * 100, 1)
+        : null,
+    },
+    recent_events: recentEvents,
+    recent_queue: recentQueue,
+    recent_trades: recentTrades,
+    notes: {
+      unique_counting: 'unique_tokens counts token_ca only; unique_entities also falls back to lifecycle_id where token_ca is missing.',
+      funnel_interpretation: 'Stages are not a strict one-row pipeline; decision events, queue rows, and trade rows are joined by target mode/branch over the same time window.',
+      action_hint: 'If canary_allow is high but entered is low, inspect queue_reason_summary for quote drift or branch circuit blockers.',
+    },
+  };
 }
 
 function trustedMissedPeakSqlExpr(cols, qualifier = 'm') {
@@ -7939,6 +8382,60 @@ const server = http.createServer(async (req, res) => {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
       res.writeHead(500, apiJsonHeaders());
       res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  } else if (url.pathname === '/api/paper/not-ath-reclaim-funnel') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 6,
+        maxHours: 24,
+        defaultLimit: 5000,
+        maxLimit: 20000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      paperDb = new Database(paperDbPath, {
+        readonly: true,
+        timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000),
+      });
+      const tableNames = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      const report = buildNotAthReclaimFunnelReport(paperDb, tableNames, liveGuard.since_ts, {
+        limit: liveGuard.limit,
+        entryMode: url.searchParams.get('entry_mode') || undefined,
+        entryBranch: url.searchParams.get('entry_branch') || undefined,
+      });
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        window_hours: liveGuard.window_hours,
+        requested_window_hours: Number.parseInt(url.searchParams.get('hours') || String(liveGuard.window_hours), 10) || liveGuard.window_hours,
+        query_ms: Date.now() - startedAt,
+        live_query: true,
+        ...report,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {
