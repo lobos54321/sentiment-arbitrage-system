@@ -2166,12 +2166,12 @@ export function buildNotAthReclaimFunnelReport(database, tableNames, sinceTs, op
              signal_ts, strategy_stage, route, component, event_type, decision,
              reason, data_source, payload_json
       FROM paper_decision_events
-      WHERE event_ts >= @since
-        AND component IN ('markov_reclaim', 'revival_canary', 'paper_fast_lane', 'entry_mode_quality')
-      ORDER BY event_ts DESC, id DESC
+      ORDER BY id DESC
       LIMIT @limit
-    `).all({ since, limit });
+    `).all({ limit });
     for (const row of rows) {
+      if (Number(row.event_ts || 0) < since) continue;
+      if (!['markov_reclaim', 'revival_canary', 'paper_fast_lane', 'entry_mode_quality'].includes(String(row.component || ''))) continue;
       const payload = parseJsonObject(row.payload_json);
       const mode = extractFunnelEventMode(row, payload);
       const branch = extractFunnelEventBranch(row, payload);
@@ -2226,16 +2226,19 @@ export function buildNotAthReclaimFunnelReport(database, tableNames, sinceTs, op
              ${optionalSqlCol(queueCols, 'payload_json')},
              ${optionalSqlCol(queueCols, 'market_session', "'unknown'")}
       FROM paper_fast_entry_queue
-      WHERE (created_at >= @since OR ${updatedExpr} >= @since)
-        AND (
-          entry_branch = @entryBranch
-          OR entry_mode_hint = @entryMode
-          OR source_type = 'not_ath_reclaim_fast'
-        )
       ORDER BY ${updatedExpr} DESC, id DESC
       LIMIT @limit
-    `).all({ since, entryBranch: target.entryBranch, entryMode: target.entryMode, limit });
+    `).all({ limit });
     for (const row of queueRows) {
+      const rowCreated = Number(row.created_at || 0);
+      const rowUpdated = Number(firstValue(row.updated_at, row.created_at, 0));
+      if (rowCreated < since && rowUpdated < since) continue;
+      if (!isTargetNotAthReclaim({
+        mode: row.entry_mode_hint,
+        branch: row.entry_branch,
+        sourceType: row.source_type,
+        reason: row.first_error || row.last_error,
+      }, target)) continue;
       addFunnelStage(stages.queued, row);
       incrementCounter(queueStatus, row.status);
       const reason = firstValue(row.first_error, row.last_error, 'none');
@@ -2431,6 +2434,7 @@ export function buildNotAthReclaimFunnelReport(database, tableNames, sinceTs, op
       unique_counting: 'unique_tokens counts token_ca only; unique_entities also falls back to lifecycle_id where token_ca is missing.',
       funnel_interpretation: 'Stages are not a strict one-row pipeline; decision events, queue rows, and trade rows are joined by target mode/branch over the same time window.',
       action_hint: 'If canary_allow is high but entered is low, inspect queue_reason_summary for quote drift or branch circuit blockers.',
+      performance_guardrail: 'Large tables are scanned from the recent id tail and then filtered in memory to keep the live dashboard responsive.',
     },
   };
 }
