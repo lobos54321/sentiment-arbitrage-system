@@ -443,6 +443,141 @@ def test_process_queue_item_enters_lotto_not_ath_reclaim_when_gates_pass(tmp_pat
     assert trade["position_size_sol"] == fast.ptm.PAPER_TINY_SCOUT_SIZE_SOL
 
 
+def test_lotto_not_ath_watch_canary_scan_queues_strict_would_enter(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_WATCH_MARKOV_CANARY_ENABLED", True)
+    db_path = tmp_path / "paper.db"
+    db = fast.ptm.init_paper_db(str(db_path))
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    signal_ts = now - 2400
+    latest_snapshot = {
+        "snapshot_ts": now - 5,
+        "quote_price": 0.0000011,
+        "mark_price": 0.00000108,
+        "quote_gap_pct": 1.8,
+        "spread_pct": 1.8,
+        "liquidity_usd": 18000,
+        "volume_m5": 12000,
+        "tx_m5": 80,
+        "buy_sell_ratio": 1.4,
+        "price_change_m5": 6.0,
+        "quote_clean": True,
+        "activity_reclaim": True,
+        "volume_reclaim": True,
+        "momentum_reclaim": True,
+        "snapshot_pass": True,
+    }
+    fast.ptm.record_decision_event(
+        db,
+        component="lotto_not_ath_watch_shadow",
+        event_type="would_enter",
+        decision="WOULD_ENTER",
+        reason="not_ath_two_snapshot_quote_clean_reclaim_confirmed",
+        token_ca="TokenWatchCanary",
+        symbol="WAT",
+        lifecycle_id=fast.ptm.build_lifecycle_id("TokenWatchCanary", signal_ts),
+        signal_ts=signal_ts,
+        signal_id=123,
+        route="LOTTO",
+        data_source="test",
+        payload={
+            "source_reject_reason": "lotto_stale_2140s",
+            "parent_blocker": "lotto_stale",
+            "baseline_price": 0.000001,
+            "tradable_peak_pnl": 1.2,
+            "would_stop_before_peak": 0,
+            "confirmation": {
+                "latest_snapshot": latest_snapshot,
+                "confirming_snapshots": [
+                    {**latest_snapshot, "snapshot_ts": now - 305, "horizon_sec": 1800},
+                    {**latest_snapshot, "snapshot_ts": now - 5, "horizon_sec": 2100},
+                ],
+            },
+            "latest_snapshot": latest_snapshot,
+        },
+        event_ts=now - 4,
+    )
+
+    result = fast.scan_lotto_not_ath_watch_canary_once(db, now_ts=now, limit=5)
+
+    assert result["queued"] == 1
+    row = db.execute(
+        """
+        SELECT status, source_type, entry_branch, entry_mode_hint, trigger_price, payload_json
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenWatchCanary'
+        """
+    ).fetchone()
+    queued_payload = json.loads(row["payload_json"])
+    assert row["status"] == "queued"
+    assert row["source_type"] == fast.LOTTO_NOT_ATH_WATCH_CANARY_SOURCE_TYPE
+    assert row["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
+    assert row["entry_mode_hint"] == "lotto_not_ath_reclaim_tiny_probe"
+    assert row["trigger_price"] == latest_snapshot["quote_price"]
+    assert queued_payload["watch_mode"] == "markov_green_canary"
+    assert queued_payload["live_entry_enabled"] is True
+    assert queued_payload["clean_dog_reclaim_eligibility"]["direct_reclaim_ok"] is True
+    audit = db.execute(
+        """
+        SELECT event_type, decision
+        FROM paper_decision_events
+        WHERE component = ?
+          AND token_ca = 'TokenWatchCanary'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (fast.LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT,),
+    ).fetchone()
+    assert audit["event_type"] == "entry_queued"
+    assert audit["decision"] == "queue"
+
+
+def test_lotto_not_ath_watch_canary_scan_blocks_without_clean_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_WATCH_MARKOV_CANARY_ENABLED", True)
+    db_path = tmp_path / "paper.db"
+    db = fast.ptm.init_paper_db(str(db_path))
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    signal_ts = now - 2400
+    fast.ptm.record_decision_event(
+        db,
+        component="lotto_not_ath_watch_shadow",
+        event_type="would_enter",
+        decision="WOULD_ENTER",
+        reason="not_ath_two_snapshot_quote_clean_reclaim_confirmed",
+        token_ca="TokenWatchBlocked",
+        symbol="BLK",
+        lifecycle_id=fast.ptm.build_lifecycle_id("TokenWatchBlocked", signal_ts),
+        signal_ts=signal_ts,
+        route="LOTTO",
+        data_source="test",
+        payload={
+            "source_reject_reason": "not_ath_prebuy_kline_block",
+            "confirmation": {"latest_snapshot": {"snapshot_ts": now - 5, "quote_clean": False}},
+        },
+        event_ts=now - 4,
+    )
+
+    result = fast.scan_lotto_not_ath_watch_canary_once(db, now_ts=now, limit=5)
+
+    assert result["blocked"] == 1
+    assert db.execute("SELECT COUNT(*) FROM paper_fast_entry_queue").fetchone()[0] == 0
+    audit = db.execute(
+        """
+        SELECT event_type, decision, reason
+        FROM paper_decision_events
+        WHERE component = ?
+          AND token_ca = 'TokenWatchBlocked'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (fast.LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT,),
+    ).fetchone()
+    assert audit["event_type"] == "entry_block"
+    assert audit["decision"] == "watch_only"
+    assert audit["reason"] == "clean_dog_reclaim_recovery_quote_clean_missing"
+
+
 def test_entry_guard_rejects_hard_drift():
     now = int(time.time())
     row = {

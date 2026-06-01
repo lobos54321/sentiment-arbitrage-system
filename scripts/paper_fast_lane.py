@@ -154,6 +154,18 @@ FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED = os.environ.get(
     "FAST_ENTRY_NOT_ATH_RECLAIM_CANARY_ENABLED",
     "true",
 ).lower() != "false"
+FAST_ENTRY_NOT_ATH_WATCH_MARKOV_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_NOT_ATH_WATCH_MARKOV_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_NOT_ATH_WATCH_CANARY_LOOKBACK_SEC = float(os.environ.get(
+    "FAST_ENTRY_NOT_ATH_WATCH_CANARY_LOOKBACK_SEC",
+    str(6 * 60 * 60),
+))
+FAST_ENTRY_NOT_ATH_WATCH_CANARY_LIMIT = int(os.environ.get(
+    "FAST_ENTRY_NOT_ATH_WATCH_CANARY_LIMIT",
+    "10",
+))
 FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED = os.environ.get(
     "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED",
     "true",
@@ -303,6 +315,10 @@ DEGRADED_CANARY_BRANCHES = {
     "smart_quality_reclaim_tiny_probe",
     "matrix_timeout_final_quote_tiny_probe",
 }
+
+LOTTO_NOT_ATH_WATCH_CANARY_SOURCE_TYPE = "lotto_not_ath_watch_reclaim_fast"
+LOTTO_NOT_ATH_WATCH_CANARY_BRANCH = "not_ath_reclaim_quote_clean_tiny_probe"
+LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT = "lotto_not_ath_watch_canary"
 
 SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
 
@@ -2884,6 +2900,198 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
     }
 
 
+def lotto_not_ath_watch_snapshot_from_payload(payload):
+    payload = payload or {}
+    confirmation = payload.get("confirmation") if isinstance(payload.get("confirmation"), dict) else {}
+    candidates = [
+        payload.get("latest_snapshot"),
+        confirmation.get("latest_snapshot"),
+    ]
+    confirming = confirmation.get("confirming_snapshots")
+    if isinstance(confirming, list) and confirming:
+        candidates.append(confirming[-1])
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def build_lotto_not_ath_watch_canary_payload(row, payload, *, now_ts=None):
+    payload = payload or {}
+    snapshot = lotto_not_ath_watch_snapshot_from_payload(payload)
+    event_ts = normalize_ts_sec(row_value(row, "event_ts") or now_ts or time.time())
+    snapshot_ts = normalize_ts_sec(snapshot.get("snapshot_ts") or event_ts)
+    signal_ts = row_value(row, "signal_ts") or snapshot.get("signal_ts") or event_ts
+    source_reject_reason = (
+        payload.get("source_reject_reason")
+        or payload.get("parent_blocker")
+        or row_value(row, "reason")
+        or "lotto_not_ath_watch"
+    )
+    quote_clean = bool(snapshot.get("quote_clean"))
+    snapshot_pass = bool(snapshot.get("snapshot_pass"))
+    latest_quote_price = snapshot.get("quote_price") or snapshot.get("mark_price") or payload.get("baseline_price")
+    canary_payload = {
+        **payload,
+        "source_component": "lotto_not_ath_watch_shadow",
+        "source_reject_reason": source_reject_reason,
+        "reject_reason": source_reject_reason,
+        "parent_blocker": payload.get("parent_blocker") or source_reject_reason,
+        "entry_branch": LOTTO_NOT_ATH_WATCH_CANARY_BRANCH,
+        "entry_mode_hint": ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        "watch_canary_source_event_id": row_value(row, "id"),
+        "watch_canary_policy_version": "lotto_not_ath_watch_markov_canary_v1",
+        "watch_family": "lotto_not_ath_watch",
+        "watch_mode": "markov_green_canary",
+        "live_entry_enabled": True,
+        "paper_only": True,
+        "route": "LOTTO",
+        "tradable_missed": 1 if quote_clean else 0,
+        "recovery_quote_clean": quote_clean,
+        "quote_clean_seen": quote_clean,
+        "final_reclaim_quote_executable": quote_clean,
+        "two_quote_clean_snapshots": snapshot_pass,
+        "activity_reclaim": bool(snapshot.get("activity_reclaim")),
+        "volume_reclaim": bool(snapshot.get("volume_reclaim")),
+        "momentum_reclaim": bool(snapshot.get("momentum_reclaim")),
+        "reclaim_momentum_ok": snapshot_pass,
+        "last_clean_quote_ts": snapshot_ts,
+        "last_tradable_ts": snapshot_ts,
+        "missed_updated_at": snapshot_ts,
+        "recovery_created_ts": event_ts,
+        "rescue_created_ts": event_ts,
+        "original_signal_ts": signal_ts,
+        "original_receive_ts": signal_ts,
+        "latest_watch_snapshot": snapshot,
+        "liquidity_usd": snapshot.get("liquidity_usd"),
+        "quote_gap_pct": snapshot.get("quote_gap_pct"),
+        "spread_pct": snapshot.get("spread_pct"),
+        "price_change_m5": snapshot.get("price_change_m5"),
+        "volume_m5": snapshot.get("volume_m5"),
+        "tx_m5": snapshot.get("tx_m5"),
+        "buy_sell_ratio": snapshot.get("buy_sell_ratio"),
+        "would_stop_before_peak": payload.get("would_stop_before_peak") or 0,
+        "executable_peak_pnl": payload.get("tradable_peak_pnl") or payload.get("max_recovery_pnl"),
+        "trigger_price": latest_quote_price,
+    }
+    return canary_payload
+
+
+def scan_lotto_not_ath_watch_canary_once(db, *, now_ts=None, limit=None, ensure_schema=True):
+    """Promote strict NOT_ATH watch WOULD_ENTER events into the normal fast queue.
+
+    This is still paper-only. The scan only bridges the shadow confirmation to
+    the existing fast-lane machinery; revival canary limits, quote guard, branch
+    circuit, and the LOTTO reclaim Markov gate still decide whether a paper
+    position is actually opened.
+    """
+    if not FAST_ENTRY_NOT_ATH_WATCH_MARKOV_CANARY_ENABLED:
+        return {"rows": 0, "queued": 0, "deduped": 0, "blocked": 0, "disabled": True}
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    if ensure_schema:
+        init_fast_lane_schema(db)
+        ptm.init_decision_audit(db)
+    if not table_exists(db, "paper_decision_events"):
+        return {"rows": 0, "queued": 0, "deduped": 0, "blocked": 0, "reason": "decision_events_missing"}
+    scan_limit = max(1, int(limit or FAST_ENTRY_NOT_ATH_WATCH_CANARY_LIMIT))
+    rows = db.execute(
+        """
+        SELECT e.id, e.event_ts, e.signal_id, e.token_ca, e.symbol, e.lifecycle_id,
+               e.signal_ts, e.reason, e.payload_json
+        FROM paper_decision_events e
+        WHERE e.component = 'lotto_not_ath_watch_shadow'
+          AND e.event_type = 'would_enter'
+          AND e.event_ts >= ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM paper_decision_events c
+              WHERE c.component = ?
+                AND c.token_ca = e.token_ca
+                AND COALESCE(c.signal_ts, 0) = COALESCE(e.signal_ts, 0)
+                AND c.event_type IN ('entry_queued', 'entry_deduped', 'entry_block')
+          )
+        ORDER BY e.event_ts ASC, e.id ASC
+        LIMIT ?
+        """,
+        (now_ts - FAST_ENTRY_NOT_ATH_WATCH_CANARY_LOOKBACK_SEC, LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT, scan_limit),
+    ).fetchall()
+    counts = {"rows": len(rows), "queued": 0, "deduped": 0, "blocked": 0}
+    for row in rows:
+        payload = row_payload(row)
+        canary_payload = build_lotto_not_ath_watch_canary_payload(row, payload, now_ts=now_ts)
+        policy_probe = {
+            "entry_branch": LOTTO_NOT_ATH_WATCH_CANARY_BRANCH,
+            "source_type": LOTTO_NOT_ATH_WATCH_CANARY_SOURCE_TYPE,
+            "entry_mode_hint": ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            "payload_json": json.dumps(canary_payload, ensure_ascii=False),
+        }
+        policy = direct_fill_policy(policy_probe, now_ts=now_ts)
+        canary_payload["clean_dog_reclaim_eligibility"] = policy.get("detail") if isinstance(policy.get("detail"), dict) else {}
+        if not policy.get("pass"):
+            counts["blocked"] += 1
+            ptm.record_decision_event(
+                db,
+                component=LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT,
+                event_type="entry_block",
+                decision="watch_only",
+                reason=policy.get("reason") or "not_ath_watch_canary_policy_block",
+                token_ca=row["token_ca"],
+                symbol=row["symbol"],
+                lifecycle_id=row["lifecycle_id"],
+                signal_ts=row["signal_ts"],
+                signal_id=row["signal_id"],
+                route="LOTTO",
+                data_source="lotto_not_ath_watch_shadow+paper_fast_entry_queue",
+                payload={**canary_payload, "direct_fill_policy": policy},
+                event_ts=now_ts,
+            )
+            continue
+        snapshot = lotto_not_ath_watch_snapshot_from_payload(payload)
+        event_ts = normalize_ts_sec(row["event_ts"] or now_ts)
+        receive_ts = normalize_ts_sec(snapshot.get("snapshot_ts") or event_ts)
+        trigger_price = (
+            snapshot.get("quote_price")
+            or snapshot.get("mark_price")
+            or payload.get("baseline_price")
+        )
+        inserted = enqueue_fast_entry(
+            db,
+            source_type=LOTTO_NOT_ATH_WATCH_CANARY_SOURCE_TYPE,
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            signal_ts=row["signal_ts"] or event_ts,
+            receive_ts=receive_ts,
+            recorded_ts=event_ts,
+            entry_mode_hint=ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+            entry_branch=LOTTO_NOT_ATH_WATCH_CANARY_BRANCH,
+            trigger_price=trigger_price,
+            priority=FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY,
+            payload={**canary_payload, "direct_fill_policy": policy.get("detail") or {}},
+            now_ts=now_ts,
+        )
+        event_type = "entry_queued" if inserted else "entry_deduped"
+        counts["queued" if inserted else "deduped"] += 1
+        ptm.record_decision_event(
+            db,
+            component=LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT,
+            event_type=event_type,
+            decision="queue" if inserted else "deduped",
+            reason=LOTTO_NOT_ATH_WATCH_CANARY_BRANCH if inserted else "fast_queue_deduped",
+            token_ca=row["token_ca"],
+            symbol=row["symbol"],
+            lifecycle_id=row["lifecycle_id"],
+            signal_ts=row["signal_ts"],
+            signal_id=row["signal_id"],
+            route="LOTTO",
+            data_source="lotto_not_ath_watch_shadow+paper_fast_entry_queue",
+            payload={**canary_payload, "direct_fill_policy": policy.get("detail") or {}},
+            event_ts=now_ts,
+        )
+    if any(counts.get(key, 0) for key in ("queued", "deduped", "blocked")):
+        db.commit()
+    return counts
+
+
 def scan_missed_rescue_once(db, *, now_ts=None, limit=None, ensure_schema=True, progress=None):
     now_ts = float(now_ts if now_ts is not None else time.time())
     if progress:
@@ -3016,6 +3224,22 @@ def missed_rescue_scan(paper_db_path, stop_event):
         stop_event.wait(max(2.0, FAST_ENTRY_SCAN_INTERVAL_SEC * 2))
 
 
+def lotto_not_ath_watch_canary_scan(paper_db_path, stop_event):
+    while not stop_event.is_set():
+        db = None
+        try:
+            db = connect_db(paper_db_path, ensure_wal=False)
+            result = scan_lotto_not_ath_watch_canary_once(db, ensure_schema=False)
+            if any(result.get(key, 0) for key in ("queued", "blocked", "deduped")):
+                log.info("[LOTTO_NOT_ATH_WATCH_CANARY] %s", result)
+        except Exception as exc:
+            log.warning("lotto not-ath watch canary scan failed: %s", exc, exc_info=True)
+        finally:
+            if db is not None:
+                db.close()
+        stop_event.wait(max(5.0, FAST_ENTRY_SCAN_INTERVAL_SEC * 4))
+
+
 def worker_loop(paper_db_path, worker_id, stop_event):
     owner = f"fast-worker-{worker_id}"
     db = connect_db(paper_db_path, ensure_wal=False)
@@ -3083,10 +3307,11 @@ def run_worker(args):
         args.signal_db,
         args.concurrency,
     )
-    with ThreadPoolExecutor(max_workers=args.concurrency + 3, thread_name_prefix="paper-fast") as pool:
+    with ThreadPoolExecutor(max_workers=args.concurrency + 4, thread_name_prefix="paper-fast") as pool:
         pool.submit(premium_scan, args.signal_db, args.paper_db, stop_event, args.lookback_sec)
         pool.submit(source_resonance_scan, args.paper_db, stop_event)
         pool.submit(missed_rescue_scan, args.paper_db, stop_event)
+        pool.submit(lotto_not_ath_watch_canary_scan, args.paper_db, stop_event)
         for i in range(args.concurrency):
             pool.submit(worker_loop, args.paper_db, i + 1, stop_event)
         while not stop_event.is_set():
