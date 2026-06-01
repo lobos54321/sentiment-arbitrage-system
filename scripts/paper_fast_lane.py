@@ -218,6 +218,38 @@ FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR = float(os.environ.get(
     "FAST_ENTRY_BRANCH_CIRCUIT_MAX_LOSS_FLOOR",
     "-0.80",
 ))
+FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED = os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES = {
+    item.strip()
+    for item in os.environ.get(
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES",
+        "not_ath_reclaim_quote_clean_tiny_probe",
+    ).split(",")
+    if item.strip()
+}
+FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS = {
+    item.strip()
+    for item in os.environ.get(
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS",
+        "branch_circuit_catastrophic_loss",
+    ).split(",")
+    if item.strip()
+}
+FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS = {
+    item.strip().lower()
+    for item in os.environ.get(
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS",
+        "green",
+    ).split(",")
+    if item.strip()
+}
+FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL = float(os.environ.get(
+    "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL",
+    "0.003",
+))
 FAST_ENTRY_SOURCE_MIN_LIQUIDITY_USD = float(os.environ.get(
     "FAST_ENTRY_SOURCE_MIN_LIQUIDITY_USD",
     "5000",
@@ -1409,6 +1441,81 @@ def branch_circuit_detail(db, branch, *, market_session=None, now_ts=None):
     return detail
 
 
+def _markov_gate_from_forecast(markov_reclaim_forecast, entry_mode_quality=None):
+    forecasts = []
+    if isinstance(markov_reclaim_forecast, dict):
+        forecasts.append(markov_reclaim_forecast)
+    if isinstance(entry_mode_quality, dict):
+        for key in ("markov_reclaim_forecast", "lotto_markov_reclaim_forecast"):
+            value = entry_mode_quality.get(key)
+            if isinstance(value, dict):
+                forecasts.append(value)
+        gate = entry_mode_quality.get("markov_reclaim_gate")
+        if isinstance(gate, dict):
+            return gate
+    for forecast in forecasts:
+        gate = forecast.get("gate")
+        if isinstance(gate, dict):
+            return gate
+    return {}
+
+
+def branch_circuit_learning_bypass_detail(
+    branch,
+    mode,
+    circuit,
+    *,
+    entry_mode_quality=None,
+    markov_reclaim_forecast=None,
+    entry_size_sol=None,
+):
+    branch = str(branch or "")
+    mode = str(mode or "")
+    reason = str((circuit or {}).get("reason") or "")
+    gate = _markov_gate_from_forecast(markov_reclaim_forecast, entry_mode_quality)
+    bucket = str(gate.get("markov_bucket") or gate.get("markovBucket") or "").lower()
+    size_sol = float(entry_size_sol or 0.0)
+    detail = {
+        "pass": False,
+        "reason": "branch_circuit_learning_bypass_not_applicable",
+        "entry_branch": branch,
+        "entry_mode": mode,
+        "branch_circuit_reason": reason,
+        "markov_bucket": bucket or None,
+        "entry_size_sol": size_sol,
+        "enabled": FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED,
+        "allowed_branches": sorted(FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES),
+        "allowed_reasons": sorted(FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS),
+        "allowed_buckets": sorted(FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS),
+        "max_size_sol": FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL,
+    }
+    if not FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED:
+        detail["reason"] = "branch_circuit_learning_bypass_disabled"
+    elif not circuit or circuit.get("pass"):
+        detail["reason"] = "branch_circuit_learning_bypass_no_block"
+    elif branch not in FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES:
+        detail["reason"] = "branch_circuit_learning_bypass_branch_not_allowed"
+    elif reason not in FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS:
+        detail["reason"] = "branch_circuit_learning_bypass_reason_not_allowed"
+    elif mode != ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE:
+        detail["reason"] = "branch_circuit_learning_bypass_mode_not_allowed"
+    elif bucket not in FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS:
+        detail["reason"] = "branch_circuit_learning_bypass_markov_not_green"
+    elif not gate.get("pass"):
+        detail["reason"] = "branch_circuit_learning_bypass_markov_gate_failed"
+    elif size_sol <= 0 or size_sol > FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL:
+        detail["reason"] = "branch_circuit_learning_bypass_size_not_tiny"
+    else:
+        detail.update({
+            "pass": True,
+            "reason": "branch_circuit_learning_bypass_markov_green_tiny_canary",
+            "paper_only": True,
+            "branch_circuit": circuit,
+            "markov_gate": gate,
+        })
+    return detail
+
+
 def direct_fill_policy(row, *, now_ts=None):
     branch = str(row_value(row, "entry_branch", "") or "")
     source_type = str(row_value(row, "source_type", "") or "")
@@ -2132,28 +2239,49 @@ def process_queue_item(db, row, owner):
         now_ts=now_ts,
     )
     if not circuit.get("pass"):
-        mark_queue(db, row["id"], "watch_only", circuit.get("reason") or "branch_circuit_block")
+        bypass = branch_circuit_learning_bypass_detail(
+            branch,
+            mode,
+            circuit,
+            entry_mode_quality=entry_mode_quality,
+            markov_reclaim_forecast=markov_reclaim_forecast,
+            entry_size_sol=entry_size_sol,
+        )
         try:
             token_ca = row["token_ca"]
             signal_ts = int(normalize_ts_sec(row["source_signal_ts"] or row["created_at"]))
             ptm.record_decision_event(
                 db,
                 component="paper_fast_lane",
-                event_type="branch_circuit",
-                decision="watch_only",
-                reason=circuit.get("reason") or "branch_circuit_block",
+                event_type="branch_circuit_learning_bypass" if bypass.get("pass") else "branch_circuit",
+                decision="allow" if bypass.get("pass") else "watch_only",
+                reason=bypass.get("reason") if bypass.get("pass") else (circuit.get("reason") or "branch_circuit_block"),
                 token_ca=token_ca,
                 symbol=row["symbol"],
                 lifecycle_id=ptm.build_lifecycle_id(token_ca, signal_ts),
                 signal_ts=signal_ts,
                 route=row["source_type"],
                 data_source="paper_trades_branch_ev",
-                payload=circuit,
+                payload={
+                    **circuit,
+                    "learning_bypass": bypass,
+                },
             )
             db.commit()
         except Exception:
             pass
-        return
+        if bypass.get("pass"):
+            log.info(
+                "[BRANCH_CIRCUIT_BYPASS] allow token=%s branch=%s mode=%s reason=%s bucket=%s",
+                row["token_ca"],
+                branch,
+                mode,
+                circuit.get("reason"),
+                bypass.get("markov_bucket"),
+            )
+        else:
+            mark_queue(db, row["id"], "watch_only", circuit.get("reason") or "branch_circuit_block")
+            return
     if now_ts - float(row["created_at"] or now_ts) > FAST_ENTRY_MAX_QUEUE_AGE_SEC:
         mark_queue(db, row["id"], "expired", "fast_lane_queue_age_expired")
         return

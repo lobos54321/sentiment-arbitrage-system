@@ -1119,6 +1119,77 @@ def test_branch_circuit_downgrades_negative_ev_session(tmp_path, monkeypatch):
     assert asia["closed_n"] == 0
 
 
+def test_branch_circuit_learning_bypass_allows_markov_green_not_ath_canary(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED", True)
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES",
+        {"not_ath_reclaim_quote_clean_tiny_probe"},
+    )
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS",
+        {"branch_circuit_catastrophic_loss"},
+    )
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS", {"green"})
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL", 0.003)
+
+    detail = fast.branch_circuit_learning_bypass_detail(
+        "not_ath_reclaim_quote_clean_tiny_probe",
+        fast.ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        {"pass": False, "reason": "branch_circuit_catastrophic_loss", "max_loss": -0.92},
+        markov_reclaim_forecast={
+            "gate": {
+                "pass": True,
+                "markov_bucket": "green",
+                "reason": "lotto_reclaim_cohort_markov_green",
+            }
+        },
+        entry_size_sol=0.003,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "branch_circuit_learning_bypass_markov_green_tiny_canary"
+    assert detail["paper_only"] is True
+    assert detail["markov_bucket"] == "green"
+
+
+def test_branch_circuit_learning_bypass_blocks_red_or_oversized_canary(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED", True)
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES",
+        {"not_ath_reclaim_quote_clean_tiny_probe"},
+    )
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS",
+        {"branch_circuit_catastrophic_loss"},
+    )
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS", {"green"})
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL", 0.003)
+
+    red = fast.branch_circuit_learning_bypass_detail(
+        "not_ath_reclaim_quote_clean_tiny_probe",
+        fast.ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        {"pass": False, "reason": "branch_circuit_catastrophic_loss"},
+        markov_reclaim_forecast={"gate": {"pass": False, "markov_bucket": "red"}},
+        entry_size_sol=0.003,
+    )
+    oversized = fast.branch_circuit_learning_bypass_detail(
+        "not_ath_reclaim_quote_clean_tiny_probe",
+        fast.ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        {"pass": False, "reason": "branch_circuit_catastrophic_loss"},
+        markov_reclaim_forecast={"gate": {"pass": True, "markov_bucket": "green"}},
+        entry_size_sol=0.01,
+    )
+
+    assert red["pass"] is False
+    assert red["reason"] == "branch_circuit_learning_bypass_markov_not_green"
+    assert oversized["pass"] is False
+    assert oversized["reason"] == "branch_circuit_learning_bypass_size_not_tiny"
+
+
 def test_smart_quality_and_matrix_reclaim_require_fresh_quote_evidence(monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED", True)
     monkeypatch.setattr(fast, "FAST_ENTRY_MATRIX_TIMEOUT_CANARY_ENABLED", True)
