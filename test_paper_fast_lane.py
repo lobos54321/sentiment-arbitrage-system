@@ -1896,19 +1896,22 @@ def test_missed_rescue_backfills_unprocessed_clean_dog_backlog(tmp_path, monkeyp
         WHERE missed_attribution_id = 1
         """
     ).fetchone()
-    queue_count = db.execute(
+    queue = db.execute(
         """
-        SELECT COUNT(*)
+        SELECT status, last_error, payload_json
         FROM paper_fast_entry_queue
         WHERE token_ca = 'TokenBacklog'
         """
-    ).fetchone()[0]
+    ).fetchone()
+    queue_payload = json.loads(queue["payload_json"])
 
     assert first["processed"] == 1
     assert first["watch_only"] == 1
     assert first["backlog_lookback_sec"] == 24 * 3600
     assert second["processed"] == 0
-    assert queue_count == 0
+    assert queue["status"] == "watch_only"
+    assert queue["last_error"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
+    assert queue_payload["dog_capture_canary"] is True
     assert state["state"] == "stale"
     assert state["last_status"] == "watch_only"
     assert state["last_reason"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
@@ -2233,9 +2236,77 @@ def test_missed_momentum_fading_rescue_queues_smart_reclaim(tmp_path, monkeypatc
     assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY
 
 
+def test_missed_ath_soft_quality_dog_capture_queues_ath_tiny_scout(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    monkeypatch.setattr(fast, "FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL", 0.50)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenAthSoft', 'ATHS', ?, 11, 'ATH', 'ath_uncertainty_scout',
+            'scout_quality_buy_pressure_weak', 1.0, ?, ?, ?, 1, 0, 0.72,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 120, now - 120, now - 120, now - 20, now),
+    )
+    db.commit()
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    queue = db.execute(
+        """
+        SELECT source_type, entry_branch, entry_mode_hint, status, priority, payload_json
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenAthSoft'
+        """
+    ).fetchone()
+    payload = json.loads(queue["payload_json"])
+
+    assert result["queued"] == 1
+    assert queue["source_type"] == "smart_quality_reclaim_fast"
+    assert queue["entry_branch"] == "smart_entry_reclaim_quote_clean_tiny_probe"
+    assert queue["entry_mode_hint"] == "ath_uncertainty_tiny_scout"
+    assert queue["status"] == "queued"
+    assert queue["priority"] == fast.FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
+    assert payload["dog_capture_canary"] is True
+    assert payload["dog_capture_parent_reason"] == "scout_quality_buy_pressure_weak"
+    assert payload["dog_capture_detail"]["fresh_canary_ok"] is True
+
+
 def test_missed_rescue_records_stale_clean_dog_state(tmp_path, monkeypatch):
     monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
     monkeypatch.setattr(fast, "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC", 300)
+    monkeypatch.setattr(fast, "FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC", 300)
     db = fast.connect_db(tmp_path / "paper.db")
     fast.init_fast_lane_schema(db)
     now = int(time.time())
@@ -2286,12 +2357,24 @@ def test_missed_rescue_records_stale_clean_dog_state(tmp_path, monkeypatch):
         WHERE missed_attribution_id = 1
         """
     ).fetchone()
+    queue = db.execute(
+        """
+        SELECT status, last_error, payload_json
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenStaleClean'
+        """
+    ).fetchone()
+    payload = json.loads(queue["payload_json"])
 
     assert result["watch_only"] == 1
     assert state["state"] == "stale"
     assert state["last_reason"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
     assert state["entry_branch"] == "not_ath_reclaim_quote_clean_tiny_probe"
     assert json.loads(state["eligibility_json"])["last_tradable_fresh_ok"] is False
+    assert queue["status"] == "watch_only"
+    assert queue["last_error"] == "clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"
+    assert payload["dog_capture_canary"] is True
+    assert payload["dog_capture_detail"]["reason"] == "dog_capture_recovery_tradable_signal_stale_watch_only"
 
 
 def test_fast_lane_health_preserves_last_error_during_scanning_heartbeat(tmp_path, monkeypatch):

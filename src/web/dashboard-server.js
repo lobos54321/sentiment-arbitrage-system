@@ -2027,6 +2027,48 @@ export function readPaperFastLaneHealth(options = {}) {
   }
 }
 
+export function readPaperDbRuntimeHealth(options = {}) {
+  const paperDbPath = options.paperDbPath || getPaperDbPath();
+  const markerPath = options.integrityMarkerPath || `${paperDbPath}.integrity_error`;
+  const health = {
+    available: false,
+    path: paperDbPath,
+    status: 'paper_db_missing',
+    integrity_marker: {
+      exists: false,
+      path: markerPath,
+    },
+  };
+  try {
+    if (fs.existsSync(paperDbPath)) {
+      const stats = fs.statSync(paperDbPath);
+      health.available = true;
+      health.status = 'ok';
+      health.size_bytes = stats.size;
+      health.size_mb = Math.round((stats.size / (1024 * 1024)) * 100) / 100;
+      health.mtime = stats.mtime.toISOString();
+    }
+    if (fs.existsSync(markerPath)) {
+      const markerStats = fs.statSync(markerPath);
+      health.status = 'paper_db_integrity_marker_present';
+      health.integrity_marker = {
+        exists: true,
+        path: markerPath,
+        size_bytes: markerStats.size,
+        mtime: markerStats.mtime.toISOString(),
+        text_preview: readTinyText(markerPath, 2000),
+      };
+    }
+    return health;
+  } catch (error) {
+    return {
+      ...health,
+      status: 'paper_db_runtime_health_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
 export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
@@ -6544,9 +6586,11 @@ const server = http.createServer(async (req, res) => {
           : { name: worker?.name || 'unknown', running: null }
       ))
       : [];
+    const paperFastLaneHealth = readPaperFastLaneHealth();
+    const paperDbHealth = readPaperDbRuntimeHealth();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: global.__startupError ? 'degraded' : 'ok',
+      status: global.__startupError || paperDbHealth.status === 'paper_db_integrity_marker_present' ? 'degraded' : 'ok',
       message: 'Sentiment Arbitrage API Running',
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
@@ -6557,7 +6601,8 @@ const server = http.createServer(async (req, res) => {
         total: shadowSidecars.length,
         workers: shadowSidecars,
       },
-      paper_fast_lane_health: readPaperFastLaneHealth(),
+      paper_fast_lane_health: paperFastLaneHealth,
+      paper_db_health: paperDbHealth,
     }));
     return;
   } else if (url.pathname === '/dashboard') {

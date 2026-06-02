@@ -28,6 +28,7 @@ import {
   dogCatchGoalFromLiveSnapshot,
   livePaperQueryGuard,
   missedRecoverySummaryFromLiveSnapshot,
+  readPaperDbRuntimeHealth,
   readPaperFastLaneHealth,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
@@ -139,6 +140,21 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
   assert.match(snapshot.retention_tail, /archived/);
+});
+
+test('paper db runtime health surfaces integrity marker without opening sqlite', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-db-runtime-health-'));
+  const paper = join(dir, 'paper_trades.db');
+  fs.writeFileSync(paper, 'sqlite-placeholder');
+  fs.writeFileSync(`${paper}.integrity_error`, 'context=watchlist_evaluation\nerror=database disk image is malformed\n');
+
+  const health = readPaperDbRuntimeHealth({ paperDbPath: paper });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'paper_db_integrity_marker_present');
+  assert.equal(health.integrity_marker.exists, true);
+  assert.match(health.integrity_marker.text_preview, /watchlist_evaluation/);
+  assert.match(health.integrity_marker.text_preview, /database disk image is malformed/);
 });
 
 test('incident artifact snapshot lists allowed evidence and blocks path escape', () => {

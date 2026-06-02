@@ -55,6 +55,10 @@ CLEAN_DOG_RECLAIM_POLICY_VERSION = os.environ.get(
     "CLEAN_DOG_RECLAIM_POLICY_VERSION",
     "clean_dog_reclaim_v2",
 )
+DOG_CAPTURE_CANARY_POLICY_VERSION = os.environ.get(
+    "DOG_CAPTURE_CANARY_POLICY_VERSION",
+    "dog_capture_canary_v1",
+)
 FAST_ENTRY_ENABLED = os.environ.get("PAPER_FAST_ENTRY_ENABLED", "true").lower() != "false"
 FAST_ENTRY_SIZE_SOL = float(os.environ.get("FAST_ENTRY_SIZE_SOL", "0.002"))
 FAST_ENTRY_DEGRADED_SIZE_SOL = float(os.environ.get("FAST_ENTRY_DEGRADED_SIZE_SOL", "0.001"))
@@ -91,6 +95,16 @@ FAST_ENTRY_MISSED_RESCUE_RECORD_WATCH_OBSERVATIONS = os.environ.get(
 ).lower() == "true"
 FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY", "8"))
 FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY = int(os.environ.get("FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY", "12"))
+FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED = os.environ.get(
+    "FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED",
+    "true",
+).lower() != "false"
+FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL = float(os.environ.get("FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL", "0.50"))
+FAST_ENTRY_DOG_CAPTURE_PRIORITY = int(os.environ.get("FAST_ENTRY_DOG_CAPTURE_PRIORITY", "9"))
+FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC",
+    "1800",
+))
 FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED",
     "false",
@@ -319,6 +333,25 @@ MATRIX_TIMEOUT_RECHECK_REASONS = {
 }
 
 LOTTO_MISSING_MC_RECHECK_REASONS = {
+    "lotto_mc_0",
+}
+
+DOG_CAPTURE_RECHECK_REASONS = {
+    "tracking_ttl_expired",
+    "not_ath_v17",
+    "not_ath_prebuy_kline_retry_expired",
+    "not_ath_prebuy_kline_block",
+    "pre_pass_signal_too_stale",
+    "weak_buying_pressure",
+    "no_kline_low_volume",
+    "momentum_fading",
+    "negative_trend",
+    "chasing_top",
+    "scout_quality_buy_pressure_weak",
+    "scout_quality_volume_low",
+    "scout_quality_tx_low",
+    "scout_quality_negative_trend",
+    "matrices not yet aligned",
     "lotto_mc_0",
 }
 
@@ -2759,6 +2792,8 @@ def source_resonance_scan(paper_db_path, stop_event):
 def missed_rescue_signature(row):
     values = [
         CLEAN_DOG_RECLAIM_POLICY_VERSION,
+        DOG_CAPTURE_CANARY_POLICY_VERSION,
+        FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL,
         row_value(row, "tradable_missed", 0),
         row_value(row, "would_stop_before_peak", 0),
         row_value(row, "first_tradable_ts"),
@@ -2771,10 +2806,91 @@ def missed_rescue_signature(row):
     return "|".join("" if value is None else str(value) for value in values)
 
 
+def missed_rescue_peak_pnl(row):
+    try:
+        return float(row_value(row, "executable_peak_pnl", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def dog_capture_reason_allowed(reason):
+    reason_l = str(reason or "").strip().lower()
+    if not reason_l:
+        return False
+    return (
+        reason_l in DOG_CAPTURE_RECHECK_REASONS
+        or reason_l.startswith("lotto_stale_")
+        or reason_l.startswith("timeout (")
+        or reason_l.startswith("price_collapse")
+        or "kline" in reason_l
+    )
+
+
+def dog_capture_canary_detail(row, reason, payload=None, *, now_ts=None):
+    payload = payload or {}
+    route = str(row_value(row, "route", "") or payload.get("route") or "").upper()
+    component = str(row_value(row, "component", "") or payload.get("component") or "")
+    reason_l = str(reason or "").strip().lower()
+    peak = missed_rescue_peak_pnl(row)
+    tradable_ok = int(row_value(row, "tradable_missed", payload.get("tradable_missed") or 0) or 0) == 1
+    stop_ok = int(row_value(row, "would_stop_before_peak", payload.get("would_stop_before_peak") or 0) or 0) != 1
+    route_allowed = route in {"ATH", "LOTTO", "NOT_ATH"}
+    blocker_allowed = dog_capture_reason_allowed(reason_l)
+    peak_ok = peak >= FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL
+    freshness = recovery_tradable_fresh_detail(
+        payload,
+        now_ts=now_ts,
+        max_age_sec=FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC,
+    )
+    historical_candidate = all((
+        FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED,
+        route_allowed,
+        blocker_allowed,
+        tradable_ok,
+        stop_ok,
+        peak_ok,
+    ))
+    if not FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED:
+        reason_out = "dog_capture_canary_disabled"
+    elif not route_allowed:
+        reason_out = "dog_capture_route_not_allowed"
+    elif not blocker_allowed:
+        reason_out = "dog_capture_blocker_not_allowed"
+    elif not tradable_ok:
+        reason_out = "dog_capture_not_tradable"
+    elif not stop_ok:
+        reason_out = "dog_capture_stop_before_peak"
+    elif not peak_ok:
+        reason_out = "dog_capture_peak_below_threshold"
+    elif not freshness.get("pass"):
+        reason_out = f"dog_capture_{freshness.get('reason')}"
+    else:
+        reason_out = "dog_capture_peak50_tradable_canary"
+    return {
+        "candidate": historical_candidate,
+        "fresh_canary_ok": historical_candidate and bool(freshness.get("pass")),
+        "reason": reason_out,
+        "policy_version": DOG_CAPTURE_CANARY_POLICY_VERSION,
+        "route": route,
+        "component": component,
+        "blocker": reason_l,
+        "peak_pnl": peak,
+        "min_peak_pnl": FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL,
+        "tradable_ok": tradable_ok,
+        "would_stop_before_peak_ok": stop_ok,
+        "route_allowed": route_allowed,
+        "blocker_allowed": blocker_allowed,
+        "freshness": freshness,
+        "family": f"{route or 'UNKNOWN'}:{component or reason_l or 'missed_rescue'}",
+    }
+
+
 def missed_rescue_entry_mode_hint(row, reason, branch):
     route = str(row_value(row, "route", "") or "").upper()
     reason_l = str(reason or "").lower()
     branch_l = str(branch or "").lower()
+    if route == "ATH" and dog_capture_reason_allowed(reason_l):
+        return getattr(ptm, "ATH_UNCERTAINTY_TINY_SCOUT_MODE", "ath_uncertainty_tiny_scout")
     if (
         route in {"LOTTO", "NOT_ATH"}
         and (
@@ -2926,18 +3042,17 @@ def mark_missed_rescue_processed(
     )
 
 
-def missed_rescue_priority(row, branch):
-    peak = 0.0
-    try:
-        peak = float(row_value(row, "executable_peak_pnl", 0) or 0)
-    except (TypeError, ValueError):
-        peak = 0.0
+def missed_rescue_priority(row, branch, reason=None):
+    peak = missed_rescue_peak_pnl(row)
     if branch in CLEAN_DOG_RECLAIM_BRANCHES:
         if peak >= 0.50:
             return FAST_ENTRY_CLEAN_DOG_RECLAIM_PRIORITY
         if peak >= 0.25:
             return FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY
         return 20
+    dog_capture = dog_capture_canary_detail(row, reason or row_value(row, "reject_reason"))
+    if dog_capture.get("candidate"):
+        return FAST_ENTRY_DOG_CAPTURE_PRIORITY
     return 35
 
 
@@ -2961,7 +3076,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
     elif reason_l in LOTTO_MISSING_MC_RECHECK_REASONS:
         source_type = "lotto_missing_mc_reclaim_fast"
         branch = "not_ath_reclaim_quote_clean_tiny_probe"
-    elif reason in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
+    elif reason_l in KLINE_RESCUE_BRANCHES or "kline" in reason_l:
         source_type = "not_ath_reclaim_fast"
         branch = "not_ath_reclaim_quote_clean_tiny_probe"
     elif "spread" in reason:
@@ -2970,10 +3085,10 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
     elif "quote" in reason:
         source_type = "missing_quote_recovery_fast"
         branch = reason
-    elif reason in SMART_QUALITY_RECHECK_REASONS:
+    elif reason_l in SMART_QUALITY_RECHECK_REASONS:
         source_type = "smart_quality_reclaim_fast"
         branch = "smart_entry_reclaim_quote_clean_tiny_probe"
-    elif reason in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
+    elif reason_l in MATRIX_TIMEOUT_RECHECK_REASONS or reason_l.startswith("timeout (") or reason_l.startswith("price_collapse"):
         source_type = "matrix_timeout_reclaim_fast"
         branch = "matrix_timeout_final_quote_tiny_probe"
     else:
@@ -2998,8 +3113,20 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
         "reject_reason": reason,
         "executable_peak_pnl": row["executable_peak_pnl"],
     }
+    dog_capture = dog_capture_canary_detail(row, reason, payload, now_ts=now_ts)
+    if dog_capture.get("candidate"):
+        payload.update({
+            "dog_capture_canary": True,
+            "dog_capture_policy_version": DOG_CAPTURE_CANARY_POLICY_VERSION,
+            "dog_capture_parent_reason": reason,
+            "dog_capture_peak_pnl": dog_capture.get("peak_pnl"),
+            "dog_capture_min_peak_pnl": FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL,
+            "dog_capture_family": dog_capture.get("family"),
+            "dog_capture_detail": dog_capture,
+            "paper_only": True,
+        })
     entry_mode_hint = missed_rescue_entry_mode_hint(row, reason, branch)
-    priority = missed_rescue_priority(row, branch)
+    priority = missed_rescue_priority(row, branch, reason)
     policy_probe = {
         "entry_branch": branch,
         "source_type": source_type,
@@ -3017,7 +3144,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
         )
     if not policy.get("pass"):
         inserted = False
-        if record_watch_observation:
+        if record_watch_observation or dog_capture.get("candidate"):
             inserted = record_fast_lane_observation(
                 db,
                 source_type=source_type,
