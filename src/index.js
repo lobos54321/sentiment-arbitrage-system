@@ -1762,7 +1762,18 @@ export async function main() {
   try {
     await system.start();
   } catch (error) {
+    global.__startupError = {
+      message: error?.message || String(error),
+      stack: error?.stack || null,
+      at: new Date().toISOString(),
+      mode,
+      phase: 'runtime_start',
+    };
     console.error('❌ Fatal error:', error);
+    if (mode === 'premium') {
+      console.error('⚠️  Dashboard-only degraded mode is active after runtime start failure; check /health and /api/logs.');
+      return;
+    }
     process.exit(1);
   }
 }

@@ -77,7 +77,7 @@ echo "[STARTUP] Starting Node.js..."
     SHADOW_MODE=false \
     AUTO_BUY_ENABLED=true \
     PYTHONUNBUFFERED=1 \
-    node src/index.js --premium 2>&1 | tee -a /app/data/node.log
+    node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium 2>&1 | tee -a /app/data/node.log
     EXIT_CODE=$?
     echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/node.log
     ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
