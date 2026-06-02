@@ -9,7 +9,7 @@ import https from 'https';
 import fs from 'fs';
 import { createHash, randomUUID } from 'crypto';
 import { URL, fileURLToPath } from 'url';
-import { dirname, join, isAbsolute } from 'path';
+import { basename, dirname, join, isAbsolute, relative, resolve } from 'path';
 import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import { execFile, spawn } from 'child_process';
@@ -1803,6 +1803,186 @@ function readTinyText(filePath, maxBytes = 2000) {
   } catch {
     return null;
   }
+}
+
+export function incidentArtifactRoots(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const dataDir = options.dataDir || process.env.ZEABUR_DATA_DIR || join(root, 'data');
+  return {
+    backup: resolve(options.backupDir || process.env.ZEABUR_PAPER_DB_BACKUP_DIR || join(dataDir, 'backup', 'paper-db-family')),
+    recovery: resolve(options.recoveryDir || process.env.ZEABUR_RECOVERY_DIR || join(dataDir, 'recovery')),
+    evidence: resolve(options.evidenceDir || process.env.PAPER_EVIDENCE_LOG_DIR || join(dataDir, 'paper_evidence_log')),
+  };
+}
+
+export function resolveIncidentArtifactPath(scope, requestedPath, options = {}) {
+  const scopeKey = String(scope || '').trim().toLowerCase();
+  const roots = incidentArtifactRoots(options);
+  const root = roots[scopeKey];
+  if (!root) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: 'Invalid incident artifact scope',
+      error_code: 'invalid_incident_artifact_scope',
+      allowed_scopes: Object.keys(roots),
+    };
+  }
+  const rawPath = String(requestedPath || '').trim();
+  if (!rawPath) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: 'Missing incident artifact path',
+      error_code: 'missing_incident_artifact_path',
+    };
+  }
+  if (rawPath.includes('\0')) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: 'Invalid incident artifact path',
+      error_code: 'invalid_incident_artifact_path',
+    };
+  }
+  const artifactPath = resolve(root, rawPath);
+  const relativePath = relative(root, artifactPath);
+  if (relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    return {
+      ok: false,
+      statusCode: 403,
+      error: 'Incident artifact path escapes allowed root',
+      error_code: 'incident_artifact_path_outside_root',
+    };
+  }
+  return {
+    ok: true,
+    scope: scopeKey,
+    root,
+    path: artifactPath,
+    relative_path: relativePath,
+  };
+}
+
+function incidentArtifactContentType(filePath) {
+  const lower = String(filePath || '').toLowerCase();
+  if (lower.endsWith('.json')) return 'application/json; charset=utf-8';
+  if (lower.endsWith('.jsonl') || lower.endsWith('.log') || lower.endsWith('.txt') || lower.endsWith('.integrity_error')) {
+    return 'text/plain; charset=utf-8';
+  }
+  return 'application/octet-stream';
+}
+
+function artifactItem(scope, root, artifactPath, stats, options = {}) {
+  const relativePath = relative(root, artifactPath);
+  const item = {
+    scope,
+    relative_path: relativePath,
+    path: artifactPath,
+    type: stats.isDirectory() ? 'directory' : stats.isFile() ? 'file' : stats.isSymbolicLink() ? 'symlink' : 'other',
+    size_bytes: stats.isFile() ? stats.size : null,
+    size_mb: stats.isFile() ? Math.round((stats.size / (1024 * 1024)) * 100) / 100 : null,
+    mtime: stats.mtime.toISOString(),
+  };
+  if (stats.isFile()) {
+    item.download_path = `/api/paper/incident-artifact/download?scope=${encodeURIComponent(scope)}&path=${encodeURIComponent(relativePath)}`;
+    const lower = artifactPath.toLowerCase();
+    if (options.includePreviews && (
+      lower.endsWith('.json')
+      || lower.endsWith('.jsonl')
+      || lower.endsWith('.log')
+      || lower.endsWith('.txt')
+      || lower.endsWith('.integrity_error')
+    )) {
+      item.text_preview = readTinyText(artifactPath, options.previewBytes || 2000);
+    }
+  }
+  return item;
+}
+
+export function buildIncidentArtifactSnapshot(options = {}) {
+  const roots = incidentArtifactRoots(options);
+  const requestedScope = String(options.scope || 'all').trim().toLowerCase();
+  const scopes = requestedScope === 'all'
+    ? Object.keys(roots)
+    : Object.keys(roots).filter((scope) => scope === requestedScope);
+  const maxFiles = Math.max(1, Math.min(Number(options.maxFiles || 80) || 80, 500));
+  const maxDepth = Math.max(0, Math.min(Number(options.maxDepth || 5) || 5, 8));
+  const includePreviews = Boolean(options.includePreviews);
+  const previewBytes = Math.max(1, Math.min(Number(options.previewBytes || 2000) || 2000, 8000));
+  const result = {
+    generated_at: new Date().toISOString(),
+    artifact_roots: {},
+    requested_scope: requestedScope,
+    max_files: maxFiles,
+    max_depth: maxDepth,
+    items: [],
+    truncated: false,
+  };
+
+  if (!scopes.length) {
+    result.error = 'Invalid incident artifact scope';
+    result.error_code = 'invalid_incident_artifact_scope';
+    result.allowed_scopes = Object.keys(roots);
+    return result;
+  }
+
+  for (const scope of scopes) {
+    const root = roots[scope];
+    result.artifact_roots[scope] = fileInfo(scope, root);
+    if (!fs.existsSync(root)) continue;
+    const stack = [{ dir: root, depth: 0 }];
+    while (stack.length && result.items.length < maxFiles) {
+      const current = stack.shift();
+      let entries = [];
+      try {
+        entries = fs.readdirSync(current.dir, { withFileTypes: true })
+          .sort((a, b) => a.name.localeCompare(b.name));
+      } catch (error) {
+        result.items.push({
+          scope,
+          relative_path: relative(root, current.dir),
+          path: current.dir,
+          type: 'directory',
+          error: error.message,
+        });
+        continue;
+      }
+      for (const entry of entries) {
+        if (result.items.length >= maxFiles) {
+          result.truncated = true;
+          break;
+        }
+        const artifactPath = join(current.dir, entry.name);
+        let stats;
+        try {
+          stats = fs.lstatSync(artifactPath);
+        } catch (error) {
+          result.items.push({
+            scope,
+            relative_path: relative(root, artifactPath),
+            path: artifactPath,
+            type: 'unknown',
+            error: error.message,
+          });
+          continue;
+        }
+        result.items.push(artifactItem(scope, root, artifactPath, stats, {
+          includePreviews,
+          previewBytes,
+        }));
+        if (stats.isDirectory() && current.depth < maxDepth) {
+          stack.push({ dir: artifactPath, depth: current.depth + 1 });
+        }
+      }
+    }
+    if (result.items.length >= maxFiles) {
+      result.truncated = true;
+      break;
+    }
+  }
+
+  return result;
 }
 
 function paperFastLaneHealthPath(env = process.env) {
@@ -10645,6 +10825,55 @@ const server = http.createServer(async (req, res) => {
       includeFileStats: ['1', 'true', 'yes'].includes(String(url.searchParams.get('files') || '').toLowerCase()),
       includePreflightTail: ['1', 'true', 'yes'].includes(String(url.searchParams.get('tail') || '').toLowerCase()),
     }), null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/incident-artifacts') {
+    if (!checkAuth(req, url, res)) return;
+    const snapshot = buildIncidentArtifactSnapshot({
+      scope: url.searchParams.get('scope') || 'all',
+      maxFiles: boundedIntParam(url, 'limit', 80, 1, 500),
+      maxDepth: boundedIntParam(url, 'depth', 5, 0, 8),
+      includePreviews: ['1', 'true', 'yes'].includes(String(url.searchParams.get('preview') || '').toLowerCase()),
+      previewBytes: boundedIntParam(url, 'preview_bytes', 2000, 1, 8000),
+    });
+    res.writeHead(snapshot.error_code ? 400 : 200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(snapshot, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/incident-artifact/download') {
+    if (!checkAuth(req, url, res)) return;
+    const resolved = resolveIncidentArtifactPath(url.searchParams.get('scope'), url.searchParams.get('path'));
+    if (!resolved.ok) {
+      res.writeHead(resolved.statusCode || 400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(resolved, null, 2));
+      return;
+    }
+    let stats;
+    try {
+      stats = fs.statSync(resolved.path);
+    } catch (error) {
+      res.writeHead(error?.code === 'ENOENT' ? 404 : 500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        error: error?.code === 'ENOENT' ? 'Incident artifact not found' : error.message,
+        error_code: error?.code === 'ENOENT' ? 'incident_artifact_not_found' : 'incident_artifact_stat_failed',
+      }, null, 2));
+      return;
+    }
+    if (!stats.isFile()) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        error: 'Incident artifact path is not a file',
+        error_code: 'incident_artifact_not_file',
+        scope: resolved.scope,
+        relative_path: resolved.relative_path,
+      }, null, 2));
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': incidentArtifactContentType(resolved.path),
+      'Content-Disposition': `attachment; filename="${basename(resolved.path).replace(/"/g, '')}"`,
+      'Content-Length': stats.size,
+      'Cache-Control': 'no-store',
+    });
+    fs.createReadStream(resolved.path).pipe(res);
     return;
   } else if (url.pathname === '/api/paper/v27-read-model-health') {
     if (!checkAuth(req, url, res)) return;

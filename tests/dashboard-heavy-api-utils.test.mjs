@@ -11,12 +11,14 @@ import {
   buildApiResponseErrorShape,
   buildV27ManualEvidenceApiResponse,
   buildDogCatchGoalProgress,
+  buildIncidentArtifactSnapshot,
   buildNotAthReclaimFunnelReport,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
   buildLottoQuoteGapWinnerJoinReport,
   latestActionableFastLaneQueueByToken,
+  resolveIncidentArtifactPath,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   appendDashboardAuditEvent,
@@ -137,6 +139,56 @@ test('storage health reports db markers and disk snapshot without opening sqlite
   assert.match(snapshot.integrity_error, /malformed page/);
   assert.match(snapshot.preflight_tail, /checkpoint failed/);
   assert.match(snapshot.retention_tail, /archived/);
+});
+
+test('incident artifact snapshot lists allowed evidence and blocks path escape', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'incident-artifacts-'));
+  const backupDir = join(dir, 'backup', 'paper-db-family');
+  const recoveryDir = join(dir, 'recovery');
+  const evidenceDir = join(dir, 'paper_evidence_log');
+  fs.mkdirSync(join(backupDir, 'paper_trades_20260602T150848Z'), { recursive: true });
+  fs.mkdirSync(join(recoveryDir, 'paper_trades_corrupt_20260602T150849Z'), { recursive: true });
+  fs.mkdirSync(evidenceDir, { recursive: true });
+  fs.writeFileSync(
+    join(backupDir, 'paper_trades_20260602T150848Z', 'manifest.json'),
+    JSON.stringify({ note: 'startup backup' }),
+  );
+  fs.writeFileSync(
+    join(recoveryDir, 'paper_trades_corrupt_20260602T150849Z', 'paper_trades.db.integrity_error'),
+    'context=watchlist_evaluation\nerror=database disk image is malformed\n',
+  );
+  fs.writeFileSync(join(evidenceDir, 'paper-events-20260602.jsonl'), '{"event_type":"entry"}\n');
+
+  const snapshot = buildIncidentArtifactSnapshot({
+    backupDir,
+    recoveryDir,
+    evidenceDir,
+    maxFiles: 20,
+    includePreviews: true,
+  });
+
+  assert.equal(snapshot.error_code, undefined);
+  assert.equal(snapshot.artifact_roots.backup.exists, true);
+  assert.equal(snapshot.items.some((item) => item.scope === 'backup' && item.relative_path.endsWith('manifest.json')), true);
+  const marker = snapshot.items.find((item) => item.relative_path.endsWith('paper_trades.db.integrity_error'));
+  assert.match(marker.text_preview, /context=watchlist_evaluation/);
+  assert.match(marker.download_path, /incident-artifact\/download/);
+
+  const resolved = resolveIncidentArtifactPath(
+    'recovery',
+    'paper_trades_corrupt_20260602T150849Z/paper_trades.db.integrity_error',
+    { backupDir, recoveryDir, evidenceDir },
+  );
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.relative_path, 'paper_trades_corrupt_20260602T150849Z/paper_trades.db.integrity_error');
+
+  const escaped = resolveIncidentArtifactPath('recovery', '../paper_trades.db', {
+    backupDir,
+    recoveryDir,
+    evidenceDir,
+  });
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.error_code, 'incident_artifact_path_outside_root');
 });
 
 test('lotto quote gap audit summary reports size curve actionability', () => {
