@@ -32,6 +32,7 @@ from entry_readiness_policy import (
     build_clean_dog_reclaim_eligibility,
     build_entry_execution_eligibility,
 )
+from paper_evidence_log import append_paper_evidence_event
 from sqlite_write_coordinator import SQLiteSingleWriterLock
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 
@@ -2033,6 +2034,37 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         "markovReclaimForecast": guard.get("markov_reclaim_forecast"),
     })
 
+    entry_evidence_payload = {
+        "queue_id": row["id"],
+        "token_ca": token_ca,
+        "symbol": symbol,
+        "lifecycle_id": lifecycle_id,
+        "signal_ts": signal_ts,
+        "entry_ts": entry_ts,
+        "entry_price": quote_price,
+        "trigger_price": trigger_price,
+        "position_size_sol": size_sol,
+        "entry_mode": entry_mode,
+        "entry_branch": entry_branch,
+        "strategy_stage": strategy_stage,
+        "source_type": row["source_type"],
+        "source_resonance_cohort": row["source_resonance_cohort"],
+        "guard": guard,
+        "entry_latency_audit": latency_audit,
+        "execution": execution,
+        "audit": audit,
+        "monitor_state": monitor_state,
+        "policy_version": FAST_LANE_POLICY_VERSION,
+    }
+    append_paper_evidence_event(
+        source="paper_fast_lane",
+        event_type="paper_trade_entry_intent",
+        idempotency_key=f"paper_fast_lane_entry:{row['id']}:{lifecycle_id}",
+        event_ts=entry_ts,
+        payload=entry_evidence_payload,
+        critical=True,
+    )
+
     with SQLITE_WRITE_LOCK:
         db.execute(
             """
@@ -2089,6 +2121,14 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
         )
         trade_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
         db.commit()
+    append_paper_evidence_event(
+        source="paper_fast_lane",
+        event_type="paper_trade_entry_committed",
+        idempotency_key=f"paper_fast_lane_entry_committed:{trade_id}",
+        event_ts=entry_ts,
+        payload={**entry_evidence_payload, "trade_id": trade_id},
+        critical=True,
+    )
     try:
         ptm.record_decision_event(
             db,

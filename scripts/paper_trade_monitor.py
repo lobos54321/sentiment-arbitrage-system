@@ -72,6 +72,7 @@ from paper_decision_audit import (
     signal_payload,
     update_due_missed_attributions,
 )
+from paper_evidence_log import append_paper_evidence_event
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
 from entry_readiness_policy import (
@@ -1579,6 +1580,19 @@ def run_db_write_with_retry(db, writer, *, label, attempts=3, base_sleep_sec=0.3
             log.warning(f"  [DB_RETRY] {label} database_locked attempt={attempt}/{attempts}")
             if attempt < attempts:
                 time.sleep(base_sleep_sec * attempt)
+    append_paper_evidence_event(
+        source="paper_trade_monitor",
+        event_type="paper_db_write_failed",
+        idempotency_key=f"paper_db_write_failed:{label}:{int(time.time() * 1000)}",
+        event_ts=time.time(),
+        payload={
+            "label": label,
+            "attempts": attempts,
+            "error": str(last_exc),
+            "error_type": type(last_exc).__name__ if last_exc is not None else None,
+        },
+        critical=True,
+    )
     raise last_exc
 
 
@@ -24617,6 +24631,51 @@ def run_monitor(db):
                         if execution.get('syntheticPaperEntry')
                         else 'available'
                     )
+                    _entry_evidence_payload = {
+                        'strategy_id': _pending_strategy_id,
+                        'strategy_role': strategy_role,
+                        'strategy_stage': _pending_strategy_stage,
+                        'stage_outcome': _pending_stage_outcome,
+                        'token_ca': pending['token_ca'],
+                        'symbol': pending['symbol'],
+                        'signal_ts': _signal_ts_store,
+                        'raw_signal_ts': pending.get('signal_ts'),
+                        'entry_price': price,
+                        'entry_ts': entry_ts,
+                        'market_regime': regime,
+                        'replay_source': _pending_replay_source,
+                        'lifecycle_id': lifecycle_id,
+                        'trigger_price': _trigger_price_store,
+                        'position_size_sol': actual_position_size_sol,
+                        'token_amount_raw': str(token_amount_raw),
+                        'token_decimals': token_decimals or 0,
+                        'premium_signal_id': pending.get('premium_signal_id'),
+                        'signal_type': pending.get('signal_type') or 'NEW_TRENDING',
+                        'signal_route': _pending_signal_route,
+                        'entry_mode': pending.get('entry_mode') or timing_reason,
+                        'entry_branch': _entry_branch,
+                        'policy_version': _policy_version,
+                        'capital_tier': _capital_tier,
+                        'position_size_class': _position_size_class,
+                        'regime_tag': _regime_tag,
+                        'execution_availability': _entry_execution_availability,
+                        'execution': execution,
+                        'monitor_state': _monitor_state,
+                        'lotto_state': _pending_lotto_state,
+                        'entry_lifecycle': _entry_lifecycle,
+                        'entry_latency_audit': _entry_latency_audit,
+                        'entry_execution_eligibility': _entry_execution_eligibility,
+                        'entry_decision_contract': _entry_decision_contract.to_dict(),
+                        'intervention_flags': _intervention_flags,
+                    }
+                    append_paper_evidence_event(
+                        source='paper_trade_monitor',
+                        event_type='paper_trade_entry_intent',
+                        idempotency_key=f"paper_monitor_entry:{lifecycle_id}:{_pending_strategy_stage}:{entry_ts}",
+                        event_ts=entry_ts,
+                        payload=_entry_evidence_payload,
+                        critical=True,
+                    )
                     def _insert_paper_trade():
                         db.execute("""
                             INSERT INTO paper_trades
@@ -24696,6 +24755,14 @@ def run_monitor(db):
                         _insert_paper_trade,
                         label=f"paper_entry_insert:{pending.get('symbol')}:{lifecycle_id}",
                         attempts=5,
+                    )
+                    append_paper_evidence_event(
+                        source='paper_trade_monitor',
+                        event_type='paper_trade_entry_committed',
+                        idempotency_key=f"paper_monitor_entry_committed:{trade_id}",
+                        event_ts=entry_ts,
+                        payload={**_entry_evidence_payload, 'trade_id': trade_id},
+                        critical=True,
                     )
                     record_decision_event(
                         db,

@@ -12,6 +12,7 @@ import logging
 import os
 import time
 
+from paper_evidence_log import append_paper_evidence_event
 from sqlite_write_coordinator import sqlite_single_writer
 
 
@@ -388,10 +389,36 @@ def record_decision_event(
     event_ts=None,
 ):
     """Best-effort audit write. Never break trading because audit failed."""
+    created_event_ts = event_ts or time.time()
+    lifecycle = _extract_lifecycle_payload(payload or {})
+    append_paper_evidence_event(
+        source="paper_decision_audit",
+        event_type="paper_decision_event_intent",
+        idempotency_key=(
+            f"paper_decision:{component}:{event_type}:{decision}:"
+            f"{token_ca or ''}:{signal_ts or ''}:{trade_id or ''}:{created_event_ts:.6f}"
+        ),
+        event_ts=created_event_ts,
+        payload={
+            "signal_id": signal_id,
+            "token_ca": token_ca,
+            "symbol": symbol,
+            "lifecycle_id": lifecycle_id,
+            "trade_id": trade_id,
+            "signal_ts": signal_ts,
+            "strategy_stage": strategy_stage,
+            "route": route,
+            "component": component,
+            "legacy_event_type": event_type,
+            "decision": decision,
+            "reason": reason,
+            "data_source": data_source,
+            "lifecycle": lifecycle,
+            "payload": payload or {},
+        },
+    )
     try:
         with sqlite_single_writer("paper_decision_audit:record_event"):
-            created_event_ts = event_ts or time.time()
-            lifecycle = _extract_lifecycle_payload(payload or {})
             cur = db.execute(
                 """
                 INSERT INTO paper_decision_events

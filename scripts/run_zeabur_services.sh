@@ -66,18 +66,21 @@ echo "[STARTUP] Starting Node.js..."
     SENTIMENT_DB=/app/data/sentiment_arb.db \
     LIFECYCLE_DB=/app/data/lifecycle_tracks.db \
     KLINE_DB=/app/data/kline_cache.db \
+    PAPER_EVIDENCE_LOG_DIR=/app/data/paper_evidence_log \
     V27_EVENT_LOG_DIR=/app/data/v27_event_log \
     V27_READ_MODEL_DIR=/app/data/v27_read_models \
     V27_MODE_READINESS_PATH=/app/data/v27_read_models/mode_readiness.json \
     V27_RUNTIME_MODE_GATE_ENABLED="${V27_RUNTIME_MODE_GATE_ENABLED:-true}" \
     V27_READ_MODEL_REFRESH_WORKER_ENABLED="${V27_READ_MODEL_REFRESH_WORKER_ENABLED:-true}" \
+    NODE_STARTUP_PREFLIGHT_ENABLED=false \
+    PAPER_DB_RETENTION_ENABLED=false \
     SHADOW_MODE=false \
     AUTO_BUY_ENABLED=true \
     PYTHONUNBUFFERED=1 \
     node src/index.js --premium 2>&1 | tee -a /app/data/node.log
     EXIT_CODE=$?
     echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/node.log
-    python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
     sleep 15
   done
 ) &
@@ -105,6 +108,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     PAPER_DB=/app/data/paper_trades.db \
     KLINE_DB=/app/data/kline_cache.db \
     SENTIMENT_DB=/app/data/sentiment_arb.db \
+    PAPER_EVIDENCE_LOG_DIR=/app/data/paper_evidence_log \
     V27_READ_MODEL_DIR=/app/data/v27_read_models \
     V27_MODE_READINESS_PATH=/app/data/v27_read_models/mode_readiness.json \
     V27_RUNTIME_MODE_GATE_ENABLED="${V27_RUNTIME_MODE_GATE_ENABLED:-true}" \
@@ -114,7 +118,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     EXIT_CODE=${PIPESTATUS[0]}
     set -e
     echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/paper-trader.log
-    python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
     sleep 15
   done
 ) &

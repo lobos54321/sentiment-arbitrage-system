@@ -25,6 +25,11 @@ DISK_WARN_FREE_BYTES = int(float(os.environ.get("ZEABUR_DISK_WARN_FREE_MB", "256
 QUARANTINE_MALFORMED_PAPER_DB = os.environ.get("ZEABUR_QUARANTINE_MALFORMED_PAPER_DB", "true").lower() != "false"
 RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DATA_DIR / "recovery")))
 QUICK_CHECK_MAX_BYTES = int(float(os.environ.get("ZEABUR_PREFLIGHT_QUICK_CHECK_MAX_MB", "64")) * 1024 * 1024)
+DB_CHECK_ENABLED = os.environ.get("ZEABUR_PREFLIGHT_DB_CHECK_ENABLED", "true").lower() != "false"
+PAPER_DB_BACKUP_ENABLED = os.environ.get("ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED", "true").lower() != "false"
+PAPER_DB_BACKUP_DIR = Path(os.environ.get("ZEABUR_PAPER_DB_BACKUP_DIR", str(DATA_DIR / "backup" / "paper-db-family")))
+PAPER_DB_BACKUP_KEEP = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_KEEP", "12"))
+PAPER_DB_BACKUP_MIN_INTERVAL_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_MIN_INTERVAL_SEC", "3600"))
 
 LOG_NAMES = [
     "node.log",
@@ -158,6 +163,48 @@ def quarantine_db_family(path: Path, reason: str) -> None:
     log(f"quarantined malformed {path.name} -> {dest_dir} files={len(moved)}")
 
 
+def backup_db_family(path: Path) -> None:
+    if not PAPER_DB_BACKUP_ENABLED or path.name != "paper_trades.db" or not path.exists():
+        return
+    try:
+        PAPER_DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        existing = sorted(PAPER_DB_BACKUP_DIR.glob("paper_trades_*"))
+        if existing and PAPER_DB_BACKUP_MIN_INTERVAL_SEC > 0:
+            latest = existing[-1]
+            try:
+                age_sec = time.time() - latest.stat().st_mtime
+                if age_sec < PAPER_DB_BACKUP_MIN_INTERVAL_SEC:
+                    log(f"backup skipped {path.name}: latest_age_sec={int(age_sec)}")
+                    return
+            except Exception:
+                pass
+        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        dest_dir = PAPER_DB_BACKUP_DIR / f"paper_trades_{ts}"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(f"{path}{suffix}") if suffix else path
+            if not src.exists():
+                continue
+            dest = dest_dir / src.name
+            shutil.copy2(src, dest)
+            copied.append({"from": str(src), "to": str(dest), "size_bytes": dest.stat().st_size})
+        manifest = {
+            "created_at": ts,
+            "db": str(path),
+            "copied": copied,
+            "note": "Startup backup of paper DB family before checkpoint/quarantine.",
+        }
+        (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        log(f"backup ok {path.name} -> {dest_dir} files={len(copied)}")
+        backups = sorted(PAPER_DB_BACKUP_DIR.glob("paper_trades_*"))
+        for old in backups[: max(0, len(backups) - max(1, PAPER_DB_BACKUP_KEEP))]:
+            shutil.rmtree(old, ignore_errors=True)
+            log(f"backup pruned {old}")
+    except Exception as exc:
+        log(f"WARN backup failed {path.name}: {exc}")
+
+
 def sqlite_header_invalid(path: Path) -> bool:
     try:
         if path.stat().st_size == 0:
@@ -226,8 +273,13 @@ def main() -> int:
     for name in LOG_NAMES:
         trim_file(DATA_DIR / name)
     remove_large_temp_files()
-    for name in DB_NAMES:
-        checkpoint_db(DATA_DIR / name)
+    if DB_CHECK_ENABLED:
+        for name in DB_NAMES:
+            path = DATA_DIR / name
+            backup_db_family(path)
+            checkpoint_db(path)
+    else:
+        log("db checkpoint disabled for this preflight run")
     disk_report("after")
     return 0
 
