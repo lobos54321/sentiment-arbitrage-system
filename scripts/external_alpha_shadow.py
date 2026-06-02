@@ -12,6 +12,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from sqlite_write_coordinator import SQLiteSingleWriterLock
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXTERNAL_ALPHA_DB = PROJECT_ROOT / "data" / "paper_trades.db"
@@ -23,6 +25,9 @@ EXTERNAL_ALPHA_FUTURE_TOLERANCE_SEC = int(os.environ.get("EXTERNAL_ALPHA_FUTURE_
 GMGN_MOMENTUM_MIN_ROUNDS = int(os.environ.get("GMGN_MOMENTUM_MIN_ROUNDS", "3"))
 GMGN_MOMENTUM_MIN_GAIN_PCT = float(os.environ.get("GMGN_MOMENTUM_MIN_GAIN_PCT", "5.0"))
 GMGN_MOMENTUM_BUY_DECAY_TOLERANCE = float(os.environ.get("GMGN_MOMENTUM_BUY_DECAY_TOLERANCE", "0.80"))
+EXTERNAL_ALPHA_SQLITE_RETRY_ATTEMPTS = int(os.environ.get("EXTERNAL_ALPHA_SQLITE_RETRY_ATTEMPTS", "4"))
+EXTERNAL_ALPHA_SQLITE_RETRY_BASE_SEC = float(os.environ.get("EXTERNAL_ALPHA_SQLITE_RETRY_BASE_SEC", "0.05"))
+SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("external_alpha_shadow")
 
 
 CREATE_EXTERNAL_ALPHA_SNAPSHOTS_SQL = """
@@ -141,6 +146,44 @@ def init_external_alpha_shadow(db):
     for sql in EXTERNAL_ALPHA_INDEXES:
         db.execute(sql)
     db.commit()
+
+
+def _sqlite_locked_error(exc):
+    text = str(exc).lower()
+    return isinstance(exc, (sqlite3.OperationalError, TimeoutError)) and (
+        "locked" in text or "busy" in text or "single-writer" in text
+    )
+
+
+def _rollback_quietly(db):
+    try:
+        db.rollback()
+    except sqlite3.Error:
+        pass
+
+
+def _with_sqlite_write_retry(db, writer, *, swallow_locked=False, fallback=None):
+    attempts = max(1, int(EXTERNAL_ALPHA_SQLITE_RETRY_ATTEMPTS))
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            with SQLITE_WRITE_LOCK:
+                result = writer()
+                db.commit()
+                return result
+        except (sqlite3.OperationalError, TimeoutError) as exc:
+            _rollback_quietly(db)
+            if not _sqlite_locked_error(exc):
+                raise
+            last_exc = exc
+            if attempt >= attempts - 1:
+                break
+            time.sleep(EXTERNAL_ALPHA_SQLITE_RETRY_BASE_SEC * (2 ** attempt))
+    if swallow_locked:
+        if callable(fallback):
+            return fallback(last_exc)
+        return fallback
+    raise last_exc
 
 
 def connect_external_alpha_db(db_path=None):
@@ -263,91 +306,95 @@ def record_external_alpha_candidates(db, candidates, captured_at=None):
     if not EXTERNAL_ALPHA_SHADOW_ENABLED:
         return {"recorded": 0, "momentum_confirmed": 0}
     captured_at = int(captured_at or time.time())
-    recorded = 0
-    confirmed = 0
-    for candidate in candidates:
-        chain, ca = _candidate_key(candidate)
-        if not ca:
-            continue
-        raw_json = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=_json_default)
-        db.execute(
-            """
-            INSERT INTO external_alpha_snapshots
-                (captured_at, source, category, chain, token_ca, symbol, name,
-                 market_cap, liquidity, volume, swaps, buys, sells,
-                 price_change_5m, price_change_1h, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                captured_at,
-                candidate.get("source") or "unknown",
-                candidate.get("category"),
-                chain,
-                ca,
-                candidate.get("symbol"),
-                candidate.get("name"),
-                _f(candidate.get("market_cap")),
-                _f(candidate.get("liquidity")),
-                _f(candidate.get("volume")),
-                _f(candidate.get("swaps")),
-                _f(candidate.get("buys")),
-                _f(candidate.get("sells")),
-                _f(candidate.get("price_change_5m")),
-                _f(candidate.get("price_change_1h")),
-                raw_json,
-            ),
-        )
-        row = db.execute(
-            "SELECT * FROM external_alpha_state WHERE chain = ? AND token_ca = ?",
-            (chain, ca),
-        ).fetchone()
-        next_state = compute_next_external_alpha_state(candidate, _row_to_dict(row), captured_at=captured_at)
-        db.execute(
-            """
-            INSERT INTO external_alpha_state
-                (chain, token_ca, first_seen_ts, last_seen_ts, seen_count, changed_count,
-                 source_last, category_last, symbol, name, last_market_cap, last_liquidity,
-                 last_volume, last_swaps, last_buys, last_sells, momentum_rounds,
-                 momentum_start_mc, momentum_gain_pct, momentum_confirmed,
-                 volume_confirmed, buy_pressure, last_snapshot_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(chain, token_ca) DO UPDATE SET
-                first_seen_ts = excluded.first_seen_ts,
-                last_seen_ts = excluded.last_seen_ts,
-                seen_count = excluded.seen_count,
-                changed_count = excluded.changed_count,
-                source_last = excluded.source_last,
-                category_last = excluded.category_last,
-                symbol = excluded.symbol,
-                name = excluded.name,
-                last_market_cap = excluded.last_market_cap,
-                last_liquidity = excluded.last_liquidity,
-                last_volume = excluded.last_volume,
-                last_swaps = excluded.last_swaps,
-                last_buys = excluded.last_buys,
-                last_sells = excluded.last_sells,
-                momentum_rounds = excluded.momentum_rounds,
-                momentum_start_mc = excluded.momentum_start_mc,
-                momentum_gain_pct = excluded.momentum_gain_pct,
-                momentum_confirmed = excluded.momentum_confirmed,
-                volume_confirmed = excluded.volume_confirmed,
-                buy_pressure = excluded.buy_pressure,
-                last_snapshot_json = excluded.last_snapshot_json,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            tuple(next_state[k] for k in [
-                "chain", "token_ca", "first_seen_ts", "last_seen_ts", "seen_count", "changed_count",
-                "source_last", "category_last", "symbol", "name", "last_market_cap", "last_liquidity",
-                "last_volume", "last_swaps", "last_buys", "last_sells", "momentum_rounds",
-                "momentum_start_mc", "momentum_gain_pct", "momentum_confirmed",
-                "volume_confirmed", "buy_pressure", "last_snapshot_json",
-            ]),
-        )
-        recorded += 1
-        if next_state["momentum_confirmed"]:
-            confirmed += 1
-    db.commit()
-    return {"recorded": recorded, "momentum_confirmed": confirmed}
+    candidates = list(candidates or [])
+
+    def write_candidates():
+        recorded = 0
+        confirmed = 0
+        for candidate in candidates:
+            chain, ca = _candidate_key(candidate)
+            if not ca:
+                continue
+            raw_json = json.dumps(candidate, ensure_ascii=False, sort_keys=True, default=_json_default)
+            db.execute(
+                """
+                INSERT INTO external_alpha_snapshots
+                    (captured_at, source, category, chain, token_ca, symbol, name,
+                     market_cap, liquidity, volume, swaps, buys, sells,
+                     price_change_5m, price_change_1h, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    captured_at,
+                    candidate.get("source") or "unknown",
+                    candidate.get("category"),
+                    chain,
+                    ca,
+                    candidate.get("symbol"),
+                    candidate.get("name"),
+                    _f(candidate.get("market_cap")),
+                    _f(candidate.get("liquidity")),
+                    _f(candidate.get("volume")),
+                    _f(candidate.get("swaps")),
+                    _f(candidate.get("buys")),
+                    _f(candidate.get("sells")),
+                    _f(candidate.get("price_change_5m")),
+                    _f(candidate.get("price_change_1h")),
+                    raw_json,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM external_alpha_state WHERE chain = ? AND token_ca = ?",
+                (chain, ca),
+            ).fetchone()
+            next_state = compute_next_external_alpha_state(candidate, _row_to_dict(row), captured_at=captured_at)
+            db.execute(
+                """
+                INSERT INTO external_alpha_state
+                    (chain, token_ca, first_seen_ts, last_seen_ts, seen_count, changed_count,
+                     source_last, category_last, symbol, name, last_market_cap, last_liquidity,
+                     last_volume, last_swaps, last_buys, last_sells, momentum_rounds,
+                     momentum_start_mc, momentum_gain_pct, momentum_confirmed,
+                     volume_confirmed, buy_pressure, last_snapshot_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chain, token_ca) DO UPDATE SET
+                    first_seen_ts = excluded.first_seen_ts,
+                    last_seen_ts = excluded.last_seen_ts,
+                    seen_count = excluded.seen_count,
+                    changed_count = excluded.changed_count,
+                    source_last = excluded.source_last,
+                    category_last = excluded.category_last,
+                    symbol = excluded.symbol,
+                    name = excluded.name,
+                    last_market_cap = excluded.last_market_cap,
+                    last_liquidity = excluded.last_liquidity,
+                    last_volume = excluded.last_volume,
+                    last_swaps = excluded.last_swaps,
+                    last_buys = excluded.last_buys,
+                    last_sells = excluded.last_sells,
+                    momentum_rounds = excluded.momentum_rounds,
+                    momentum_start_mc = excluded.momentum_start_mc,
+                    momentum_gain_pct = excluded.momentum_gain_pct,
+                    momentum_confirmed = excluded.momentum_confirmed,
+                    volume_confirmed = excluded.volume_confirmed,
+                    buy_pressure = excluded.buy_pressure,
+                    last_snapshot_json = excluded.last_snapshot_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                tuple(next_state[k] for k in [
+                    "chain", "token_ca", "first_seen_ts", "last_seen_ts", "seen_count", "changed_count",
+                    "source_last", "category_last", "symbol", "name", "last_market_cap", "last_liquidity",
+                    "last_volume", "last_swaps", "last_buys", "last_sells", "momentum_rounds",
+                    "momentum_start_mc", "momentum_gain_pct", "momentum_confirmed",
+                    "volume_confirmed", "buy_pressure", "last_snapshot_json",
+                ]),
+            )
+            recorded += 1
+            if next_state["momentum_confirmed"]:
+                confirmed += 1
+        return {"recorded": recorded, "momentum_confirmed": confirmed}
+
+    return _with_sqlite_write_retry(db, write_candidates)
 
 
 def record_external_alpha_health(
@@ -363,38 +410,7 @@ def record_external_alpha_health(
 ):
     run_ts = int(run_ts or time.time())
     error_text = str(error)[:500] if error else None
-    db.execute(
-        """
-        INSERT INTO external_alpha_health
-            (source, last_run_ts, last_success_ts, candidate_count, recorded_count,
-             momentum_confirmed_count, error_count, last_error, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(source) DO UPDATE SET
-            last_run_ts = excluded.last_run_ts,
-            last_success_ts = CASE
-                WHEN excluded.last_success_ts IS NOT NULL THEN excluded.last_success_ts
-                ELSE external_alpha_health.last_success_ts
-            END,
-            candidate_count = excluded.candidate_count,
-            recorded_count = excluded.recorded_count,
-            momentum_confirmed_count = excluded.momentum_confirmed_count,
-            error_count = external_alpha_health.error_count + excluded.error_count,
-            last_error = excluded.last_error,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            source,
-            run_ts,
-            run_ts if success else None,
-            int(candidate_count or 0),
-            int(recorded_count or 0),
-            int(momentum_confirmed_count or 0),
-            0 if success else 1,
-            error_text,
-        ),
-    )
-    db.commit()
-    return {
+    result = {
         "source": source,
         "last_run_ts": run_ts,
         "success": bool(success),
@@ -403,6 +419,46 @@ def record_external_alpha_health(
         "momentum_confirmed_count": int(momentum_confirmed_count or 0),
         "error": error_text,
     }
+
+    def write_health():
+        db.execute(
+            """
+            INSERT INTO external_alpha_health
+                (source, last_run_ts, last_success_ts, candidate_count, recorded_count,
+                 momentum_confirmed_count, error_count, last_error, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(source) DO UPDATE SET
+                last_run_ts = excluded.last_run_ts,
+                last_success_ts = CASE
+                    WHEN excluded.last_success_ts IS NOT NULL THEN excluded.last_success_ts
+                    ELSE external_alpha_health.last_success_ts
+                END,
+                candidate_count = excluded.candidate_count,
+                recorded_count = excluded.recorded_count,
+                momentum_confirmed_count = excluded.momentum_confirmed_count,
+                error_count = external_alpha_health.error_count + excluded.error_count,
+                last_error = excluded.last_error,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                source,
+                run_ts,
+                run_ts if success else None,
+                int(candidate_count or 0),
+                int(recorded_count or 0),
+                int(momentum_confirmed_count or 0),
+                0 if success else 1,
+                error_text,
+            ),
+        )
+        return result
+
+    return _with_sqlite_write_retry(
+        db,
+        write_health,
+        swallow_locked=True,
+        fallback=lambda exc: {**result, "health_write_failed": True, "health_write_error": str(exc)[:500]},
+    )
 
 
 def lookup_external_alpha(db, token_ca, *, chain=None, now=None, signal_ts=None, lookback_sec=None):

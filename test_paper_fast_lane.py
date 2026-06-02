@@ -696,6 +696,52 @@ def test_retry_watch_expiry_preserves_first_failure_reason(tmp_path, monkeypatch
     assert any(event["status"] == "retry_watch" and event["error"] == "entry_quote_failed_429" for event in history)
 
 
+def test_mark_queue_syncs_missed_rescue_terminal_status(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = fast.connect_db(db_path)
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    fast.mark_missed_rescue_processed(
+        db,
+        1,
+        "sig",
+        status="queued",
+        reason="smart_entry_reclaim_quote_clean_tiny_probe",
+        now_ts=now,
+        token_ca="TokenSync",
+        entry_branch="smart_entry_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="ath_uncertainty_tiny_scout",
+        payload={"last_tradable_ts": now, "tradable_missed": 1},
+    )
+    db.commit()
+    assert fast.enqueue_fast_entry(
+        db,
+        source_type="smart_quality_reclaim_fast",
+        token_ca="TokenSync",
+        symbol="SYNC",
+        signal_ts=now,
+        receive_ts=now,
+        entry_branch="smart_entry_reclaim_quote_clean_tiny_probe",
+        entry_mode_hint="ath_uncertainty_tiny_scout",
+        payload={"missed_attribution_id": 1, "entry_mode_hint": "ath_uncertainty_tiny_scout"},
+        now_ts=now,
+    )
+    row = fast.claim_queue_item(db, "worker-1")
+
+    fast.mark_queue(db, row["id"], "watch_only", "entry_mode_quality_shadow_only_mode")
+    state = db.execute(
+        """
+        SELECT last_status, last_reason, state
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 1
+        """
+    ).fetchone()
+
+    assert state["last_status"] == "watch_only"
+    assert state["last_reason"] == "entry_mode_quality_shadow_only_mode"
+    assert state["state"] == "watch_only"
+
+
 def test_fast_queue_records_market_session(tmp_path):
     db_path = tmp_path / "paper.db"
     db = fast.connect_db(db_path)
@@ -2301,6 +2347,78 @@ def test_missed_ath_soft_quality_dog_capture_queues_ath_tiny_scout(tmp_path, mon
     assert payload["dog_capture_canary"] is True
     assert payload["dog_capture_parent_reason"] == "scout_quality_buy_pressure_weak"
     assert payload["dog_capture_detail"]["fresh_canary_ok"] is True
+
+
+def test_missed_ath_dog_capture_stale_event_records_watch_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC", 3600)
+    monkeypatch.setattr(fast, "FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC", 120)
+    monkeypatch.setattr(fast, "FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC", 120)
+    db = fast.connect_db(tmp_path / "paper.db")
+    fast.init_fast_lane_schema(db)
+    now = int(time.time())
+    db.execute(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_id INTEGER,
+            route TEXT,
+            component TEXT,
+            reject_reason TEXT,
+            baseline_price REAL,
+            baseline_ts INTEGER,
+            created_event_ts INTEGER,
+            first_tradable_ts INTEGER,
+            tradable_missed INTEGER,
+            would_stop_before_peak INTEGER,
+            executable_peak_pnl REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+            id, token_ca, symbol, signal_ts, signal_id, route, component,
+            reject_reason, baseline_price, baseline_ts, created_event_ts,
+            first_tradable_ts, tradable_missed, would_stop_before_peak,
+            executable_peak_pnl, updated_at
+        ) VALUES (
+            1, 'TokenAthLate', 'LATE', ?, 11, 'ATH', 'ath_uncertainty_scout',
+            'scout_quality_buy_pressure_weak', 1.0, ?, ?, ?, 1, 0, 2.50,
+            datetime(?, 'unixepoch')
+        )
+        """,
+        (now - 600, now - 600, now - 600, now - 20, now),
+    )
+    db.commit()
+
+    result = fast.scan_missed_rescue_once(db, now_ts=now)
+    queue = db.execute(
+        """
+        SELECT status, last_error, payload_json
+        FROM paper_fast_entry_queue
+        WHERE token_ca = 'TokenAthLate'
+        """
+    ).fetchone()
+    state = db.execute(
+        """
+        SELECT last_status, state
+        FROM paper_fast_missed_rescue_state
+        WHERE missed_attribution_id = 1
+        """
+    ).fetchone()
+    payload = json.loads(queue["payload_json"])
+
+    assert result["watch_only"] == 1
+    assert queue["status"] == "watch_only"
+    assert queue["last_error"] == "dog_capture_event_stale_watch_only"
+    assert state["last_status"] == "watch_only"
+    assert state["state"] == "stale"
+    assert payload["dog_capture_detail"]["historical_candidate"] is True
+    assert payload["dog_capture_detail"]["fresh_canary_ok"] is False
 
 
 def test_missed_rescue_records_stale_clean_dog_state(tmp_path, monkeypatch):

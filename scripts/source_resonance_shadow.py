@@ -25,6 +25,8 @@ DEFAULT_SIGNAL_DB = PROJECT_ROOT / "data" / "sentiment_arb.db"
 SOURCE_NAME = "source_resonance_shadow"
 SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC = int(os.environ.get("SOURCE_RESONANCE_QUOTE_LOOKBACK_SEC", "3600"))
 SQLITE_WRITE_LOCK = SQLiteSingleWriterLock(SOURCE_NAME)
+SOURCE_RESONANCE_SQLITE_RETRY_ATTEMPTS = int(os.environ.get("SOURCE_RESONANCE_SQLITE_RETRY_ATTEMPTS", "4"))
+SOURCE_RESONANCE_SQLITE_RETRY_BASE_SEC = float(os.environ.get("SOURCE_RESONANCE_SQLITE_RETRY_BASE_SEC", "0.05"))
 
 
 CREATE_SOURCE_RESONANCE_CANDIDATES_SQL = """
@@ -183,13 +185,52 @@ def connect_signal_db(primary):
 
 
 def init_source_resonance_shadow(db):
-    with SQLITE_WRITE_LOCK:
+    def write_schema():
         db.execute(CREATE_SOURCE_RESONANCE_CANDIDATES_SQL)
         db.execute(CREATE_SOURCE_RESONANCE_HEALTH_SQL)
         db.execute(CREATE_LATENCY_AUDIT_EVENTS_SQL)
         for sql in RESONANCE_INDEXES:
             db.execute(sql)
-        db.commit()
+
+    _with_sqlite_write_retry(db, write_schema)
+
+
+def _sqlite_locked_error(exc):
+    text = str(exc).lower()
+    return isinstance(exc, (sqlite3.OperationalError, TimeoutError)) and (
+        "locked" in text or "busy" in text or "single-writer" in text
+    )
+
+
+def _rollback_quietly(db):
+    try:
+        db.rollback()
+    except sqlite3.Error:
+        pass
+
+
+def _with_sqlite_write_retry(db, writer, *, swallow_locked=False, fallback=None):
+    attempts = max(1, int(SOURCE_RESONANCE_SQLITE_RETRY_ATTEMPTS))
+    last_exc = None
+    for attempt in range(attempts):
+        try:
+            with SQLITE_WRITE_LOCK:
+                result = writer()
+                db.commit()
+                return result
+        except (sqlite3.OperationalError, TimeoutError) as exc:
+            _rollback_quietly(db)
+            if not _sqlite_locked_error(exc):
+                raise
+            last_exc = exc
+            if attempt >= attempts - 1:
+                break
+            time.sleep(SOURCE_RESONANCE_SQLITE_RETRY_BASE_SEC * (2 ** attempt))
+    if swallow_locked:
+        if callable(fallback):
+            return fallback(last_exc)
+        return fallback
+    raise last_exc
 
 
 def table_exists(db, table):
@@ -592,7 +633,7 @@ def _write_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pr
 
 def record_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pre_seen_count=0,
                   dual_source_count=0, quote_clean_count=0, error=None):
-    with SQLITE_WRITE_LOCK:
+    def write_health():
         _write_health(
             db,
             run_ts=run_ts,
@@ -603,7 +644,13 @@ def record_health(db, *, run_ts=None, signal_count=0, candidate_count=0, gmgn_pr
             quote_clean_count=quote_clean_count,
             error=error,
         )
-        db.commit()
+
+    return _with_sqlite_write_retry(
+        db,
+        write_health,
+        swallow_locked=True,
+        fallback=lambda exc: {"health_write_failed": True, "health_write_error": str(exc)[:500]},
+    )
 
 
 def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limit=500, now=None):
@@ -629,7 +676,7 @@ def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limi
         gmgn_pre_seen_count = sum(1 for item in candidates if item["gmgn_pre_seen"])
         quote_clean_count = sum(1 for item in candidates if item["quote_clean_seen"])
         dual_source_count = sum(1 for item in candidates if item["source_count"] >= 2)
-        with SQLITE_WRITE_LOCK:
+        def write_batch():
             for candidate in candidates:
                 upsert_candidate(paper_db, candidate)
             for event in latency_events:
@@ -643,7 +690,8 @@ def run_once(*, paper_db_path=None, signal_db_path=None, lookback_hours=24, limi
                 dual_source_count=dual_source_count,
                 quote_clean_count=quote_clean_count,
             )
-            paper_db.commit()
+
+        _with_sqlite_write_retry(paper_db, write_batch)
         return {
             "signals": len(signals),
             "candidates": len(candidates),

@@ -57,7 +57,7 @@ CLEAN_DOG_RECLAIM_POLICY_VERSION = os.environ.get(
 )
 DOG_CAPTURE_CANARY_POLICY_VERSION = os.environ.get(
     "DOG_CAPTURE_CANARY_POLICY_VERSION",
-    "dog_capture_canary_v1",
+    "dog_capture_canary_v2",
 )
 FAST_ENTRY_ENABLED = os.environ.get("PAPER_FAST_ENTRY_ENABLED", "true").lower() != "false"
 FAST_ENTRY_SIZE_SOL = float(os.environ.get("FAST_ENTRY_SIZE_SOL", "0.002"))
@@ -103,7 +103,11 @@ FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL = float(os.environ.get("FAST_ENTRY_DOG_CAPTU
 FAST_ENTRY_DOG_CAPTURE_PRIORITY = int(os.environ.get("FAST_ENTRY_DOG_CAPTURE_PRIORITY", "9"))
 FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC",
-    "1800",
+    "120",
+))
+FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC = float(os.environ.get(
+    "FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC",
+    "120",
 ))
 FAST_ENTRY_HARD_GATE_DIRECT_ENABLED = os.environ.get(
     "FAST_ENTRY_HARD_GATE_DIRECT_ENABLED",
@@ -1302,6 +1306,23 @@ def payload_ts_age_sec(payload, keys, *, now_ts=None):
     return None
 
 
+def row_or_payload_ts_age_sec(row, payload, keys, *, now_ts=None):
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    payload = payload or {}
+    for key in keys:
+        raw = row_value(row, key)
+        if raw in (None, ""):
+            raw = payload.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        ts = parse_datetime_ts(raw)
+        if ts:
+            return max(0.0, now_ts - ts)
+    return None
+
+
 def recovery_tradable_fresh_detail(payload, *, now_ts=None, max_age_sec=None):
     payload = payload or {}
     max_age_sec = FAST_ENTRY_RECOVERY_MAX_TRADABLE_AGE_SEC if max_age_sec is None else max_age_sec
@@ -1352,10 +1373,33 @@ def recovery_strong_signal_confirmed(payload):
 
 
 def clean_dog_reclaim_eligibility_detail(branch, payload, *, now_ts=None):
+    payload = payload or {}
+    route = str(payload.get("route") or "").upper()
+    dog_capture = payload.get("dog_capture_detail")
+    component = str(payload.get("component") or "")
+    reject_reason = str(payload.get("reject_reason") or "")
+    ath_soft_quality_dog_capture = (
+        route == "ATH"
+        and (
+            component == "ath_uncertainty_scout"
+            or reject_reason.startswith("scout_quality_")
+            or reject_reason.startswith("ath_uncertainty_")
+        )
+    )
+    if ath_soft_quality_dog_capture and isinstance(dog_capture, dict) and not dog_capture.get("fresh_canary_ok"):
+        return {
+            "pass": False,
+            "reason": dog_capture.get("reason") or "dog_capture_not_fresh_watch_only",
+            "entry_branch": branch,
+            "route": route,
+            "dog_capture_detail": dog_capture,
+            "last_tradable_age_sec": (dog_capture.get("freshness") or {}).get("tradable_age_sec"),
+            "max_tradable_age_sec": FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC,
+        }
     eligibility = build_clean_dog_reclaim_eligibility(
         payload,
         entry_branch=branch,
-        route=(payload or {}).get("route"),
+        route=payload.get("route"),
         now_ts=now_ts,
         max_tradable_age_sec=FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC,
         route_allowed=branch in CLEAN_DOG_RECLAIM_BRANCHES,
@@ -1797,13 +1841,54 @@ def claim_queue_item(db, owner):
     return db.execute("SELECT * FROM paper_fast_entry_queue WHERE id = ?", (row["id"],)).fetchone()
 
 
+def sync_missed_rescue_state_from_queue_row(db, row, *, status, reason, now_ts):
+    if not row or not table_exists(db, "paper_fast_missed_rescue_state"):
+        return
+    try:
+        payload = json.loads(row["payload_json"] or "{}") or {}
+    except Exception:
+        payload = {}
+    missed_id = payload.get("missed_attribution_id")
+    if missed_id in (None, ""):
+        return
+    try:
+        missed_id = int(missed_id)
+    except (TypeError, ValueError):
+        return
+    db.execute(
+        """
+        UPDATE paper_fast_missed_rescue_state
+        SET last_status = ?,
+            last_reason = ?,
+            last_action_at = ?,
+            updated_at = ?,
+            state = ?,
+            token_ca = COALESCE(token_ca, ?),
+            entry_branch = COALESCE(entry_branch, ?),
+            entry_mode_hint = COALESCE(entry_mode_hint, ?)
+        WHERE missed_attribution_id = ?
+        """,
+        (
+            status,
+            reason,
+            now_ts,
+            now_ts,
+            clean_dog_reclaim_state(status, reason),
+            row["token_ca"],
+            row["entry_branch"],
+            row["entry_mode_hint"] or payload.get("entry_mode_hint"),
+            missed_id,
+        ),
+    )
+
+
 def mark_queue(db, row_id, status, error=None):
     with SQLITE_WRITE_LOCK:
         now_ts = time.time()
         row = db.execute(
             """
             SELECT first_error, first_error_at, status_history_json,
-                   token_ca, source_type, entry_branch
+                   token_ca, source_type, entry_branch, entry_mode_hint, payload_json
             FROM paper_fast_entry_queue
             WHERE id = ?
             """,
@@ -1821,6 +1906,7 @@ def mark_queue(db, row_id, status, error=None):
             """,
             (status, error, first_error, first_error_at, history, now_ts, row_id),
         )
+        sync_missed_rescue_state_from_queue_row(db, row, status=status, reason=error, now_ts=now_ts)
         db.commit()
     if row:
         log.info(
@@ -2794,6 +2880,8 @@ def missed_rescue_signature(row):
         CLEAN_DOG_RECLAIM_POLICY_VERSION,
         DOG_CAPTURE_CANARY_POLICY_VERSION,
         FAST_ENTRY_DOG_CAPTURE_MIN_PEAK_PNL,
+        FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC,
+        FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC,
         row_value(row, "tradable_missed", 0),
         row_value(row, "would_stop_before_peak", 0),
         row_value(row, "first_tradable_ts"),
@@ -2842,6 +2930,13 @@ def dog_capture_canary_detail(row, reason, payload=None, *, now_ts=None):
         now_ts=now_ts,
         max_age_sec=FAST_ENTRY_DOG_CAPTURE_MAX_TRADABLE_AGE_SEC,
     )
+    event_age_sec = row_or_payload_ts_age_sec(
+        row,
+        payload,
+        ("created_event_ts", "signal_ts", "baseline_ts", "missed_updated_at", "updated_at"),
+        now_ts=now_ts,
+    )
+    event_fresh_ok = event_age_sec is not None and event_age_sec <= FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC
     historical_candidate = all((
         FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED,
         route_allowed,
@@ -2850,6 +2945,7 @@ def dog_capture_canary_detail(row, reason, payload=None, *, now_ts=None):
         stop_ok,
         peak_ok,
     ))
+    fresh_canary_ok = historical_candidate and bool(freshness.get("pass")) and event_fresh_ok
     if not FAST_ENTRY_DOG_CAPTURE_CANARY_ENABLED:
         reason_out = "dog_capture_canary_disabled"
     elif not route_allowed:
@@ -2864,11 +2960,14 @@ def dog_capture_canary_detail(row, reason, payload=None, *, now_ts=None):
         reason_out = "dog_capture_peak_below_threshold"
     elif not freshness.get("pass"):
         reason_out = f"dog_capture_{freshness.get('reason')}"
+    elif not event_fresh_ok:
+        reason_out = "dog_capture_event_stale_watch_only"
     else:
         reason_out = "dog_capture_peak50_tradable_canary"
     return {
-        "candidate": historical_candidate,
-        "fresh_canary_ok": historical_candidate and bool(freshness.get("pass")),
+        "candidate": fresh_canary_ok,
+        "historical_candidate": historical_candidate,
+        "fresh_canary_ok": fresh_canary_ok,
         "reason": reason_out,
         "policy_version": DOG_CAPTURE_CANARY_POLICY_VERSION,
         "route": route,
@@ -2881,6 +2980,9 @@ def dog_capture_canary_detail(row, reason, payload=None, *, now_ts=None):
         "route_allowed": route_allowed,
         "blocker_allowed": blocker_allowed,
         "freshness": freshness,
+        "event_age_sec": event_age_sec,
+        "max_event_age_sec": FAST_ENTRY_DOG_CAPTURE_MAX_EVENT_AGE_SEC,
+        "event_fresh_ok": event_fresh_ok,
         "family": f"{route or 'UNKNOWN'}:{component or reason_l or 'missed_rescue'}",
     }
 
@@ -3051,7 +3153,7 @@ def missed_rescue_priority(row, branch, reason=None):
             return FAST_ENTRY_CLEAN_DOG_BRONZE_PRIORITY
         return 20
     dog_capture = dog_capture_canary_detail(row, reason or row_value(row, "reject_reason"))
-    if dog_capture.get("candidate"):
+    if dog_capture.get("historical_candidate"):
         return FAST_ENTRY_DOG_CAPTURE_PRIORITY
     return 35
 
@@ -3114,7 +3216,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
         "executable_peak_pnl": row["executable_peak_pnl"],
     }
     dog_capture = dog_capture_canary_detail(row, reason, payload, now_ts=now_ts)
-    if dog_capture.get("candidate"):
+    if dog_capture.get("historical_candidate"):
         payload.update({
             "dog_capture_canary": True,
             "dog_capture_policy_version": DOG_CAPTURE_CANARY_POLICY_VERSION,
@@ -3144,7 +3246,7 @@ def process_missed_rescue_row(db, row, *, now_ts=None, record_watch_observation=
         )
     if not policy.get("pass"):
         inserted = False
-        if record_watch_observation or dog_capture.get("candidate"):
+        if record_watch_observation or dog_capture.get("historical_candidate"):
             inserted = record_fast_lane_observation(
                 db,
                 source_type=source_type,

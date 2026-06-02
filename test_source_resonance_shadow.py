@@ -219,6 +219,28 @@ def test_source_resonance_batches_writes_under_single_writer_lock(tmp_path, monk
     assert lock.entries >= 2
 
 
+def test_source_resonance_health_swallow_final_lock_timeout(tmp_path, monkeypatch):
+    db = src.connect_db(tmp_path / "paper.db")
+    src.init_source_resonance_shadow(db)
+
+    class Locked:
+        def __enter__(self):
+            raise TimeoutError("sqlite single-writer lock timeout holder=paper_fast_lane")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(src, "SQLITE_WRITE_LOCK", Locked())
+    monkeypatch.setattr(src, "SOURCE_RESONANCE_SQLITE_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(src.time, "sleep", lambda _seconds: None)
+
+    result = src.record_health(db, run_ts=1200, error="database is locked")
+
+    assert result["health_write_failed"] is True
+    assert db.execute("SELECT COUNT(*) FROM source_resonance_health").fetchone()[0] == 0
+    db.close()
+
+
 def test_external_alpha_lookup_tolerates_small_clock_skew(tmp_path):
     paper_db_path = tmp_path / "paper.db"
     db = sqlite3.connect(paper_db_path)

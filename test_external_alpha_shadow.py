@@ -7,6 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
+import external_alpha_shadow as alpha  # noqa: E402
 from external_alpha_shadow import (  # noqa: E402
     compute_next_external_alpha_state,
     init_external_alpha_shadow,
@@ -149,6 +150,59 @@ def test_external_alpha_health_records_success_and_errors():
     assert row["candidate_count"] == 0
     assert row["error_count"] == 1
     assert row["last_error"] == "gmgn-cli failed"
+
+
+def test_external_alpha_health_retries_transient_single_writer_timeout(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+
+    class FlakyLock:
+        def __init__(self):
+            self.entries = 0
+
+        def __enter__(self):
+            self.entries += 1
+            if self.entries == 1:
+                raise TimeoutError("sqlite single-writer lock timeout holder=paper_fast_lane")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    lock = FlakyLock()
+    monkeypatch.setattr(alpha, "SQLITE_WRITE_LOCK", lock)
+    monkeypatch.setattr(alpha, "EXTERNAL_ALPHA_SQLITE_RETRY_ATTEMPTS", 2)
+    monkeypatch.setattr(alpha.time, "sleep", lambda _seconds: None)
+
+    result = record_external_alpha_health(db, run_ts=1200, success=True, candidate_count=1)
+    row = db.execute("SELECT * FROM external_alpha_health WHERE source = 'gmgn_candidate_scout'").fetchone()
+
+    assert result["success"] is True
+    assert lock.entries == 2
+    assert row["last_success_ts"] == 1200
+
+
+def test_external_alpha_health_swallow_final_lock_timeout(monkeypatch):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_external_alpha_shadow(db)
+
+    class Locked:
+        def __enter__(self):
+            raise TimeoutError("sqlite single-writer lock timeout holder=paper_fast_lane")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(alpha, "SQLITE_WRITE_LOCK", Locked())
+    monkeypatch.setattr(alpha, "EXTERNAL_ALPHA_SQLITE_RETRY_ATTEMPTS", 1)
+    monkeypatch.setattr(alpha.time, "sleep", lambda _seconds: None)
+
+    result = record_external_alpha_health(db, run_ts=1200, success=False, error="upstream failed")
+
+    assert result["health_write_failed"] is True
+    assert db.execute("SELECT COUNT(*) FROM external_alpha_health").fetchone()[0] == 0
 
 
 def test_gmgn_candidate_normalize_accepts_ca_and_camel_base_token():
