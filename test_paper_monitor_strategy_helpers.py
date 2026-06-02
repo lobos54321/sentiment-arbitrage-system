@@ -3840,6 +3840,12 @@ def _revival_canary_db():
     return db
 
 
+def test_revival_canary_sampling_defaults_collect_larger_paper_sample():
+    assert monitor.LOTTO_MICRO_RECLAIM_MARKOV_MIN_SAMPLE_N == 10
+    assert monitor.REVIVAL_CANARY_MAX_PER_MODE_PER_HOUR == 4
+    assert monitor.REVIVAL_CANARY_MAX_GLOBAL_PER_HOUR == 8
+
+
 def test_revival_canary_pending_tags_policy_and_caps_size():
     pending = {
         "token_ca": "TokenCA",

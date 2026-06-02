@@ -165,7 +165,7 @@ FAST_ENTRY_NOT_ATH_WATCH_CANARY_LOOKBACK_SEC = float(os.environ.get(
 ))
 FAST_ENTRY_NOT_ATH_WATCH_CANARY_LIMIT = int(os.environ.get(
     "FAST_ENTRY_NOT_ATH_WATCH_CANARY_LIMIT",
-    "10",
+    "25",
 ))
 FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED = os.environ.get(
     "FAST_ENTRY_SMART_QUALITY_RECHECK_CANARY_ENABLED",
@@ -185,7 +185,7 @@ FAST_ENTRY_TTL_RESCUE_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
 ))
 FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC = float(os.environ.get(
     "FAST_ENTRY_NOT_ATH_RECLAIM_MAX_TRADABLE_AGE_SEC",
-    "300",
+    "1800",
 ))
 FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC = float(os.environ.get(
     "FAST_ENTRY_MISSED_RESCUE_LOOKBACK_SEC",
@@ -227,7 +227,12 @@ FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES = {
     item.strip()
     for item in os.environ.get(
         "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES",
-        "not_ath_reclaim_quote_clean_tiny_probe",
+        (
+            "not_ath_reclaim_quote_clean_tiny_probe,"
+            "tracking_ttl_reclaim_quote_clean_tiny_probe,"
+            "pre_pass_stale_reclaim_quote_clean_tiny_probe,"
+            "smart_entry_reclaim_quote_clean_tiny_probe"
+        ),
     ).split(",")
     if item.strip()
 }
@@ -235,7 +240,7 @@ FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS = {
     item.strip()
     for item in os.environ.get(
         "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS",
-        "branch_circuit_catastrophic_loss",
+        "branch_circuit_negative_ev,branch_circuit_tail_loss,branch_circuit_catastrophic_loss",
     ).split(",")
     if item.strip()
 }
@@ -1498,7 +1503,10 @@ def branch_circuit_learning_bypass_detail(
         detail["reason"] = "branch_circuit_learning_bypass_branch_not_allowed"
     elif reason not in FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS:
         detail["reason"] = "branch_circuit_learning_bypass_reason_not_allowed"
-    elif mode != ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE:
+    elif mode not in {
+        ptm.LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE,
+        ptm.LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+    }:
         detail["reason"] = "branch_circuit_learning_bypass_mode_not_allowed"
     elif bucket not in FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS:
         detail["reason"] = "branch_circuit_learning_bypass_markov_not_green"

@@ -833,6 +833,28 @@ def test_clean_reclaim_uses_recent_missed_update_as_fresh_anchor(monkeypatch):
     assert detail["detail"]["tradable_age_sec"] <= 25
 
 
+def test_not_ath_reclaim_default_window_allows_late_clean_candidate():
+    now = int(time.time())
+    detail = fast.direct_fill_policy({
+        "source_type": "pre_pass_stale_reclaim_fast",
+        "entry_branch": "pre_pass_stale_reclaim_quote_clean_tiny_probe",
+        "payload_json": json.dumps({
+            "tradable_missed": 1,
+            "recovery_quote_clean": True,
+            "first_tradable_ts": now - 1200,
+            "last_clean_quote_ts": now - 1200,
+            "would_stop_before_peak": 0,
+            "activity_reclaim": True,
+            "route": "LOTTO",
+        }),
+    }, now_ts=now)
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "pre_pass_stale_reclaim_quote_clean_tiny_probe"
+    assert detail["detail"]["max_tradable_age_sec"] == 1800.0
+    assert detail["detail"]["last_tradable_age_sec"] == 1200
+
+
 def test_kline_rescue_is_counterfactual_only_by_default():
     detail = fast.direct_fill_policy({
         "source_type": "kline_retry_reclaim_fast",
@@ -1152,6 +1174,55 @@ def test_branch_circuit_learning_bypass_allows_markov_green_not_ath_canary(monke
     assert detail["reason"] == "branch_circuit_learning_bypass_markov_green_tiny_canary"
     assert detail["paper_only"] is True
     assert detail["markov_bucket"] == "green"
+
+
+def test_branch_circuit_learning_bypass_allows_markov_green_lotto_micro_canary(monkeypatch):
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_ENABLED", True)
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES",
+        {"smart_entry_reclaim_quote_clean_tiny_probe"},
+    )
+    monkeypatch.setattr(
+        fast,
+        "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS",
+        {"branch_circuit_negative_ev"},
+    )
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BUCKETS", {"green"})
+    monkeypatch.setattr(fast, "FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_MAX_SIZE_SOL", 0.003)
+
+    detail = fast.branch_circuit_learning_bypass_detail(
+        "smart_entry_reclaim_quote_clean_tiny_probe",
+        fast.ptm.LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE,
+        {"pass": False, "reason": "branch_circuit_negative_ev", "avg_pnl": -0.08},
+        markov_reclaim_forecast={
+            "gate": {
+                "pass": True,
+                "markov_bucket": "green",
+                "reason": "lotto_reclaim_cohort_markov_green",
+            }
+        },
+        entry_size_sol=0.001,
+    )
+
+    assert detail["pass"] is True
+    assert detail["reason"] == "branch_circuit_learning_bypass_markov_green_tiny_canary"
+    assert detail["paper_only"] is True
+    assert detail["markov_bucket"] == "green"
+
+
+def test_branch_circuit_learning_bypass_default_scope_matches_reclaim_sampling_plan():
+    assert {
+        "not_ath_reclaim_quote_clean_tiny_probe",
+        "tracking_ttl_reclaim_quote_clean_tiny_probe",
+        "pre_pass_stale_reclaim_quote_clean_tiny_probe",
+        "smart_entry_reclaim_quote_clean_tiny_probe",
+    }.issubset(fast.FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_BRANCHES)
+    assert {
+        "branch_circuit_negative_ev",
+        "branch_circuit_tail_loss",
+        "branch_circuit_catastrophic_loss",
+    }.issubset(fast.FAST_ENTRY_BRANCH_CIRCUIT_LEARNING_BYPASS_REASONS)
 
 
 def test_branch_circuit_learning_bypass_blocks_red_or_oversized_canary(monkeypatch):
