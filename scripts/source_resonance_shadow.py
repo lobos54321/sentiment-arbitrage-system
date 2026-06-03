@@ -352,6 +352,7 @@ def lookup_quote_shadow(paper_db, token_ca, signal_ts):
     }
     if not token_ca or not table_exists(paper_db, "lotto_not_ath_watch_shadow_snapshots"):
         return empty
+    cols = table_columns(paper_db, "lotto_not_ath_watch_shadow_snapshots")
     params = {
         "token_ca": token_ca,
         "signal_ts": int(signal_ts or 0),
@@ -376,12 +377,48 @@ def lookup_quote_shadow(paper_db, token_ca, signal_ts):
     if not row:
         return empty
     quote_clean_count = int(row["quote_clean_count"] or 0)
-    return {
+    detail = {
         "quote_clean_seen": 1 if quote_clean_count > 0 else 0,
         "two_quote_clean_snapshots": 1 if quote_clean_count >= 2 else 0,
         "snapshot_pass_seen": int(row["snapshot_pass_seen"] or 0),
         "quote_snapshot_count": int(row["snapshot_count"] or 0),
     }
+    if quote_clean_count > 0:
+        select_cols = [
+            "snapshot_ts",
+            "quote_clean",
+            "snapshot_pass",
+            "liquidity_usd",
+            "spread_pct",
+            "quote_gap_pct",
+            "quote_price",
+            "mark_price",
+            "quote_pnl",
+            "mark_pnl",
+        ]
+        present_cols = [name for name in select_cols if name in cols]
+        if present_cols:
+            latest = paper_db.execute(
+                f"""
+                SELECT {', '.join(present_cols)}
+                FROM lotto_not_ath_watch_shadow_snapshots
+                WHERE token_ca = @token_ca
+                  AND quote_clean = 1
+                  AND (
+                    @signal_ts = 0
+                    OR COALESCE(signal_ts, 0) = @signal_ts
+                    OR ABS(COALESCE(signal_ts, 0) - @signal_ts) <= @lookback_sec
+                  )
+                ORDER BY COALESCE(snapshot_ts, 0) DESC, rowid DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+            if latest:
+                for name in present_cols:
+                    detail[name] = latest[name]
+                detail["last_clean_quote_ts"] = latest["snapshot_ts"] if "snapshot_ts" in present_cols else None
+    return detail
 
 
 def lookup_entry_quote_audit(paper_db, token_ca, signal_ts):

@@ -6,6 +6,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from a_class_fastlane import (
     AClassCandidate,
+    candidate_from_decision_event_row,
+    candidate_from_fast_queue_row,
     decide_size,
     evaluate_a_class_fastlane,
     hard_prefilter,
@@ -144,6 +146,100 @@ def test_size_thresholds_are_capped():
     assert decide_size(70, config=config) == ("A", 0.001)
     assert decide_size(82, config=config) == ("STRONG_A", 0.002)
     assert decide_size(92, config=config) == ("A_PLUS", 0.003)
+
+
+def test_decision_event_hydrates_nested_quote_execution_evidence():
+    candidate = candidate_from_decision_event_row(
+        {
+            "id": 1,
+            "event_ts": 995,
+            "token_ca": "DecisionToken",
+            "symbol": "DEC",
+            "lifecycle_id": "life-dec",
+            "signal_ts": 100,
+            "route": "ATH",
+            "component": "ath_uncertainty_scout",
+            "reason": "scout_quality_buy_pressure_weak",
+            "payload_json": """
+            {
+              "gmgn_pre_seen": true,
+              "gmgn_momentum_confirmed": true,
+              "source_resonance": true,
+              "guard": {
+                "success": true,
+                "routeAvailable": true,
+                "quote_spread_pct": 0.7
+              },
+              "latest_snapshot": {
+                "quote_clean": true,
+                "quote_source": "jupiter",
+                "snapshot_ts": 996,
+                "liquidity_usd": 75000,
+                "spread_pct": 0.7
+              },
+              "top10_pct": 35,
+              "bundler_rate": 0.01,
+              "rat_trader_rate": 0.01,
+              "entrapment_ratio": 0.01
+            }
+            """,
+        },
+        now_ts=1000,
+    )
+
+    assert candidate.quote_available is True
+    assert candidate.quote_executable is True
+    assert candidate.route_available is True
+    assert candidate.quote_source == "jupiter"
+    assert candidate.quote_age_sec == 4
+    assert candidate.liquidity_usd == 75000
+    assert candidate.spread_pct == 0.7
+
+    decision = evaluate_a_class_fastlane(candidate, now_ts=1000, config=load_a_class_config({}))
+    assert decision.action == "ENTER"
+    assert "fresh_quote" in decision.freshness_detail["freshness_sources"]
+
+
+def test_fast_queue_quote_clean_verified_can_satisfy_spread_without_inventing_number():
+    candidate = candidate_from_fast_queue_row(
+        {
+            "id": 2,
+            "created_at": 990,
+            "updated_at": 998,
+            "source_signal_ts": 100,
+            "token_ca": "QueueToken",
+            "symbol": "QUEUE",
+            "source_type": "source_resonance_fast",
+            "entry_branch": "source_resonance_quote_clean_fast",
+            "entry_mode_hint": "source_resonance_tiny_probe",
+            "status": "watch_only",
+            "first_error": "source_quote_clean_original_signal_stale_watch_only",
+            "payload_json": """
+            {
+              "quote_clean_seen": true,
+              "two_quote_clean_snapshots": true,
+              "last_clean_quote_ts": 997,
+              "liquidity_usd": 90000,
+              "gmgn_pre_seen": true,
+              "gmgn_momentum_confirmed": true,
+              "source_resonance": true,
+              "top10_pct": 30,
+              "bundler_rate": 0.01,
+              "rat_trader_rate": 0.01,
+              "entrapment_ratio": 0.01
+            }
+            """,
+        },
+        now_ts=1000,
+    )
+
+    assert candidate.spread_pct is None
+    assert candidate.spread_verified is True
+    assert candidate.quote_clean_verified is True
+    passed, blockers, detail = hard_prefilter(candidate, config=load_a_class_config({}))
+    assert passed is True
+    assert "spread_unknown" not in blockers
+    assert detail["spread_verified"] is True
 
 
 def test_shadow_scan_records_counterfactual_sources():

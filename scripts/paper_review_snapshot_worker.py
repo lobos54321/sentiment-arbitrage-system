@@ -753,6 +753,146 @@ def fast_lane_summary(db, since_ts, limit):
     }
 
 
+def a_class_summary(db, since_ts, limit):
+    if not table_exists(db, "a_class_decision_events"):
+        return {"available": False, "reason": "a_class_decision_events_missing"}
+    cols = columns(db, "a_class_decision_events")
+    event_ts_expr = "event_ts" if "event_ts" in cols else "0"
+    params = {"since": since_ts, "limit": limit}
+    where = f"WHERE {event_ts_expr} >= :since"
+    action_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE(action, 'UNKNOWN') AS action,
+               COUNT(*) AS n,
+               MAX({event_ts_expr}) AS latest_event_ts,
+               AVG(COALESCE(score, 0)) AS avg_score,
+               SUM(CASE WHEN action = 'WOULD_ENTER' THEN COALESCE(size_sol, 0) ELSE 0 END) AS would_enter_size_sol
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE(action, 'UNKNOWN')
+        ORDER BY n DESC
+        """,
+        params,
+    ).fetchall())
+    grade_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE(grade, 'UNKNOWN') AS grade,
+               COALESCE(action, 'UNKNOWN') AS action,
+               COUNT(*) AS n,
+               AVG(COALESCE(score, 0)) AS avg_score
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE(grade, 'UNKNOWN'), COALESCE(action, 'UNKNOWN')
+        ORDER BY n DESC
+        """,
+        params,
+    ).fetchall())
+    source_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE(source_table, 'unknown') AS source_table,
+               COALESCE(source_component, 'unknown') AS source_component,
+               COALESCE(action, 'UNKNOWN') AS action,
+               COUNT(*) AS n,
+               AVG(COALESCE(score, 0)) AS avg_score,
+               SUM(CASE WHEN action = 'WOULD_ENTER' THEN COALESCE(size_sol, 0) ELSE 0 END) AS would_enter_size_sol,
+               MAX({event_ts_expr}) AS latest_event_ts
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'), COALESCE(action, 'UNKNOWN')
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    reason_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE(source_table, 'unknown') AS source_table,
+               COALESCE(source_component, 'unknown') AS source_component,
+               COALESCE(source_reason, 'unknown') AS source_reason,
+               COALESCE(action, 'UNKNOWN') AS action,
+               COUNT(*) AS n,
+               MAX(COALESCE(score, 0)) AS max_score,
+               MAX({event_ts_expr}) AS latest_event_ts
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'),
+                 COALESCE(source_reason, 'unknown'), COALESCE(action, 'UNKNOWN')
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    blocker_counts = {}
+    blocker_rows = db.execute(
+        f"""
+        SELECT hard_blockers_json
+        FROM a_class_decision_events
+        {where}
+        """,
+        params,
+    ).fetchall()
+    for row in blocker_rows:
+        try:
+            blockers = json.loads(row["hard_blockers_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            blockers = []
+        if not isinstance(blockers, list):
+            continue
+        for blocker in blockers:
+            blocker = str(blocker)
+            blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+    hard_blockers = [
+        {"blocker": blocker, "n": n}
+        for blocker, n in sorted(blocker_counts.items(), key=lambda item: item[1], reverse=True)
+    ]
+    select_cols = [
+        "id",
+        event_ts_expr + " AS event_ts",
+        col_expr(cols, "symbol"),
+        col_expr(cols, "token_ca"),
+        col_expr(cols, "route_bucket"),
+        col_expr(cols, "source_table"),
+        col_expr(cols, "source_component"),
+        col_expr(cols, "source_reason"),
+        col_expr(cols, "action"),
+        col_expr(cols, "grade"),
+        col_expr(cols, "size_sol", "0"),
+        col_expr(cols, "score", "0"),
+        col_expr(cols, "reason"),
+        col_expr(cols, "hard_blockers_json"),
+    ]
+    recent_events = rows_as_dicts(db.execute(
+        f"""
+        SELECT {', '.join(select_cols)}
+        FROM a_class_decision_events
+        {where}
+        ORDER BY {event_ts_expr} DESC, id DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    for row in recent_events:
+        try:
+            row["hard_blockers"] = json.loads(row.pop("hard_blockers_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            row["hard_blockers"] = []
+    total = sum(int(row.get("n") or 0) for row in action_summary)
+    would_enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "WOULD_ENTER")
+    enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "ENTER")
+    return {
+        "available": True,
+        "total": total,
+        "would_enter": would_enter,
+        "enter": enter,
+        "action_summary": action_summary,
+        "grade_summary": grade_summary,
+        "source_summary": source_summary,
+        "reason_summary": reason_summary,
+        "hard_blockers": hard_blockers,
+        "recent_events": recent_events,
+    }
+
+
 def branch_ev_summary(db, since_ts, limit):
     if not table_exists(db, "paper_trades"):
         return []
@@ -1305,6 +1445,7 @@ def build_snapshot(db, hours, limit):
         "missed": timed_section("missed", lambda: missed_summary(db, since_ts, limit)),
         "trades": timed_section("trades", lambda: trade_summary(db, since_ts, limit)),
         "fast_lane": timed_section("fast_lane", lambda: fast_lane_summary(db, since_ts, limit)),
+        "a_class": timed_section("a_class", lambda: a_class_summary(db, since_ts, max(limit, 120))),
         "entry_mode_performance": timed_section(
             "entry_mode_performance",
             lambda: entry_mode_performance_summary(db, since_ts, max(limit, 120)),

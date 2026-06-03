@@ -43,6 +43,25 @@ def _safe_int(value, default=None):
         return default
 
 
+def _first_present(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_ts_sec(value):
+    ts = _safe_float(value, None)
+    if ts is None or ts <= 0:
+        return None
+    if ts > 1_000_000_000_000:
+        return ts / 1000.0
+    return ts
+
+
 def _json_loads(value):
     if isinstance(value, dict):
         return value
@@ -93,6 +112,7 @@ class AClassCandidate:
     quote_source: Optional[str] = None
     quote_age_sec: Optional[float] = None
     quote_ts: Optional[float] = None
+    quote_clean_verified: bool = False
     route_available: bool = False
     route_failure_reason: Optional[str] = None
     route_stable_recent: bool = False
@@ -115,6 +135,7 @@ class AClassCandidate:
     bundler_rate: Optional[float] = None
     rat_trader_rate: Optional[float] = None
     entrapment_ratio: Optional[float] = None
+    spread_verified: bool = False
     creator_close: bool = False
     risk_flags: list = field(default_factory=list)
     recent_hard_loss: bool = False
@@ -157,6 +178,7 @@ class AClassCandidate:
             quote_source=merged.get("quote_source") or merged.get("executable_peak_source"),
             quote_age_sec=_safe_float(merged.get("quote_age_sec"), None),
             quote_ts=_safe_float(merged.get("quote_ts") or merged.get("first_tradable_ts"), None),
+            quote_clean_verified=_truthy(merged.get("quote_clean_verified", False)),
             route_available=_truthy(merged.get("route_available", merged.get("tradable_missed", False))),
             route_failure_reason=merged.get("route_failure_reason") or merged.get("tradability_reason"),
             route_stable_recent=_truthy(merged.get("route_stable_recent", False)),
@@ -179,6 +201,7 @@ class AClassCandidate:
             bundler_rate=_safe_float(merged.get("bundler_rate"), None),
             rat_trader_rate=_safe_float(merged.get("rat_trader_rate"), None),
             entrapment_ratio=_safe_float(merged.get("entrapment_ratio"), None),
+            spread_verified=_truthy(merged.get("spread_verified", False)),
             creator_close=_truthy(merged.get("creator_close", False)),
             risk_flags=risk_flags,
             recent_hard_loss=_truthy(merged.get("recent_hard_loss", False)),
@@ -244,11 +267,11 @@ def hard_prefilter(candidate, context=None, config=None):
 
     max_spread = config.max_spread_for_route(candidate.route_bucket)
     detail["max_spread_pct"] = max_spread
-    if candidate.spread_pct is None:
+    if candidate.spread_pct is None and not candidate.spread_verified:
         blockers.append("spread_unknown")
-    elif abs(candidate.spread_pct) > config.extreme_spread_block_pct:
+    elif candidate.spread_pct is not None and abs(candidate.spread_pct) > config.extreme_spread_block_pct:
         blockers.append("spread_extreme")
-    elif abs(candidate.spread_pct) > max_spread:
+    elif candidate.spread_pct is not None and abs(candidate.spread_pct) > max_spread:
         blockers.append("spread_too_high")
 
     if candidate.creator_close:
@@ -282,6 +305,8 @@ def hard_prefilter(candidate, context=None, config=None):
         "quote_source": candidate.quote_source,
         "liquidity_usd": candidate.liquidity_usd,
         "spread_pct": candidate.spread_pct,
+        "spread_verified": candidate.spread_verified,
+        "quote_clean_verified": candidate.quote_clean_verified,
         "route_bucket": candidate.route_bucket,
         "active_fastlane_count": active_count,
     })
@@ -312,7 +337,7 @@ def score_a_class(candidate, freshness_decision: FreshnessDecision, config=None)
     if candidate.quote_available and candidate.quote_executable and candidate.quote_clean:
         detail["execution_quality"] += 10
     max_spread = (config or load_a_class_config()).max_spread_for_route(candidate.route_bucket)
-    if candidate.spread_pct is not None and abs(candidate.spread_pct) <= max_spread / 2:
+    if candidate.spread_verified or (candidate.spread_pct is not None and abs(candidate.spread_pct) <= max_spread / 2):
         detail["execution_quality"] += 5
     if candidate.liquidity_usd is not None and candidate.liquidity_usd >= (config or load_a_class_config()).min_liquidity_for_route(candidate.route_bucket):
         detail["execution_quality"] += 5
@@ -514,7 +539,79 @@ def _candidate_route_from_text(*values):
     return "A_GRADE"
 
 
+def _truthy_first(*values):
+    for value in values:
+        if value is None:
+            continue
+        if _truthy(value):
+            return True
+    return False
+
+
+def _nested_dicts(payload):
+    if not isinstance(payload, dict):
+        return []
+    names = (
+        "quote",
+        "entry_quote",
+        "execution_quote",
+        "quote_snapshot",
+        "latest_snapshot",
+        "latest_watch_snapshot",
+        "quote_shadow",
+        "quote_audit",
+        "guard",
+        "entry_guard",
+        "entry_latency_audit",
+        "entry_execution_eligibility",
+        "clean_dog_reclaim_eligibility",
+        "recovery_quote",
+        "confirmation",
+    )
+    out = [payload]
+    for name in names:
+        value = payload.get(name)
+        if isinstance(value, dict):
+            out.append(value)
+    confirmation = payload.get("confirmation")
+    if isinstance(confirmation, dict):
+        confirming = confirmation.get("confirming_snapshots")
+        if isinstance(confirming, list):
+            out.extend(item for item in confirming if isinstance(item, dict))
+    return out
+
+
+def _first_from_dicts(dicts, *keys):
+    for data in dicts:
+        for key in keys:
+            if key in data and data.get(key) not in (None, ""):
+                return data.get(key)
+    return None
+
+
+def _first_bool_from_dicts(dicts, *keys):
+    for data in dicts:
+        for key in keys:
+            if key in data and data.get(key) not in (None, ""):
+                return _truthy(data.get(key))
+    return None
+
+
+def _age_from_any_ts(merged, payload_dicts, now_ts, *keys):
+    if now_ts is None:
+        return None, None
+    ts_value = _first_present(
+        *(merged.get(key) for key in keys),
+        _first_from_dicts(payload_dicts, *keys),
+    )
+    ts = _normalize_ts_sec(ts_value)
+    if ts is None:
+        return None, None
+    return max(0.0, float(now_ts) - ts), ts
+
+
 def _extract_quote_fields(merged, payload, now_ts=None):
+    payload_dicts = _nested_dicts(payload)
     quote = payload.get("quote")
     if not isinstance(quote, dict):
         quote = payload.get("entry_quote")
@@ -524,6 +621,25 @@ def _extract_quote_fields(merged, payload, now_ts=None):
         quote = payload.get("quote_snapshot")
     if not isinstance(quote, dict):
         quote = {}
+    quote_clean_evidence = _truthy_first(
+        merged.get("quote_clean"),
+        merged.get("quote_clean_seen"),
+        merged.get("two_quote_clean_snapshots"),
+        merged.get("recovery_quote_clean"),
+        merged.get("final_reclaim_quote_executable"),
+        merged.get("tradable_missed"),
+        _first_from_dicts(
+            payload_dicts,
+            "quote_clean",
+            "quoteClean",
+            "quote_clean_seen",
+            "two_quote_clean_snapshots",
+            "recovery_quote_clean",
+            "final_reclaim_quote_executable",
+            "tradable_missed",
+            "direct_entry_ok",
+        ),
+    )
     for key in (
         "quote_available",
         "quote_executable",
@@ -539,23 +655,168 @@ def _extract_quote_fields(merged, payload, now_ts=None):
     ):
         if merged.get(key) is None and quote.get(key) is not None:
             merged[key] = quote.get(key)
+    if merged.get("quote_available") is None:
+        value = _first_bool_from_dicts(
+            payload_dicts,
+            "quote_available",
+            "quoteAvailable",
+            "quote_success",
+            "quoteSuccess",
+            "success",
+            "direct_entry_ok",
+            "quote_clean_seen",
+            "recovery_quote_clean",
+            "final_reclaim_quote_executable",
+            "tradable_missed",
+        )
+        if value is not None:
+            merged["quote_available"] = value
+    if merged.get("quote_executable") is None:
+        value = _first_bool_from_dicts(
+            payload_dicts,
+            "quote_executable",
+            "quoteExecutable",
+            "routeAvailable",
+            "route_available",
+            "success",
+            "direct_entry_ok",
+            "quote_clean_seen",
+            "recovery_quote_clean",
+            "final_reclaim_quote_executable",
+            "tradable_missed",
+        )
+        if value is not None:
+            merged["quote_executable"] = value
+    if merged.get("route_available") is None:
+        value = _first_bool_from_dicts(
+            payload_dicts,
+            "route_available",
+            "routeAvailable",
+            "route_clean",
+            "direct_entry_ok",
+            "success",
+            "quote_clean_seen",
+            "recovery_quote_clean",
+            "final_reclaim_quote_executable",
+            "tradable_missed",
+        )
+        if value is not None:
+            merged["route_available"] = value
+    if merged.get("quote_clean") is None and quote_clean_evidence:
+        merged["quote_clean"] = True
+    if quote_clean_evidence:
+        merged["quote_clean_verified"] = True
     if merged.get("quote_source") is None:
-        merged["quote_source"] = quote.get("source") or quote.get("provider")
+        merged["quote_source"] = (
+            quote.get("source")
+            or quote.get("provider")
+            or _first_from_dicts(payload_dicts, "quote_source", "quoteSource", "source", "provider")
+            or ("quote_clean_verified" if quote_clean_evidence else None)
+        )
     if merged.get("liquidity_usd") is None:
         merged["liquidity_usd"] = (
             payload.get("liquidity_usd")
             or payload.get("liquidityUsd")
             or payload.get("liquidity")
+            or payload.get("gmgn_last_liquidity")
+            or payload.get("last_liquidity")
             or quote.get("liquidity_usd")
+            or _first_from_dicts(
+                payload_dicts,
+                "liquidity_usd",
+                "liquidityUsd",
+                "liquidity",
+                "gmgn_last_liquidity",
+                "last_liquidity",
+            )
         )
     if merged.get("spread_pct") is None:
-        merged["spread_pct"] = payload.get("spread_pct") or payload.get("quote_spread_pct") or quote.get("spread_pct")
+        merged["spread_pct"] = _first_present(
+            payload.get("spread_pct"),
+            payload.get("quote_spread_pct"),
+            payload.get("quote_gap_pct"),
+            quote.get("spread_pct"),
+            _first_from_dicts(payload_dicts, "spread_pct", "quote_spread_pct", "quote_gap_pct", "spreadPct"),
+        )
+    if merged.get("spread_verified") is None and quote_clean_evidence and merged.get("spread_pct") is None:
+        # quote_clean_seen / final_reclaim_quote_executable are upstream
+        # policy-level checks that already rejected extreme spread. Preserve
+        # that as verified evidence without inventing a numeric spread.
+        merged["spread_verified"] = True
     if merged.get("market_cap") is None:
-        merged["market_cap"] = payload.get("market_cap") or payload.get("marketCap")
+        merged["market_cap"] = (
+            payload.get("market_cap")
+            or payload.get("marketCap")
+            or payload.get("trigger_mc")
+            or payload.get("gmgn_last_market_cap")
+            or _first_from_dicts(payload_dicts, "market_cap", "marketCap", "trigger_mc", "gmgn_last_market_cap")
+        )
+    if merged.get("quote_ts") is None:
+        merged["quote_ts"] = _first_present(
+            _first_from_dicts(
+                payload_dicts,
+                "quote_ts",
+                "quoteTs",
+                "snapshot_ts",
+                "last_clean_quote_ts",
+                "last_tradable_ts",
+                "missed_updated_at",
+                "updated_at",
+                "source_updated_ts",
+            ),
+            merged.get("last_clean_quote_ts"),
+            merged.get("last_tradable_ts"),
+        )
     if merged.get("quote_age_sec") is None and merged.get("quote_ts") is not None and now_ts is not None:
-        quote_ts = _safe_float(merged.get("quote_ts"), None)
+        quote_ts = _normalize_ts_sec(merged.get("quote_ts"))
         if quote_ts is not None:
             merged["quote_age_sec"] = max(0.0, float(now_ts) - quote_ts)
+    if merged.get("quote_age_sec") is None and quote_clean_evidence:
+        age, ts = _age_from_any_ts(
+            merged,
+            payload_dicts,
+            now_ts,
+            "last_clean_quote_ts",
+            "last_tradable_ts",
+            "snapshot_ts",
+            "missed_updated_at",
+            "updated_at",
+            "source_updated_ts",
+            "source_updated_at",
+        )
+        if age is not None:
+            merged["quote_age_sec"] = age
+            merged["quote_ts"] = ts
+    if merged.get("route_stable_recent") is None and _truthy_first(
+        merged.get("two_quote_clean_snapshots"),
+        _first_from_dicts(payload_dicts, "two_quote_clean_snapshots"),
+    ):
+        merged["route_stable_recent"] = True
+    if merged.get("gmgn_pre_seen") is None:
+        value = _first_bool_from_dicts(payload_dicts, "gmgn_pre_seen")
+        if value is not None:
+            merged["gmgn_pre_seen"] = value
+    if merged.get("gmgn_activity_fresh") is None:
+        value = _first_bool_from_dicts(
+            payload_dicts,
+            "gmgn_activity_fresh",
+            "gmgn_momentum_confirmed",
+            "gmgn_volume_confirmed",
+            "activity_confirmed",
+        )
+        if value is not None:
+            merged["gmgn_activity_fresh"] = value
+    if merged.get("fresh_reclaim") is None and _truthy_first(
+        merged.get("recovery_quote_clean"),
+        merged.get("final_reclaim_quote_executable"),
+        _first_from_dicts(payload_dicts, "recovery_quote_clean", "final_reclaim_quote_executable"),
+    ):
+        merged["fresh_reclaim"] = True
+    if merged.get("fresh_momentum") is None and _truthy_first(
+        merged.get("gmgn_momentum_confirmed"),
+        _first_from_dicts(payload_dicts, "gmgn_momentum_confirmed", "momentum_confirmed"),
+    ):
+        merged["fresh_momentum"] = True
     return merged
 
 
@@ -637,6 +898,17 @@ def candidate_from_source_resonance_row(row, now_ts=None):
     if gmgn_last_seen_ts is not None and now_ts is not None:
         gmgn_last_seen_age_sec = max(0.0, float(now_ts) - gmgn_last_seen_ts)
     quote_clean = _truthy(data.get("quote_clean_seen")) or _safe_int(data.get("two_quote_clean_snapshots"), 0) >= 1
+    quote_shadow = payload.get("quote_shadow") if isinstance(payload.get("quote_shadow"), dict) else {}
+    last_clean_quote_ts = _normalize_ts_sec(
+        quote_shadow.get("last_clean_quote_ts")
+        or quote_shadow.get("snapshot_ts")
+        or payload.get("last_clean_quote_ts")
+    )
+    quote_age_sec = None
+    if quote_clean and now_ts is not None:
+        quote_ref_ts = last_clean_quote_ts or updated_ts
+        if quote_ref_ts is not None:
+            quote_age_sec = max(0.0, float(now_ts) - quote_ref_ts)
     signal_type = data.get("signal_type")
     route_bucket = "ATH" if str(signal_type or "").upper() == "ATH" else "RECLAIM"
     merged = {**payload, **data}
@@ -650,8 +922,10 @@ def candidate_from_source_resonance_row(row, now_ts=None):
         "quote_available": quote_clean,
         "quote_executable": quote_clean,
         "quote_clean": quote_clean,
+        "quote_clean_verified": quote_clean,
         "quote_source": "source_resonance_quote_clean" if quote_clean else None,
-        "quote_age_sec": max(0.0, float(now_ts) - updated_ts) if quote_clean and updated_ts is not None and now_ts is not None else None,
+        "quote_age_sec": quote_age_sec,
+        "quote_ts": last_clean_quote_ts or updated_ts,
         "route_available": quote_clean,
         "route_stable_recent": _safe_int(data.get("two_quote_clean_snapshots"), 0) >= 2,
         "gmgn_pre_seen": _truthy(data.get("gmgn_pre_seen")),
@@ -664,6 +938,7 @@ def candidate_from_source_resonance_row(row, now_ts=None):
         "premium_source_repeat_hit": _safe_int(data.get("source_count"), 1) >= 2,
         "ath_continuation": route_bucket == "ATH",
         "reclaim_resonance": route_bucket == "RECLAIM",
+        "spread_verified": quote_clean and (quote_shadow.get("spread_pct") is None and quote_shadow.get("quote_gap_pct") is None),
         "data_confidence": payload.get("data_confidence") or "source_resonance_shadow",
     })
     _extract_quote_fields(merged, payload, now_ts=now_ts)

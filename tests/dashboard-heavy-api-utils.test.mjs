@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
   apiJsonHeaders,
+  aClassStatusFromLiveSnapshot,
   apiEnvelopePayloadForHash,
   auditSha256Hex,
   buildApiResponseErrorShape,
@@ -1709,6 +1710,43 @@ test('dog catch goal can be served from materialized live snapshot section', () 
   assert.equal(progress.materialized_snapshot_id, 'paper_live_2h_test');
   assert.equal(progress.goal.eligible_gold_silver_unique, 3);
   assert.equal(progress.missed.by_blocker[0].reject_reason, 'tracking_ttl_expired');
+});
+
+test('a class status can be served from materialized live snapshot section', () => {
+  const status = aClassStatusFromLiveSnapshot({
+    snapshot_id: 'paper_live_8h_test',
+    generated_at: '2026-05-21T00:00:00Z',
+    window: { since_ts: 1000, since_iso: '2026-05-21T00:00:00Z' },
+    a_class: {
+      available: true,
+      total: 12,
+      would_enter: 2,
+      enter: 0,
+      action_summary: [
+        { action: 'BLOCK', n: 10, avg_score: 0, would_enter_size_sol: 0 },
+        { action: 'WOULD_ENTER', n: 2, avg_score: 88.126, would_enter_size_sol: 0.004 },
+      ],
+      grade_summary: [{ grade: 'STRONG_A', action: 'WOULD_ENTER', n: 2, avg_score: 88.126 }],
+      source_summary: [{ source_table: 'source_resonance_candidates', source_component: 'source_resonance_shadow', action: 'WOULD_ENTER', n: 2, avg_score: 88.126, would_enter_size_sol: 0.004 }],
+      reason_summary: [{ source_table: 'paper_decision_events', source_component: 'scout_quality', source_reason: 'scout_quality_volume_low', action: 'BLOCK', n: 10, max_score: 0 }],
+      hard_blockers: [{ blocker: 'quote_not_available', n: 10 }],
+      recent_events: [{ id: 1, action: 'WOULD_ENTER', symbol: 'DOG' }],
+    },
+  }, {
+    dbPath: '/tmp/paper.db',
+    requestedHours: 7,
+    materializedHours: 8,
+    limit: 10,
+  });
+
+  assert.equal(status.materialized, true);
+  assert.equal(status.live_query, false);
+  assert.equal(status.materialized_snapshot_id, 'paper_live_8h_test');
+  assert.equal(status.requested_window_hours, 7);
+  assert.equal(status.materialized_window_hours, 8);
+  assert.equal(status.would_enter, 2);
+  assert.equal(status.action_summary[1].avg_score, 88.13);
+  assert.equal(status.source_summary[0].would_enter_size_sol, 0.004);
 });
 
 test('closed loop missed dog summary ranks one blocker per token in SQL', () => {

@@ -3041,6 +3041,16 @@ function livePaperReviewPath(hours) {
   return join(getLivePaperReviewDir(), `paper_review_${safeHours}h.json`);
 }
 
+function nearestLivePaperReviewHours(requestedHours) {
+  const requested = Math.max(1, Number.parseInt(String(requestedHours || 24), 10) || 24);
+  const windows = String(process.env.PAPER_REVIEW_WINDOWS || '2,8,12,24')
+    .split(',')
+    .map((value) => Number.parseInt(value.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b);
+  return windows.find((hours) => hours >= requested) || windows[windows.length - 1] || Math.min(requested, 24);
+}
+
 function readLivePaperReview(hours) {
   const path = livePaperReviewPath(hours);
   if (!fs.existsSync(path)) return null;
@@ -4179,6 +4189,50 @@ function routeHealthFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, lim
     totals: section.totals || {},
     routes: Array.isArray(section.routes) ? section.routes.slice(0, limit) : [],
     notes: section.notes || {},
+  };
+}
+
+export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, materializedHours = requestedHours, limit = 30 }) {
+  const section = liveSnapshot?.a_class || {};
+  const rows = (value) => Array.isArray(value) ? value : [];
+  return {
+    generated_at: new Date().toISOString(),
+    db_path: dbPath,
+    available: Boolean(section.available),
+    materialized: true,
+    live_query: false,
+    requested_window_hours: requestedHours,
+    materialized_window_hours: materializedHours,
+    materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+    materialized_generated_at: liveSnapshot?.generated_at || null,
+    materialized_path: livePaperReviewPath(materializedHours),
+    since_ts: liveSnapshot?.window?.since_ts ?? null,
+    enabled_env: String(process.env.A_CLASS_ENABLED || 'false').toLowerCase() === 'true',
+    shadow_eval_enabled_env: String(process.env.A_CLASS_SHADOW_EVAL_ENABLED || 'true').toLowerCase() !== 'false',
+    total: Number(section.total || 0),
+    would_enter: Number(section.would_enter || 0),
+    enter: Number(section.enter || 0),
+    action_summary: rows(section.action_summary).map((row) => ({
+      ...row,
+      avg_score: roundNullableNumber(row.avg_score, 2),
+      would_enter_size_sol: roundNullableNumber(row.would_enter_size_sol, 6),
+    })),
+    grade_summary: rows(section.grade_summary).map((row) => ({
+      ...row,
+      avg_score: roundNullableNumber(row.avg_score, 2),
+    })),
+    source_summary: rows(section.source_summary).slice(0, limit).map((row) => ({
+      ...row,
+      avg_score: roundNullableNumber(row.avg_score, 2),
+      would_enter_size_sol: roundNullableNumber(row.would_enter_size_sol, 6),
+    })),
+    reason_summary: rows(section.reason_summary).slice(0, limit).map((row) => ({
+      ...row,
+      max_score: roundNullableNumber(row.max_score, 2),
+    })),
+    hard_blockers: rows(section.hard_blockers),
+    recent_events: rows(section.recent_events).slice(0, limit),
+    note: 'Default is materialized by paper_review_snapshot_worker; pass live=1 for an on-demand DB scan.',
   };
 }
 
@@ -11710,10 +11764,43 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'Paper trades database not found' }));
       return;
     }
+    const requestedHours = boundedIntParam(url, 'hours', 6, 1, 168);
+    const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+      || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+    const limit = boundedIntParam(url, 'limit', 30, 1, 200);
+    if (!forceLive) {
+      const materializedHours = nearestLivePaperReviewHours(Math.min(requestedHours, 24));
+      const liveSnapshot = readLivePaperReview(materializedHours);
+      if (liveSnapshot && !liveSnapshot.error && liveSnapshot.a_class?.available) {
+        res.writeHead(200, apiJsonHeaders());
+        res.end(JSON.stringify(aClassStatusFromLiveSnapshot(liveSnapshot, {
+          dbPath: paperDbPath,
+          requestedHours,
+          materializedHours,
+          limit,
+        }), null, 2));
+        return;
+      }
+      res.writeHead(202, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: false,
+        materialized: true,
+        live_query: false,
+        requested_window_hours: requestedHours,
+        materialized_window_hours: materializedHours,
+        materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+        materialized_generated_at: liveSnapshot?.generated_at || null,
+        reason: liveSnapshot?.error || (liveSnapshot ? 'a_class_materialized_section_not_ready' : 'materialized_snapshot_not_ready'),
+        path: livePaperReviewPath(materializedHours),
+        note: 'Pass live=1 to force a DB scan; default stays materialized so dashboard health cannot be blocked by SQLite.',
+      }, null, 2));
+      return;
+    }
     let paperDb;
     try {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
-      const limit = boundedIntParam(url, 'limit', 30, 1, 200);
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('a_class_decision_events')) {
@@ -11801,6 +11888,8 @@ const server = http.createServer(async (req, res) => {
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
         available: true,
+        materialized: false,
+        live_query: true,
         enabled_env: String(process.env.A_CLASS_ENABLED || 'false').toLowerCase() === 'true',
         shadow_eval_enabled_env: String(process.env.A_CLASS_SHADOW_EVAL_ENABLED || 'true').toLowerCase() !== 'false',
         since_ts: sinceTs,
