@@ -9,6 +9,7 @@ from a_class_fastlane import (
     candidate_from_decision_event_row,
     candidate_from_fast_queue_row,
     decide_size,
+    enrich_candidate_with_db_evidence,
     evaluate_a_class_fastlane,
     hard_prefilter,
     record_a_class_fastlane_shadow_candidates,
@@ -240,6 +241,60 @@ def test_fast_queue_quote_clean_verified_can_satisfy_spread_without_inventing_nu
     assert passed is True
     assert "spread_unknown" not in blockers
     assert detail["spread_verified"] is True
+
+
+def test_decision_event_can_hydrate_quote_evidence_from_shadow_snapshot_table():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript("""
+    CREATE TABLE lotto_not_ath_watch_shadow_snapshots (
+        id INTEGER PRIMARY KEY,
+        token_ca TEXT,
+        snapshot_ts REAL,
+        quote_clean INTEGER,
+        snapshot_pass INTEGER,
+        liquidity_usd REAL,
+        spread_pct REAL,
+        quote_price REAL
+    );
+    INSERT INTO lotto_not_ath_watch_shadow_snapshots
+        (token_ca, snapshot_ts, quote_clean, snapshot_pass, liquidity_usd, spread_pct, quote_price)
+    VALUES
+        ('HydrateToken', 997, 1, 1, 88000, 0.8, 0.00042);
+    """)
+    candidate = candidate_from_decision_event_row(
+        {
+            "id": 7,
+            "event_ts": 996,
+            "token_ca": "HydrateToken",
+            "symbol": "HYD",
+            "route": "ATH",
+            "component": "ath_uncertainty_scout",
+            "reason": "scout_quality_buy_pressure_weak",
+            "payload_json": """
+            {
+              "gmgn_pre_seen": true,
+              "source_resonance": true,
+              "gmgn_momentum_confirmed": true
+            }
+            """,
+        },
+        now_ts=1000,
+    )
+    assert candidate.quote_available is False
+
+    candidate = enrich_candidate_with_db_evidence(db, candidate, now_ts=1000, config=load_a_class_config({}))
+
+    assert candidate.quote_available is True
+    assert candidate.quote_executable is True
+    assert candidate.route_available is True
+    assert candidate.quote_source == "lotto_not_ath_watch_shadow"
+    assert candidate.quote_age_sec == 3
+    assert candidate.liquidity_usd == 88000
+    assert candidate.spread_pct == 0.8
+    passed, blockers, _ = hard_prefilter(candidate, config=load_a_class_config({}))
+    assert passed is True
+    assert blockers == []
 
 
 def test_shadow_scan_records_counterfactual_sources():

@@ -523,6 +523,13 @@ def _table_exists(db, table_name):
         return False
 
 
+def _table_columns(db, table_name):
+    try:
+        return {row[1] for row in db.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+
 def _text_contains_any(text, needles):
     haystack = str(text or "").lower()
     return any(str(needle).lower() in haystack for needle in needles)
@@ -818,6 +825,333 @@ def _extract_quote_fields(merged, payload, now_ts=None):
     ):
         merged["fresh_momentum"] = True
     return merged
+
+
+def _payload_quote_evidence(payload, now_ts=None):
+    if not isinstance(payload, dict):
+        return {}
+    evidence = {}
+    _extract_quote_fields(evidence, payload, now_ts=now_ts)
+    if evidence.get("quote_clean_verified") or evidence.get("quote_clean"):
+        evidence.setdefault("quote_available", True)
+        evidence.setdefault("quote_executable", True)
+        evidence.setdefault("route_available", True)
+        evidence.setdefault("quote_clean", True)
+    return evidence
+
+
+def _apply_candidate_evidence(candidate, evidence, now_ts=None):
+    if not evidence:
+        return candidate
+    merged = asdict(candidate)
+    bool_keys = {
+        "quote_available",
+        "quote_executable",
+        "quote_clean",
+        "quote_clean_verified",
+        "route_available",
+        "route_stable_recent",
+        "gmgn_pre_seen",
+        "gmgn_activity_fresh",
+        "source_resonance",
+        "fresh_momentum",
+        "fresh_reclaim",
+        "fresh_ath_refresh",
+        "fresh_source_hit",
+        "premium_source_repeat_hit",
+        "missed_dog_cohort_strong",
+        "ath_continuation",
+        "lotto_early_momentum",
+        "reclaim_resonance",
+        "spread_verified",
+    }
+    numeric_if_missing = {
+        "market_cap",
+        "liquidity_usd",
+        "spread_pct",
+        "current_price",
+        "top10_pct",
+        "bundler_rate",
+        "rat_trader_rate",
+        "entrapment_ratio",
+        "momentum_pct",
+        "momentum_age_sec",
+        "gmgn_last_seen_age_sec",
+    }
+    text_if_missing = {
+        "quote_source",
+        "data_confidence",
+        "source_component",
+        "source_reason",
+    }
+    for key, value in evidence.items():
+        if value is None or value == "":
+            continue
+        if key in bool_keys:
+            if _truthy(value):
+                merged[key] = True
+            continue
+        if key == "quote_ts":
+            ts = _normalize_ts_sec(value)
+            existing = _normalize_ts_sec(merged.get("quote_ts"))
+            if ts is not None and (existing is None or ts >= existing):
+                merged["quote_ts"] = ts
+                if now_ts is not None:
+                    merged["quote_age_sec"] = max(0.0, float(now_ts) - ts)
+            continue
+        if key == "quote_age_sec":
+            age = _safe_float(value, None)
+            existing = _safe_float(merged.get("quote_age_sec"), None)
+            if age is not None and (existing is None or age <= existing):
+                merged["quote_age_sec"] = age
+            continue
+        if key in numeric_if_missing:
+            if merged.get(key) in (None, ""):
+                merged[key] = value
+            continue
+        if key in text_if_missing:
+            if merged.get(key) in (None, "") or (
+                key == "data_confidence" and merged.get(key) == "decision_event_counterfactual"
+            ):
+                merged[key] = value
+            continue
+        if merged.get(key) in (None, ""):
+            merged[key] = value
+    return AClassCandidate.from_mapping(merged)
+
+
+def _latest_lotto_quote_shadow_evidence(db, token_ca, now_ts, config):
+    if not token_ca or not _table_exists(db, "lotto_not_ath_watch_shadow_snapshots"):
+        return {}
+    cols = _table_columns(db, "lotto_not_ath_watch_shadow_snapshots")
+    if "token_ca" not in cols:
+        return {}
+    select_cols = [
+        "snapshot_ts",
+        "quote_clean",
+        "snapshot_pass",
+        "liquidity_usd",
+        "spread_pct",
+        "quote_gap_pct",
+        "quote_price",
+        "mark_price",
+        "quote_pnl",
+        "mark_pnl",
+    ]
+    present_cols = [name for name in select_cols if name in cols]
+    if not present_cols:
+        return {}
+    ts_expr = "COALESCE(snapshot_ts, 0)" if "snapshot_ts" in cols else "0"
+    clean_parts = []
+    if "quote_clean" in cols:
+        clean_parts.append("COALESCE(quote_clean, 0) = 1")
+    if "snapshot_pass" in cols:
+        clean_parts.append("COALESCE(snapshot_pass, 0) = 1")
+    clean_sql = f"AND ({' OR '.join(clean_parts)})" if clean_parts else ""
+    row = db.execute(
+        f"""
+        SELECT {', '.join(present_cols)}
+        FROM lotto_not_ath_watch_shadow_snapshots
+        WHERE token_ca = ?
+          AND {ts_expr} >= ?
+          {clean_sql}
+        ORDER BY {ts_expr} DESC, rowid DESC
+        LIMIT 1
+        """,
+        (token_ca, float(now_ts) - float(config.shadow_scan_window_sec)),
+    ).fetchone()
+    if not row:
+        return {}
+    data = _row_to_dict(row)
+    quote_clean = _truthy(data.get("quote_clean")) or _truthy(data.get("snapshot_pass"))
+    spread_pct = _first_present(data.get("spread_pct"), data.get("quote_gap_pct"))
+    evidence = {
+        "quote_source": "lotto_not_ath_watch_shadow",
+        "quote_ts": data.get("snapshot_ts"),
+        "liquidity_usd": data.get("liquidity_usd"),
+        "spread_pct": spread_pct,
+        "current_price": _first_present(data.get("quote_price"), data.get("mark_price")),
+        "data_confidence": "lotto_not_ath_watch_shadow",
+        "fresh_reclaim": True,
+        "route_stable_recent": quote_clean,
+    }
+    if quote_clean:
+        evidence.update({
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "quote_clean_verified": True,
+            "route_available": True,
+        })
+        if spread_pct is None:
+            evidence["spread_verified"] = True
+    return {key: value for key, value in evidence.items() if value is not None}
+
+
+def _latest_source_resonance_evidence(db, token_ca, now_ts, config):
+    if not token_ca or not _table_exists(db, "source_resonance_candidates"):
+        return {}
+    cols = _table_columns(db, "source_resonance_candidates")
+    if "token_ca" not in cols:
+        return {}
+    base_cols = [
+        "payload_json",
+        "signal_type",
+        "gmgn_pre_seen",
+        "source_count",
+        "quote_clean_seen",
+        "two_quote_clean_snapshots",
+        "gmgn_last_liquidity",
+        "gmgn_last_market_cap",
+        "gmgn_last_seen_ts",
+        "resonance_score",
+        "updated_at",
+        "signal_ts",
+    ]
+    present_cols = [name for name in base_cols if name in cols]
+    if "updated_at" in cols:
+        updated_expr = "CASE WHEN typeof(updated_at) IN ('integer', 'real') THEN updated_at ELSE CAST(strftime('%s', updated_at) AS REAL) END"
+    elif "signal_ts" in cols:
+        updated_expr = "signal_ts / 1000"
+    else:
+        updated_expr = "0"
+    order_terms = []
+    if "quote_clean_seen" in cols:
+        order_terms.append("COALESCE(quote_clean_seen, 0) DESC")
+    if "two_quote_clean_snapshots" in cols:
+        order_terms.append("COALESCE(two_quote_clean_snapshots, 0) DESC")
+    if "resonance_score" in cols:
+        order_terms.append("COALESCE(resonance_score, 0) DESC")
+    order_terms.extend([f"COALESCE({updated_expr}, 0) DESC", "rowid DESC"])
+    row = db.execute(
+        f"""
+        SELECT {', '.join(present_cols) if present_cols else 'token_ca'},
+               {updated_expr} AS updated_ts
+        FROM source_resonance_candidates
+        WHERE token_ca = ?
+          AND COALESCE({updated_expr}, 0) >= ?
+        ORDER BY {', '.join(order_terms)}
+        LIMIT 1
+        """,
+        (token_ca, float(now_ts) - float(config.shadow_scan_window_sec)),
+    ).fetchone()
+    if not row:
+        return {}
+    data = _row_to_dict(row)
+    payload = _json_loads(data.get("payload_json"))
+    evidence = _payload_quote_evidence(payload, now_ts=now_ts)
+    quote_clean = _truthy(data.get("quote_clean_seen")) or _safe_int(data.get("two_quote_clean_snapshots"), 0) >= 1
+    if quote_clean:
+        evidence.update({
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "quote_clean_verified": True,
+            "quote_source": evidence.get("quote_source") or "source_resonance_quote_clean",
+            "quote_ts": evidence.get("quote_ts") or data.get("updated_ts"),
+            "route_available": True,
+            "route_stable_recent": _safe_int(data.get("two_quote_clean_snapshots"), 0) >= 2,
+            "source_resonance": True,
+            "fresh_source_hit": True,
+        })
+        if evidence.get("spread_pct") is None:
+            evidence["spread_verified"] = True
+    evidence.update({
+        "gmgn_pre_seen": _truthy(data.get("gmgn_pre_seen")),
+        "premium_source_repeat_hit": _safe_int(data.get("source_count"), 1) >= 2,
+        "liquidity_usd": evidence.get("liquidity_usd") or data.get("gmgn_last_liquidity"),
+        "market_cap": evidence.get("market_cap") or data.get("gmgn_last_market_cap"),
+        "data_confidence": "source_resonance_shadow",
+    })
+    signal_type = str(data.get("signal_type") or "").upper()
+    if signal_type == "ATH":
+        evidence["fresh_ath_refresh"] = True
+        evidence["ath_continuation"] = True
+    else:
+        evidence["fresh_reclaim"] = True
+        evidence["reclaim_resonance"] = True
+    return {key: value for key, value in evidence.items() if value is not None}
+
+
+def _latest_fast_queue_evidence(db, token_ca, now_ts, config):
+    if not token_ca or not _table_exists(db, "paper_fast_entry_queue"):
+        return {}
+    cols = _table_columns(db, "paper_fast_entry_queue")
+    if "token_ca" not in cols:
+        return {}
+    present_cols = [
+        name
+        for name in (
+            "payload_json",
+            "updated_at",
+            "created_at",
+            "source_type",
+            "entry_branch",
+            "entry_mode_hint",
+            "status",
+            "first_error",
+        )
+        if name in cols
+    ]
+    if not present_cols:
+        return {}
+    ts_expr = "COALESCE(updated_at, created_at, 0)" if "updated_at" in cols and "created_at" in cols else (
+        "COALESCE(updated_at, 0)" if "updated_at" in cols else "COALESCE(created_at, 0)"
+    )
+    row = db.execute(
+        f"""
+        SELECT {', '.join(present_cols)}, {ts_expr} AS queue_ts
+        FROM paper_fast_entry_queue
+        WHERE token_ca = ?
+          AND {ts_expr} >= ?
+        ORDER BY {ts_expr} DESC, rowid DESC
+        LIMIT 1
+        """,
+        (token_ca, float(now_ts) - float(config.shadow_scan_window_sec)),
+    ).fetchone()
+    if not row:
+        return {}
+    data = _row_to_dict(row)
+    payload = _json_loads(data.get("payload_json"))
+    text = " ".join(str(data.get(name) or "") for name in ("source_type", "entry_branch", "entry_mode_hint", "status", "first_error"))
+    evidence = _payload_quote_evidence(payload, now_ts=now_ts)
+    if evidence:
+        evidence.setdefault("quote_ts", data.get("queue_ts"))
+        evidence.setdefault("data_confidence", "paper_fast_entry_queue")
+    if _text_contains_any(text, ("source_resonance", "fast", "hard_gate_fast")):
+        evidence["source_resonance"] = True
+        evidence["fresh_source_hit"] = True
+    if _text_contains_any(text, ("reclaim", "revival")):
+        evidence["fresh_reclaim"] = True
+        evidence["reclaim_resonance"] = True
+    if _text_contains_any(text, ("ath", "hard_gate_fast")):
+        evidence["fresh_ath_refresh"] = True
+        evidence["ath_continuation"] = True
+    return {key: value for key, value in evidence.items() if value is not None}
+
+
+def enrich_candidate_with_db_evidence(db, candidate, *, now_ts=None, config=None):
+    """Hydrate counterfactual candidates from adjacent quote evidence tables.
+
+    Decision/missed rows often carry only the blocker reason. The execution
+    evidence lives in shadow snapshot or queue tables, so A_CLASS must join it
+    at evaluation time instead of treating those rows as permanently unknown.
+    """
+    config = config or load_a_class_config()
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    if not candidate or not candidate.token_ca:
+        return candidate
+    for lookup in (
+        _latest_lotto_quote_shadow_evidence,
+        _latest_source_resonance_evidence,
+        _latest_fast_queue_evidence,
+    ):
+        try:
+            evidence = lookup(db, candidate.token_ca, now_ts, config)
+        except Exception:
+            evidence = {}
+        candidate = _apply_candidate_evidence(candidate, evidence, now_ts=now_ts)
+    return candidate
 
 
 def candidate_from_decision_event_row(row, now_ts=None):
@@ -1192,6 +1526,7 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
             row_dict = _row_to_dict(row)
             try:
                 candidate = builder(row, now_ts=now_ts)
+                candidate = enrich_candidate_with_db_evidence(db, candidate, now_ts=now_ts, config=config)
                 stored_action = _evaluate_and_record_candidate(
                     db,
                     candidate=candidate,
