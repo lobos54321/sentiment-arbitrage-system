@@ -71,6 +71,9 @@ def init_canonical_ledger(db):
             source_id INTEGER,
             source_component TEXT,
             source_reason TEXT,
+            opportunity_key TEXT,
+            is_duplicate INTEGER DEFAULT 0,
+            duplicate_of_id INTEGER,
             signal_ts REAL,
             opportunity_ts REAL,
             action TEXT NOT NULL,
@@ -99,6 +102,23 @@ def init_canonical_ledger(db):
         """
         CREATE INDEX IF NOT EXISTS idx_a_class_decision_recent
         ON a_class_decision_events(event_ts DESC, action, route_bucket)
+        """
+    )
+    for col_name, col_def in (
+        ("opportunity_key", "TEXT"),
+        ("is_duplicate", "INTEGER DEFAULT 0"),
+        ("duplicate_of_id", "INTEGER"),
+    ):
+        if col_name not in _table_columns(db, "a_class_decision_events"):
+            try:
+                db.execute(f"ALTER TABLE a_class_decision_events ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_a_class_decision_opportunity
+        ON a_class_decision_events(opportunity_key, action, event_ts DESC)
+        WHERE opportunity_key IS NOT NULL
         """
     )
     db.execute(
@@ -216,12 +236,13 @@ def record_a_class_decision_event(
         """
         INSERT OR IGNORE INTO a_class_decision_events (
             event_ts, token_ca, symbol, lifecycle_id, route_bucket, normalized_mode,
-            source_table, source_id, source_component, source_reason, signal_ts,
+            source_table, source_id, source_component, source_reason,
+            opportunity_key, is_duplicate, duplicate_of_id, signal_ts,
             opportunity_ts, action, grade, size_sol, score, reason,
             hard_blockers_json, soft_notes_json, freshness_json, budget_json,
             risk_json, candidate_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             now_ts,
@@ -234,6 +255,9 @@ def record_a_class_decision_event(
             source_id,
             _get(candidate, "source_component"),
             _get(candidate, "source_reason"),
+            _get(candidate, "opportunity_key"),
+            1 if _truthy(_get(candidate, "is_duplicate", False)) else 0,
+            _safe_int(_get(candidate, "duplicate_of_event_id"), None),
             _safe_float(_get(candidate, "signal_ts"), None),
             _safe_float(decision_dict.get("freshness_detail", {}).get("opportunity_ts"), None)
             or _safe_float(_get(candidate, "opportunity_ts"), None),

@@ -144,6 +144,9 @@ class AClassCandidate:
     daily_loss_budget_breached: bool = False
     mode_circuit_broken: bool = False
     data_confidence: str = "unknown"
+    opportunity_key: Optional[str] = None
+    is_duplicate: bool = False
+    duplicate_of_event_id: Optional[int] = None
     raw_payload: dict = field(default_factory=dict)
 
     @classmethod
@@ -210,6 +213,9 @@ class AClassCandidate:
             daily_loss_budget_breached=_truthy(merged.get("daily_loss_budget_breached", False)),
             mode_circuit_broken=_truthy(merged.get("mode_circuit_broken", False)),
             data_confidence=str(merged.get("data_confidence") or "unknown"),
+            opportunity_key=merged.get("opportunity_key"),
+            is_duplicate=_truthy(merged.get("is_duplicate", False)),
+            duplicate_of_event_id=_safe_int(merged.get("duplicate_of_event_id"), None),
             raw_payload=merged,
         )
 
@@ -1279,6 +1285,85 @@ def candidate_from_source_resonance_row(row, now_ts=None):
     return AClassCandidate.from_mapping(merged)
 
 
+def _candidate_opportunity_ts(candidate, now_ts):
+    for value in (
+        _get(candidate, "opportunity_ts"),
+        _get(candidate, "quote_ts"),
+        _get(candidate, "signal_ts"),
+        now_ts,
+    ):
+        ts = _normalize_ts_sec(value)
+        if ts is not None:
+            return ts
+    return float(now_ts if now_ts is not None else time.time())
+
+
+def a_class_opportunity_key(candidate, *, now_ts=None, config=None):
+    config = config or load_a_class_config()
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    token_ca = str(_get(candidate, "token_ca") or "").strip()
+    if not token_ca:
+        return None
+    window = max(1.0, float(getattr(config, "opportunity_dedup_sec", 300.0) or 300.0))
+    bucket = int(_candidate_opportunity_ts(candidate, now_ts) // window)
+    lifecycle_id = str(_get(candidate, "lifecycle_id") or "").strip()
+    route = str(_get(candidate, "route_bucket") or "A_GRADE").upper()
+    identity = lifecycle_id or f"route:{route}"
+    return f"{token_ca}:{identity}:{bucket}"
+
+
+def _find_existing_a_class_opportunity(db, opportunity_key, *, now_ts=None, config=None):
+    if not opportunity_key or not _table_exists(db, "a_class_decision_events"):
+        return None
+    cols = _table_columns(db, "a_class_decision_events")
+    if "opportunity_key" not in cols:
+        return None
+    config = config or load_a_class_config()
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    window = max(1.0, float(getattr(config, "opportunity_dedup_sec", 300.0) or 300.0))
+    try:
+        return db.execute(
+            """
+            SELECT id, action, event_ts, token_ca, symbol, route_bucket, score
+            FROM a_class_decision_events
+            WHERE opportunity_key = ?
+              AND action IN ('WOULD_ENTER', 'ENTER')
+              AND event_ts >= ?
+            ORDER BY event_ts DESC, id DESC
+            LIMIT 1
+            """,
+            (opportunity_key, now_ts - window),
+        ).fetchone()
+    except Exception:
+        return None
+
+
+def _duplicate_a_class_decision(decision, duplicate_row, opportunity_key):
+    duplicate_data = _row_to_dict(duplicate_row)
+    duplicate_id = duplicate_data.get("id")
+    soft_notes = list(_get(decision, "soft_notes", []) or [])
+    soft_notes.append(
+        f"duplicate_of_event_id={duplicate_id} opportunity_key={opportunity_key} "
+        f"would_grade={_get(decision, 'grade')} would_size_sol={_get(decision, 'size_sol')}"
+    )
+    return AClassDecision(
+        action="SHADOW",
+        grade=_get(decision, "grade", "REJECT"),
+        size_sol=0.0,
+        reason="a_class_duplicate_opportunity_window",
+        hard_blockers=[],
+        soft_notes=soft_notes,
+        score=_safe_float(_get(decision, "score"), 0.0) or 0.0,
+        freshness_detail=_get(decision, "freshness_detail", {}) or {},
+        budget_detail=_get(decision, "budget_detail", {}) or {},
+        risk_detail={
+            **(_get(decision, "risk_detail", {}) or {}),
+            "duplicate_of_event_id": duplicate_id,
+            "opportunity_key": opportunity_key,
+        },
+    )
+
+
 def _evaluate_and_record_candidate(
     db,
     *,
@@ -1301,6 +1386,15 @@ def _evaluate_and_record_candidate(
         )
     decision = evaluate_a_class_fastlane(candidate, config=config, now_ts=now_ts)
     stored_action = "WOULD_ENTER" if decision.action == "ENTER" and not config.enabled else decision.action
+    opportunity_key = a_class_opportunity_key(candidate, now_ts=now_ts, config=config)
+    candidate.opportunity_key = opportunity_key
+    if stored_action in {"WOULD_ENTER", "ENTER"}:
+        duplicate_row = _find_existing_a_class_opportunity(db, opportunity_key, now_ts=now_ts, config=config)
+        if duplicate_row:
+            candidate.is_duplicate = True
+            candidate.duplicate_of_event_id = _safe_int(_row_to_dict(duplicate_row).get("id"), None)
+            decision = _duplicate_a_class_decision(decision, duplicate_row, opportunity_key)
+            stored_action = "SHADOW"
     record_a_class_decision_event(
         db,
         candidate=candidate,

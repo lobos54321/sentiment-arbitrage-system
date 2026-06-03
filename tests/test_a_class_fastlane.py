@@ -432,3 +432,75 @@ def test_shadow_scan_records_counterfactual_sources():
         "paper_decision_events",
     }
     assert any(row["action"] == "WOULD_ENTER" for row in source_rows)
+
+
+def test_shadow_scan_deduplicates_would_enter_by_token_lifecycle_window():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_decision_events (
+            id INTEGER PRIMARY KEY,
+            event_ts REAL,
+            token_ca TEXT,
+            symbol TEXT,
+            lifecycle_id TEXT,
+            signal_ts INTEGER,
+            route TEXT,
+            component TEXT,
+            event_type TEXT,
+            decision TEXT,
+            reason TEXT,
+            data_source TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    payload = '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_age_sec":4,"route_available":true,"route_stable_recent":true,"liquidity_usd":80000,"spread_pct":0.8,"gmgn_pre_seen":true,"gmgn_activity_fresh":true,"source_resonance":true,"fresh_ath_refresh":true,"top10_pct":35,"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}'
+    for row_id, component in ((10, "ath_uncertainty_scout"), (11, "entry_mode_quality")):
+        db.execute(
+            """
+            INSERT INTO paper_decision_events (
+                id, event_ts, token_ca, symbol, lifecycle_id, signal_ts, route,
+                component, event_type, decision, reason, data_source, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_id,
+                996 + (row_id - 10),
+                "DupToken",
+                "DUP",
+                "life-dup",
+                100,
+                "ATH",
+                component,
+                "reject",
+                "block",
+                "scout_quality_buy_pressure_weak",
+                "paper_decision_events",
+                payload,
+            ),
+        )
+
+    summary = record_a_class_fastlane_shadow_candidates(
+        db,
+        now_ts=1000,
+        limit=10,
+        config=load_a_class_config({"A_CLASS_ENABLED": "false", "A_CLASS_OPPORTUNITY_DEDUP_SEC": "300"}),
+    )
+
+    assert summary["candidates"] == 2
+    assert summary["would_enter"] == 1
+    assert summary["shadow"] == 1
+    rows = db.execute(
+        """
+        SELECT action, reason, opportunity_key, is_duplicate, duplicate_of_id, score
+        FROM a_class_decision_events
+        ORDER BY id
+        """
+    ).fetchall()
+    assert [row["action"] for row in rows] == ["WOULD_ENTER", "SHADOW"]
+    assert rows[1]["reason"] == "a_class_duplicate_opportunity_window"
+    assert rows[1]["is_duplicate"] == 1
+    assert rows[1]["duplicate_of_id"] == 1
+    assert rows[0]["opportunity_key"] == rows[1]["opportunity_key"]

@@ -1561,17 +1561,30 @@ def _sqlite_is_locked_error(exc):
     return isinstance(exc, sqlite3.OperationalError) and 'locked' in str(exc).lower()
 
 
-def run_db_write_with_retry(db, writer, *, label, attempts=3, base_sleep_sec=0.35):
+def run_db_write_with_retry(
+    db,
+    writer,
+    *,
+    label,
+    attempts=3,
+    base_sleep_sec=0.35,
+    max_sleep_sec=5.0,
+    lock_timeout_sec=None,
+):
     last_exc = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            with sqlite_single_writer(f"paper_trade_monitor:{label}"):
+            with sqlite_single_writer(f"paper_trade_monitor:{label}", timeout_sec=lock_timeout_sec):
                 return writer()
         except TimeoutError as exc:
             last_exc = exc
+            try:
+                db.rollback()
+            except Exception:
+                pass
             log.warning(f"  [DB_RETRY] {label} single_writer_timeout attempt={attempt}/{attempts}")
             if attempt < attempts:
-                time.sleep(base_sleep_sec * attempt)
+                time.sleep(min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))))
         except sqlite3.OperationalError as exc:
             if not _sqlite_is_locked_error(exc):
                 raise
@@ -1582,7 +1595,7 @@ def run_db_write_with_retry(db, writer, *, label, attempts=3, base_sleep_sec=0.3
                 pass
             log.warning(f"  [DB_RETRY] {label} database_locked attempt={attempt}/{attempts}")
             if attempt < attempts:
-                time.sleep(base_sleep_sec * attempt)
+                time.sleep(min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))))
     append_paper_evidence_event(
         source="paper_trade_monitor",
         event_type="paper_db_write_failed",
@@ -26424,7 +26437,10 @@ def run_monitor(db):
                     db,
                     _write_position_close,
                     label=f"position_close:{pos.trade_id}:{reason}",
-                    attempts=3,
+                    attempts=int(os.environ.get("PAPER_CLOSE_WRITE_ATTEMPTS", "8")),
+                    base_sleep_sec=float(os.environ.get("PAPER_CLOSE_WRITE_RETRY_BASE_SEC", "0.75")),
+                    max_sleep_sec=float(os.environ.get("PAPER_CLOSE_WRITE_RETRY_MAX_SEC", "6.0")),
+                    lock_timeout_sec=float(os.environ.get("PAPER_CLOSE_WRITE_LOCK_TIMEOUT_SEC", "18.0")),
                 )
                 record_decision_event(
                     db,

@@ -56,6 +56,7 @@ class AClassFastlaneConfig:
     quote_max_age_sec: float = 10.0
     opportunity_max_age_sec: float = 60.0
     opportunity_shadow_max_age_sec: float = 180.0
+    opportunity_dedup_sec: float = 300.0
 
     lotto_min_liquidity_usd: float = 15000.0
     ath_min_liquidity_usd: float = 10000.0
@@ -112,6 +113,7 @@ def load_a_class_config(env=None):
         quote_max_age_sec=_env_float(env, "A_CLASS_QUOTE_MAX_AGE_SEC", 10.0),
         opportunity_max_age_sec=_env_float(env, "A_CLASS_OPPORTUNITY_MAX_AGE_SEC", 60.0),
         opportunity_shadow_max_age_sec=_env_float(env, "A_CLASS_OPPORTUNITY_SHADOW_MAX_AGE_SEC", 180.0),
+        opportunity_dedup_sec=_env_float(env, "A_CLASS_OPPORTUNITY_DEDUP_SEC", 300.0),
         lotto_min_liquidity_usd=_env_float(env, "A_CLASS_LOTTO_MIN_LIQUIDITY_USD", 15000.0),
         ath_min_liquidity_usd=_env_float(env, "A_CLASS_ATH_MIN_LIQUIDITY_USD", 10000.0),
         reclaim_min_liquidity_usd=_env_float(env, "A_CLASS_RECLAIM_MIN_LIQUIDITY_USD", 10000.0),
