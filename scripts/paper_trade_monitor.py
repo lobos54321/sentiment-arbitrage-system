@@ -72,6 +72,9 @@ from paper_decision_audit import (
     signal_payload,
     update_due_missed_attributions,
 )
+from a_class_fastlane import record_a_class_fastlane_shadow_candidates
+from canonical_ledger import init_canonical_ledger
+from fastlane_config import load_a_class_config
 from paper_evidence_log import append_paper_evidence_event
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
@@ -16767,6 +16770,7 @@ def init_paper_db(db_path=None):
         except sqlite3.OperationalError:
             pass
         init_decision_audit(db_conn)
+        init_canonical_ledger(db_conn)
         init_external_alpha_shadow(db_conn)
         db_conn.commit()
     
@@ -20320,6 +20324,14 @@ def run_monitor(db):
     else:
         log.info(f"  Signal DB: {SENTIMENT_DB}")
     log.info(f"  Paper DB: {PAPER_DB}")
+    a_class_config = load_a_class_config()
+    log.info(
+        f"  A_CLASS_FASTLANE: enabled={a_class_config.enabled} "
+        f"shadow_eval={a_class_config.shadow_eval_enabled} "
+        f"max_size={a_class_config.max_size_sol:.3f}SOL "
+        f"max_concurrent={a_class_config.max_concurrent} "
+        f"daily_loss_budget={a_class_config.daily_loss_budget_sol:.3f}SOL"
+    )
 
     freshness = get_signal_freshness()
     if freshness['latest_ts']:
@@ -20693,6 +20705,20 @@ def run_monitor(db):
 
         if not pending_priority and not signal_poll_has_work and now - last_missed_attribution_update >= MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC:
             try:
+                _attr_before = {}
+                try:
+                    _attr_before_row = db.execute(
+                        """
+                        SELECT COUNT(*) AS total,
+                               MAX(id) AS max_id,
+                               MAX(COALESCE(updated_at, created_at)) AS max_updated_at
+                        FROM paper_missed_signal_attribution
+                        """
+                    ).fetchone()
+                    if _attr_before_row:
+                        _attr_before = {k: _attr_before_row[k] for k in _attr_before_row.keys()}
+                except Exception:
+                    _attr_before = {}
                 _missed_result = run_due_missed_attribution_update(
                     db,
                     historical_price_fetcher=fetch_kline_close_at_or_after,
@@ -20707,6 +20733,41 @@ def run_monitor(db):
                         log.debug(f"  [MISSED_ATTRIBUTION] skipped reason={_skip_reason}")
                 if _missed_updated:
                     log.info(f"  [MISSED_ATTRIBUTION] updated={_missed_updated}")
+                    try:
+                        _attr_after = db.execute(
+                            """
+                            SELECT COUNT(*) AS total,
+                                   SUM(CASE WHEN created_event_ts >= ? THEN 1 ELSE 0 END) AS window2h,
+                                   MAX(id) AS max_id,
+                                   MAX(COALESCE(updated_at, created_at)) AS max_updated_at,
+                                   MAX(created_event_ts) AS latest_created_event_ts
+                            FROM paper_missed_signal_attribution
+                            """,
+                            (now - 2 * 60 * 60,),
+                        ).fetchone()
+                        if _attr_after:
+                            _attr_after_d = {k: _attr_after[k] for k in _attr_after.keys()}
+                            log.info(
+                                f"  [ATTR_DB_ROWS] total={_attr_after_d.get('total') or 0} "
+                                f"window2h={_attr_after_d.get('window2h') or 0} "
+                                f"max_id={_attr_after_d.get('max_id') or 'n/a'} "
+                                f"latest_event={_attr_after_d.get('latest_created_event_ts') or 'n/a'} "
+                                f"max_updated_at={_attr_after_d.get('max_updated_at') or 'n/a'}"
+                            )
+                            if (
+                                _missed_updated
+                                and _attr_before
+                                and (_attr_after_d.get('total') == _attr_before.get('total'))
+                                and (_attr_after_d.get('max_id') == _attr_before.get('max_id'))
+                                and (_attr_after_d.get('max_updated_at') == _attr_before.get('max_updated_at'))
+                            ):
+                                log.warning(
+                                    f"  [ATTR_DB_WRITE_STALE] updated={_missed_updated} "
+                                    f"but row counters unchanged total={_attr_after_d.get('total') or 0} "
+                                    f"max_id={_attr_after_d.get('max_id') or 'n/a'}"
+                                )
+                    except Exception as _attr_rows_err:
+                        log.debug(f"  [ATTR_DB_ROWS] query failed: {_attr_rows_err}")
                     try:
                         _top_missed = db.execute(
                             """
@@ -20783,6 +20844,28 @@ def run_monitor(db):
                         )
                 except Exception as _explosive_shadow_err:
                     log.debug(f"  [EXPLOSIVE_CONTINUATION_SHADOW] scan failed: {_explosive_shadow_err}")
+                try:
+                    _a_class_summary = record_a_class_fastlane_shadow_candidates(
+                        db,
+                        now_ts=now,
+                        limit=50,
+                        logger=log,
+                    )
+                    if (_a_class_summary or {}).get('candidates'):
+                        _a_class_sources = ",".join(
+                            f"{_src}:{_detail.get('candidates', 0)}/{_detail.get('would_enter', 0)}/{_detail.get('block', 0)}"
+                            for _src, _detail in ((_a_class_summary or {}).get('sources') or {}).items()
+                        )
+                        log.info(
+                            f"  [A_CLASS_SHADOW_SCAN] candidates={_a_class_summary.get('candidates', 0)} "
+                            f"would_enter={_a_class_summary.get('would_enter', 0)} "
+                            f"shadow={_a_class_summary.get('shadow', 0)} "
+                            f"block={_a_class_summary.get('block', 0)} "
+                            f"sources={_a_class_sources or 'none'} "
+                            f"live_entry=false"
+                        )
+                except Exception as _a_class_shadow_err:
+                    log.debug(f"  [A_CLASS_SHADOW_SCAN] scan failed: {_a_class_shadow_err}")
                 try:
                     with positions_lock:
                         _upstream_probe_live_n = enqueue_lotto_upstream_miss_tiny_scout_candidates(

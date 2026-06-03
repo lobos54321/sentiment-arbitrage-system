@@ -455,6 +455,15 @@ function parseJsonObject(value) {
   }
 }
 
+function parseJsonValue(value, fallback = null) {
+  if (!value || typeof value !== 'string') return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function firstValue(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null && String(value).trim() !== '') return value;
@@ -1805,6 +1814,97 @@ function readTinyText(filePath, maxBytes = 2000) {
   }
 }
 
+function sqliteDownloadUsesBackup(url) {
+  return !['0', 'false', 'raw'].includes(String(url.searchParams.get('backup') || '1').toLowerCase());
+}
+
+function tempSqliteDownloadPath(prefix) {
+  const safePrefix = String(prefix || 'sqlite_download').replace(/[^a-z0-9_-]/gi, '_').slice(0, 48);
+  return join('/tmp', `${safePrefix}_${process.pid}_${Date.now()}_${randomUUID()}.db`);
+}
+
+async function createSqliteDownloadSnapshot(sourcePath, prefix, options = {}) {
+  if (!fs.existsSync(sourcePath)) {
+    const error = new Error(`${options.label || 'SQLite database'} not found`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const timeout = Number(options.timeoutMs || 10000);
+  let sourceDb;
+  let snapshotPath = null;
+  try {
+    sourceDb = new Database(sourcePath, { readonly: true, fileMustExist: true, timeout });
+    try { sourceDb.pragma(`busy_timeout = ${timeout}`); } catch {}
+    try { sourceDb.pragma('wal_checkpoint(PASSIVE)'); } catch {}
+    if (typeof sourceDb.backup !== 'function') {
+      return {
+        path: sourcePath,
+        cleanupPath: null,
+        mode: 'raw',
+        note: 'better-sqlite3 backup() unavailable; streamed raw main DB file',
+      };
+    }
+    snapshotPath = tempSqliteDownloadPath(prefix);
+    await sourceDb.backup(snapshotPath);
+    return {
+      path: snapshotPath,
+      cleanupPath: snapshotPath,
+      mode: 'sqlite_backup_snapshot',
+      note: 'WAL-safe SQLite backup snapshot',
+    };
+  } catch (error) {
+    try { if (snapshotPath && fs.existsSync(snapshotPath)) fs.unlinkSync(snapshotPath); } catch {}
+    throw error;
+  } finally {
+    try { if (sourceDb) sourceDb.close(); } catch {}
+  }
+}
+
+function streamDownloadFile(res, filePath, filename, cleanupPath = null, extraHeaders = {}) {
+  const stats = fs.statSync(filePath);
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': stats.size,
+    ...extraHeaders,
+  });
+  const fileStream = fs.createReadStream(filePath);
+  const cleanup = () => {
+    try { if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath); } catch {}
+  };
+  fileStream.on('close', cleanup);
+  fileStream.on('error', cleanup);
+  res.on('close', cleanup);
+  fileStream.pipe(res);
+}
+
+async function downloadSqliteDatabase(req, res, url, sourcePath, filename, label, prefix) {
+  if (!checkAuth(req, url, res)) return false;
+  if (!fs.existsSync(sourcePath)) {
+    res.writeHead(404, apiJsonHeaders());
+    res.end(JSON.stringify({ error: `${label} not found`, path: sourcePath }));
+    return true;
+  }
+  try {
+    let download = { path: sourcePath, cleanupPath: null, mode: 'raw', note: 'raw main DB file' };
+    if (sqliteDownloadUsesBackup(url)) {
+      download = await createSqliteDownloadSnapshot(sourcePath, prefix, {
+        label,
+        timeoutMs: boundedIntParam(url, 'backup_timeout_ms', 10000, 1000, 60000),
+      });
+    }
+    streamDownloadFile(res, download.path, filename, download.cleanupPath, {
+      'X-SQLite-Download-Mode': download.mode,
+      'X-SQLite-Download-Note': download.note,
+      'X-SQLite-Source-Path': sourcePath,
+    });
+  } catch (error) {
+    res.writeHead(error.statusCode || 500, apiJsonHeaders());
+    res.end(JSON.stringify({ error: `${label} backup failed: ${error.message}`, path: sourcePath }));
+  }
+  return true;
+}
+
 export function incidentArtifactRoots(options = {}) {
   const root = options.projectRoot || projectRoot;
   const dataDir = options.dataDir || process.env.ZEABUR_DATA_DIR || join(root, 'data');
@@ -2198,6 +2298,72 @@ export function buildStorageHealthSnapshot(options = {}) {
 
 function getTableColumns(database, tableName) {
   return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
+}
+
+function aClassEventRow(row) {
+  const freshness = parseJsonValue(row.freshness_json, {});
+  return {
+    id: row.id,
+    event_ts: row.event_ts,
+    event_iso: row.event_ts ? new Date(Number(row.event_ts) * 1000).toISOString() : null,
+    token_ca: row.token_ca,
+    symbol: row.symbol,
+    lifecycle_id: row.lifecycle_id,
+    route_bucket: row.route_bucket,
+    normalized_mode: row.normalized_mode,
+    source_table: row.source_table,
+    source_id: row.source_id,
+    source_component: row.source_component,
+    source_reason: row.source_reason,
+    action: row.action,
+    grade: row.grade,
+    size_sol: row.size_sol,
+    score: row.score,
+    reason: row.reason,
+    hard_blockers: parseJsonValue(row.hard_blockers_json, []),
+    soft_notes: parseJsonValue(row.soft_notes_json, []),
+    freshness,
+    budget: parseJsonValue(row.budget_json, {}),
+    risk: parseJsonValue(row.risk_json, {}),
+    opportunity_age_sec: freshness?.opportunity_age_sec ?? null,
+    raw_signal_age_sec: freshness?.raw_signal_age_sec ?? null,
+    freshness_sources: freshness?.freshness_sources || [],
+  };
+}
+
+function canonicalLedgerTradeRow(row) {
+  return {
+    id: row.id,
+    trade_id: row.trade_id,
+    token_ca: row.token_ca,
+    symbol: row.symbol,
+    lifecycle_id: row.lifecycle_id,
+    route_bucket: row.route_bucket,
+    entry_mode: row.entry_mode,
+    normalized_mode: row.normalized_mode,
+    strategy_family: row.strategy_family,
+    entry_ts: row.entry_ts,
+    entry_iso: row.entry_ts ? new Date(Number(row.entry_ts) * 1000).toISOString() : null,
+    exit_ts: row.exit_ts,
+    exit_iso: row.exit_ts ? new Date(Number(row.exit_ts) * 1000).toISOString() : null,
+    entry_size_sol: row.entry_size_sol,
+    realized_exit_sol: row.realized_exit_sol,
+    realized_pnl_sol: row.realized_pnl_sol,
+    realized_pnl_pct: row.realized_pnl_pct == null ? null : roundNumber(Number(row.realized_pnl_pct) * 100, 3),
+    peak_quote_pnl_pct: row.peak_quote_pnl_pct == null ? null : roundNumber(Number(row.peak_quote_pnl_pct) * 100, 3),
+    max_drawdown_pct: row.max_drawdown_pct == null ? null : roundNumber(Number(row.max_drawdown_pct) * 100, 3),
+    exit_reason: row.exit_reason,
+    accounting_source: row.accounting_source,
+    trapped_flag: Boolean(row.trapped_flag),
+    no_route_flag: Boolean(row.no_route_flag),
+    stale_flag: Boolean(row.stale_flag),
+    outlier_flag: Boolean(row.outlier_flag),
+    outlier_reason: row.outlier_reason,
+    is_a_class_fastlane: Boolean(row.is_a_class_fastlane),
+    a_class_grade: row.a_class_grade,
+    a_class_score: row.a_class_score,
+    a_class_size_rule: row.a_class_size_rule,
+  };
 }
 
 function sqlCol(name, qualifier = '') {
@@ -7057,40 +7223,118 @@ const server = http.createServer(async (req, res) => {
     }
     return;
   } else if (url.pathname === '/api/download/database') {
-    // 数据库下载端点 — 需要 token 认证
-    if (!checkAuth(req, url, res)) return;
-    const filePath = resolvedDbPath;
-    if (!fs.existsSync(filePath)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database file not found' }));
-      return;
-    }
-    const stats = fs.statSync(filePath);
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': 'attachment; filename="sentiment_arb.db"',
-      'Content-Length': stats.size
-    });
-    const fileStream = fs.createReadStream(filePath);
-    fileStream.pipe(res);
+    // 数据库下载端点 — 默认走 SQLite backup，避免遗漏 WAL 中的线上新信号。
+    await downloadSqliteDatabase(req, res, url, resolvedDbPath, 'sentiment_arb.db', 'Signal database', 'sentiment_arb_download');
     return;
   } else if (url.pathname === '/api/download/kline_cache') {
-    // K线数据库下载 — 需要 token 认证
-    if (!checkAuth(req, url, res)) return;
+    // K线数据库下载 — 默认走 SQLite backup，避免只下载主文件导致回测缺口。
     const klineDbPath = join(projectRoot, 'data', 'kline_cache.db');
-    if (!fs.existsSync(klineDbPath)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Kline cache database not found' }));
+    await downloadSqliteDatabase(req, res, url, klineDbPath, 'kline_cache.db', 'Kline cache database', 'kline_cache_download');
+    return;
+  } else if (url.pathname === '/api/download/lifecycle_tracks') {
+    const lifecycleDbPath = isAbsolute(process.env.LIFECYCLE_DB || '')
+      ? process.env.LIFECYCLE_DB
+      : join(projectRoot, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db');
+    await downloadSqliteDatabase(req, res, url, lifecycleDbPath, 'lifecycle_tracks.db', 'Lifecycle tracks database', 'lifecycle_tracks_download');
+    return;
+  } else if (url.pathname === '/api/data/download/sentiment-db') {
+    await downloadSqliteDatabase(req, res, url, resolvedDbPath, 'sentiment_arb.db', 'Signal database', 'sentiment_arb_download');
+    return;
+  } else if (url.pathname === '/api/data/download/paper-trades') {
+    await downloadSqliteDatabase(req, res, url, getPaperDbPath(), 'paper_trades.db', 'Paper trades database', 'paper_trades_download');
+    return;
+  } else if (url.pathname === '/api/data/download/kline-cache') {
+    await downloadSqliteDatabase(req, res, url, join(projectRoot, 'data', 'kline_cache.db'), 'kline_cache.db', 'Kline cache database', 'kline_cache_download');
+    return;
+  } else if (url.pathname === '/api/data/download/lifecycle-tracks') {
+    const lifecycleDbPath = isAbsolute(process.env.LIFECYCLE_DB || '')
+      ? process.env.LIFECYCLE_DB
+      : join(projectRoot, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db');
+    await downloadSqliteDatabase(req, res, url, lifecycleDbPath, 'lifecycle_tracks.db', 'Lifecycle tracks database', 'lifecycle_tracks_download');
+    return;
+  } else if (url.pathname === '/api/data/download/audit-bundle') {
+    if (!checkAuth(req, url, res)) return;
+    const origin = `https://${req.headers.host || 'sentiment-arbitrage.zeabur.app'}`;
+    const tokenHint = '<DASHBOARD_TOKEN>';
+    const payload = {
+      generated_at: new Date().toISOString(),
+      bundle_type: 'audit_manifest',
+      note: 'Download DB endpoints use SQLite backup snapshots by default; pass backup=raw only for debugging.',
+      downloads: {
+        signal_db: `${origin}/api/data/download/sentiment-db?token=${tokenHint}`,
+        paper_trades_db: `${origin}/api/data/download/paper-trades?token=${tokenHint}`,
+        kline_cache_db: `${origin}/api/data/download/kline-cache?token=${tokenHint}`,
+        lifecycle_tracks_db: `${origin}/api/data/download/lifecycle-tracks?token=${tokenHint}`,
+        canonical_ledger_json: `${origin}/api/data/download/canonical-ledger?token=${tokenHint}`,
+      },
+      review_apis: {
+        a_class_status: `${origin}/api/a-class/status?token=${tokenHint}&hours=24`,
+        a_class_events: `${origin}/api/a-class/events?token=${tokenHint}&hours=24&limit=500`,
+        a_class_scorecard: `${origin}/api/scorecard/a-class?token=${tokenHint}&hours=168`,
+        fast_lane: `${origin}/api/paper/fast-lane?token=${tokenHint}&live=1&hours=2`,
+        source_resonance: `${origin}/api/paper/source-resonance?token=${tokenHint}&live=1&hours=2`,
+        storage_health: `${origin}/api/paper/storage-health?token=${tokenHint}&files=1`,
+      },
+      storage_health: buildStorageHealthSnapshot({ includeFileStats: true }),
+    };
+    const text = JSON.stringify(payload, null, 2);
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="sentiment-arbitrage-audit-manifest.json"',
+      'Content-Length': Buffer.byteLength(text),
+    });
+    res.end(text);
+    return;
+  } else if (url.pathname === '/api/data/download/canonical-ledger') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
       return;
     }
-    const stats = fs.statSync(klineDbPath);
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': 'attachment; filename="kline_cache.db"',
-      'Content-Length': stats.size
-    });
-    const fileStream = fs.createReadStream(klineDbPath);
-    fileStream.pipe(res);
+    let paperDb;
+    try {
+      const limit = boundedIntParam(url, 'limit', 10000, 1, 100000);
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      const tables = {};
+      for (const table of ['canonical_trade_ledger', 'a_class_decision_events', 'paper_missed_signal_attribution']) {
+        if (!tableNames.has(table)) {
+          tables[table] = { available: false, rows: [] };
+          continue;
+        }
+        const orderCol = table === 'canonical_trade_ledger'
+          ? 'COALESCE(entry_ts, exit_ts, created_at, 0)'
+          : (table === 'a_class_decision_events' ? 'event_ts' : 'COALESCE(created_event_ts, 0)');
+        const rows = paperDb.prepare(`
+          SELECT *
+          FROM ${table}
+          ORDER BY ${orderCol} DESC, id DESC
+          LIMIT @limit
+        `).all({ limit });
+        tables[table] = { available: true, count: rows.length, rows };
+      }
+      const payload = {
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        export_type: 'canonical_ledger_and_a_class_evidence',
+        limit,
+        tables,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="canonical-ledger-export.json"',
+        'Content-Length': Buffer.byteLength(text),
+      });
+      res.end(text);
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
     return;
   } else if (url.pathname === '/api/paper/data-source-policy') {
     if (!checkAuth(req, url, res)) return;
@@ -11458,48 +11702,347 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
-  } else if (url.pathname === '/api/download/paper_trades') {
-    // Paper trades数据库下载 — 需要 token 认证
+  } else if (url.pathname === '/api/a-class/status') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
     if (!fs.existsSync(paperDbPath)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.writeHead(404, apiJsonHeaders());
       res.end(JSON.stringify({ error: 'Paper trades database not found' }));
       return;
     }
-    let downloadPath = paperDbPath;
-    let cleanupPath = null;
-    if (!['0', 'false', 'raw'].includes(String(url.searchParams.get('backup') || '1').toLowerCase())) {
-      let sourceDb;
-      try {
-        cleanupPath = join('/tmp', `paper_trades_download_${process.pid}_${Date.now()}.db`);
-        sourceDb = new Database(paperDbPath, { readonly: true, timeout: 5000 });
-        try { sourceDb.pragma('wal_checkpoint(PASSIVE)'); } catch {}
-        if (typeof sourceDb.backup === 'function') {
-          await sourceDb.backup(cleanupPath);
-          downloadPath = cleanupPath;
-        }
-      } catch (e) {
-        try { if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath); } catch {}
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `Paper trades backup failed: ${e.message}` }));
-        try { if (sourceDb) sourceDb.close(); } catch {}
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
+      const limit = boundedIntParam(url, 'limit', 30, 1, 200);
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('a_class_decision_events')) {
+        res.writeHead(200, apiJsonHeaders());
+        res.end(JSON.stringify({
+          generated_at: new Date().toISOString(),
+          db_path: paperDbPath,
+          available: false,
+          reason: 'a_class_decision_events table not found',
+        }, null, 2));
         return;
-      } finally {
-        try { if (sourceDb) sourceDb.close(); } catch {}
       }
+      const where = sinceTs == null ? '' : 'WHERE event_ts >= @sinceTs';
+      const params = sinceTs == null ? {} : { sinceTs };
+      const actionSummary = paperDb.prepare(`
+        SELECT action, COUNT(*) AS n, MAX(event_ts) AS latest_event_ts,
+               AVG(score) AS avg_score,
+               SUM(CASE WHEN action = 'WOULD_ENTER' THEN size_sol ELSE 0 END) AS would_enter_size_sol
+        FROM a_class_decision_events
+        ${where}
+        GROUP BY action
+        ORDER BY n DESC
+      `).all(params);
+      const gradeSummary = paperDb.prepare(`
+        SELECT COALESCE(grade, 'UNKNOWN') AS grade, action, COUNT(*) AS n, AVG(score) AS avg_score
+        FROM a_class_decision_events
+        ${where}
+        GROUP BY COALESCE(grade, 'UNKNOWN'), action
+        ORDER BY n DESC
+      `).all(params);
+      const sourceSummary = paperDb.prepare(`
+        SELECT COALESCE(source_table, 'unknown') AS source_table,
+               COALESCE(source_component, 'unknown') AS source_component,
+               action,
+               COUNT(*) AS n,
+               AVG(score) AS avg_score,
+               SUM(CASE WHEN action = 'WOULD_ENTER' THEN size_sol ELSE 0 END) AS would_enter_size_sol,
+               MAX(event_ts) AS latest_event_ts
+        FROM a_class_decision_events
+        ${where}
+        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'), action
+        ORDER BY n DESC
+        LIMIT 80
+      `).all(params);
+      const reasonSummary = paperDb.prepare(`
+        SELECT COALESCE(source_table, 'unknown') AS source_table,
+               COALESCE(source_component, 'unknown') AS source_component,
+               COALESCE(source_reason, 'unknown') AS source_reason,
+               action,
+               COUNT(*) AS n,
+               MAX(score) AS max_score,
+               MAX(event_ts) AS latest_event_ts
+        FROM a_class_decision_events
+        ${where}
+        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'), COALESCE(source_reason, 'unknown'), action
+        ORDER BY n DESC
+        LIMIT 80
+      `).all(params);
+      const blockerRows = paperDb.prepare(`
+        SELECT hard_blockers_json
+        FROM a_class_decision_events
+        ${where}
+      `).all(params);
+      const blockerCounts = new Map();
+      for (const row of blockerRows) {
+        const blockers = parseJsonValue(row.hard_blockers_json, []);
+        if (!Array.isArray(blockers)) continue;
+        for (const blocker of blockers) {
+          blockerCounts.set(blocker, (blockerCounts.get(blocker) || 0) + 1);
+        }
+      }
+      const recentEvents = paperDb.prepare(`
+        SELECT id, event_ts, token_ca, symbol, lifecycle_id, route_bucket,
+               normalized_mode, source_table, source_id, source_component,
+               source_reason, action, grade, size_sol, score, reason,
+               hard_blockers_json, soft_notes_json,
+               freshness_json, budget_json, risk_json
+        FROM a_class_decision_events
+        ${where}
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @limit
+      `).all({ ...params, limit }).map(aClassEventRow);
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: true,
+        enabled_env: String(process.env.A_CLASS_ENABLED || 'false').toLowerCase() === 'true',
+        shadow_eval_enabled_env: String(process.env.A_CLASS_SHADOW_EVAL_ENABLED || 'true').toLowerCase() !== 'false',
+        since_ts: sinceTs,
+        action_summary: actionSummary.map((row) => ({
+          ...row,
+          avg_score: roundNullableNumber(row.avg_score, 2),
+          would_enter_size_sol: roundNullableNumber(row.would_enter_size_sol, 6),
+        })),
+        grade_summary: gradeSummary.map((row) => ({
+          ...row,
+          avg_score: roundNullableNumber(row.avg_score, 2),
+        })),
+        source_summary: sourceSummary.map((row) => ({
+          ...row,
+          avg_score: roundNullableNumber(row.avg_score, 2),
+          would_enter_size_sol: roundNullableNumber(row.would_enter_size_sol, 6),
+        })),
+        reason_summary: reasonSummary.map((row) => ({
+          ...row,
+          max_score: roundNullableNumber(row.max_score, 2),
+        })),
+        hard_blockers: Array.from(blockerCounts.entries())
+          .map(([blocker, n]) => ({ blocker, n }))
+          .sort((a, b) => b.n - a.n),
+        recent_events: recentEvents,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
     }
-    const stats = fs.statSync(downloadPath);
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': 'attachment; filename="paper_trades.db"',
-      'Content-Length': stats.size
-    });
-    const fileStream = fs.createReadStream(downloadPath);
-    fileStream.on('close', () => {
-      try { if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath); } catch {}
-    });
-    fileStream.pipe(res);
+    return;
+  } else if (url.pathname === '/api/a-class/events') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
+      const limit = boundedIntParam(url, 'limit', 100, 1, 500);
+      const action = String(url.searchParams.get('action') || '').trim().toUpperCase();
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('a_class_decision_events')) {
+        res.writeHead(200, apiJsonHeaders());
+        res.end(JSON.stringify({ generated_at: new Date().toISOString(), db_path: paperDbPath, available: false, events: [] }, null, 2));
+        return;
+      }
+      const filters = [];
+      const params = { limit };
+      if (sinceTs != null) {
+        filters.push('event_ts >= @sinceTs');
+        params.sinceTs = sinceTs;
+      }
+      if (action) {
+        filters.push('UPPER(action) = @action');
+        params.action = action;
+      }
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+      const events = paperDb.prepare(`
+        SELECT id, event_ts, token_ca, symbol, lifecycle_id, route_bucket,
+               normalized_mode, source_table, source_id, source_component,
+               source_reason, action, grade, size_sol, score, reason,
+               hard_blockers_json, soft_notes_json,
+               freshness_json, budget_json, risk_json
+        FROM a_class_decision_events
+        ${where}
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @limit
+      `).all(params).map(aClassEventRow);
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: true,
+        since_ts: sinceTs,
+        action: action || null,
+        events,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/a-class/trades' || url.pathname === '/api/ledger/trades') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 24, 24 * 120, { allowAll: true });
+      const limit = boundedIntParam(url, 'limit', 100, 1, 1000);
+      const mode = String(url.searchParams.get('mode') || '').trim();
+      const aClassOnly = url.pathname === '/api/a-class/trades' || String(url.searchParams.get('a_class') || '').toLowerCase() === 'true';
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('canonical_trade_ledger')) {
+        res.writeHead(200, apiJsonHeaders());
+        res.end(JSON.stringify({ generated_at: new Date().toISOString(), db_path: paperDbPath, available: false, trades: [] }, null, 2));
+        return;
+      }
+      const filters = [];
+      const params = { limit };
+      if (sinceTs != null) {
+        filters.push('COALESCE(entry_ts, exit_ts, created_at, 0) >= @sinceTs');
+        params.sinceTs = sinceTs;
+      }
+      if (aClassOnly) {
+        filters.push('is_a_class_fastlane = 1');
+      }
+      if (mode) {
+        filters.push('normalized_mode = @mode');
+        params.mode = mode;
+      }
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+      const trades = paperDb.prepare(`
+        SELECT id, trade_id, token_ca, symbol, lifecycle_id, route_bucket,
+               entry_mode, normalized_mode, strategy_family, entry_ts, exit_ts,
+               entry_size_sol, realized_exit_sol, realized_pnl_sol, realized_pnl_pct,
+               peak_quote_pnl_pct, max_drawdown_pct, exit_reason, accounting_source,
+               trapped_flag, no_route_flag, stale_flag, outlier_flag, outlier_reason,
+               is_a_class_fastlane, a_class_grade, a_class_score, a_class_size_rule
+        FROM canonical_trade_ledger
+        ${where}
+        ORDER BY COALESCE(entry_ts, exit_ts, created_at, 0) DESC, id DESC
+        LIMIT @limit
+      `).all(params).map(canonicalLedgerTradeRow);
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: true,
+        since_ts: sinceTs,
+        mode: mode || null,
+        a_class_only: aClassOnly,
+        trades,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/scorecard/a-class' || url.pathname === '/api/scorecard/entry-modes') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 24 * 7, 24 * 120, { allowAll: true });
+      const aClassScorecard = url.pathname === '/api/scorecard/a-class';
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('canonical_trade_ledger')) {
+        res.writeHead(200, apiJsonHeaders());
+        res.end(JSON.stringify({ generated_at: new Date().toISOString(), db_path: paperDbPath, available: false, rows: [] }, null, 2));
+        return;
+      }
+      const filters = [];
+      const params = {};
+      if (sinceTs != null) {
+        filters.push('COALESCE(entry_ts, exit_ts, created_at, 0) >= @sinceTs');
+        params.sinceTs = sinceTs;
+      }
+      if (aClassScorecard) {
+        filters.push('is_a_class_fastlane = 1');
+      }
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+      const groupExpr = aClassScorecard
+        ? "COALESCE(a_class_grade, 'UNKNOWN')"
+        : "COALESCE(normalized_mode, 'UNKNOWN')";
+      const rows = paperDb.prepare(`
+        SELECT ${groupExpr} AS bucket,
+               COUNT(*) AS trades,
+               SUM(CASE WHEN exit_ts IS NOT NULL THEN 1 ELSE 0 END) AS closed_trades,
+               SUM(CASE WHEN realized_pnl_sol > 0 THEN 1 ELSE 0 END) AS wins,
+               SUM(COALESCE(realized_pnl_sol, 0)) AS total_pnl_sol,
+               AVG(realized_pnl_sol) AS avg_pnl_sol,
+               AVG(realized_pnl_pct) AS avg_pnl_pct,
+               SUM(CASE WHEN COALESCE(peak_quote_pnl_pct, 0) <= 0 THEN 1 ELSE 0 END) AS doa_n,
+               SUM(CASE WHEN COALESCE(peak_quote_pnl_pct, 0) >= 0.20 THEN 1 ELSE 0 END) AS peak20_n,
+               SUM(CASE WHEN COALESCE(peak_quote_pnl_pct, 0) >= 0.50 THEN 1 ELSE 0 END) AS peak50_n,
+               SUM(CASE WHEN COALESCE(peak_quote_pnl_pct, 0) >= 1.00 THEN 1 ELSE 0 END) AS peak100_n,
+               SUM(CASE WHEN no_route_flag = 1 THEN 1 ELSE 0 END) AS no_route_n,
+               SUM(CASE WHEN trapped_flag = 1 THEN 1 ELSE 0 END) AS trapped_n,
+               SUM(CASE WHEN outlier_flag = 1 THEN 1 ELSE 0 END) AS outlier_n
+        FROM canonical_trade_ledger
+        ${where}
+        GROUP BY ${groupExpr}
+        ORDER BY trades DESC
+      `).all(params).map((row) => ({
+        bucket: row.bucket,
+        trades: row.trades,
+        closed_trades: row.closed_trades,
+        win_rate_pct: row.closed_trades ? roundNumber((Number(row.wins || 0) / Number(row.closed_trades)) * 100, 2) : null,
+        total_pnl_sol: roundNullableNumber(row.total_pnl_sol, 6),
+        avg_pnl_sol: roundNullableNumber(row.avg_pnl_sol, 6),
+        avg_pnl_pct: row.avg_pnl_pct == null ? null : roundNumber(Number(row.avg_pnl_pct) * 100, 3),
+        doa_rate_pct: row.trades ? roundNumber((Number(row.doa_n || 0) / Number(row.trades)) * 100, 2) : null,
+        peak20_rate_pct: row.trades ? roundNumber((Number(row.peak20_n || 0) / Number(row.trades)) * 100, 2) : null,
+        peak50_rate_pct: row.trades ? roundNumber((Number(row.peak50_n || 0) / Number(row.trades)) * 100, 2) : null,
+        peak100_rate_pct: row.trades ? roundNumber((Number(row.peak100_n || 0) / Number(row.trades)) * 100, 2) : null,
+        no_route_rate_pct: row.trades ? roundNumber((Number(row.no_route_n || 0) / Number(row.trades)) * 100, 2) : null,
+        trapped_rate_pct: row.trades ? roundNumber((Number(row.trapped_n || 0) / Number(row.trades)) * 100, 2) : null,
+        outlier_n: row.outlier_n,
+      }));
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: true,
+        since_ts: sinceTs,
+        scorecard: aClassScorecard ? 'a_class' : 'entry_modes',
+        rows,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/download/paper_trades') {
+    // Paper trades数据库下载 — 默认走 SQLite backup，确保 WAL 内 attribution/ledger 一起下载。
+    const paperDbPath = getPaperDbPath();
+    await downloadSqliteDatabase(req, res, url, paperDbPath, 'paper_trades.db', 'Paper trades database', 'paper_trades_download');
     return;
   } else if (url.pathname === '/api/export') {
     // v10: 导出所有DB数据为JSON（用于回测分析） — 需要 token 认证

@@ -1,0 +1,283 @@
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+from a_class_fastlane import (
+    AClassCandidate,
+    decide_size,
+    evaluate_a_class_fastlane,
+    hard_prefilter,
+    record_a_class_fastlane_shadow_candidates,
+)
+from fastlane_config import load_a_class_config
+
+
+def base_candidate(**overrides):
+    data = {
+        "token_ca": "TokenCA123",
+        "symbol": "AFAST",
+        "lifecycle_id": "life-1",
+        "route_bucket": "ATH",
+        "signal_ts": 100,
+        "quote_available": True,
+        "quote_executable": True,
+        "quote_clean": True,
+        "quote_source": "gmgn",
+        "quote_age_sec": 5,
+        "route_available": True,
+        "route_stable_recent": True,
+        "liquidity_usd": 50_000,
+        "spread_pct": 1.0,
+        "gmgn_pre_seen": True,
+        "gmgn_activity_fresh": True,
+        "gmgn_last_seen_age_sec": 5,
+        "source_resonance": True,
+        "fresh_momentum": True,
+        "fresh_ath_refresh": True,
+        "ath_continuation": True,
+        "top10_pct": 40,
+        "bundler_rate": 0.05,
+        "rat_trader_rate": 0.01,
+        "entrapment_ratio": 0.01,
+    }
+    data.update(overrides)
+    return AClassCandidate.from_mapping(data)
+
+
+def test_no_route_must_block():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(route_available=False),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "route_unavailable" in decision.hard_blockers
+
+
+def test_quote_not_executable_must_block():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(quote_executable=False),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "quote_not_executable" in decision.hard_blockers
+
+
+def test_liquidity_unknown_must_block():
+    passed, blockers, _detail = hard_prefilter(
+        base_candidate(liquidity_usd=None),
+        config=load_a_class_config({}),
+    )
+
+    assert passed is False
+    assert "liquidity_unknown" in blockers
+
+
+def test_extreme_spread_must_block():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(spread_pct=8.0),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "spread_extreme" in decision.hard_blockers
+
+
+def test_security_and_cooldown_blocks_cannot_be_overridden_by_high_score():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(risk_flags=["obvious_rug"], recent_hard_loss=True),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "security_red_flag" in decision.hard_blockers
+    assert "recent_hard_loss" in decision.hard_blockers
+    assert decision.score == 0
+
+
+def test_same_lifecycle_duplicate_must_block():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(prior_fastlane_in_lifecycle=True),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "prior_fastlane_in_lifecycle" in decision.hard_blockers
+
+
+def test_old_signal_with_fresh_quote_and_gmgn_can_enter():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(signal_ts=1_000 - 3_600),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "ENTER"
+    assert decision.grade == "A_PLUS"
+    assert decision.size_sol == 0.003
+    assert decision.freshness_detail["raw_signal_age_sec"] == 3_600
+    assert "fresh_quote" in decision.freshness_detail["freshness_sources"]
+
+
+def test_raw_signal_fresh_but_quote_stale_cannot_enter():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(signal_ts=970, quote_age_sec=120, gmgn_activity_fresh=False, fresh_momentum=False, fresh_ath_refresh=False),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert "quote_stale" in decision.hard_blockers
+
+
+def test_size_thresholds_are_capped():
+    config = load_a_class_config({"A_CLASS_MAX_SIZE_SOL": "0.003"})
+
+    assert decide_size(70, config=config) == ("A", 0.001)
+    assert decide_size(82, config=config) == ("STRONG_A", 0.002)
+    assert decide_size(92, config=config) == ("A_PLUS", 0.003)
+
+
+def test_shadow_scan_records_counterfactual_sources():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_fast_entry_queue (
+            id INTEGER PRIMARY KEY,
+            created_at REAL,
+            updated_at REAL,
+            source_signal_ts INTEGER,
+            signal_receive_ts INTEGER,
+            signal_recorded_ts INTEGER,
+            token_ca TEXT,
+            symbol TEXT,
+            source_type TEXT,
+            entry_mode_hint TEXT,
+            entry_branch TEXT,
+            status TEXT,
+            last_error TEXT,
+            first_error TEXT,
+            payload_json TEXT
+        );
+        CREATE TABLE source_resonance_candidates (
+            id INTEGER PRIMARY KEY,
+            token_ca TEXT,
+            symbol TEXT,
+            signal_ts INTEGER,
+            signal_type TEXT,
+            gmgn_pre_seen INTEGER,
+            gmgn_last_seen_ts INTEGER,
+            gmgn_last_market_cap REAL,
+            gmgn_last_liquidity REAL,
+            quote_clean_seen INTEGER,
+            two_quote_clean_snapshots INTEGER,
+            source_count INTEGER,
+            resonance_level INTEGER,
+            resonance_score REAL,
+            cohort TEXT,
+            payload_json TEXT,
+            updated_at REAL
+        );
+        CREATE TABLE paper_decision_events (
+            id INTEGER PRIMARY KEY,
+            event_ts REAL,
+            token_ca TEXT,
+            symbol TEXT,
+            lifecycle_id TEXT,
+            signal_ts INTEGER,
+            route TEXT,
+            component TEXT,
+            event_type TEXT,
+            decision TEXT,
+            reason TEXT,
+            data_source TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_fast_entry_queue (
+            id, created_at, updated_at, source_signal_ts, token_ca, symbol,
+            source_type, entry_mode_hint, entry_branch, status, first_error, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            990,
+            995,
+            100,
+            "FastToken",
+            "FAST",
+            "source_resonance_gmgn_fast",
+            "a_class_fastlane_shadow",
+            "source_resonance_gmgn_fast",
+            "watch_only",
+            "source_resonance_gmgn_only_watch_only",
+            '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_age_sec":5,"route_available":true,"route_stable_recent":true,"liquidity_usd":50000,"spread_pct":1.0,"gmgn_pre_seen":true,"gmgn_activity_fresh":true,"top10_pct":40,"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}',
+        ),
+    )
+    db.execute(
+        """
+        INSERT INTO source_resonance_candidates (
+            id, token_ca, symbol, signal_ts, signal_type, gmgn_pre_seen,
+            gmgn_last_seen_ts, gmgn_last_market_cap, gmgn_last_liquidity,
+            quote_clean_seen, two_quote_clean_snapshots, source_count,
+            resonance_level, resonance_score, cohort, payload_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (2, "ResToken", "RES", 100000, "ATH", 1, 997, 100000, 60000, 1, 2, 2, 2, 85, "telegram_gmgn", "{}", 998),
+    )
+    db.execute(
+        """
+        INSERT INTO paper_decision_events (
+            id, event_ts, token_ca, symbol, lifecycle_id, signal_ts, route,
+            component, event_type, decision, reason, data_source, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            3,
+            996,
+            "DecisionToken",
+            "DEC",
+            "life-dec",
+            100,
+            "ATH",
+            "ath_uncertainty_scout",
+            "reject",
+            "block",
+            "scout_quality_buy_pressure_weak",
+            "paper_decision_events",
+            '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_age_sec":4,"route_available":true,"route_stable_recent":true,"liquidity_usd":80000,"spread_pct":0.8,"gmgn_pre_seen":true,"gmgn_activity_fresh":true,"source_resonance":true,"fresh_ath_refresh":true,"top10_pct":35,"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}',
+        ),
+    )
+
+    summary = record_a_class_fastlane_shadow_candidates(
+        db,
+        now_ts=1000,
+        limit=10,
+        config=load_a_class_config({"A_CLASS_ENABLED": "false"}),
+    )
+
+    assert summary["candidates"] == 3
+    assert summary["sources"]["paper_fast_entry_queue"]["candidates"] == 1
+    assert summary["sources"]["source_resonance_candidates"]["candidates"] == 1
+    assert summary["sources"]["paper_decision_events"]["candidates"] == 1
+    source_rows = db.execute(
+        "SELECT source_table, action FROM a_class_decision_events ORDER BY source_table"
+    ).fetchall()
+    assert {row["source_table"] for row in source_rows} == {
+        "paper_fast_entry_queue",
+        "source_resonance_candidates",
+        "paper_decision_events",
+    }
+    assert any(row["action"] == "WOULD_ENTER" for row in source_rows)
