@@ -18,8 +18,10 @@ from pathlib import Path
 
 try:
     from scripts.a_class_expected_rr import build_a_class_p0_discovery
+    from scripts.ai_strategy_reviewer import build_ai_strategy_review
 except ImportError:
     from a_class_expected_rr import build_a_class_p0_discovery
+    from ai_strategy_reviewer import build_ai_strategy_review
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -880,6 +882,13 @@ def a_class_summary(db, since_ts, limit):
         col_expr(cols, "score", "0"),
         col_expr(cols, "reason"),
         col_expr(cols, "hard_blockers_json"),
+        col_expr(cols, "expected_rr"),
+        col_expr(cols, "expected_upside_pct"),
+        col_expr(cols, "defined_risk_pct"),
+        col_expr(cols, "bottom_ticket_size_sol"),
+        col_expr(cols, "matrix_json"),
+        col_expr(cols, "ai_review_json"),
+        col_expr(cols, "controller_action_json"),
     ]
     recent_events = rows_as_dicts(db.execute(
         f"""
@@ -896,6 +905,12 @@ def a_class_summary(db, since_ts, limit):
             row["hard_blockers"] = json.loads(row.pop("hard_blockers_json") or "[]")
         except (TypeError, json.JSONDecodeError):
             row["hard_blockers"] = []
+        for json_key in ("matrix_json", "ai_review_json", "controller_action_json"):
+            out_key = json_key.replace("_json", "")
+            try:
+                row[out_key] = json.loads(row.pop(json_key) or "{}")
+            except (TypeError, json.JSONDecodeError):
+                row[out_key] = {}
     total = sum(int(row.get("n") or 0) for row in action_summary)
     would_enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "WOULD_ENTER")
     enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "ENTER")
@@ -943,6 +958,28 @@ def a_class_p0_discovery_summary(db, since_ts, until_ts):
         summary["status"] = "evidence_unavailable"
         summary["reason"] = "a_class_p0_evidence_unavailable"
     return summary
+
+
+def ai_strategy_review_summary(a_class_p0_discovery):
+    try:
+        return build_ai_strategy_review(a_class_p0_discovery)
+    except Exception as exc:
+        return {
+            "schema_version": "v1.ai_strategy_review.bundle",
+            "advisory_only": True,
+            "available": False,
+            "reason": str(exc),
+            "missed_dog_review": {},
+            "counterfactual_audit": {},
+            "controller_actions": {
+                "schema_version": "v1.strategy_goal_controller.advisory",
+                "advisory_only": True,
+                "can_trigger_trade": False,
+                "actions": [{"mode": "A_CLASS_FASTLANE", "action": "SHADOW", "reason": "ai_strategy_review_unavailable"}],
+                "blockers": ["ai_strategy_review_unavailable"],
+                "next_safe_action": "keep_a_class_shadow",
+            },
+        }
 
 
 def branch_ev_summary(db, since_ts, limit):
@@ -1510,8 +1547,15 @@ def build_snapshot(db, hours, limit):
         lambda: a_class_p0_discovery_summary(db, since_ts, now_ts),
     )
     snapshot["a_class_p0_discovery"] = discovery
+    ai_review = timed_section(
+        "ai_strategy_review",
+        lambda: ai_strategy_review_summary(discovery),
+    )
+    snapshot["ai_strategy_review"] = ai_review
+    snapshot["strategy_goal_controller"] = ai_review.get("controller_actions") if isinstance(ai_review, dict) else None
     if isinstance(snapshot.get("a_class"), dict):
         snapshot["a_class"]["p0_discovery"] = discovery
+        snapshot["a_class"]["ai_strategy_review"] = ai_review
     return snapshot
 
 

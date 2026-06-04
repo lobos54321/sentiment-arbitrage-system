@@ -11,6 +11,9 @@ from typing import Optional
 
 from fastlane_config import AClassFastlaneConfig, load_a_class_config
 from opportunity_freshness import FreshnessDecision, evaluate_opportunity_freshness
+from a_class_opportunity_matrix import evaluate_a_class_opportunity_matrix
+from a_class_rr_model import build_a_class_rr_model
+from ai_candidate_rater import review_a_class_candidate
 
 
 def _get(value, key, default=None):
@@ -236,6 +239,15 @@ class AClassDecision:
     budget_detail: dict
     risk_detail: dict
     expected_rr_detail: dict = field(default_factory=dict)
+    matrix_detail: dict = field(default_factory=dict)
+    ai_review: dict = field(default_factory=dict)
+    controller_action: dict = field(default_factory=dict)
+    expected_rr: Optional[float] = None
+    expected_upside_pct: Optional[float] = None
+    defined_risk_pct: Optional[float] = None
+    bottom_ticket_size_sol: Optional[float] = None
+    principal_recovery_plan: dict = field(default_factory=dict)
+    moonbag_plan: dict = field(default_factory=dict)
     would_action: Optional[str] = None
     denominator_key: Optional[str] = None
 
@@ -435,6 +447,9 @@ def evaluate_a_class_fastlane(candidate, context=None, config=None, now_ts=None)
 
     freshness = evaluate_opportunity_freshness(candidate, now_ts=now_ts, config=config)
     freshness_detail = freshness.to_dict()
+    matrix_detail = evaluate_a_class_opportunity_matrix(candidate, freshness, config=config)
+    rr_detail = build_a_class_rr_model(candidate, matrix_detail, config=config)
+    ai_review = review_a_class_candidate(candidate, matrix_detail, rr_detail)
     if not freshness.fresh:
         return AClassDecision(
             action="SHADOW",
@@ -447,9 +462,66 @@ def evaluate_a_class_fastlane(candidate, context=None, config=None, now_ts=None)
             freshness_detail=freshness_detail,
             budget_detail={},
             risk_detail=risk_detail,
+            expected_rr_detail=rr_detail,
+            matrix_detail=matrix_detail,
+            ai_review=ai_review,
+            expected_rr=rr_detail.get("expected_rr"),
+            expected_upside_pct=rr_detail.get("expected_upside_pct"),
+            defined_risk_pct=rr_detail.get("defined_risk_pct"),
+            bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+            principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+            moonbag_plan=rr_detail.get("moonbag_plan", {}),
+        )
+    if matrix_detail.get("hard_red_dimensions") or matrix_detail.get("red_count", 0) > 0:
+        return AClassDecision(
+            action="SHADOW",
+            grade="REJECT",
+            size_sol=0.0,
+            reason="opportunity_matrix_red_cell",
+            hard_blockers=[],
+            soft_notes=[
+                "matrix_red_cells_prevent_live_entry",
+                f"red_dimensions={matrix_detail.get('hard_red_dimensions', [])}",
+            ],
+            score=matrix_detail.get("matrix_score", 0.0),
+            freshness_detail=freshness_detail,
+            budget_detail={},
+            risk_detail=risk_detail,
+            expected_rr_detail=rr_detail,
+            matrix_detail=matrix_detail,
+            ai_review=ai_review,
+            expected_rr=rr_detail.get("expected_rr"),
+            expected_upside_pct=rr_detail.get("expected_upside_pct"),
+            defined_risk_pct=rr_detail.get("defined_risk_pct"),
+            bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+            principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+            moonbag_plan=rr_detail.get("moonbag_plan", {}),
+        )
+    if not rr_detail.get("live_allowed_by_rr", False):
+        return AClassDecision(
+            action="SHADOW",
+            grade="REJECT",
+            size_sol=0.0,
+            reason="expected_rr_below_min",
+            hard_blockers=[],
+            soft_notes=list(rr_detail.get("hard_blockers") or []),
+            score=matrix_detail.get("matrix_score", 0.0),
+            freshness_detail=freshness_detail,
+            budget_detail={},
+            risk_detail=risk_detail,
+            expected_rr_detail=rr_detail,
+            matrix_detail=matrix_detail,
+            ai_review=ai_review,
+            expected_rr=rr_detail.get("expected_rr"),
+            expected_upside_pct=rr_detail.get("expected_upside_pct"),
+            defined_risk_pct=rr_detail.get("defined_risk_pct"),
+            bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+            principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+            moonbag_plan=rr_detail.get("moonbag_plan", {}),
         )
 
     score, score_detail = score_a_class(candidate, freshness, config=config)
+    score = min(100.0, max(score, _safe_float(matrix_detail.get("matrix_score"), score) or score))
     if score < 70:
         return AClassDecision(
             action="SHADOW",
@@ -462,6 +534,15 @@ def evaluate_a_class_fastlane(candidate, context=None, config=None, now_ts=None)
             freshness_detail=freshness_detail,
             budget_detail={},
             risk_detail=risk_detail,
+            expected_rr_detail=rr_detail,
+            matrix_detail=matrix_detail,
+            ai_review=ai_review,
+            expected_rr=rr_detail.get("expected_rr"),
+            expected_upside_pct=rr_detail.get("expected_upside_pct"),
+            defined_risk_pct=rr_detail.get("defined_risk_pct"),
+            bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+            principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+            moonbag_plan=rr_detail.get("moonbag_plan", {}),
         )
 
     budget_ok, budget_blockers, budget_detail = apply_budget_guard(candidate, score, context=context, config=config)
@@ -477,20 +558,46 @@ def evaluate_a_class_fastlane(candidate, context=None, config=None, now_ts=None)
             freshness_detail=freshness_detail,
             budget_detail=budget_detail,
             risk_detail=risk_detail,
+            expected_rr_detail=rr_detail,
+            matrix_detail=matrix_detail,
+            ai_review=ai_review,
+            expected_rr=rr_detail.get("expected_rr"),
+            expected_upside_pct=rr_detail.get("expected_upside_pct"),
+            defined_risk_pct=rr_detail.get("defined_risk_pct"),
+            bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+            principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+            moonbag_plan=rr_detail.get("moonbag_plan", {}),
         )
 
     grade, size = decide_size(score, config=config)
+    rr_size = _safe_float(rr_detail.get("bottom_ticket_size_sol"), size) or size
+    if rr_size < size:
+        size = rr_size
+        grade = rr_detail.get("rr_grade") or grade
     return AClassDecision(
         action="ENTER",
         grade=grade,
         size_sol=size,
         reason="a_class_fastlane_pass",
         hard_blockers=[],
-        soft_notes=[f"score_detail={score_detail}"],
+        soft_notes=[
+            f"score_detail={score_detail}",
+            "ai_review_advisory_only",
+            "expected_rr_gate_passed",
+        ],
         score=score,
         freshness_detail=freshness_detail,
         budget_detail=budget_detail,
         risk_detail=risk_detail,
+        expected_rr_detail=rr_detail,
+        matrix_detail=matrix_detail,
+        ai_review=ai_review,
+        expected_rr=rr_detail.get("expected_rr"),
+        expected_upside_pct=rr_detail.get("expected_upside_pct"),
+        defined_risk_pct=rr_detail.get("defined_risk_pct"),
+        bottom_ticket_size_sol=rr_detail.get("bottom_ticket_size_sol"),
+        principal_recovery_plan=rr_detail.get("principal_recovery_plan", {}),
+        moonbag_plan=rr_detail.get("moonbag_plan", {}),
     )
 
 
@@ -1364,6 +1471,15 @@ def _duplicate_a_class_decision(decision, duplicate_row, opportunity_key):
             "duplicate_of_event_id": duplicate_id,
             "opportunity_key": opportunity_key,
         },
+        expected_rr_detail=_get(decision, "expected_rr_detail", {}) or {},
+        matrix_detail=_get(decision, "matrix_detail", {}) or {},
+        ai_review=_get(decision, "ai_review", {}) or {},
+        expected_rr=_get(decision, "expected_rr", None),
+        expected_upside_pct=_get(decision, "expected_upside_pct", None),
+        defined_risk_pct=_get(decision, "defined_risk_pct", None),
+        bottom_ticket_size_sol=_get(decision, "bottom_ticket_size_sol", None),
+        principal_recovery_plan=_get(decision, "principal_recovery_plan", {}) or {},
+        moonbag_plan=_get(decision, "moonbag_plan", {}) or {},
     )
 
 

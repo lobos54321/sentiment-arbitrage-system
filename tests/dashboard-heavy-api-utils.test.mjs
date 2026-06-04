@@ -15,6 +15,10 @@ import {
   buildIncidentArtifactSnapshot,
   buildNotAthReclaimFunnelReport,
   buildRolling24hGoalStatusFromLiveSnapshot,
+  buildCounterfactualAiAuditFromP0,
+  buildGoalControllerActions,
+  buildMissedDogAiReviewFromP0,
+  summarizeAClassMatrixEvents,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
@@ -2246,4 +2250,128 @@ test('closed loop probe summary uses recent trade window with exit fallback', ()
   assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.fills, 1);
   assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.avg_pnl_pct, 40);
   db.close();
+});
+
+test('a class matrix and AI advisory helpers summarize shadow evidence safely', () => {
+  const events = [
+    {
+      id: 1,
+      symbol: 'DOG',
+      action: 'WOULD_ENTER',
+      grade: 'A',
+      expected_rr: 3.2,
+      matrix: {
+        matrix_version: 'v1.a_class_18_cell',
+        matrix_grade: 'A',
+        source_strength: 'GREEN',
+        execution_quality: 'GREEN',
+        market_flow: 'YELLOW',
+        security_cleanliness: 'GREEN',
+        freshness_lifecycle: 'GREEN',
+        historical_ev: 'YELLOW',
+      },
+      ai_review: {
+        schema_version: 'v1.ai_strategy_advisory.shadow_only',
+        ai_grade: 'supportive',
+      },
+    },
+  ];
+  const matrix = summarizeAClassMatrixEvents(events);
+  const p0 = {
+    available: true,
+    quote_clean_gold_silver_seen_count: 12,
+    quote_clean_gold_silver_would_enter_count: 6,
+    outlier_trimmed_would_rr: 3.0,
+    would_enter_no_route_rate: 0.01,
+    would_enter_trapped_rate: 0,
+    unknown_data_rate: 0,
+    discovery_exit: { advisory: 'PROMOTE_TINY_CANARY', canary_size_sol: 0.001 },
+    missed_blockers: [
+      { route: 'ATH', component: 'scout', reject_reason: 'scout_quality_buy_pressure_weak', gold_n: 1, silver_n: 0, unique_tokens: 2, max_adjusted_peak: 1.2 },
+      { route: 'LOTTO', component: 'security', reject_reason: 'creator_dump_security_red_flag', gold_n: 1, silver_n: 0, unique_tokens: 1, max_adjusted_peak: 2.0 },
+    ],
+  };
+  const missed = buildMissedDogAiReviewFromP0(p0);
+  const audit = buildCounterfactualAiAuditFromP0(p0);
+  const controller = buildGoalControllerActions({
+    rollingGoalStatus: { status: 'under_target' },
+    p0Discovery: p0,
+    counterfactualAudit: audit,
+    missedDogReview: missed,
+  });
+
+  assert.equal(matrix.available, true);
+  assert.equal(matrix.grade_counts.A, 1);
+  assert.equal(missed.allow_a_class_only_count, 1);
+  assert.equal(missed.keep_hard_block_count, 1);
+  assert.equal(audit.pass, true);
+  assert.equal(controller.can_trigger_trade, false);
+  assert.equal(controller.next_safe_action, 'prepare_0_001_tiny_paper_after_observability_green');
+});
+
+test('rolling 24h goal exposes matrix rr ai and controller fields', () => {
+  const snapshot = {
+    snapshot_id: 'snap-ai',
+    generated_at: '2026-06-04T00:00:00.000Z',
+    window: { since_ts: 1000 },
+    trades: {
+      totals: {
+        closed: 20,
+        wins: 13,
+        deployed_sol: 1,
+        est_pnl_sol: 2.5,
+        min_pnl: -0.1,
+      },
+    },
+    dog_catch_goal: {
+      available: true,
+      goal: {
+        eligible_gold_silver_unique: 10,
+        captured_gold_silver_unique: 7,
+      },
+      trades: { captured_gold_silver_unique: 7 },
+    },
+    a_class_p0_discovery: {
+      available: true,
+      quote_clean_gold_silver_seen_count: 12,
+      quote_clean_gold_silver_would_enter_count: 6,
+      outlier_trimmed_would_rr: 3.0,
+      would_enter_no_route_rate: 0.01,
+      would_enter_trapped_rate: 0,
+      unknown_data_rate: 0,
+      missed_blockers: [],
+      discovery_exit: { advisory: 'PROMOTE_TINY_CANARY', canary_size_sol: 0.001 },
+    },
+    a_class: {
+      available: true,
+      would_enter: 1,
+      enter: 0,
+      recent_events: [{
+        id: 1,
+        symbol: 'DOG',
+        action: 'WOULD_ENTER',
+        grade: 'A',
+        expected_rr: 3,
+        matrix: {
+          matrix_version: 'v1.a_class_18_cell',
+          matrix_grade: 'A',
+          source_strength: 'GREEN',
+          execution_quality: 'GREEN',
+        },
+      }],
+    },
+  };
+
+  const status = buildRolling24hGoalStatusFromLiveSnapshot(snapshot, {
+    generatedAt: '2026-06-04T00:05:00.000Z',
+    nowMs: Date.parse('2026-06-04T00:05:00.000Z'),
+    requestedHours: 24,
+    materializedHours: 24,
+  });
+
+  assert.equal(status.matrix_summary.available, true);
+  assert.equal(status.rr_summary.outlier_trimmed_would_rr, 3);
+  assert.equal(status.ai_advisory.advisory_only, true);
+  assert.equal(Array.isArray(status.controller_actions), true);
+  assert.equal(status.next_safe_action, 'prepare_0_001_tiny_paper_after_observability_green');
 });

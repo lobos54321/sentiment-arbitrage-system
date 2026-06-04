@@ -49,6 +49,19 @@ def _truthy(value):
     return bool(value)
 
 
+def _as_dict(value):
+    if value is None:
+        return {}
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        return dict(value)
+    except (TypeError, ValueError):
+        return dict(vars(value))
+
+
 def _table_columns(db, table):
     try:
         return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -97,9 +110,17 @@ def init_canonical_ledger(db):
             source_dedup_key TEXT,
             would_action TEXT,
             expected_rr REAL,
+            expected_upside_pct REAL,
+            defined_risk_pct REAL,
+            bottom_ticket_size_sol REAL,
             expected_rr_detail_json TEXT,
+            matrix_json TEXT,
+            ai_review_json TEXT,
+            controller_action_json TEXT,
             denominator_key TEXT,
             discovery_exit_json TEXT,
+            principal_recovery_plan_json TEXT,
+            moonbag_plan_json TEXT,
             candidate_json TEXT,
             created_at REAL NOT NULL
         )
@@ -125,9 +146,17 @@ def init_canonical_ledger(db):
         ("source_dedup_key", "TEXT"),
         ("would_action", "TEXT"),
         ("expected_rr", "REAL"),
+        ("expected_upside_pct", "REAL"),
+        ("defined_risk_pct", "REAL"),
+        ("bottom_ticket_size_sol", "REAL"),
         ("expected_rr_detail_json", "TEXT"),
+        ("matrix_json", "TEXT"),
+        ("ai_review_json", "TEXT"),
+        ("controller_action_json", "TEXT"),
         ("denominator_key", "TEXT"),
         ("discovery_exit_json", "TEXT"),
+        ("principal_recovery_plan_json", "TEXT"),
+        ("moonbag_plan_json", "TEXT"),
     ):
         if col_name not in _table_columns(db, "a_class_decision_events"):
             try:
@@ -250,6 +279,15 @@ def init_canonical_ledger(db):
             a_class_freshness_sources_json TEXT,
             a_class_hard_prefilter_json TEXT,
             a_class_budget_state_json TEXT,
+            expected_rr REAL,
+            expected_upside_pct REAL,
+            defined_risk_pct REAL,
+            bottom_ticket_size_sol REAL,
+            principal_recovery_plan_json TEXT,
+            moonbag_plan_json TEXT,
+            a_class_matrix_json TEXT,
+            ai_review_json TEXT,
+            controller_action_json TEXT,
 
             metadata_json TEXT,
             code_version TEXT,
@@ -259,6 +297,22 @@ def init_canonical_ledger(db):
         )
         """
     )
+    for col_name, col_def in (
+        ("expected_rr", "REAL"),
+        ("expected_upside_pct", "REAL"),
+        ("defined_risk_pct", "REAL"),
+        ("bottom_ticket_size_sol", "REAL"),
+        ("principal_recovery_plan_json", "TEXT"),
+        ("moonbag_plan_json", "TEXT"),
+        ("a_class_matrix_json", "TEXT"),
+        ("ai_review_json", "TEXT"),
+        ("controller_action_json", "TEXT"),
+    ):
+        if col_name not in _table_columns(db, "canonical_trade_ledger"):
+            try:
+                db.execute(f"ALTER TABLE canonical_trade_ledger ADD COLUMN {col_name} {col_def}")
+            except Exception:
+                pass
     db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_canonical_trade_mode_recent
@@ -290,8 +344,8 @@ def record_a_class_decision_event(
     init_canonical_ledger(db)
     now_ts = float(now_ts if now_ts is not None else time.time())
     action = stored_action or _get(decision, "action", "SHADOW")
-    candidate_dict = candidate.to_dict() if hasattr(candidate, "to_dict") else dict(candidate or {})
-    decision_dict = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+    candidate_dict = _as_dict(candidate)
+    decision_dict = _as_dict(decision)
     opportunity_key = _get(candidate, "opportunity_key")
     source_dedup_key = _get(decision, "source_dedup_key", None) or _get(candidate, "source_dedup_key", None)
     if not source_dedup_key:
@@ -313,8 +367,33 @@ def record_a_class_decision_event(
         else expected_rr_detail.get("outlier_trimmed_would_rr"),
         None,
     )
+    expected_upside_pct = _safe_float(
+        _get(decision, "expected_upside_pct", None)
+        if _get(decision, "expected_upside_pct", None) is not None
+        else expected_rr_detail.get("expected_upside_pct"),
+        None,
+    )
+    defined_risk_pct = _safe_float(
+        _get(decision, "defined_risk_pct", None)
+        if _get(decision, "defined_risk_pct", None) is not None
+        else expected_rr_detail.get("defined_risk_pct"),
+        None,
+    )
+    bottom_ticket_size_sol = _safe_float(
+        _get(decision, "bottom_ticket_size_sol", None)
+        if _get(decision, "bottom_ticket_size_sol", None) is not None
+        else expected_rr_detail.get("bottom_ticket_size_sol"),
+        None,
+    )
     denominator_key = _get(decision, "denominator_key", None) or expected_rr_detail.get("denominator_key")
     discovery_exit = _get(decision, "discovery_exit", None) or expected_rr_detail.get("discovery_exit")
+    matrix_detail = _get(decision, "matrix_detail", {}) or {}
+    ai_review = _get(decision, "ai_review", {}) or {}
+    controller_action = _get(decision, "controller_action", {}) or {}
+    principal_recovery_plan = (
+        _get(decision, "principal_recovery_plan", {}) or expected_rr_detail.get("principal_recovery_plan") or {}
+    )
+    moonbag_plan = _get(decision, "moonbag_plan", {}) or expected_rr_detail.get("moonbag_plan") or {}
     db.execute(
         """
         INSERT INTO a_class_decision_events (
@@ -323,16 +402,27 @@ def record_a_class_decision_event(
             opportunity_key, source_dedup_key, is_duplicate, duplicate_of_id, signal_ts,
             opportunity_ts, action, grade, size_sol, score, reason,
             hard_blockers_json, soft_notes_json, freshness_json, budget_json,
-            risk_json, would_action, expected_rr, expected_rr_detail_json,
-            denominator_key, discovery_exit_json, candidate_json, created_at
+            risk_json, would_action, expected_rr, expected_upside_pct,
+            defined_risk_pct, bottom_ticket_size_sol, expected_rr_detail_json,
+            matrix_json, ai_review_json, controller_action_json, denominator_key,
+            discovery_exit_json, principal_recovery_plan_json, moonbag_plan_json,
+            candidate_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_dedup_key) WHERE source_dedup_key IS NOT NULL DO UPDATE SET
             would_action=excluded.would_action,
             expected_rr=excluded.expected_rr,
+            expected_upside_pct=excluded.expected_upside_pct,
+            defined_risk_pct=excluded.defined_risk_pct,
+            bottom_ticket_size_sol=excluded.bottom_ticket_size_sol,
             expected_rr_detail_json=excluded.expected_rr_detail_json,
+            matrix_json=excluded.matrix_json,
+            ai_review_json=excluded.ai_review_json,
+            controller_action_json=excluded.controller_action_json,
             denominator_key=excluded.denominator_key,
-            discovery_exit_json=excluded.discovery_exit_json
+            discovery_exit_json=excluded.discovery_exit_json,
+            principal_recovery_plan_json=excluded.principal_recovery_plan_json,
+            moonbag_plan_json=excluded.moonbag_plan_json
         """,
         (
             now_ts,
@@ -364,9 +454,17 @@ def record_a_class_decision_event(
             _json_dumps(_get(decision, "risk_detail", {})),
             would_action,
             expected_rr,
+            expected_upside_pct,
+            defined_risk_pct,
+            bottom_ticket_size_sol,
             _json_dumps(expected_rr_detail),
+            _json_dumps(matrix_detail),
+            _json_dumps(ai_review),
+            _json_dumps(controller_action),
             denominator_key,
             _json_dumps(discovery_exit) if discovery_exit is not None else None,
+            _json_dumps(principal_recovery_plan),
+            _json_dumps(moonbag_plan),
             _json_dumps(candidate_dict),
             now_ts,
         ),
@@ -396,10 +494,13 @@ def record_canonical_trade_entry(db, trade):
             trapped_flag, no_route_flag, stale_flag, outlier_flag, outlier_reason,
             is_a_class_fastlane, a_class_grade, a_class_score, a_class_size_rule,
             a_class_freshness_sources_json, a_class_hard_prefilter_json,
-            a_class_budget_state_json, security_flags_json, gmgn_policy_json,
+            a_class_budget_state_json, expected_rr, expected_upside_pct,
+            defined_risk_pct, bottom_ticket_size_sol, principal_recovery_plan_json,
+            moonbag_plan_json, a_class_matrix_json, ai_review_json,
+            controller_action_json, security_flags_json, gmgn_policy_json,
             metadata_json, code_version, deploy_version, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trade_id) DO UPDATE SET
             updated_at=excluded.updated_at
         """
@@ -440,6 +541,15 @@ def record_canonical_trade_entry(db, trade):
             _json_dumps(_get(trade, "a_class_freshness_sources", [])),
             _json_dumps(_get(trade, "a_class_hard_prefilter", {})),
             _json_dumps(_get(trade, "a_class_budget_state", {})),
+            _safe_float(_get(trade, "expected_rr"), None),
+            _safe_float(_get(trade, "expected_upside_pct"), None),
+            _safe_float(_get(trade, "defined_risk_pct"), None),
+            _safe_float(_get(trade, "bottom_ticket_size_sol"), None),
+            _json_dumps(_get(trade, "principal_recovery_plan", {})),
+            _json_dumps(_get(trade, "moonbag_plan", {})),
+            _json_dumps(_get(trade, "a_class_matrix", {})),
+            _json_dumps(_get(trade, "ai_review", {})),
+            _json_dumps(_get(trade, "controller_action", {})),
             _json_dumps(_get(trade, "security_flags", [])),
             _json_dumps(_get(trade, "gmgn_policy", {})),
             _json_dumps(_get(trade, "metadata", {})),
@@ -580,8 +690,11 @@ def fetch_a_class_events(db, since_ts=None, limit=50):
                normalized_mode, source_table, source_id, source_component,
                source_reason, action, grade, size_sol, score, reason,
                hard_blockers_json, freshness_json, budget_json, risk_json,
-               would_action, expected_rr, expected_rr_detail_json,
-               denominator_key, discovery_exit_json, source_dedup_key
+               would_action, expected_rr, expected_upside_pct, defined_risk_pct,
+               bottom_ticket_size_sol, expected_rr_detail_json, matrix_json,
+               ai_review_json, controller_action_json, denominator_key,
+               discovery_exit_json, principal_recovery_plan_json,
+               moonbag_plan_json, source_dedup_key
         FROM a_class_decision_events
         {where}
         ORDER BY event_ts DESC, id DESC
@@ -614,12 +727,32 @@ def fetch_a_class_events(db, since_ts=None, limit=50):
             "risk_json": row[19],
             "would_action": row[20],
             "expected_rr": row[21],
-            "expected_rr_detail_json": row[22],
-            "denominator_key": row[23],
-            "discovery_exit_json": row[24],
-            "source_dedup_key": row[25],
+            "expected_upside_pct": row[22],
+            "defined_risk_pct": row[23],
+            "bottom_ticket_size_sol": row[24],
+            "expected_rr_detail_json": row[25],
+            "matrix_json": row[26],
+            "ai_review_json": row[27],
+            "controller_action_json": row[28],
+            "denominator_key": row[29],
+            "discovery_exit_json": row[30],
+            "principal_recovery_plan_json": row[31],
+            "moonbag_plan_json": row[32],
+            "source_dedup_key": row[33],
         }
-        for key in ("hard_blockers_json", "freshness_json", "budget_json", "risk_json", "expected_rr_detail_json", "discovery_exit_json"):
+        for key in (
+            "hard_blockers_json",
+            "freshness_json",
+            "budget_json",
+            "risk_json",
+            "expected_rr_detail_json",
+            "matrix_json",
+            "ai_review_json",
+            "controller_action_json",
+            "discovery_exit_json",
+            "principal_recovery_plan_json",
+            "moonbag_plan_json",
+        ):
             try:
                 item[key.replace("_json", "")] = json.loads(item.get(key) or "{}")
             except Exception:

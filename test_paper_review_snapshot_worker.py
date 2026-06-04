@@ -113,6 +113,7 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
         "route_health",
         "dog_catch_goal",
         "a_class_p0_discovery",
+        "ai_strategy_review",
     }
     assert snapshot["missed"]["available"] is True
     assert snapshot["missed"]["overall"]["unique_tokens"] == 1

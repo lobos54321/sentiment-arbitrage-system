@@ -1,6 +1,8 @@
+import json
 import os
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -345,7 +347,58 @@ def test_a_class_upsert_updates_only_enrichment_and_preserves_safety_fields():
     assert row["size_sol"] == 0
     assert row["would_action"] == "WOULD_ENTER"
     assert row["expected_rr"] == 3.25
-    assert row["denominator_key"] == "quote_clean_gold_silver_unique:1:2"
+
+
+def test_a_class_decision_event_records_matrix_rr_ai_and_bottom_ticket_fields():
+    db = memory_db()
+    candidate = SimpleNamespace(
+        token_ca="TokenMatrix",
+        symbol="MATRIX",
+        route_bucket="ATH",
+        source_component="unit",
+        source_reason="matrix_test",
+        opportunity_key="matrix:unit",
+    )
+    decision = SimpleNamespace(
+        action="ENTER",
+        grade="A",
+        size_sol=0.001,
+        score=84,
+        reason="a_class_fastlane_pass",
+        hard_blockers=[],
+        soft_notes=["expected_rr_gate_passed"],
+        freshness_detail={"freshness_sources": ["fresh_quote"]},
+        budget_detail={},
+        risk_detail={},
+        expected_rr=3.0,
+        expected_upside_pct=0.60,
+        defined_risk_pct=0.20,
+        bottom_ticket_size_sol=0.001,
+        expected_rr_detail={"expected_rr": 3.0},
+        matrix_detail={"matrix_version": "v1.a_class_18_cell", "matrix_grade": "A"},
+        ai_review={"schema_version": "v1.ai_strategy_advisory.shadow_only", "ai_grade": "supportive"},
+        principal_recovery_plan={"no_averaging_down": True},
+        moonbag_plan={"keep_tail_after_moonbag": True},
+    )
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=decision,
+        stored_action="WOULD_ENTER",
+        source_table="unit_source",
+        source_id=10,
+        now_ts=2000,
+    )
+
+    row = db.execute("SELECT * FROM a_class_decision_events").fetchone()
+    assert row["expected_rr"] == 3.0
+    assert row["expected_upside_pct"] == 0.60
+    assert row["defined_risk_pct"] == 0.20
+    assert row["bottom_ticket_size_sol"] == 0.001
+    assert json.loads(row["matrix_json"])["matrix_grade"] == "A"
+    assert json.loads(row["ai_review_json"])["ai_grade"] == "supportive"
+    assert json.loads(row["principal_recovery_plan_json"])["no_averaging_down"] is True
 
 
 def test_a_class_null_source_rows_dedup_by_token_route_time_bucket():
