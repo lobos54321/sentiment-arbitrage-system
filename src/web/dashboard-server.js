@@ -1818,9 +1818,63 @@ function sqliteDownloadUsesBackup(url) {
   return !['0', 'false', 'raw'].includes(String(url.searchParams.get('backup') || '1').toLowerCase());
 }
 
+function sqliteDbFamilySizeBytes(sourcePath) {
+  let total = 0;
+  for (const path of [sourcePath, `${sourcePath}-wal`, `${sourcePath}-shm`]) {
+    try {
+      if (fs.existsSync(path)) total += fs.statSync(path).size;
+    } catch {}
+  }
+  return total;
+}
+
+function sqliteSnapshotSpaceRequirementBytes(sourcePath) {
+  const familyBytes = sqliteDbFamilySizeBytes(sourcePath);
+  const multiplier = Number(process.env.SQLITE_DOWNLOAD_SPACE_MULTIPLIER || 1.35);
+  const minReserveMb = Number(process.env.SQLITE_DOWNLOAD_MIN_FREE_MB || 256);
+  return Math.ceil(familyBytes * Math.max(1.0, multiplier) + minReserveMb * 1024 * 1024);
+}
+
+function assertSqliteDownloadSpace(sourcePath, snapshotDir, options = {}) {
+  if (options.skipSpaceCheck) return null;
+  if (typeof fs.statfsSync !== 'function') return null;
+  let stats;
+  try {
+    stats = fs.statfsSync(snapshotDir);
+  } catch (error) {
+    const err = new Error(`snapshot space check failed: ${error.message}`);
+    err.statusCode = 507;
+    throw err;
+  }
+  const free = Number(stats.bavail || stats.bfree || 0) * Number(stats.bsize || 0);
+  const required = sqliteSnapshotSpaceRequirementBytes(sourcePath);
+  if (free > 0 && free < required) {
+    const err = new Error(
+      `insufficient snapshot space: free_mb=${Math.round((free / (1024 * 1024)) * 100) / 100} ` +
+      `required_mb=${Math.round((required / (1024 * 1024)) * 100) / 100}`
+    );
+    err.statusCode = 507;
+    err.detail = {
+      snapshot_dir: snapshotDir,
+      free_bytes: free,
+      required_bytes: required,
+      sqlite_family_bytes: sqliteDbFamilySizeBytes(sourcePath),
+    };
+    throw err;
+  }
+  return {
+    snapshot_dir: snapshotDir,
+    free_bytes: free,
+    required_bytes: required,
+    sqlite_family_bytes: sqliteDbFamilySizeBytes(sourcePath),
+  };
+}
+
 function tempSqliteDownloadPath(prefix) {
   const safePrefix = String(prefix || 'sqlite_download').replace(/[^a-z0-9_-]/gi, '_').slice(0, 48);
-  return join('/tmp', `${safePrefix}_${process.pid}_${Date.now()}_${randomUUID()}.db`);
+  const tmpDir = process.env.SQLITE_DOWNLOAD_TMP_DIR || '/tmp';
+  try { fs.mkdirSync(tmpDir, { recursive: true }); } catch {}
+  return join(tmpDir, `${safePrefix}_${process.pid}_${Date.now()}_${randomUUID()}.db`);
 }
 
 async function createSqliteDownloadSnapshot(sourcePath, prefix, options = {}) {
@@ -1845,12 +1899,17 @@ async function createSqliteDownloadSnapshot(sourcePath, prefix, options = {}) {
       };
     }
     snapshotPath = tempSqliteDownloadPath(prefix);
+    const snapshotDir = dirname(snapshotPath);
+    const space = assertSqliteDownloadSpace(sourcePath, snapshotDir, {
+      skipSpaceCheck: options.skipSpaceCheck,
+    });
     await sourceDb.backup(snapshotPath);
     return {
       path: snapshotPath,
       cleanupPath: snapshotPath,
       mode: 'sqlite_backup_snapshot',
       note: 'WAL-safe SQLite backup snapshot',
+      space,
     };
   } catch (error) {
     try { if (snapshotPath && fs.existsSync(snapshotPath)) fs.unlinkSync(snapshotPath); } catch {}
@@ -1891,16 +1950,24 @@ async function downloadSqliteDatabase(req, res, url, sourcePath, filename, label
       download = await createSqliteDownloadSnapshot(sourcePath, prefix, {
         label,
         timeoutMs: boundedIntParam(url, 'backup_timeout_ms', 10000, 1000, 60000),
+        skipSpaceCheck: ['1', 'true', 'yes'].includes(String(url.searchParams.get('skip_space_check') || '').toLowerCase()),
       });
     }
     streamDownloadFile(res, download.path, filename, download.cleanupPath, {
       'X-SQLite-Download-Mode': download.mode,
       'X-SQLite-Download-Note': download.note,
       'X-SQLite-Source-Path': sourcePath,
+      'X-SQLite-Family-Bytes': String(download.space?.sqlite_family_bytes ?? sqliteDbFamilySizeBytes(sourcePath)),
+      'X-SQLite-Snapshot-Required-Bytes': String(download.space?.required_bytes ?? ''),
     });
   } catch (error) {
     res.writeHead(error.statusCode || 500, apiJsonHeaders());
-    res.end(JSON.stringify({ error: `${label} backup failed: ${error.message}`, path: sourcePath }));
+    res.end(JSON.stringify({
+      error: `${label} backup failed: ${error.message}`,
+      path: sourcePath,
+      detail: error.detail || null,
+      storage_health: buildStorageHealthSnapshot({ includeDisk: true, includeFileStats: true }),
+    }));
   }
   return true;
 }

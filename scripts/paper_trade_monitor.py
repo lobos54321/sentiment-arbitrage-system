@@ -73,8 +73,15 @@ from paper_decision_audit import (
     update_due_missed_attributions,
 )
 from a_class_fastlane import record_a_class_fastlane_shadow_candidates
-from canonical_ledger import init_canonical_ledger
+from canonical_ledger import (
+    init_canonical_ledger,
+    record_canonical_trade_entry,
+    record_canonical_trade_exit,
+    record_canonical_trade_path_update,
+)
 from fastlane_config import load_a_class_config
+from final_entry_contract import evaluate_final_entry_contract
+from opportunity_events import record_opportunity_event
 from paper_evidence_log import append_paper_evidence_event
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
@@ -90,7 +97,7 @@ from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
 from gmgn_policy import evaluate_gmgn_lotto_policy, evaluate_gmgn_tiny_scout_rescue
 from scout_quality import SCOUT_QUALITY_SIZE_CAP_SOL, evaluate_scout_quality
-from entry_mode_registry import entry_mode_registry_entry
+from entry_mode_registry import entry_mode_registry_entry, normalize_entry_mode
 from entry_mode_quality import evaluate_entry_mode_quality
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
@@ -12552,6 +12559,196 @@ def with_lifecycle_payload(payload, lifecycle):
     return data
 
 
+def _env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _fractional_pct(value):
+    """Convert a percent-like value into ratio-decimal when needed.
+
+    Existing entry contracts use percent units (15.0 means 15%).  The final
+    gate and ledger use ratio units (0.15 means 15%).
+    """
+    number = _safe_float(value, None)
+    if number is None:
+        return None
+    return number / 100.0 if abs(number) > 1.0 else number
+
+
+def _entry_contract_rr_fields(entry_decision_contract):
+    contract = entry_decision_contract.to_dict() if hasattr(entry_decision_contract, 'to_dict') else (entry_decision_contract or {})
+    expected_upside_pct = _fractional_pct(contract.get('expected_upside_pct'))
+    defined_risk_pct = _fractional_pct(contract.get('expected_loss_pct'))
+    expected_rr = _safe_float(contract.get('odds_r'), None)
+    if expected_rr is None and expected_upside_pct is not None and defined_risk_pct and defined_risk_pct > 0:
+        expected_rr = expected_upside_pct / defined_risk_pct
+    return {
+        'expected_rr': expected_rr if expected_rr and expected_rr > 0 else None,
+        'expected_upside_pct': expected_upside_pct,
+        'defined_risk_pct': defined_risk_pct,
+        'entry_decision_contract': contract,
+    }
+
+
+def _quote_age_sec_from_execution(execution, now_ts):
+    execution = execution if isinstance(execution, dict) else {}
+    quote_ts = _safe_float(execution.get('quoteTs') or execution.get('quote_ts') or execution.get('timestamp'), None)
+    if quote_ts is None:
+        return 0.0
+    if quote_ts > 10_000_000_000:
+        quote_ts = quote_ts / 1000.0
+    return max(0.0, float(now_ts or time.time()) - quote_ts)
+
+
+def _final_contract_risk_flags(pending, token_risk=None):
+    pending = pending or {}
+    flags = []
+    raw_flags = pending.get('risk_flags') or pending.get('security_flags') or []
+    if isinstance(raw_flags, str):
+        flags.append(raw_flags)
+    else:
+        try:
+            flags.extend([str(flag) for flag in raw_flags])
+        except TypeError:
+            pass
+    token_risk = token_risk if isinstance(token_risk, dict) else {}
+    if token_risk.get('blocked'):
+        flags.append(str(token_risk.get('reason') or 'security_red'))
+    for key in ('creator_close', 'creator_dump', 'obvious_rug', 'honeypot', 'security_red'):
+        if pending.get(key):
+            flags.append(key)
+    return sorted({flag for flag in flags if flag})
+
+
+def build_final_entry_contract_candidate(
+    *,
+    pending,
+    execution,
+    entry_mode,
+    normalized_mode,
+    route_bucket,
+    lifecycle_id,
+    entry_ts,
+    entry_price,
+    position_size_sol,
+    token_amount_raw,
+    token_decimals,
+    spread_pct,
+    liquidity_usd,
+    market_cap,
+    entry_decision_contract,
+    entry_execution_availability,
+    entry_execution_data_source,
+    entry_lifecycle=None,
+    token_risk=None,
+    now_ts=None,
+):
+    pending = pending or {}
+    execution = execution if isinstance(execution, dict) else {}
+    now_ts = float(now_ts or time.time())
+    rr_fields = _entry_contract_rr_fields(entry_decision_contract)
+    executable = bool(execution.get('success')) and not bool(execution.get('syntheticPaperEntry'))
+    quote_age_sec = _quote_age_sec_from_execution(execution, now_ts)
+    route_available = executable and str(execution.get('failureReason') or '').lower() not in {
+        'no_route',
+        'route_unavailable',
+        'trapped',
+    }
+    return {
+        'token_ca': pending.get('token_ca'),
+        'symbol': pending.get('symbol'),
+        'lifecycle_id': lifecycle_id,
+        'route_bucket': route_bucket,
+        'entry_mode': entry_mode,
+        'normalized_mode': normalized_mode,
+        'quote_source': entry_execution_data_source,
+        'quote_available': executable,
+        'quote_executable': executable,
+        'quote_clean': executable,
+        'route_available': route_available,
+        'quote_age_sec': quote_age_sec,
+        'input_sol': position_size_sol,
+        'entry_size_sol': position_size_sol,
+        'valuation_sol': position_size_sol,
+        'entry_price': entry_price,
+        'price_sol_per_token': entry_price,
+        'token_amount_raw': str(token_amount_raw),
+        'token_decimals': token_decimals or 0,
+        'spread_pct': spread_pct,
+        'liquidity_usd': liquidity_usd,
+        'market_cap': market_cap,
+        'data_confidence': 'quote_only' if executable else entry_execution_availability,
+        'expected_rr': rr_fields.get('expected_rr'),
+        'expected_upside_pct': rr_fields.get('expected_upside_pct'),
+        'defined_risk_pct': rr_fields.get('defined_risk_pct'),
+        'risk_flags': _final_contract_risk_flags(pending, token_risk=token_risk),
+        'creator_close': pending.get('creator_close'),
+        'creator_dump': pending.get('creator_dump'),
+        'recent_hard_loss': pending.get('recent_hard_loss'),
+        'recent_trapped_or_no_route': pending.get('recent_trapped_or_no_route'),
+        'prior_fastlane_in_lifecycle': pending.get('prior_fastlane_in_lifecycle'),
+        'prior_exposure_in_lifecycle': pending.get('prior_exposure_in_lifecycle'),
+        'top10_pct': pending.get('top10_pct'),
+        'bundler_rate': pending.get('bundler_rate'),
+        'rat_trader_rate': pending.get('rat_trader_rate'),
+        'entrapment_ratio': pending.get('entrapment_ratio'),
+        'signal_ts': pending.get('signal_ts'),
+        'opportunity_ts': entry_ts,
+        'source_component': pending.get('source_component') or pending.get('entry_mode') or entry_mode,
+        'source_reason': pending.get('source_reject_reason') or pending.get('entry_reason') or pending.get('reason'),
+        'entry_lifecycle': entry_lifecycle or {},
+        'entry_decision_contract': rr_fields.get('entry_decision_contract'),
+        'execution': build_execution_audit(execution, {
+            'entryExecutionAvailability': entry_execution_availability,
+            'entryExecutionDataSource': entry_execution_data_source,
+        }),
+    }
+
+
+def record_monitor_opportunity_event(db, *, final_candidate, final_decision, event_ts, linked_trade_id=None, did_enter=False):
+    decision_dict = final_decision.to_dict() if hasattr(final_decision, 'to_dict') else (final_decision or {})
+    candidate = final_candidate or {}
+    opportunity_key = (
+        candidate.get('opportunity_key')
+        or f"paper_entry:{candidate.get('lifecycle_id') or candidate.get('token_ca')}:{int(event_ts or time.time())}"
+    )
+    return record_opportunity_event(
+        db,
+        {
+            'opportunity_key': opportunity_key,
+            'event_ts': event_ts,
+            'token_ca': candidate.get('token_ca'),
+            'symbol': candidate.get('symbol'),
+            'lifecycle_id': candidate.get('lifecycle_id'),
+            'source_type': 'paper_trade_monitor',
+            'source_component': candidate.get('source_component'),
+            'source_reason': candidate.get('source_reason'),
+            'route_bucket': candidate.get('route_bucket'),
+            'raw_signal_ts': candidate.get('signal_ts'),
+            'opportunity_ts': candidate.get('opportunity_ts'),
+            'quote_available': candidate.get('quote_available'),
+            'quote_executable': candidate.get('quote_executable'),
+            'quote_clean': candidate.get('quote_clean'),
+            'route_available': candidate.get('route_available'),
+            'liquidity_usd': candidate.get('liquidity_usd'),
+            'spread_pct': candidate.get('spread_pct'),
+            'market_cap': candidate.get('market_cap'),
+            'expected_rr': candidate.get('expected_rr'),
+            'defined_risk_pct': candidate.get('defined_risk_pct'),
+            'hard_blockers': decision_dict.get('hard_blockers', []),
+            'soft_notes': decision_dict.get('soft_notes', []),
+            'would_enter_a_class': decision_dict.get('decision') == 'PASS',
+            'did_enter': did_enter,
+            'linked_trade_id': linked_trade_id,
+            'final_entry_decision': decision_dict,
+            'raw_payload': candidate,
+        },
+    )
+
+
 def _scout_event_key(row):
     lifecycle_id = row['lifecycle_id'] if 'lifecycle_id' in row.keys() else None
     token_ca = row['token_ca'] if 'token_ca' in row.keys() else None
@@ -24645,11 +24842,23 @@ def run_monitor(db):
                     _policy_version = pending.get('policy_version')
                     _intervention_flags = _normalize_intervention_flags(pending.get('intervention_flags') or [])
                     _intervention_flags_json = json.dumps(_intervention_flags) if _intervention_flags else None
+                    _raw_entry_mode = pending.get('entry_mode') or timing_reason
+                    _normalized_entry_mode = normalize_entry_mode(
+                        raw_entry_mode=_raw_entry_mode,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        detail={
+                            'entry_branch': _entry_branch,
+                            'strategy_stage': _pending_strategy_stage,
+                            'source_component': pending.get('source_component'),
+                            'source_reason': pending.get('source_reject_reason') or pending.get('entry_reason'),
+                        },
+                    )
                     _monitor_state = {
                         'tokenCA': pending['token_ca'],
                         'symbol': pending['symbol'],
                         'entryPrice': price,
-                        'entryMode': pending.get('entry_mode') or timing_reason,
+                        'entryMode': _raw_entry_mode,
+                        'normalizedEntryMode': _normalized_entry_mode,
                         'entryTriggerPrice': trigger_price_val,
                         'entryQuotePrice': price,
                         'entryPriceUnit': PRICE_UNIT_SOL_PER_TOKEN,
@@ -24727,6 +24936,87 @@ def run_monitor(db):
                         if execution.get('syntheticPaperEntry')
                         else 'available'
                     )
+                    _entry_liquidity_usd = _first_number(
+                        (_entry_lifecycle.get('lifecycle_features') or {}).get('liquidity_usd'),
+                        (_entry_lifecycle.get('lifecycle_features') or {}).get('last_liquidity'),
+                        (_entry_dex_snapshot or {}).get('liquidity_usd'),
+                        pending.get('liquidity_usd'),
+                    ) or None
+                    _entry_market_cap = _first_number(
+                        (_entry_lifecycle.get('lifecycle_features') or {}).get('market_cap'),
+                        (_entry_dex_snapshot or {}).get('market_cap'),
+                        (_entry_dex_snapshot or {}).get('fdv'),
+                        pending.get('market_cap'),
+                        pending.get('signal_mc'),
+                    ) or None
+                    _final_entry_candidate = build_final_entry_contract_candidate(
+                        pending=pending,
+                        execution=execution,
+                        entry_mode=_raw_entry_mode,
+                        normalized_mode=_normalized_entry_mode,
+                        route_bucket=_pending_signal_route or pending.get('signal_type'),
+                        lifecycle_id=lifecycle_id,
+                        entry_ts=entry_ts,
+                        entry_price=price,
+                        position_size_sol=actual_position_size_sol,
+                        token_amount_raw=token_amount_raw,
+                        token_decimals=token_decimals or 0,
+                        spread_pct=_spread,
+                        liquidity_usd=_entry_liquidity_usd,
+                        market_cap=_entry_market_cap,
+                        entry_decision_contract=_entry_decision_contract,
+                        entry_execution_availability=_entry_execution_availability,
+                        entry_execution_data_source=_entry_execution_data_source,
+                        entry_lifecycle=_entry_lifecycle,
+                        token_risk=_token_risk,
+                        now_ts=now,
+                    )
+                    _final_entry_decision = evaluate_final_entry_contract(
+                        _final_entry_candidate,
+                        config=a_class_config,
+                        now_ts=now,
+                    )
+                    _final_entry_decision_payload = _final_entry_decision.to_dict()
+                    _monitor_state['finalEntryContract'] = _final_entry_decision_payload
+                    _monitor_state['finalEntryContractEnforce'] = _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False)
+                    record_decision_event(
+                        db,
+                        component='final_entry_contract',
+                        event_type='entry_audit' if _final_entry_decision.passed else 'entry_block',
+                        decision=_final_entry_decision.decision.lower(),
+                        reason=_final_entry_decision.reason,
+                        token_ca=pending['token_ca'],
+                        symbol=pending['symbol'],
+                        lifecycle_id=lifecycle_id,
+                        signal_ts=pending['signal_ts'],
+                        signal_id=pending.get('premium_signal_id'),
+                        strategy_stage=_pending_strategy_stage,
+                        route=_pending_signal_route or pending.get('signal_type'),
+                        data_source='executable_sol_valuation+final_entry_contract',
+                        payload=with_lifecycle_payload({
+                            **_final_entry_decision_payload,
+                            'candidate': _final_entry_candidate,
+                            'enforced': _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False),
+                        }, _entry_lifecycle),
+                    )
+                    if (not _final_entry_decision.passed) and _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False):
+                        try:
+                            record_monitor_opportunity_event(
+                                db,
+                                final_candidate=_final_entry_candidate,
+                                final_decision=_final_entry_decision,
+                                event_ts=entry_ts,
+                                linked_trade_id=None,
+                                did_enter=False,
+                            )
+                        except Exception as exc:
+                            log.debug(f"  [OPPORTUNITY_EVENT] final block record failed for {pending['symbol']}: {exc}", exc_info=True)
+                        log.info(
+                            f"  [FINAL_ENTRY_CONTRACT] 🚫 {pending['symbol']} BLOCKED: "
+                            f"{_final_entry_decision.reason} blockers={_final_entry_decision.hard_blockers}"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
                     _entry_evidence_payload = {
                         'strategy_id': _pending_strategy_id,
                         'strategy_role': strategy_role,
@@ -24748,7 +25038,8 @@ def run_monitor(db):
                         'premium_signal_id': pending.get('premium_signal_id'),
                         'signal_type': pending.get('signal_type') or 'NEW_TRENDING',
                         'signal_route': _pending_signal_route,
-                        'entry_mode': pending.get('entry_mode') or timing_reason,
+                        'entry_mode': _raw_entry_mode,
+                        'normalized_entry_mode': _normalized_entry_mode,
                         'entry_branch': _entry_branch,
                         'policy_version': _policy_version,
                         'capital_tier': _capital_tier,
@@ -24762,6 +25053,7 @@ def run_monitor(db):
                         'entry_latency_audit': _entry_latency_audit,
                         'entry_execution_eligibility': _entry_execution_eligibility,
                         'entry_decision_contract': _entry_decision_contract.to_dict(),
+                        'final_entry_contract': _final_entry_decision_payload,
                         'intervention_flags': _intervention_flags,
                     }
                     append_paper_evidence_event(
@@ -24807,6 +25099,8 @@ def run_monitor(db):
                                 'entryReadinessPolicy': pending.get('entry_readiness_policy'),
                                 'entryExecutionEligibility': _entry_execution_eligibility,
                                 'entryDecisionContract': _entry_decision_contract.to_dict(),
+                                'finalEntryContract': _final_entry_decision_payload,
+                                'normalizedEntryMode': _normalized_entry_mode,
                                 'entryLatencyAudit': _entry_latency_audit,
                                 'positionSizeSol': actual_position_size_sol,
                                 'capitalTier': _capital_tier,
@@ -24831,7 +25125,7 @@ def run_monitor(db):
                                 'originalFailureReason': execution.get('originalFailureReason'),
                             })), json.dumps(_monitor_state),
                             pending.get('premium_signal_id'), pending.get('signal_type') or 'NEW_TRENDING',
-                            _pending_signal_route, pending.get('entry_mode') or timing_reason,
+                            _pending_signal_route, _raw_entry_mode,
                             json.dumps(_pending_lotto_state) if _pending_lotto_state else None,
                             _entry_lifecycle.get('lifecycle_state'), _entry_lifecycle.get('vitality_score'),
                             _entry_lifecycle.get('entry_bias'), json.dumps(_entry_lifecycle.get('lifecycle_features') or {}),
@@ -24852,6 +25146,83 @@ def run_monitor(db):
                         label=f"paper_entry_insert:{pending.get('symbol')}:{lifecycle_id}",
                         attempts=5,
                     )
+                    try:
+                        _final_entry_blockers = set(_final_entry_decision.hard_blockers or [])
+                        _raw_entry_mode_l = str(_raw_entry_mode or '').lower()
+                        _is_a_class_entry = (
+                            _normalized_entry_mode == 'A_CLASS_FASTLANE'
+                            or 'a_class' in _raw_entry_mode_l
+                            or 'fastlane' in _raw_entry_mode_l
+                            or 'fast_lane' in _raw_entry_mode_l
+                        )
+                        record_canonical_trade_entry(
+                            db,
+                            {
+                                'trade_id': str(trade_id),
+                                'token_ca': pending['token_ca'],
+                                'symbol': pending['symbol'],
+                                'lifecycle_id': lifecycle_id,
+                                'route_bucket': _pending_signal_route or pending.get('signal_type'),
+                                'entry_mode': _raw_entry_mode,
+                                'normalized_mode': _normalized_entry_mode,
+                                'strategy_family': _normalized_entry_mode,
+                                'source_component': _final_entry_candidate.get('source_component'),
+                                'source_reason': _final_entry_candidate.get('source_reason'),
+                                'entry_ts': entry_ts,
+                                'entry_size_sol': actual_position_size_sol,
+                                'entry_price': price,
+                                'entry_quote_out_raw': str(token_amount_raw),
+                                'entry_quote_source': _entry_execution_data_source,
+                                'entry_route_available': _final_entry_candidate.get('route_available'),
+                                'entry_quote_executable': _final_entry_candidate.get('quote_executable'),
+                                'entry_quote_age_sec': _final_entry_candidate.get('quote_age_sec'),
+                                'entry_spread_pct': _spread,
+                                'entry_liquidity_usd': _entry_liquidity_usd,
+                                'entry_market_cap': _entry_market_cap,
+                                'entry_data_confidence': _final_entry_candidate.get('data_confidence'),
+                                'trapped_flag': 'trapped' in _final_entry_blockers,
+                                'no_route_flag': 'route_unavailable' in _final_entry_blockers,
+                                'stale_flag': 'quote_stale' in _final_entry_blockers,
+                                'is_a_class_fastlane': _is_a_class_entry,
+                                'a_class_grade': (
+                                    'A_CLASS_CONTRACT_PASS'
+                                    if _is_a_class_entry and _final_entry_decision.passed
+                                    else None
+                                ),
+                                'a_class_hard_prefilter': _final_entry_decision_payload,
+                                'expected_rr': _final_entry_candidate.get('expected_rr'),
+                                'expected_upside_pct': _final_entry_candidate.get('expected_upside_pct'),
+                                'defined_risk_pct': _final_entry_candidate.get('defined_risk_pct'),
+                                'bottom_ticket_size_sol': actual_position_size_sol if _is_a_class_entry else None,
+                                'security_flags': _final_entry_candidate.get('risk_flags'),
+                                'metadata': {
+                                    'entry_execution_eligibility': _entry_execution_eligibility,
+                                    'entry_decision_contract': _entry_decision_contract.to_dict(),
+                                    'final_entry_contract': _final_entry_decision_payload,
+                                    'runtime_mode_gate': _runtime_mode_gate,
+                                    'entry_latency_audit': _entry_latency_audit,
+                                    'execution': build_execution_audit(execution),
+                                    'legacy_path_entered_despite_final_contract_block': not _final_entry_decision.passed,
+                                },
+                                'code_version': os.environ.get('GIT_COMMIT') or os.environ.get('COMMIT_SHA'),
+                                'deploy_version': os.environ.get('DEPLOY_VERSION') or os.environ.get('ZEABUR_DEPLOYMENT_ID'),
+                            },
+                        )
+                        record_monitor_opportunity_event(
+                            db,
+                            final_candidate=_final_entry_candidate,
+                            final_decision=_final_entry_decision,
+                            event_ts=entry_ts,
+                            linked_trade_id=str(trade_id),
+                            did_enter=True,
+                        )
+                        log.info(
+                            f"[LEDGER_ENTRY] trade_id={trade_id} symbol={pending['symbol']} "
+                            f"mode={_normalized_entry_mode} final={_final_entry_decision.decision} "
+                            f"blockers={_final_entry_decision.hard_blockers}"
+                        )
+                    except Exception as exc:
+                        log.warning(f"[LEDGER_ENTRY] failed trade_id={trade_id} symbol={pending['symbol']}: {exc}", exc_info=True)
                     append_paper_evidence_event(
                         source='paper_trade_monitor',
                         event_type='paper_trade_entry_committed',
@@ -24895,6 +25266,8 @@ def run_monitor(db):
                             'entry_readiness_policy': pending.get('entry_readiness_policy'),
                             'entry_execution_eligibility': _entry_execution_eligibility,
                             'entry_decision_contract': _entry_decision_contract.to_dict(),
+                            'final_entry_contract': _final_entry_decision_payload,
+                            'normalized_entry_mode': _normalized_entry_mode,
                             'revival_canary': bool(pending.get('revival_canary')),
                             'policy_version': _policy_version,
                             'entry_branch': _entry_branch,
@@ -25276,14 +25649,54 @@ def run_monitor(db):
                         # === BUG FIX: Persist all dynamic state back to watchlist DB ===
                         # Without this, peak_pnl stays 0 forever and Trail/Lock never fires
                         state_updates = {'last_matrix_check': time.time()}
-                        
+                        _ledger_path_now = time.time()
+                        _ledger_prev_quote_peak = _safe_float(getattr(pos, 'quote_peak_pnl', None), 0.0) or 0.0
                         peak_state = update_position_peak_state(
                             pos,
                             current_pnl=exit_matrix.get('current_pnl'),
                             price_source=pre_src,
-                            now_ts=time.time(),
+                            now_ts=_ledger_path_now,
                         )
                         state_updates['peak_pnl'] = peak_state['trusted_peak_pnl']
+                        try:
+                            _ledger_last_path_ts = _safe_float((pos.monitor_state or {}).get('lastLedgerPathUpdateTs'), 0.0) or 0.0
+                            _ledger_min_path_sec = max(
+                                5,
+                                int(os.environ.get('CANONICAL_LEDGER_PATH_UPDATE_MIN_SEC', '30')),
+                            )
+                            _ledger_quote_peak = _safe_float(peak_state.get('quote_peak_pnl'), None)
+                            _ledger_current_quote_pnl = (
+                                _safe_float(exit_matrix.get('current_pnl'), None)
+                                if is_quote_price_source(pre_src) else None
+                            )
+                            if (
+                                _ledger_quote_peak is not None
+                                and (
+                                    _ledger_quote_peak > _ledger_prev_quote_peak
+                                    or (_ledger_path_now - _ledger_last_path_ts) >= _ledger_min_path_sec
+                                )
+                            ):
+                                record_canonical_trade_path_update(
+                                    db,
+                                    str(pos.trade_id),
+                                    {
+                                        'updated_at': _ledger_path_now,
+                                        'current_quote_pnl_pct': _ledger_current_quote_pnl,
+                                        'peak_quote_pnl_pct': _ledger_quote_peak,
+                                        'positive_feedback_seen': _ledger_quote_peak > 0,
+                                    },
+                                )
+                                pos.monitor_state = dict(pos.monitor_state or {})
+                                pos.monitor_state['lastLedgerPathUpdateTs'] = _ledger_path_now
+                                log.debug(
+                                    f"[LEDGER_UPDATE] trade_id={pos.trade_id} symbol={pos.symbol} "
+                                    f"quote_peak={_ledger_quote_peak}"
+                                )
+                        except ValueError:
+                            # Positions opened before ledger wiring will not have a canonical row.
+                            pass
+                        except Exception as exc:
+                            log.debug(f"[LEDGER_UPDATE] skipped trade_id={pos.trade_id} symbol={pos.symbol}: {exc}", exc_info=True)
                         
                         # Persist moon_peak_pnl (critical for moon trail)
                         if exit_matrix.get('moon_peak_pnl') is not None:
@@ -26442,6 +26855,78 @@ def run_monitor(db):
                     max_sleep_sec=float(os.environ.get("PAPER_CLOSE_WRITE_RETRY_MAX_SEC", "6.0")),
                     lock_timeout_sec=float(os.environ.get("PAPER_CLOSE_WRITE_LOCK_TIMEOUT_SEC", "18.0")),
                 )
+                try:
+                    _exit_quote_freshness = exit_eval.get('quoteFreshness')
+                    if isinstance(_exit_quote_freshness, dict):
+                        _exit_quote_age_sec = _safe_float(
+                            _exit_quote_freshness.get('ageSec')
+                            or _exit_quote_freshness.get('quote_age_sec')
+                            or _exit_quote_freshness.get('age_sec'),
+                            None,
+                        )
+                    else:
+                        _exit_quote_age_sec = _safe_float(_exit_quote_freshness, None)
+                    _exit_route_available = (
+                        not synthetic_exit
+                        and not is_force_timeout
+                        and actual_out is not None
+                        and bool(exit_execution.get('success', True))
+                    )
+                    _exit_reason_l = str(reason or '').lower()
+                    _ledger_peak_quote_pnl = _safe_float(pos.quote_peak_pnl, None)
+                    _ledger_peak_quote_sol = (
+                        _safe_float(pos.position_size_sol, 0.0) * _ledger_peak_quote_pnl
+                        if _ledger_peak_quote_pnl is not None else None
+                    )
+                    _ledger_drawdown = min(
+                        [
+                            value for value in (
+                                _safe_float(realized_pnl, None),
+                                _safe_float(trigger_pnl, None),
+                                _safe_float(exit_quote_pnl, None),
+                                0.0,
+                            )
+                            if value is not None and value == value
+                        ],
+                        default=None,
+                    )
+                    record_canonical_trade_exit(
+                        db,
+                        str(pos.trade_id),
+                        {
+                            'exit_ts': exit_ts,
+                            'exit_price': effective_exit_price,
+                            'exit_quote_out_sol': _safe_float(actual_out, None),
+                            'realized_exit_sol': _safe_float(total_realized_sol, _safe_float(actual_out, None)),
+                            'exit_quote_source': mark_source,
+                            'exit_route_available': _exit_route_available,
+                            'exit_quote_executable': _exit_route_available,
+                            'exit_quote_age_sec': _exit_quote_age_sec,
+                            'exit_reason': reason,
+                            'total_fees_sol': _safe_float(exit_execution.get('feeEstimate'), 0.0) or 0.0,
+                            'slippage_bps': _safe_float(exit_execution.get('slippageBps'), None),
+                            'accounting_source': accounting_source,
+                            'peak_quote_pnl_pct': _ledger_peak_quote_pnl,
+                            'peak_quote_pnl_sol': _ledger_peak_quote_sol,
+                            'max_drawdown_pct': _ledger_drawdown,
+                            'positive_feedback_seen': (_ledger_peak_quote_pnl is not None and _ledger_peak_quote_pnl > 0),
+                            'trapped_flag': 'trapped' in _exit_reason_l,
+                            'no_route_flag': 'no_route' in _exit_reason_l or 'route' in str(exit_execution.get('failureReason') or '').lower(),
+                            'stale_flag': 'stale' in _exit_reason_l,
+                            'outlier_flag': synthetic_exit or is_force_timeout,
+                            'outlier_reason': 'synthetic_or_force_timeout_exit' if (synthetic_exit or is_force_timeout) else None,
+                        },
+                    )
+                    log.info(
+                        f"[LEDGER_EXIT] trade_id={pos.trade_id} symbol={pos.symbol} "
+                        f"reason={reason} realized_sol={_safe_float(total_realized_sol, None)} "
+                        f"accounting={accounting_source}"
+                    )
+                except ValueError:
+                    # Positions opened before ledger wiring will not have a canonical row.
+                    pass
+                except Exception as exc:
+                    log.warning(f"[LEDGER_EXIT] failed trade_id={pos.trade_id} symbol={pos.symbol}: {exc}", exc_info=True)
                 record_decision_event(
                     db,
                     component='trade_lifecycle',

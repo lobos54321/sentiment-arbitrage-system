@@ -636,6 +636,101 @@ def record_canonical_trade_exit(db, trade_id, exit_data):
         pass
 
 
+def record_canonical_trade_path_update(db, trade_id, path_data):
+    """Update quote-trusted path metrics without closing the trade.
+
+    The ledger remains SOL-accounting-primary.  Path values are evidence for
+    convexity capture, DOA, and stop-before-peak analysis; they should never
+    replace realized SOL PnL.
+    """
+    init_canonical_ledger(db)
+    now_ts = float(_get(path_data, "updated_at", None) or time.time())
+    row = db.execute(
+        """
+        SELECT entry_size_sol, entry_ts, peak_quote_pnl_pct, max_drawdown_pct,
+               first_positive_feedback_sec
+        FROM canonical_trade_ledger
+        WHERE trade_id = ?
+        """,
+        (str(trade_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"trade_id not found: {trade_id}")
+
+    entry_size_sol = _safe_float(row[0], 0.0) or 0.0
+    entry_ts = _safe_float(row[1], None)
+    previous_peak = _safe_float(row[2], None)
+    previous_drawdown = _safe_float(row[3], None)
+    previous_first_positive = _safe_float(row[4], None)
+
+    observed_peak = _safe_float(_get(path_data, "peak_quote_pnl_pct"), None)
+    current_quote_pnl = _safe_float(_get(path_data, "current_quote_pnl_pct"), None)
+    if observed_peak is None:
+        observed_peak = current_quote_pnl
+    peak_candidates = [value for value in (previous_peak, observed_peak) if value is not None and value == value]
+    new_peak = max(peak_candidates) if peak_candidates else None
+    peak_sol = entry_size_sol * new_peak if new_peak is not None else None
+
+    observed_drawdown = _safe_float(_get(path_data, "max_drawdown_pct"), None)
+    if observed_drawdown is None and current_quote_pnl is not None:
+        observed_drawdown = current_quote_pnl
+    drawdown_candidates = [
+        value for value in (previous_drawdown, observed_drawdown) if value is not None and value == value
+    ]
+    new_drawdown = min(drawdown_candidates) if drawdown_candidates else None
+
+    positive_feedback_seen = _truthy(_get(path_data, "positive_feedback_seen", False))
+    if new_peak is not None and new_peak > 0:
+        positive_feedback_seen = True
+    if current_quote_pnl is not None and current_quote_pnl > 0:
+        positive_feedback_seen = True
+
+    first_positive = previous_first_positive
+    if positive_feedback_seen and first_positive is None and entry_ts is not None:
+        first_positive = max(0.0, now_ts - entry_ts)
+
+    time_to_peak = _safe_float(_get(path_data, "time_to_peak_sec"), None)
+    if (
+        time_to_peak is None
+        and entry_ts is not None
+        and observed_peak is not None
+        and new_peak is not None
+        and observed_peak >= new_peak
+    ):
+        time_to_peak = max(0.0, now_ts - entry_ts)
+
+    db.execute(
+        """
+        UPDATE canonical_trade_ledger
+        SET peak_quote_pnl_pct = COALESCE(?, peak_quote_pnl_pct),
+            peak_quote_pnl_sol = COALESCE(?, peak_quote_pnl_sol),
+            max_drawdown_pct = COALESCE(?, max_drawdown_pct),
+            time_to_peak_sec = COALESCE(?, time_to_peak_sec),
+            positive_feedback_seen = CASE
+                WHEN ? THEN 1
+                ELSE COALESCE(positive_feedback_seen, 0)
+            END,
+            first_positive_feedback_sec = COALESCE(first_positive_feedback_sec, ?),
+            updated_at = ?
+        WHERE trade_id = ?
+        """,
+        (
+            new_peak,
+            peak_sol,
+            new_drawdown,
+            time_to_peak,
+            1 if positive_feedback_seen else 0,
+            first_positive,
+            now_ts,
+            str(trade_id),
+        ),
+    )
+    try:
+        db.commit()
+    except Exception:
+        pass
+
+
 def fetch_a_class_status(db, since_ts=None, limit=20):
     init_canonical_ledger(db)
     params = {}

@@ -13,6 +13,7 @@ from canonical_ledger import (
     record_a_class_decision_event,
     record_canonical_trade_entry,
     record_canonical_trade_exit,
+    record_canonical_trade_path_update,
 )
 from fastlane_config import load_a_class_config
 
@@ -155,6 +156,58 @@ def test_no_route_trapped_and_outlier_flags_are_recorded():
     assert row["outlier_flag"] == 1
     assert row["outlier_reason"] == "route_disappeared"
     assert row["accounting_source"] == "no_route_zero_exit"
+
+
+def test_path_update_keeps_best_quote_peak_and_first_positive_feedback():
+    db = memory_db()
+
+    record_canonical_trade_entry(
+        db,
+        {
+            "trade_id": "trade-path",
+            "token_ca": "TokenCA789",
+            "entry_ts": 1_000,
+            "entry_size_sol": 0.003,
+            "entry_quote_source": "gmgn",
+            "entry_route_available": True,
+            "entry_quote_executable": True,
+        },
+    )
+    record_canonical_trade_path_update(
+        db,
+        "trade-path",
+        {
+            "updated_at": 1_020,
+            "current_quote_pnl_pct": 0.12,
+            "peak_quote_pnl_pct": 0.12,
+        },
+    )
+    record_canonical_trade_path_update(
+        db,
+        "trade-path",
+        {
+            "updated_at": 1_050,
+            "current_quote_pnl_pct": -0.04,
+            "peak_quote_pnl_pct": 0.08,
+            "max_drawdown_pct": -0.04,
+        },
+    )
+
+    row = db.execute(
+        """
+        SELECT peak_quote_pnl_pct, peak_quote_pnl_sol, max_drawdown_pct,
+               positive_feedback_seen, first_positive_feedback_sec,
+               time_to_peak_sec
+        FROM canonical_trade_ledger
+        WHERE trade_id = 'trade-path'
+        """
+    ).fetchone()
+    assert row["peak_quote_pnl_pct"] == 0.12
+    assert round(row["peak_quote_pnl_sol"], 8) == 0.00036
+    assert row["max_drawdown_pct"] == -0.04
+    assert row["positive_feedback_seen"] == 1
+    assert row["first_positive_feedback_sec"] == 20
+    assert row["time_to_peak_sec"] == 20
 
 
 def test_a_class_migration_backfills_source_dedup_key_and_replaces_unique_source_index():
