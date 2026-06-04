@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, "scripts")
 
+from strategy_goal_controller import write_strategy_goal_runtime_overlay  # noqa: E402
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate, required_runtime_mode_for_entry  # noqa: E402
 
 
@@ -69,3 +70,93 @@ def test_runtime_mode_gate_promotes_non_tiny_large_entries_to_normal_tiny():
     )
 
     assert required == "normal_tiny"
+
+
+def test_runtime_mode_gate_ignores_controller_overlay_until_enabled(tmp_path):
+    path = write_matrix(tmp_path / "mode_readiness.json", highest="normal_tiny")
+    overlay = write_strategy_goal_runtime_overlay(
+        {"actions": [{"mode": "A_CLASS_FASTLANE", "action": "DISABLE", "reason": "unit"}]},
+        path=tmp_path / "controller.json",
+        enforcement_enabled=True,
+        generated_at=1_700_000_000,
+    )
+
+    gate = evaluate_runtime_mode_gate(
+        required_mode="ultra_tiny",
+        entry_mode="a_class_fastlane",
+        mode_readiness_path=path,
+        controller_actions_path=overlay["path"],
+        env={"STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED": "false"},
+    )
+
+    assert gate["pass"] is True
+    assert gate["strategy_goal_controller_decision"] == "NOT_ENFORCED"
+
+
+def test_runtime_mode_gate_blocks_matching_controller_disable(tmp_path):
+    path = write_matrix(tmp_path / "mode_readiness.json", highest="normal_tiny")
+    overlay = write_strategy_goal_runtime_overlay(
+        {"actions": [{"mode": "A_CLASS_FASTLANE", "action": "DISABLE", "reason": "unit"}]},
+        path=tmp_path / "controller.json",
+        enforcement_enabled=True,
+        generated_at=1_700_000_000,
+    )
+
+    gate = evaluate_runtime_mode_gate(
+        required_mode="ultra_tiny",
+        entry_mode="source_resonance_a_class_fastlane",
+        mode_readiness_path=path,
+        controller_actions_path=overlay["path"],
+        env={"STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED": "true"},
+    )
+
+    assert gate["pass"] is False
+    assert gate["reason"] == "strategy_goal_controller_disable"
+    assert gate["strategy_goal_controller_decision"] == "BLOCK"
+
+
+def test_runtime_mode_gate_enforces_tiny_canary_size_cap(tmp_path):
+    path = write_matrix(tmp_path / "mode_readiness.json", highest="normal_tiny")
+    overlay = write_strategy_goal_runtime_overlay(
+        {"actions": [{"mode": "A_CLASS_FASTLANE", "action": "TINY_CANARY", "size_sol": 0.001}]},
+        path=tmp_path / "controller.json",
+        enforcement_enabled=True,
+        generated_at=1_700_000_000,
+    )
+
+    blocked = evaluate_runtime_mode_gate(
+        required_mode="ultra_tiny",
+        entry_mode="a_class_fastlane",
+        position_size_sol=0.003,
+        mode_readiness_path=path,
+        controller_actions_path=overlay["path"],
+        env={"STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED": "true"},
+    )
+    allowed = evaluate_runtime_mode_gate(
+        required_mode="ultra_tiny",
+        entry_mode="a_class_fastlane",
+        position_size_sol=0.001,
+        mode_readiness_path=path,
+        controller_actions_path=overlay["path"],
+        env={"STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED": "true"},
+    )
+
+    assert blocked["pass"] is False
+    assert blocked["reason"] == "strategy_goal_controller_size_cap_exceeded"
+    assert allowed["pass"] is True
+    assert allowed["strategy_goal_controller_decision"] == "ALLOW"
+
+
+def test_runtime_mode_gate_fails_closed_when_controller_overlay_missing_and_enabled(tmp_path):
+    path = write_matrix(tmp_path / "mode_readiness.json", highest="normal_tiny")
+
+    gate = evaluate_runtime_mode_gate(
+        required_mode="ultra_tiny",
+        entry_mode="a_class_fastlane",
+        mode_readiness_path=path,
+        controller_actions_path=tmp_path / "missing-controller.json",
+        env={"STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED": "true"},
+    )
+
+    assert gate["pass"] is False
+    assert gate["reason"] == "strategy_goal_controller_actions_missing"

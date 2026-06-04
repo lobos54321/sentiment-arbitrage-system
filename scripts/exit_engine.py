@@ -12,6 +12,7 @@ import threading
 import os
 import re
 
+from a_class_exit_policy import evaluate_a_class_exit_policy
 from profit_protect_policy import (
     ath_moon_bag_floor,
     cohort_aware_probe_runner_floor,
@@ -910,6 +911,75 @@ class ExitGuardianThread(threading.Thread):
                 if w_entry and pos.peak_pnl > (w_entry.get('peak_pnl', 0) or 0):
                     w_entry['trusted_peak_pnl'] = _trusted_peak
                     w_entry['peak_pnl'] = _trusted_peak  # write back trusted peak for ExitMatrix
+
+                _a_class_exit = evaluate_a_class_exit_policy(
+                    pos,
+                    current_pnl=pnl,
+                    peak_pnl=pos.peak_pnl,
+                    held_sec=held_sec,
+                    quote_available=True,
+                    route_available=True,
+                )
+                if _a_class_exit.get('applies') and _a_class_exit.get('action') == 'partial_sell':
+                    _a_state = pos.monitor_state if isinstance(getattr(pos, 'monitor_state', None), dict) else {}
+                    _partial_type = _a_class_exit.get('partial_type') or 'A_CLASS_PARTIAL_LOCK'
+                    if _partial_type == 'A_CLASS_PRINCIPAL_RECOVERY':
+                        _a_state['aClassPrincipalRecovered'] = True
+                    elif _partial_type == 'A_CLASS_MOONBAG':
+                        _a_state['aClassMoonbagReduced'] = True
+                    else:
+                        _a_state['aClassPartialLocked'] = True
+                    _a_state['aClassExitPolicyLastAction'] = _a_class_exit
+                    pos.monitor_state = _a_state
+                    _sell_pct = _clamp_pct(_a_class_exit.get('sell_pct'), 0.0)
+                    if _sell_pct > 0:
+                        log.info(
+                            f"[A_CLASS_EXIT_GUARDIAN] 🔒 {pos.symbol} {_partial_type}: "
+                            f"sell={_sell_pct:.0%} pnl={pnl:.1%} peak={pos.peak_pnl:.1%} "
+                            f"reason={_a_class_exit.get('reason')}"
+                        )
+                        with self.exit_queue_lock:
+                            _queued_sold_pct = _clamp_pct(_a_state.get('soldPct'))
+                            self.exit_queue.append({
+                                'trade_id': trade_id,
+                                'symbol': pos.symbol,
+                                'action': 'partial_sell',
+                                'sell_pct': _sell_pct,
+                                'queued_sold_pct': _queued_sold_pct,
+                                'target_sold_pct': min(1.0, _queued_sold_pct + _sell_pct),
+                                'partial_type': _partial_type,
+                                'tp_name': _partial_type,
+                                'reason': (
+                                    f"{_a_class_exit.get('reason')} "
+                                    f"(pnl={pnl:.1%}, peak={pos.peak_pnl:.1%}, sell={_sell_pct:.0%})"
+                                ),
+                                'trigger_price': price,
+                                'trigger_pnl': pnl,
+                                'a_class_exit_policy': _a_class_exit,
+                                '_instant_sim': self._get_instant_quote(pos, ca, sell_pct=_sell_pct),
+                            })
+                        continue
+                if _a_class_exit.get('applies') and _a_class_exit.get('action') == 'exit':
+                    log.info(
+                        f"[A_CLASS_EXIT_GUARDIAN] 🚪 {pos.symbol} exit: "
+                        f"pnl={pnl:.1%} peak={pos.peak_pnl:.1%} reason={_a_class_exit.get('reason')}"
+                    )
+                    with self.exit_queue_lock:
+                        self.exit_queue.append({
+                            'trade_id': trade_id,
+                            'symbol': pos.symbol,
+                            'reason': (
+                                f"{_a_class_exit.get('reason')} "
+                                f"(pnl={pnl:.1%}, peak={pos.peak_pnl:.1%}, held={held_sec:.0f}s)"
+                            ),
+                            'trigger_price': price,
+                            'trigger_pnl': pnl,
+                            'trail_floor': _a_class_exit.get('trail_floor'),
+                            'a_class_exit_policy': _a_class_exit,
+                            '_instant_sim': self._get_instant_quote(pos, ca),
+                        })
+                    self._exit_pending.add(trade_id)
+                    continue
 
                 # === B+C: Record price into ring buffer for velocity calc ===
                 pos.price_ring.append((time.time(), price))

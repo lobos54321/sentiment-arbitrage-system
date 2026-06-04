@@ -119,3 +119,54 @@ def entry_mode_registry_summary(registry=None):
         "paper_blocked_modes": paper_blocked,
         "shadow_only_modes": sorted(entry_mode_registry_shadow_only_modes(registry)),
     }
+
+
+NORMALIZED_ENTRY_MODES = {
+    "ATH_CONTINUATION",
+    "LOTTO_TINY_SCOUT",
+    "RECLAIM_REVIVAL",
+    "A_CLASS_FASTLANE",
+}
+
+
+def normalize_entry_mode(raw_entry_mode=None, route=None, detail=None):
+    """Collapse many raw execution labels into four auditable strategy buckets.
+
+    The raw mode remains useful as annotation, but first-level scorecards should
+    group by this normalized mode to avoid learning from dozens of tiny,
+    overlapping labels.
+    """
+    detail = detail or {}
+    raw = str(raw_entry_mode or "").strip().lower()
+    route_name = str(route or detail.get("route") or detail.get("route_bucket") or "").strip().upper()
+    haystack = " ".join(
+        str(value or "").lower()
+        for value in (
+            raw,
+            route_name,
+            detail.get("entry_branch"),
+            detail.get("source_component"),
+            detail.get("source_reason"),
+            detail.get("strategy_stage"),
+        )
+    )
+
+    if any(marker in haystack for marker in ("a_class", "a-grade", "a_grade", "fastlane", "fast_lane")):
+        return "A_CLASS_FASTLANE"
+    if any(marker in haystack for marker in ("reclaim", "revival", "canary", "reactivation", "source_resonance")):
+        return "RECLAIM_REVIVAL"
+    if "lotto" in haystack or "newborn" in haystack or route_name == "LOTTO":
+        return "LOTTO_TINY_SCOUT"
+    if any(marker in haystack for marker in ("ath", "high_mc", "uncertainty", "matrix_dissonance")) or route_name == "ATH":
+        return "ATH_CONTINUATION"
+    return "A_CLASS_FASTLANE" if route_name in {"A_GRADE", "A_GRADE_RESONANCE_FASTLANE"} else "ATH_CONTINUATION"
+
+
+def normalized_entry_mode_detail(raw_entry_mode=None, route=None, detail=None):
+    normalized = normalize_entry_mode(raw_entry_mode=raw_entry_mode, route=route, detail=detail)
+    return {
+        "raw_entry_mode": raw_entry_mode,
+        "route": route,
+        "normalized_mode": normalized,
+        "known_normalized_mode": normalized in NORMALIZED_ENTRY_MODES,
+    }
