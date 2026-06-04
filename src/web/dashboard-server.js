@@ -2302,6 +2302,8 @@ function getTableColumns(database, tableName) {
 
 function aClassEventRow(row) {
   const freshness = parseJsonValue(row.freshness_json, {});
+  const expectedRrDetail = parseJsonValue(row.expected_rr_detail_json, {});
+  const discoveryExit = parseJsonValue(row.discovery_exit_json, null);
   return {
     id: row.id,
     event_ts: row.event_ts,
@@ -2320,6 +2322,11 @@ function aClassEventRow(row) {
     size_sol: row.size_sol,
     score: row.score,
     reason: row.reason,
+    would_action: row.would_action ?? null,
+    expected_rr: row.expected_rr ?? null,
+    expected_rr_detail: expectedRrDetail && typeof expectedRrDetail === 'object' ? expectedRrDetail : {},
+    denominator_key: row.denominator_key ?? null,
+    discovery_exit: discoveryExit && typeof discoveryExit === 'object' ? discoveryExit : null,
     hard_blockers: parseJsonValue(row.hard_blockers_json, []),
     soft_notes: parseJsonValue(row.soft_notes_json, []),
     freshness,
@@ -2329,6 +2336,66 @@ function aClassEventRow(row) {
     raw_signal_age_sec: freshness?.raw_signal_age_sec ?? null,
     freshness_sources: freshness?.freshness_sources || [],
   };
+}
+
+function sanitizeAClassP0Discovery(raw) {
+  const section = raw && typeof raw === 'object' ? raw : null;
+  if (!section) {
+    return {
+      available: false,
+      status: 'shadow_pending',
+      reason: 'a_class_p0_discovery_materialized_section_missing',
+      quote_clean_gold_silver_seen_count: 0,
+      quote_clean_gold_silver_would_enter_count: 0,
+      would_enter_no_route_rate: null,
+      would_enter_trapped_rate: null,
+      unknown_data_rate: null,
+      outlier_trimmed_would_rr: null,
+      missed_blockers: [],
+      discovery_exit: null,
+    };
+  }
+  const blockerRows = Array.isArray(section.missed_blockers) ? section.missed_blockers : [];
+  const missedBlockers = blockerRows.map((row) => ({
+    route: row.route ?? null,
+    component: row.component ?? null,
+    reject_reason: row.reject_reason ?? null,
+    unique_tokens: Number(row.unique_tokens || 0),
+    gold_n: Number(row.gold_n || 0),
+    silver_n: Number(row.silver_n || 0),
+    max_adjusted_peak: roundNullableNumber(row.max_adjusted_peak, 6),
+  }));
+  const available = section.available !== false && section.status !== 'evidence_unavailable';
+  return {
+    available,
+    status: available ? (section.status || 'shadow_ready') : (section.status || 'shadow_pending'),
+    reason: section.reason || null,
+    denominator_key: section.denominator_key || null,
+    quote_clean_gold_silver_seen_count: Number(section.quote_clean_gold_silver_seen_count || 0),
+    quote_clean_gold_silver_gold_count: Number(section.quote_clean_gold_silver_gold_count || 0),
+    quote_clean_gold_silver_silver_count: Number(section.quote_clean_gold_silver_silver_count || 0),
+    quote_clean_gold_silver_would_enter_count: Number(section.quote_clean_gold_silver_would_enter_count || 0),
+    would_enter_no_route_rate: roundNullableNumber(section.would_enter_no_route_rate, 6),
+    would_enter_trapped_rate: roundNullableNumber(section.would_enter_trapped_rate, 6),
+    unknown_data_rate: roundNullableNumber(section.unknown_data_rate, 6),
+    outlier_trimmed_would_rr: roundNullableNumber(section.outlier_trimmed_would_rr, 6),
+    defined_risk_pct: roundNullableNumber(section.defined_risk_pct, 6),
+    source_breakdown: section.source_breakdown && typeof section.source_breakdown === 'object'
+      ? { ...section.source_breakdown }
+      : {},
+    source_issues: Array.isArray(section.source_issues) ? section.source_issues.map(String) : [],
+    missed_blockers: missedBlockers,
+    discovery_exit: section.discovery_exit && typeof section.discovery_exit === 'object'
+      ? { ...section.discovery_exit }
+      : null,
+    expected_rr_detail: section.expected_rr_detail && typeof section.expected_rr_detail === 'object'
+      ? { ...section.expected_rr_detail }
+      : {},
+  };
+}
+
+function aClassP0DiscoveryFromSnapshot(liveSnapshot) {
+  return sanitizeAClassP0Discovery(liveSnapshot?.a_class_p0_discovery || liveSnapshot?.a_class?.p0_discovery || null);
 }
 
 function canonicalLedgerTradeRow(row) {
@@ -4195,10 +4262,13 @@ function routeHealthFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, lim
 export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, materializedHours = requestedHours, limit = 30 }) {
   const section = liveSnapshot?.a_class || {};
   const rows = (value) => Array.isArray(value) ? value : [];
+  const p0Discovery = aClassP0DiscoveryFromSnapshot(liveSnapshot);
+  const shadowPending = !p0Discovery.available;
   return {
     generated_at: new Date().toISOString(),
     db_path: dbPath,
-    available: Boolean(section.available),
+    available: Boolean(section.available) && !shadowPending,
+    status: shadowPending ? 'shadow_pending' : 'shadow_ready',
     materialized: true,
     live_query: false,
     requested_window_hours: requestedHours,
@@ -4232,6 +4302,8 @@ export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
     })),
     hard_blockers: rows(section.hard_blockers),
     recent_events: rows(section.recent_events).slice(0, limit),
+    p0_discovery: p0Discovery,
+    shadow_pending: shadowPending,
     note: 'Default is materialized by paper_review_snapshot_worker; pass live=1 for an on-demand DB scan.',
   };
 }
@@ -4423,6 +4495,8 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const snapshotAvailable = Boolean(liveSnapshot && !liveSnapshot.error);
   const snapshotAge = snapshotAvailable ? snapshotAgeMinutes(liveSnapshot, nowMs) : null;
   const snapshotFresh = Boolean(snapshotAvailable && snapshotAge != null && snapshotAge <= maxSnapshotAgeMinutes);
+  const aClassP0Discovery = snapshotAvailable ? aClassP0DiscoveryFromSnapshot(liveSnapshot) : sanitizeAClassP0Discovery(null);
+  const shadowPending = snapshotAvailable && !aClassP0Discovery.available;
   const dogCatch = snapshotAvailable ? dogCatchGoalFromLiveSnapshot(liveSnapshot, {
     dbPath,
     requestedHours,
@@ -4454,6 +4528,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const evidenceBlockers = [];
   if (!snapshotAvailable) evidenceBlockers.push(liveSnapshot?.error ? 'materialized_review_snapshot_invalid' : 'materialized_review_snapshot_missing');
   if (snapshotAvailable && !snapshotFresh) evidenceBlockers.push('materialized_review_snapshot_stale_or_undated');
+  if (shadowPending) evidenceBlockers.push('a_class_p0_shadow_discovery_pending');
   if (closed < targets.min_closed_trades_24h) sampleBlockers.push('insufficient_closed_trades_24h');
   if (eligibleGoldSilver < targets.min_gold_silver_candidates_24h) sampleBlockers.push('insufficient_gold_silver_denominator_24h');
   if (realizedWinRate == null || realizedWinRate < targets.target_realized_win_rate) metricBlockers.push('realized_win_rate_below_target');
@@ -4468,7 +4543,9 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const validSample = sampleBlockers.length === 0;
   const pass = snapshotFresh && validSample && metricBlockers.length === 0 && evidenceBlockers.length === 0;
   let status = 'under_target';
-  if (pass) {
+  if (shadowPending) {
+    status = 'shadow_pending';
+  } else if (pass) {
     status = 'pass';
   } else if (evidenceBlockers.length) {
     status = 'evidence_unavailable';
@@ -4484,6 +4561,12 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     wins_24h: wins,
     eligible_gold_silver_24h: eligibleGoldSilver,
     captured_gold_silver_24h: capturedGoldSilver,
+    quote_clean_gold_silver_seen_24h: aClassP0Discovery.quote_clean_gold_silver_seen_count,
+    quote_clean_gold_silver_would_enter_24h: aClassP0Discovery.quote_clean_gold_silver_would_enter_count,
+    would_enter_no_route_rate: aClassP0Discovery.would_enter_no_route_rate,
+    would_enter_trapped_rate: aClassP0Discovery.would_enter_trapped_rate,
+    unknown_data_rate: aClassP0Discovery.unknown_data_rate,
+    outlier_trimmed_would_rr: aClassP0Discovery.outlier_trimmed_would_rr,
     deployed_sol_24h: roundNullableNumber(deployedSol, 6),
     realized_pnl_sol_24h: roundNullableNumber(realizedPnlSol, 6),
   };
@@ -4493,7 +4576,8 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     goal: 'rolling_24h_convexity_capture',
     materialized: true,
     live_query: false,
-    available: snapshotAvailable,
+    available: snapshotAvailable && !shadowPending,
+    shadow_pending: shadowPending,
     pass,
     status,
     db_path: dbPath,
@@ -4507,6 +4591,8 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     max_snapshot_age_minutes: maxSnapshotAgeMinutes,
     targets,
     metrics,
+    a_class_p0_discovery: aClassP0Discovery,
+    top_missed_blockers: aClassP0Discovery.missed_blockers,
     target_gaps: {
       realized_win_rate: realizedWinRate == null ? null : roundNumber(targets.target_realized_win_rate - realizedWinRate, 4),
       gold_silver_capture_rate: captureRate == null ? null : roundNumber(targets.target_gold_silver_capture_rate - captureRate, 4),
@@ -11618,7 +11704,7 @@ const server = http.createServer(async (req, res) => {
       dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
       winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
     });
-    res.writeHead(status.available ? 200 : 202, apiJsonHeaders());
+    res.writeHead(status.available && !status.shadow_pending ? 200 : 202, apiJsonHeaders());
     res.end(JSON.stringify(status, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-kpi-proof-status') {
@@ -11997,13 +12083,14 @@ const server = http.createServer(async (req, res) => {
       const materializedHours = nearestLivePaperReviewHours(Math.min(requestedHours, 24));
       const liveSnapshot = readLivePaperReview(materializedHours);
       if (liveSnapshot && !liveSnapshot.error && liveSnapshot.a_class?.available) {
-        res.writeHead(200, apiJsonHeaders());
-        res.end(JSON.stringify(aClassStatusFromLiveSnapshot(liveSnapshot, {
+        const status = aClassStatusFromLiveSnapshot(liveSnapshot, {
           dbPath: paperDbPath,
           requestedHours,
           materializedHours,
           limit,
-        }), null, 2));
+        });
+        res.writeHead(status.available && !status.shadow_pending ? 200 : 202, apiJsonHeaders());
+        res.end(JSON.stringify(status, null, 2));
         return;
       }
       res.writeHead(202, apiJsonHeaders());
@@ -12038,6 +12125,15 @@ const server = http.createServer(async (req, res) => {
         }, null, 2));
         return;
       }
+      const aceColumns = getTableColumns(paperDb, 'a_class_decision_events');
+      const p0ColumnsReady = [
+        'would_action',
+        'expected_rr',
+        'expected_rr_detail_json',
+        'denominator_key',
+        'discovery_exit_json',
+      ].every((name) => aceColumns.has(name));
+      const optionalAceSelect = (name, fallback = 'NULL') => aceColumns.has(name) ? name : `${fallback} AS ${name}`;
       const where = sinceTs == null ? '' : 'WHERE event_ts >= @sinceTs';
       const params = sinceTs == null ? {} : { sinceTs };
       const actionSummary = paperDb.prepare(`
@@ -12102,19 +12198,27 @@ const server = http.createServer(async (req, res) => {
                normalized_mode, source_table, source_id, source_component,
                source_reason, action, grade, size_sol, score, reason,
                hard_blockers_json, soft_notes_json,
-               freshness_json, budget_json, risk_json
+               freshness_json, budget_json, risk_json,
+               ${optionalAceSelect('would_action')},
+               ${optionalAceSelect('expected_rr')},
+               ${optionalAceSelect('expected_rr_detail_json')},
+               ${optionalAceSelect('denominator_key')},
+               ${optionalAceSelect('discovery_exit_json')}
         FROM a_class_decision_events
         ${where}
         ORDER BY event_ts DESC, id DESC
         LIMIT @limit
       `).all({ ...params, limit }).map(aClassEventRow);
-      res.writeHead(200, apiJsonHeaders());
+      res.writeHead(p0ColumnsReady ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
-        available: true,
+        available: p0ColumnsReady,
+        status: p0ColumnsReady ? 'shadow_ready' : 'shadow_pending',
+        shadow_pending: !p0ColumnsReady,
         materialized: false,
         live_query: true,
+        p0_schema_columns_ready: p0ColumnsReady,
         enabled_env: String(process.env.A_CLASS_ENABLED || 'false').toLowerCase() === 'true',
         shadow_eval_enabled_env: String(process.env.A_CLASS_SHADOW_EVAL_ENABLED || 'true').toLowerCase() !== 'false',
         since_ts: sinceTs,
@@ -12168,6 +12272,15 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ generated_at: new Date().toISOString(), db_path: paperDbPath, available: false, events: [] }, null, 2));
         return;
       }
+      const aceColumns = getTableColumns(paperDb, 'a_class_decision_events');
+      const p0ColumnsReady = [
+        'would_action',
+        'expected_rr',
+        'expected_rr_detail_json',
+        'denominator_key',
+        'discovery_exit_json',
+      ].every((name) => aceColumns.has(name));
+      const optionalAceSelect = (name, fallback = 'NULL') => aceColumns.has(name) ? name : `${fallback} AS ${name}`;
       const filters = [];
       const params = { limit };
       if (sinceTs != null) {
@@ -12184,17 +12297,24 @@ const server = http.createServer(async (req, res) => {
                normalized_mode, source_table, source_id, source_component,
                source_reason, action, grade, size_sol, score, reason,
                hard_blockers_json, soft_notes_json,
-               freshness_json, budget_json, risk_json
+               freshness_json, budget_json, risk_json,
+               ${optionalAceSelect('would_action')},
+               ${optionalAceSelect('expected_rr')},
+               ${optionalAceSelect('expected_rr_detail_json')},
+               ${optionalAceSelect('denominator_key')},
+               ${optionalAceSelect('discovery_exit_json')}
         FROM a_class_decision_events
         ${where}
         ORDER BY event_ts DESC, id DESC
         LIMIT @limit
       `).all(params).map(aClassEventRow);
-      res.writeHead(200, apiJsonHeaders());
+      res.writeHead(p0ColumnsReady ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
-        available: true,
+        available: p0ColumnsReady,
+        status: p0ColumnsReady ? 'shadow_ready' : 'shadow_pending',
+        shadow_pending: !p0ColumnsReady,
         since_ts: sinceTs,
         action: action || null,
         events,
@@ -12280,8 +12400,47 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const sinceTs = boundedWindowedSinceTs(url, 24 * 7, 24 * 120, { allowAll: true });
       const aClassScorecard = url.pathname === '/api/scorecard/a-class';
+      const requestedHours = boundedIntParam(url, 'hours', 24, 1, 24 * 120);
+      const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+        || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+      if (aClassScorecard && !forceLive) {
+        const materializedHours = nearestLivePaperReviewHours(Math.min(requestedHours, 24));
+        const liveSnapshot = readLivePaperReview(materializedHours);
+        const p0Discovery = aClassP0DiscoveryFromSnapshot(liveSnapshot);
+        const response = {
+          generated_at: new Date().toISOString(),
+          db_path: paperDbPath,
+          available: p0Discovery.available,
+          status: p0Discovery.available ? 'shadow_ready' : 'shadow_pending',
+          shadow_pending: !p0Discovery.available,
+          materialized: true,
+          live_query: false,
+          requested_window_hours: requestedHours,
+          materialized_window_hours: materializedHours,
+          materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+          materialized_generated_at: liveSnapshot?.generated_at || null,
+          scorecard: 'a_class',
+          rows: p0Discovery.available ? [{
+            bucket: 'A_CLASS_P0_SHADOW_DISCOVERY',
+            quote_clean_gold_silver_seen_count: p0Discovery.quote_clean_gold_silver_seen_count,
+            quote_clean_gold_silver_would_enter_count: p0Discovery.quote_clean_gold_silver_would_enter_count,
+            would_enter_no_route_rate: p0Discovery.would_enter_no_route_rate,
+            would_enter_trapped_rate: p0Discovery.would_enter_trapped_rate,
+            unknown_data_rate: p0Discovery.unknown_data_rate,
+            outlier_trimmed_would_rr: p0Discovery.outlier_trimmed_would_rr,
+            advisory: p0Discovery.discovery_exit?.advisory || p0Discovery.discovery_exit?.advisory_action || null,
+            advisory_only: true,
+            requires_human_approval: p0Discovery.discovery_exit?.requires_human_approval ?? true,
+          }] : [],
+          p0_discovery: p0Discovery,
+          note: 'Default A_CLASS scorecard reads the Python materialized P0 discovery evidence; pass live=1 for the legacy canonical ledger scorecard.',
+        };
+        res.writeHead(response.available ? 200 : 202, apiJsonHeaders());
+        res.end(JSON.stringify(response, null, 2));
+        return;
+      }
+      const sinceTs = boundedWindowedSinceTs(url, 24 * 7, 24 * 120, { allowAll: true });
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('canonical_trade_ledger')) {

@@ -235,6 +235,9 @@ class AClassDecision:
     freshness_detail: dict
     budget_detail: dict
     risk_detail: dict
+    expected_rr_detail: dict = field(default_factory=dict)
+    would_action: Optional[str] = None
+    denominator_key: Optional[str] = None
 
     def to_dict(self):
         return asdict(self)

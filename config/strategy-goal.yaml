@@ -38,6 +38,24 @@ controller:
   require_canonical_sol_accounting: true
   require_quote_clean_denominator: true
 
+a_class_p0_discovery_exit:
+  window_hours: 24
+  evaluation_cadence_minutes: 15
+  consecutive_windows_required: 4
+  min_quote_clean_gold_silver_seen_24h: 8
+  min_quote_clean_gold_silver_would_enter_count: 5
+  min_quote_clean_gold_silver_would_enter_count_72h: 30
+  max_would_enter_no_route_rate: 0.10
+  max_would_enter_trapped_rate: 0.10
+  max_unknown_data_rate: 0.05
+  min_outlier_trimmed_would_rr: 2.0
+  advisory_action_promote: PROMOTE_TINY_CANARY
+  advisory_action_insufficient: INVESTIGATE_SOURCING
+  requires_human_approval: true
+  canary_size_sol: 0.001
+  canary_max_concurrent: 1
+  canary_max_per_hour: 1
+
 strategy_buckets:
   enabled: [ATH_CONTINUATION, SOURCE_RESONANCE_RECLAIM, LOTTO_QUOTE_CLEAN_EARLY, A_CLASS_FASTLANE, NORMAL_MAIN_TRADE]
 

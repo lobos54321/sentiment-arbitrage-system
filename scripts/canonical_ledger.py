@@ -56,6 +56,14 @@ def _table_columns(db, table):
         return set()
 
 
+def _index_exists(db, index_name):
+    row = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+        (index_name,),
+    ).fetchone()
+    return row is not None
+
+
 def init_canonical_ledger(db):
     db.execute(
         """
@@ -86,6 +94,12 @@ def init_canonical_ledger(db):
             freshness_json TEXT,
             budget_json TEXT,
             risk_json TEXT,
+            source_dedup_key TEXT,
+            would_action TEXT,
+            expected_rr REAL,
+            expected_rr_detail_json TEXT,
+            denominator_key TEXT,
+            discovery_exit_json TEXT,
             candidate_json TEXT,
             created_at REAL NOT NULL
         )
@@ -93,7 +107,7 @@ def init_canonical_ledger(db):
     )
     db.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_a_class_decision_source
+        CREATE INDEX IF NOT EXISTS idx_a_class_decision_source
         ON a_class_decision_events(source_table, source_id)
         WHERE source_table IS NOT NULL AND source_id IS NOT NULL
         """
@@ -108,12 +122,58 @@ def init_canonical_ledger(db):
         ("opportunity_key", "TEXT"),
         ("is_duplicate", "INTEGER DEFAULT 0"),
         ("duplicate_of_id", "INTEGER"),
+        ("source_dedup_key", "TEXT"),
+        ("would_action", "TEXT"),
+        ("expected_rr", "REAL"),
+        ("expected_rr_detail_json", "TEXT"),
+        ("denominator_key", "TEXT"),
+        ("discovery_exit_json", "TEXT"),
     ):
         if col_name not in _table_columns(db, "a_class_decision_events"):
             try:
                 db.execute(f"ALTER TABLE a_class_decision_events ADD COLUMN {col_name} {col_def}")
             except Exception:
                 pass
+    if not _index_exists(db, "idx_a_class_decision_dedup"):
+        db.execute(
+            """
+            UPDATE a_class_decision_events
+               SET source_dedup_key = CASE
+                 WHEN source_table IS NOT NULL AND source_id IS NOT NULL THEN source_table||':'||source_id
+                 WHEN opportunity_key IS NOT NULL THEN 'opportunity:'||opportunity_key
+                 ELSE 'token:'||COALESCE(token_ca,'')||':'||COALESCE(route_bucket,'')||':'||CAST(CAST(event_ts/300 AS INT) AS TEXT)
+               END
+             WHERE source_dedup_key IS NULL
+            """
+        )
+        db.execute(
+            """
+            WITH ranked AS (
+              SELECT id,
+                     ROW_NUMBER() OVER (PARTITION BY source_dedup_key ORDER BY id) AS rn
+              FROM a_class_decision_events
+              WHERE source_dedup_key IS NOT NULL
+            )
+            UPDATE a_class_decision_events
+               SET source_dedup_key = source_dedup_key || '#legacy:' || id
+             WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
+            """
+        )
+        db.execute("DROP INDEX IF EXISTS idx_a_class_decision_source")
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_a_class_decision_source
+            ON a_class_decision_events(source_table, source_id)
+            WHERE source_table IS NOT NULL AND source_id IS NOT NULL
+            """
+        )
+        db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_a_class_decision_dedup
+            ON a_class_decision_events(source_dedup_key)
+            WHERE source_dedup_key IS NOT NULL
+            """
+        )
     db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_a_class_decision_opportunity
@@ -232,17 +292,47 @@ def record_a_class_decision_event(
     action = stored_action or _get(decision, "action", "SHADOW")
     candidate_dict = candidate.to_dict() if hasattr(candidate, "to_dict") else dict(candidate or {})
     decision_dict = decision.to_dict() if hasattr(decision, "to_dict") else dict(decision or {})
+    opportunity_key = _get(candidate, "opportunity_key")
+    source_dedup_key = _get(decision, "source_dedup_key", None) or _get(candidate, "source_dedup_key", None)
+    if not source_dedup_key:
+        if source_table is not None and source_id is not None:
+            source_dedup_key = f"{source_table}:{source_id}"
+        elif opportunity_key:
+            source_dedup_key = f"opportunity:{opportunity_key}"
+        else:
+            bucket = int(now_ts / 300)
+            # Deliberately merges within 5 minutes; denominators dedup by token_ca at read time.
+            source_dedup_key = f"token:{_get(candidate, 'token_ca') or ''}:{_get(candidate, 'route_bucket') or ''}:{bucket}"
+    would_action = _get(decision, "would_action", None)
+    if would_action is None and action == "WOULD_ENTER":
+        would_action = "WOULD_ENTER"
+    expected_rr_detail = _get(decision, "expected_rr_detail", {}) or {}
+    expected_rr = _safe_float(
+        _get(decision, "expected_rr", None)
+        if _get(decision, "expected_rr", None) is not None
+        else expected_rr_detail.get("outlier_trimmed_would_rr"),
+        None,
+    )
+    denominator_key = _get(decision, "denominator_key", None) or expected_rr_detail.get("denominator_key")
+    discovery_exit = _get(decision, "discovery_exit", None) or expected_rr_detail.get("discovery_exit")
     db.execute(
         """
-        INSERT OR IGNORE INTO a_class_decision_events (
+        INSERT INTO a_class_decision_events (
             event_ts, token_ca, symbol, lifecycle_id, route_bucket, normalized_mode,
             source_table, source_id, source_component, source_reason,
-            opportunity_key, is_duplicate, duplicate_of_id, signal_ts,
+            opportunity_key, source_dedup_key, is_duplicate, duplicate_of_id, signal_ts,
             opportunity_ts, action, grade, size_sol, score, reason,
             hard_blockers_json, soft_notes_json, freshness_json, budget_json,
-            risk_json, candidate_json, created_at
+            risk_json, would_action, expected_rr, expected_rr_detail_json,
+            denominator_key, discovery_exit_json, candidate_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_dedup_key) WHERE source_dedup_key IS NOT NULL DO UPDATE SET
+            would_action=excluded.would_action,
+            expected_rr=excluded.expected_rr,
+            expected_rr_detail_json=excluded.expected_rr_detail_json,
+            denominator_key=excluded.denominator_key,
+            discovery_exit_json=excluded.discovery_exit_json
         """,
         (
             now_ts,
@@ -255,7 +345,8 @@ def record_a_class_decision_event(
             source_id,
             _get(candidate, "source_component"),
             _get(candidate, "source_reason"),
-            _get(candidate, "opportunity_key"),
+            opportunity_key,
+            source_dedup_key,
             1 if _truthy(_get(candidate, "is_duplicate", False)) else 0,
             _safe_int(_get(candidate, "duplicate_of_event_id"), None),
             _safe_float(_get(candidate, "signal_ts"), None),
@@ -271,6 +362,11 @@ def record_a_class_decision_event(
             _json_dumps(_get(decision, "freshness_detail", {})),
             _json_dumps(_get(decision, "budget_detail", {})),
             _json_dumps(_get(decision, "risk_detail", {})),
+            would_action,
+            expected_rr,
+            _json_dumps(expected_rr_detail),
+            denominator_key,
+            _json_dumps(discovery_exit) if discovery_exit is not None else None,
             _json_dumps(candidate_dict),
             now_ts,
         ),
@@ -483,7 +579,9 @@ def fetch_a_class_events(db, since_ts=None, limit=50):
         SELECT id, event_ts, token_ca, symbol, lifecycle_id, route_bucket,
                normalized_mode, source_table, source_id, source_component,
                source_reason, action, grade, size_sol, score, reason,
-               hard_blockers_json, freshness_json, budget_json, risk_json
+               hard_blockers_json, freshness_json, budget_json, risk_json,
+               would_action, expected_rr, expected_rr_detail_json,
+               denominator_key, discovery_exit_json, source_dedup_key
         FROM a_class_decision_events
         {where}
         ORDER BY event_ts DESC, id DESC
@@ -514,8 +612,14 @@ def fetch_a_class_events(db, since_ts=None, limit=50):
             "freshness_json": row[17],
             "budget_json": row[18],
             "risk_json": row[19],
+            "would_action": row[20],
+            "expected_rr": row[21],
+            "expected_rr_detail_json": row[22],
+            "denominator_key": row[23],
+            "discovery_exit_json": row[24],
+            "source_dedup_key": row[25],
         }
-        for key in ("hard_blockers_json", "freshness_json", "budget_json", "risk_json"):
+        for key in ("hard_blockers_json", "freshness_json", "budget_json", "risk_json", "expected_rr_detail_json", "discovery_exit_json"):
             try:
                 item[key.replace("_json", "")] = json.loads(item.get(key) or "{}")
             except Exception:
