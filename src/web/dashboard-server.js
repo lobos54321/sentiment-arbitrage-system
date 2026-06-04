@@ -4323,6 +4323,209 @@ export function dogCatchGoalFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
   };
 }
 
+function finiteNumber(value, fallback = null) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function lowestEntryModeLossPct(liveSnapshot) {
+  const rows = Array.isArray(liveSnapshot?.entry_mode_performance?.by_entry_mode)
+    ? liveSnapshot.entry_mode_performance.by_entry_mode
+    : [];
+  const losses = rows
+    .map((row) => finiteNumber(row.max_loss_pct, null))
+    .filter((value) => value != null);
+  return losses.length ? Math.min(...losses) : null;
+}
+
+function modeActionsFromSnapshot(liveSnapshot, metrics, targets) {
+  const actions = [];
+  const aClass = liveSnapshot?.a_class || {};
+  const aClassWouldEnter = Number(aClass.would_enter || 0);
+  const aClassEnter = Number(aClass.enter || 0);
+  const aClassEnabled = String(process.env.A_CLASS_ENABLED || 'false').toLowerCase() === 'true';
+  if (aClass.available) {
+    actions.push({
+      mode: 'A_CLASS_FASTLANE',
+      status: aClassEnabled ? 'TINY_ONLY' : 'SHADOW',
+      would_enter_24h: aClassWouldEnter,
+      enter_24h: aClassEnter,
+      recommended_action: !aClassEnabled && aClassWouldEnter > 0
+        ? 'prepare_0_001_tiny_paper_after_observability_green'
+        : 'observe',
+      reason: !aClassEnabled && aClassWouldEnter > 0
+        ? 'a_class_has_shadow_would_enter_samples_but_live_tiny_disabled'
+        : 'a_class_not_ready_to_upgrade',
+    });
+  }
+  const rows = Array.isArray(liveSnapshot?.entry_mode_performance?.by_entry_mode)
+    ? liveSnapshot.entry_mode_performance.by_entry_mode
+    : [];
+  for (const row of rows.slice(0, 8)) {
+    const closed = Number(row.closed || row.closed_n || 0);
+    const winRatePct = finiteNumber(row.win_rate_pct, null);
+    const avgPnlPct = finiteNumber(row.avg_pnl_pct, null);
+    const maxLossPct = finiteNumber(row.max_loss_pct, null);
+    let status = 'TINY_ONLY';
+    let recommended = 'collect_more_samples';
+    let reason = 'insufficient_closed_trades_for_mode_promotion';
+    if (maxLossPct != null && maxLossPct <= -Math.abs(targets.max_single_trade_loss_pct)) {
+      status = 'DISABLED';
+      recommended = 'disable_or_shadow_until_loss_source_explained';
+      reason = 'mode_max_loss_breached_goal_limit';
+    } else if (closed >= targets.min_closed_trades_24h && avgPnlPct != null && avgPnlPct < 0) {
+      status = 'SHADOW';
+      recommended = 'downgrade_to_shadow';
+      reason = 'mode_ev_negative_after_min_sample';
+    } else if (closed >= targets.min_closed_trades_24h && winRatePct != null && winRatePct >= targets.target_realized_win_rate * 100 && avgPnlPct != null && avgPnlPct > 0) {
+      status = 'LIVE';
+      recommended = 'allow_or_observe';
+      reason = 'mode_meets_win_rate_and_positive_ev';
+    }
+    actions.push({
+      mode: row.entry_mode || row.bucket || 'unknown',
+      bucket: row.bucket || null,
+      status,
+      closed_24h: closed,
+      win_rate_pct: winRatePct,
+      avg_pnl_pct: avgPnlPct,
+      max_loss_pct: maxLossPct,
+      recommended_action: recommended,
+      reason,
+    });
+  }
+  if (!actions.length) {
+    actions.push({
+      mode: 'ALL',
+      status: 'SHADOW',
+      recommended_action: 'build_more_evidence',
+      reason: 'no_mode_performance_or_a_class_snapshot_available',
+    });
+  }
+  return actions;
+}
+
+export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options = {}) {
+  const generatedAt = options.generatedAt || new Date().toISOString();
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.parse(generatedAt) || Date.now();
+  const requestedHours = Math.max(1, Math.min(24, parseInt(String(options.requestedHours ?? 24), 10) || 24));
+  const materializedHours = Math.max(1, Math.min(24, parseInt(String(options.materializedHours ?? requestedHours), 10) || requestedHours));
+  const maxSnapshotAgeMinutes = Math.max(1, Math.min(1440, parseInt(String(options.maxSnapshotAgeMinutes ?? 30), 10) || 30));
+  const dbPath = options.dbPath || getPaperDbPath();
+  const targets = {
+    target_realized_win_rate: finiteNumber(options.targetRealizedWinRate, finiteNumber(process.env.ROLLING_GOAL_WIN_RATE, 0.60)),
+    target_gold_silver_capture_rate: finiteNumber(options.targetGoldSilverCaptureRate, finiteNumber(process.env.DOG_CATCH_GOAL_CAPTURE_RATE, 0.60)),
+    target_strategy_bucket_roi: finiteNumber(options.targetStrategyBucketRoi, finiteNumber(process.env.DOG_CATCH_GOAL_ROI, 2.0)),
+    max_single_trade_loss_pct: Math.abs(finiteNumber(options.maxSingleTradeLossPct, finiteNumber(process.env.ROLLING_GOAL_MAX_SINGLE_LOSS_PCT, 20))),
+    min_closed_trades_24h: Math.max(0, parseInt(String(options.minClosedTrades ?? process.env.ROLLING_GOAL_MIN_CLOSED_TRADES_24H ?? 20), 10) || 20),
+    min_gold_silver_candidates_24h: Math.max(0, parseInt(String(options.minGoldSilverCandidates ?? process.env.ROLLING_GOAL_MIN_GOLD_SILVER_CANDIDATES_24H ?? 5), 10) || 5),
+  };
+  const snapshotAvailable = Boolean(liveSnapshot && !liveSnapshot.error);
+  const snapshotAge = snapshotAvailable ? snapshotAgeMinutes(liveSnapshot, nowMs) : null;
+  const snapshotFresh = Boolean(snapshotAvailable && snapshotAge != null && snapshotAge <= maxSnapshotAgeMinutes);
+  const dogCatch = snapshotAvailable ? dogCatchGoalFromLiveSnapshot(liveSnapshot, {
+    dbPath,
+    requestedHours,
+    options: {
+      targetCatchRate: targets.target_gold_silver_capture_rate,
+      targetWinRate: targets.target_realized_win_rate,
+      targetRoi: targets.target_strategy_bucket_roi,
+      dogPeakRatio: finiteNumber(options.dogPeakRatio, 0.50),
+      winPeakRatio: finiteNumber(options.winPeakRatio, 0.30),
+    },
+  }) : null;
+  const tradeTotals = liveSnapshot?.trades?.totals || {};
+  const closed = finiteNumber(tradeTotals.closed, finiteNumber(dogCatch?.trades?.closed, 0)) || 0;
+  const wins = finiteNumber(tradeTotals.wins, null);
+  const realizedWinRate = closed > 0 && wins != null ? wins / closed : null;
+  const eligibleGoldSilver = finiteNumber(dogCatch?.goal?.eligible_gold_silver_unique, 0) || 0;
+  const capturedGoldSilver = finiteNumber(dogCatch?.goal?.captured_gold_silver_unique ?? dogCatch?.trades?.captured_gold_silver_unique, 0) || 0;
+  const captureRate = eligibleGoldSilver > 0 ? capturedGoldSilver / eligibleGoldSilver : null;
+  const deployedSol = finiteNumber(tradeTotals.deployed_sol, finiteNumber(dogCatch?.trades?.deployed_sol, 0)) || 0;
+  const realizedPnlSol = finiteNumber(tradeTotals.est_pnl_sol, finiteNumber(dogCatch?.trades?.realized_pnl_sol, null));
+  const bucketRoi = deployedSol > 0 && realizedPnlSol != null
+    ? realizedPnlSol / deployedSol
+    : finiteNumber(dogCatch?.trades?.realized_roi, null);
+  const minPnlRatio = finiteNumber(tradeTotals.min_pnl, null);
+  const maxSingleLossPct = minPnlRatio == null ? lowestEntryModeLossPct(liveSnapshot) : minPnlRatio * 100.0;
+  const blockers = [];
+  const metricBlockers = [];
+  const sampleBlockers = [];
+  const evidenceBlockers = [];
+  if (!snapshotAvailable) evidenceBlockers.push(liveSnapshot?.error ? 'materialized_review_snapshot_invalid' : 'materialized_review_snapshot_missing');
+  if (snapshotAvailable && !snapshotFresh) evidenceBlockers.push('materialized_review_snapshot_stale_or_undated');
+  if (closed < targets.min_closed_trades_24h) sampleBlockers.push('insufficient_closed_trades_24h');
+  if (eligibleGoldSilver < targets.min_gold_silver_candidates_24h) sampleBlockers.push('insufficient_gold_silver_denominator_24h');
+  if (realizedWinRate == null || realizedWinRate < targets.target_realized_win_rate) metricBlockers.push('realized_win_rate_below_target');
+  if (captureRate == null || captureRate < targets.target_gold_silver_capture_rate) metricBlockers.push('gold_silver_capture_rate_below_target');
+  if (bucketRoi == null || bucketRoi < targets.target_strategy_bucket_roi) metricBlockers.push('strategy_bucket_roi_below_target');
+  if (maxSingleLossPct == null) {
+    metricBlockers.push('max_single_trade_loss_unavailable');
+  } else if (maxSingleLossPct <= -targets.max_single_trade_loss_pct) {
+    metricBlockers.push('max_single_trade_loss_breached');
+  }
+  blockers.push(...evidenceBlockers, ...sampleBlockers, ...metricBlockers);
+  const validSample = sampleBlockers.length === 0;
+  const pass = snapshotFresh && validSample && metricBlockers.length === 0 && evidenceBlockers.length === 0;
+  let status = 'under_target';
+  if (pass) {
+    status = 'pass';
+  } else if (evidenceBlockers.length) {
+    status = 'evidence_unavailable';
+  } else if (!validSample) {
+    status = 'insufficient_sample';
+  }
+  const metrics = {
+    realized_win_rate: realizedWinRate == null ? null : roundNumber(realizedWinRate, 4),
+    gold_silver_capture_rate: captureRate == null ? null : roundNumber(captureRate, 4),
+    strategy_bucket_roi: bucketRoi == null ? null : roundNumber(bucketRoi, 4),
+    max_single_trade_loss_pct: maxSingleLossPct == null ? null : roundNumber(maxSingleLossPct, 2),
+    closed_trades_24h: closed,
+    wins_24h: wins,
+    eligible_gold_silver_24h: eligibleGoldSilver,
+    captured_gold_silver_24h: capturedGoldSilver,
+    deployed_sol_24h: roundNullableNumber(deployedSol, 6),
+    realized_pnl_sol_24h: roundNullableNumber(realizedPnlSol, 6),
+  };
+  return {
+    generated_at: generatedAt,
+    schema_version: 'v1.rolling_24h_strategy_goal_status',
+    goal: 'rolling_24h_convexity_capture',
+    materialized: true,
+    live_query: false,
+    available: snapshotAvailable,
+    pass,
+    status,
+    db_path: dbPath,
+    config_path: join(projectRoot, 'config', 'strategy-goal.yaml'),
+    requested_window_hours: requestedHours,
+    materialized_window_hours: materializedHours,
+    materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+    materialized_generated_at: liveSnapshot?.generated_at || null,
+    materialized_path: livePaperReviewPath(materializedHours),
+    snapshot_age_minutes: snapshotAge,
+    max_snapshot_age_minutes: maxSnapshotAgeMinutes,
+    targets,
+    metrics,
+    target_gaps: {
+      realized_win_rate: realizedWinRate == null ? null : roundNumber(targets.target_realized_win_rate - realizedWinRate, 4),
+      gold_silver_capture_rate: captureRate == null ? null : roundNumber(targets.target_gold_silver_capture_rate - captureRate, 4),
+      strategy_bucket_roi: bucketRoi == null ? null : roundNumber(targets.target_strategy_bucket_roi - bucketRoi, 4),
+      max_single_trade_loss_pct: maxSingleLossPct == null ? null : roundNumber(maxSingleLossPct + targets.max_single_trade_loss_pct, 2),
+    },
+    blockers: [...new Set(blockers)],
+    evidence_blockers: evidenceBlockers,
+    sample_blockers: sampleBlockers,
+    metric_blockers: metricBlockers,
+    mode_actions: snapshotAvailable ? modeActionsFromSnapshot(liveSnapshot, metrics, targets) : [],
+    notes: {
+      endpoint_goal: 'rolling 24h strategy controller status; default reads materialized snapshot only so dashboard health is not blocked by SQLite scans',
+      success_rule: 'pass requires fresh materialized evidence, minimum sample denominators, realized win rate >=60%, quote-clean gold/silver catch rate >=60%, deployed-capital ROI >=200%, and no non-outlier trade loss worse than -20%',
+      next_controller_step: 'use mode_actions to decide LIVE/TINY_ONLY/SHADOW/DISABLED; do not increase size without positive EV and clean denominator evidence',
+    },
+  };
+}
+
 function runtimeCommitFingerprint() {
   const envCommit = firstValue(
     process.env.GIT_COMMIT,
@@ -7322,6 +7525,7 @@ const server = http.createServer(async (req, res) => {
         canonical_ledger_json: `${origin}/api/data/download/canonical-ledger?token=${tokenHint}`,
       },
       review_apis: {
+        rolling_24h_goal: `${origin}/api/goal/rolling-24h?token=${tokenHint}`,
         a_class_status: `${origin}/api/a-class/status?token=${tokenHint}&hours=24`,
         a_class_events: `${origin}/api/a-class/events?token=${tokenHint}&hours=24&limit=500`,
         a_class_scorecard: `${origin}/api/scorecard/a-class?token=${tokenHint}&hours=168`,
@@ -11395,6 +11599,27 @@ const server = http.createServer(async (req, res) => {
     });
     res.writeHead(record.accepted ? 202 : 409, apiJsonHeaders());
     res.end(JSON.stringify(buildV27ManualEvidenceApiResponse('v2.7.0.manual_normal_tiny_ops_evidence.v1', record, { endpoint: url.pathname }), null, 2));
+    return;
+  } else if (url.pathname === '/api/goal/rolling-24h') {
+    if (!checkAuth(req, url, res)) return;
+    const requestedHours = boundedIntParam(url, 'hours', 24, 1, 24);
+    const materializedHours = nearestLivePaperReviewHours(requestedHours);
+    const liveSnapshot = readLivePaperReview(materializedHours);
+    const status = buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, {
+      requestedHours,
+      materializedHours,
+      maxSnapshotAgeMinutes: boundedIntParam(url, 'max_snapshot_age_minutes', 30, 1, 1440),
+      targetRealizedWinRate: Number(url.searchParams.get('target_win_rate') || 0.60),
+      targetGoldSilverCaptureRate: Number(url.searchParams.get('target_capture') || 0.60),
+      targetStrategyBucketRoi: Number(url.searchParams.get('target_roi') || 2.0),
+      maxSingleTradeLossPct: Number(url.searchParams.get('max_single_loss_pct') || 20),
+      minClosedTrades: Number(url.searchParams.get('min_closed_trades') || 20),
+      minGoldSilverCandidates: Number(url.searchParams.get('min_gold_silver_candidates') || 5),
+      dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
+      winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
+    });
+    res.writeHead(status.available ? 200 : 202, apiJsonHeaders());
+    res.end(JSON.stringify(status, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-kpi-proof-status') {
     const proofStatus = buildV27KpiProofStatus({

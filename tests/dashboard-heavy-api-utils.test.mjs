@@ -14,6 +14,7 @@ import {
   buildDogCatchGoalProgress,
   buildIncidentArtifactSnapshot,
   buildNotAthReclaimFunnelReport,
+  buildRolling24hGoalStatusFromLiveSnapshot,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
@@ -1710,6 +1711,81 @@ test('dog catch goal can be served from materialized live snapshot section', () 
   assert.equal(progress.materialized_snapshot_id, 'paper_live_2h_test');
   assert.equal(progress.goal.eligible_gold_silver_unique, 3);
   assert.equal(progress.missed.by_blocker[0].reject_reason, 'tracking_ttl_expired');
+});
+
+test('rolling 24h goal status is calculated from materialized snapshot', () => {
+  const status = buildRolling24hGoalStatusFromLiveSnapshot({
+    snapshot_id: 'paper_live_24h_goal_test',
+    generated_at: '2026-06-04T00:50:00.000Z',
+    window: { since_ts: 1000, since_iso: '2026-06-03T00:50:00.000Z' },
+    trades: {
+      totals: {
+        total: 24,
+        closed: 20,
+        wins: 12,
+        min_pnl: -0.12,
+        deployed_sol: 0.05,
+        est_pnl_sol: 0.11,
+      },
+    },
+    dog_catch_goal: {
+      available: true,
+      trades: {
+        fills: 24,
+        closed: 20,
+        captured_gold_silver_unique: 6,
+        realized_pnl_sol: 0.11,
+        deployed_sol: 0.05,
+        realized_roi: 2.2,
+      },
+      missed: {
+        clean_gold_silver_unique: 4,
+        by_blocker: [],
+      },
+      goal: {
+        eligible_gold_silver_unique: 10,
+        captured_gold_silver_unique: 6,
+        clean_gold_silver_capture_rate: 0.6,
+        pass: true,
+        blockers: [],
+      },
+    },
+    a_class: {
+      available: true,
+      would_enter: 3,
+      enter: 0,
+    },
+    entry_mode_performance: {
+      by_entry_mode: [
+        {
+          bucket: 'tiny_scout',
+          entry_mode: 'A_CLASS_FASTLANE',
+          closed: 20,
+          win_rate_pct: 60,
+          avg_pnl_pct: 8,
+          max_loss_pct: -12,
+        },
+      ],
+    },
+  }, {
+    generatedAt: '2026-06-04T01:00:00.000Z',
+    nowMs: Date.parse('2026-06-04T01:00:00.000Z'),
+    requestedHours: 24,
+    materializedHours: 24,
+    dbPath: '/tmp/paper.db',
+  });
+
+  assert.equal(status.schema_version, 'v1.rolling_24h_strategy_goal_status');
+  assert.equal(status.pass, true);
+  assert.equal(status.status, 'pass');
+  assert.equal(status.metrics.realized_win_rate, 0.6);
+  assert.equal(status.metrics.gold_silver_capture_rate, 0.6);
+  assert.equal(status.metrics.strategy_bucket_roi, 2.2);
+  assert.equal(status.metrics.max_single_trade_loss_pct, -12);
+  assert.deepEqual(status.blockers, []);
+  assert.equal(status.mode_actions[0].mode, 'A_CLASS_FASTLANE');
+  assert.equal(status.mode_actions[0].status, 'SHADOW');
+  assert.equal(status.mode_actions[0].recommended_action, 'prepare_0_001_tiny_paper_after_observability_green');
 });
 
 test('a class status can be served from materialized live snapshot section', () => {

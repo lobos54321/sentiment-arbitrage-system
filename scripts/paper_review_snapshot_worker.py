@@ -467,6 +467,8 @@ def trade_summary(db, since_ts, limit):
           SUM(CASE WHEN {exit_ts_expr} IS NULL THEN 1 ELSE 0 END) AS open,
           SUM(CASE WHEN {pnl_expr} > 0 THEN 1 ELSE 0 END) AS wins,
           AVG({pnl_expr}) AS avg_pnl,
+          MIN({pnl_expr}) AS min_pnl,
+          MAX({pnl_expr}) AS max_pnl,
           AVG({peak_expr}) AS avg_peak,
           AVG({mark_peak_expr}) AS avg_mark_peak,
           SUM(CASE
@@ -474,6 +476,7 @@ def trade_summary(db, since_ts, limit):
              AND {mark_peak_expr} >= 0.25
             THEN 1 ELSE 0 END
           ) AS mark_only_peak_spikes,
+          SUM(COALESCE({size_expr}, 0)) AS deployed_sol,
           SUM(COALESCE({size_expr}, 0) * COALESCE({pnl_expr}, 0)) AS est_pnl_sol
         FROM paper_trades
         {where}
@@ -489,6 +492,8 @@ def trade_summary(db, since_ts, limit):
           SUM(CASE WHEN {exit_ts_expr} IS NOT NULL THEN 1 ELSE 0 END) AS closed,
           SUM(CASE WHEN {pnl_expr} > 0 THEN 1 ELSE 0 END) AS wins,
           AVG({pnl_expr}) AS avg_pnl,
+          MIN({pnl_expr}) AS min_pnl,
+          MAX({pnl_expr}) AS max_pnl,
           AVG({peak_expr}) AS avg_peak,
           AVG({mark_peak_expr}) AS avg_mark_peak,
           SUM(CASE
@@ -496,6 +501,7 @@ def trade_summary(db, since_ts, limit):
              AND {mark_peak_expr} >= 0.25
             THEN 1 ELSE 0 END
           ) AS mark_only_peak_spikes,
+          SUM(COALESCE({size_expr}, 0)) AS deployed_sol,
           SUM(COALESCE({size_expr}, 0) * COALESCE({pnl_expr}, 0)) AS est_pnl_sol
         FROM paper_trades
         {where}

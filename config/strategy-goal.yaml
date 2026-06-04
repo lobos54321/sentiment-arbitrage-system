@@ -1,26 +1,48 @@
-schema_version: v1.strategy_reflection_goal
+schema_version: v2.rolling_24h_strategy_goal
 
 business_goal:
-  primary: catch_gold_silver_bronze_dogs
-  mode: paper
-  target_capture_rate_gold_silver: 0.55
+  primary: rolling_24h_convexity_capture
+  mode: paper_then_a_class_tiny
+  target_realized_win_rate: 0.60
+  target_capture_rate_gold_silver: 0.60
   target_winner_clean_quote_recall: 0.60
-  target_peak30_capture: 0.30
+  target_strategy_bucket_roi: 2.00
+  target_peak30_capture: 0.60
+  gold_pnl_threshold: 1.00
+  silver_pnl_threshold: 0.50
 
 risk_limits:
-  max_daily_loss_sol: 0.05
+  max_single_trade_loss_pct: 20
+  max_daily_loss_sol: 0.02
+  max_a_class_size_sol: 0.003
+  max_a_class_concurrent: 2
+  max_no_route_rate: 0.10
+  max_trapped_rate: 0.10
   max_canary_loss_streak: 3
-  max_drawdown_pct: 8
+  max_drawdown_pct: 20
+  min_closed_trades_24h: 20
+  min_gold_silver_candidates_24h: 5
   min_sample_n_before_promotion: 30
 
 reflection:
-  cadence: every_24h_or_20_closed_trades
+  cadence: rolling_24h_every_15m
   one_variable_only: true
   shadow_first: true
   evidence_windows_hours: [24, 72, 168]
 
+controller:
+  cadence_minutes: 15
+  mode_statuses: [LIVE, TINY_ONLY, SHADOW, DISABLED]
+  auto_downgrade_on_loss_limit: true
+  auto_promote_only_after_positive_ev: true
+  require_canonical_sol_accounting: true
+  require_quote_clean_denominator: true
+
+strategy_buckets:
+  enabled: [ATH_CONTINUATION, SOURCE_RESONANCE_RECLAIM, LOTTO_QUOTE_CLEAN_EARLY, A_CLASS_FASTLANE, NORMAL_MAIN_TRADE]
+
 candidate_scope:
-  default_entry_mode: lotto_not_ath_reclaim_tiny_probe
-  allowed_entry_modes: [lotto_not_ath_reclaim_tiny_probe, lotto_micro_reclaim_tiny_probe]
-  allowed_variables: [markov_green_required, quote_clean_max_gap_pct, max_canary_per_hour, position_size_sol, stale_reclaim_max_age_sec, mc0_gate_fallback_enabled]
-  forbidden_actions: [live_trade, multi_variable_change, full_open_without_canary, unverified_external_signal]
+  default_entry_mode: A_CLASS_FASTLANE
+  allowed_entry_modes: [ATH_CONTINUATION, SOURCE_RESONANCE_RECLAIM, LOTTO_QUOTE_CLEAN_EARLY, A_CLASS_FASTLANE, NORMAL_MAIN_TRADE]
+  allowed_variables: [a_class_enabled, a_class_size_sol, markov_green_required, quote_clean_max_gap_pct, max_canary_per_hour, position_size_sol, stale_reclaim_max_age_sec, mc0_gate_fallback_enabled]
+  forbidden_actions: [bypass_hard_security_gate, bypass_quote_executable_gate, bypass_route_available_gate, hide_trapped_or_no_route_loss, optimize_on_mark_only_pnl, increase_size_without_positive_ev, multi_variable_change, full_open_without_canary, unverified_external_signal]
