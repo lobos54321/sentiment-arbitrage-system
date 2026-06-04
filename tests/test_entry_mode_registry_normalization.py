@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from entry_mode_registry import normalize_entry_mode, normalized_entry_mode_detail
+from entry_mode_registry import entry_mode_registry_entry, normalize_entry_mode, normalized_entry_mode_detail
 
 
 def test_normalize_entry_mode_four_primary_buckets():
@@ -19,3 +19,15 @@ def test_normalized_entry_mode_detail_marks_known_mode():
 
     assert detail["normalized_mode"] == "ATH_CONTINUATION"
     assert detail["known_normalized_mode"] is True
+
+
+def test_recent_loss_breach_modes_are_hard_shadowed():
+    pullback = entry_mode_registry_entry("smart_entry_pullback_bounce")
+    micro = entry_mode_registry_entry("lotto_micro_reclaim_tiny_probe")
+
+    assert pullback["tier"] == "hard_shadow"
+    assert pullback["paper_enabled"] is False
+    assert "20%" in pullback["reason"]
+    assert micro["tier"] == "hard_shadow"
+    assert micro["paper_enabled"] is False
+    assert "20%" in micro["reason"]

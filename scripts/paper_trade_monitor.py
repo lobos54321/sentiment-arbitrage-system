@@ -144,6 +144,13 @@ REMOTE_SIGNAL_URL = os.environ.get('REMOTE_SIGNAL_URL', '').strip()
 REMOTE_SIGNAL_TOKEN = os.environ.get('REMOTE_SIGNAL_TOKEN', '').strip()
 REMOTE_SIGNAL_LOOKBACK = max(50, int(os.environ.get('REMOTE_SIGNAL_LOOKBACK', '500')))
 EXECUTION_BRIDGE = PROJECT_ROOT / 'scripts' / 'execution_bridge.js'
+V27_READ_MODEL_DIR = Path(os.environ.get('V27_READ_MODEL_DIR', str(DATA_DIR / 'v27_read_models')))
+SIGNAL_SOURCE_FRESHNESS_HEALTH_PATH = Path(os.environ.get(
+    'SIGNAL_SOURCE_FRESHNESS_HEALTH_PATH',
+    str(V27_READ_MODEL_DIR / 'signal_source_freshness.json'),
+))
+SIGNAL_SOURCE_STALE_WARN_MIN = float(os.environ.get('SIGNAL_SOURCE_STALE_WARN_MIN', '15'))
+SIGNAL_SOURCE_FAIL_CLOSED_MIN = float(os.environ.get('SIGNAL_SOURCE_FAIL_CLOSED_MIN', '45'))
 
 DEFAULT_STRATEGY_ID = 'notath-selective-v1'
 DEFAULT_STRATEGY_ROLE = 'selective_challenger'
@@ -934,6 +941,7 @@ PAPER_SHARED_RUNTIME_FAILURE_CACHE_TTL_SEC = float(os.environ.get('PAPER_SHARED_
 MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC = float(os.environ.get('MISSED_ATTRIBUTION_UPDATE_INTERVAL_SEC', '60'))
 MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_SEC', '180'))
 MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC = float(os.environ.get('MISSED_ATTRIBUTION_LOCK_BACKOFF_MAX_SEC', '900'))
+MISSED_ATTRIBUTION_SINGLE_WRITER_TIMEOUT_SEC = float(os.environ.get('MISSED_ATTRIBUTION_SINGLE_WRITER_TIMEOUT_SEC', '10'))
 SOL_PRICE_TTL_SEC = int(os.environ.get('SOL_PRICE_TTL_SEC', '30'))
 MARKET_DATA_UNIFIED_ROLLOUT = os.environ.get('MARKET_DATA_UNIFIED_ROLLOUT', 'true').lower() != 'false'
 MARKET_DATA_UNIFIED_PAPER_MONITOR = os.environ.get('MARKET_DATA_UNIFIED_PAPER_MONITOR', 'true').lower() != 'false'
@@ -17716,16 +17724,29 @@ def run_due_missed_attribution_update(
     if not _MISSED_ATTRIBUTION_WRITE_LOCK.acquire(blocking=False):
         return {'updated': 0, 'skipped': True, 'reason': 'writer_busy'}
     try:
-        updated = update_due_missed_attributions(
-            db,
-            historical_price_fetcher=historical_price_fetcher,
-            live_price_fetcher=live_price_fetcher,
-            now=now,
-            limit=limit,
-        )
+        with sqlite_single_writer(
+            "paper_trade_monitor:missed_attribution_update",
+            timeout_sec=MISSED_ATTRIBUTION_SINGLE_WRITER_TIMEOUT_SEC,
+        ):
+            updated = update_due_missed_attributions(
+                db,
+                historical_price_fetcher=historical_price_fetcher,
+                live_price_fetcher=live_price_fetcher,
+                now=now,
+                limit=limit,
+            )
         _MISSED_ATTRIBUTION_LOCK_FAILURES = 0
         _MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
         return {'updated': updated, 'skipped': False, 'reason': 'updated'}
+    except TimeoutError as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        detail = _missed_attribution_lock_backoff_detail(exc, now_ts=now)
+        detail['updated'] = 0
+        detail['reason'] = 'single_writer_timeout_backoff'
+        return detail
     except Exception as exc:
         if sqlite_malformed_error(exc):
             try:
@@ -19211,6 +19232,75 @@ def get_signal_freshness():
         return {'latest_ts': None, 'age_minutes': None, 'total': 0, 'source': 'unknown'}
 
 
+def build_signal_source_freshness_health(freshness=None, *, now_ts=None):
+    """Build a small read-model for the Zeabur/container signal DB chain."""
+    now_ts = float(now_ts if now_ts is not None else time.time())
+    freshness = dict(freshness or get_signal_freshness() or {})
+    latest_ts = freshness.get('latest_ts')
+    age_minutes = freshness.get('age_minutes')
+    total = int(freshness.get('total') or 0)
+    source = freshness.get('source') or 'unknown'
+    status = 'ok'
+    fail_closed = False
+    if not latest_ts or age_minutes is None:
+        status = 'empty_fail_closed'
+        fail_closed = True
+    else:
+        try:
+            age_value = float(age_minutes)
+        except (TypeError, ValueError):
+            age_value = None
+        if age_value is None:
+            status = 'unknown_fail_closed'
+            fail_closed = True
+        elif age_value > SIGNAL_SOURCE_FAIL_CLOSED_MIN:
+            status = 'stale_fail_closed'
+            fail_closed = True
+        elif age_value > SIGNAL_SOURCE_STALE_WARN_MIN:
+            status = 'stale_warn'
+    latest_iso = None
+    if latest_ts:
+        try:
+            latest_iso = datetime.utcfromtimestamp(float(latest_ts)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        except Exception:
+            latest_iso = None
+    return {
+        'schema_version': 'v1.signal_source_freshness_health',
+        'generated_at': now_ts,
+        'generated_at_iso': datetime.utcfromtimestamp(now_ts).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'status': status,
+        'fail_closed': fail_closed,
+        'source': source,
+        'source_note': (
+            'local means the Zeabur/container-local sentiment DB, not the operator laptop'
+            if source == 'local'
+            else None
+        ),
+        'sentiment_db_path': SENTIMENT_DB if source == 'local' else None,
+        'remote_signal_url_present': bool(REMOTE_SIGNAL_URL),
+        'latest_ts': latest_ts,
+        'latest_iso': latest_iso,
+        'age_minutes': age_minutes,
+        'total': total,
+        'warn_after_minutes': SIGNAL_SOURCE_STALE_WARN_MIN,
+        'fail_closed_after_minutes': SIGNAL_SOURCE_FAIL_CLOSED_MIN,
+        'entry_action': 'fail_closed_no_new_live_entries' if fail_closed else 'allow_fresh_signal_processing',
+    }
+
+
+def write_signal_source_freshness_health(freshness=None, *, now_ts=None):
+    health = build_signal_source_freshness_health(freshness, now_ts=now_ts)
+    try:
+        path = SIGNAL_SOURCE_FRESHNESS_HEALTH_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        tmp.write_text(json.dumps(health, ensure_ascii=False, sort_keys=True, indent=2), encoding='utf-8')
+        tmp.replace(path)
+    except Exception as exc:
+        log.debug(f"  [SOURCE_FRESHNESS_HEALTH] write failed: {exc}")
+    return health
+
+
 def get_last_processed_id(db):
     """Get the highest signal_ts in paper_trades to avoid re-processing."""
     row = db.execute("""
@@ -20544,13 +20634,26 @@ def run_monitor(db):
     )
 
     freshness = get_signal_freshness()
+    source_health = write_signal_source_freshness_health(freshness)
     if freshness['latest_ts']:
         latest_iso = datetime.utcfromtimestamp(freshness['latest_ts']).strftime('%Y-%m-%d %H:%M:%S UTC')
-        log.info(f"  premium_signals latest: {latest_iso} ({freshness['age_minutes']} min ago, sample={freshness['total']}, source={freshness.get('source', 'unknown')})")
-        if freshness['age_minutes'] is not None and freshness['age_minutes'] > 120:
-            log.warning("  premium_signals is stale; paper trade monitor may idle until upstream signal source updates")
+        log.info(
+            f"  premium_signals latest: {latest_iso} ({freshness['age_minutes']} min ago, "
+            f"sample={freshness['total']}, source={freshness.get('source', 'unknown')}, "
+            f"health={source_health.get('status')})"
+        )
+        if source_health.get('fail_closed'):
+            log.warning(
+                "  [SOURCE_FRESHNESS_FAIL_CLOSED] premium_signals is stale; "
+                "new live entries will fail closed until the container signal DB refreshes"
+            )
+        elif source_health.get('status') == 'stale_warn':
+            log.warning("  [SOURCE_FRESHNESS_WARN] premium_signals is aging; monitor may idle until upstream signal source updates")
     else:
-        log.warning(f"  premium_signals has no rows from {freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process")
+        log.warning(
+            f"  [SOURCE_FRESHNESS_FAIL_CLOSED] premium_signals has no rows from "
+            f"{freshness.get('source', 'unknown')} source; paper trade monitor has no upstream signals to process"
+        )
 
     positions = {}
     positions_lock = threading.Lock()  # P6: shared lock for Guardian thread
@@ -20743,6 +20846,8 @@ def run_monitor(db):
     last_heartbeat = 0.0
     last_progress = time.time()
     _eval_rotation_offset = 0
+    source_fail_closed = bool(source_health.get('fail_closed'))
+    last_source_fail_closed_log = 0.0
 
     # --- P6: Start EXIT Guardian Thread ---
     exit_guardian = ExitGuardianThread(
@@ -20828,6 +20933,8 @@ def run_monitor(db):
 
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
             freshness = get_signal_freshness()
+            source_health = write_signal_source_freshness_health(freshness, now_ts=now)
+            source_fail_closed = bool(source_health.get('fail_closed'))
             wl_watching = len(watchlist.get_watching())
             wl_holding = watchlist.get_active_count()
             # --- Memory monitor (detect OOM before SIGKILL) ---
@@ -20858,12 +20965,25 @@ def run_monitor(db):
                 pass
             log.info(
                 f'[heartbeat] signals={freshness.get("total", 0)} source={freshness.get("source", "unknown")} '
-                f'age_min={freshness.get("age_minutes")} watching={wl_watching} holding={wl_holding} '
+                f'age_min={freshness.get("age_minutes")} source_health={source_health.get("status")} '
+                f'watching={wl_watching} holding={wl_holding} '
                 f'active_positions={len(positions)} pending={len(pending_entries)} discovery={len(discovery_candidates)}{_mem_info}'
             )
+            if source_fail_closed and now - last_source_fail_closed_log >= 60:
+                log.warning(
+                    f"[SOURCE_FRESHNESS_FAIL_CLOSED] status={source_health.get('status')} "
+                    f"age_min={source_health.get('age_minutes')} total={source_health.get('total')} "
+                    f"source={source_health.get('source')} action=no_new_live_entries"
+                )
+                last_source_fail_closed_log = now
             last_heartbeat = now
 
-        if not pending_priority and not signal_poll_has_work and now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC:
+        if (
+            not source_fail_closed
+            and not pending_priority
+            and not signal_poll_has_work
+            and now - last_discovery_tracking >= DISCOVERY_TRACKING_POLL_SEC
+        ):
             try:
                 with positions_lock:
                     _discovery_armed = process_discovery_tracking_candidates(
@@ -20889,6 +21009,7 @@ def run_monitor(db):
         if (
             HARD_GATE_PASS_QUOTE_RETRY_ENABLED
             and _hard_gate_pass_quote_retry
+            and not source_fail_closed
             and not pending_priority
             and not signal_poll_has_work
             and now - last_hard_gate_quote_retry >= max(1, min(HARD_GATE_PASS_QUOTE_RETRY_POLL_SEC, 5))
@@ -21076,67 +21197,70 @@ def run_monitor(db):
                         )
                 except Exception as _a_class_shadow_err:
                     log.debug(f"  [A_CLASS_SHADOW_SCAN] scan failed: {_a_class_shadow_err}")
-                try:
-                    with positions_lock:
-                        _upstream_probe_live_n = enqueue_lotto_upstream_miss_tiny_scout_candidates(
-                            db,
-                            watchlist,
-                            pending_entries,
-                            dict(positions),
-                            now_ts=now,
-                            limit=1,
-                            max_positions=max_positions,
-                        )
-                    if _upstream_probe_live_n:
-                        log.info(
-                            f"  [LOTTO_UPSTREAM_PROBE_LIVE] pending={_upstream_probe_live_n} "
-                            f"minMax={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_MAX_PNL:.0%} "
-                            f"minReclaim={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_RECLAIM_PNL:.0%} "
-                            f"maxMc={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC:.0f} "
-                            f"size={LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL:.3f}SOL"
-                        )
-                except Exception as _upstream_probe_live_err:
-                    log.debug(f"  [LOTTO_UPSTREAM_PROBE_LIVE] scan failed: {_upstream_probe_live_err}")
-                try:
-                    with positions_lock:
-                        _probe_live_n = enqueue_lotto_real_probe_candidates(
-                            db,
-                            watchlist,
-                            pending_entries,
-                            dict(positions),
-                            now_ts=now,
-                            limit=1,
-                            max_positions=max_positions,
-                        )
-                    if _probe_live_n:
-                        log.info(
-                            f"  [LOTTO_PROBE_LIVE] pending={_probe_live_n} "
-                            f"minMax={LOTTO_REAL_PROBE_MIN_MAX_PNL:.0%} "
-                            f"min15m={LOTTO_REAL_PROBE_MIN_15M_PNL:.0%} "
-                            f"size={LOTTO_REAL_PROBE_SIZE_SOL:.3f}SOL"
-                        )
-                except Exception as _probe_live_err:
-                    log.debug(f"  [LOTTO_PROBE_LIVE] scan failed: {_probe_live_err}")
-                try:
-                    with positions_lock:
-                        _ath_probe_live_n = enqueue_ath_real_probe_candidates(
-                            db,
-                            watchlist,
-                            pending_entries,
-                            dict(positions),
-                            now_ts=now,
-                            limit=1,
-                            max_positions=max_positions,
-                        )
-                    if _ath_probe_live_n:
-                        log.info(
-                            f"  [ATH_PROBE_LIVE] pending={_ath_probe_live_n} "
-                            f"minMax={ATH_REAL_PROBE_MIN_MAX_PNL:.0%} "
-                            f"minReclaim={ATH_REAL_PROBE_MIN_RECLAIM_PNL:.0%} "
-                            f"size={ATH_REAL_PROBE_SIZE_SOL:.3f}SOL"
-                        )
-                except Exception as _ath_probe_live_err:
-                    log.debug(f"  [ATH_PROBE_LIVE] scan failed: {_ath_probe_live_err}")
+                if source_fail_closed:
+                    log.debug("  [SOURCE_FRESHNESS_FAIL_CLOSED] live probe scans skipped")
+                else:
+                    try:
+                        with positions_lock:
+                            _upstream_probe_live_n = enqueue_lotto_upstream_miss_tiny_scout_candidates(
+                                db,
+                                watchlist,
+                                pending_entries,
+                                dict(positions),
+                                now_ts=now,
+                                limit=1,
+                                max_positions=max_positions,
+                            )
+                        if _upstream_probe_live_n:
+                            log.info(
+                                f"  [LOTTO_UPSTREAM_PROBE_LIVE] pending={_upstream_probe_live_n} "
+                                f"minMax={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_MAX_PNL:.0%} "
+                                f"minReclaim={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MIN_RECLAIM_PNL:.0%} "
+                                f"maxMc={LOTTO_UPSTREAM_MISS_TINY_SCOUT_MAX_MC:.0f} "
+                                f"size={LOTTO_UPSTREAM_MISS_TINY_SCOUT_SIZE_SOL:.3f}SOL"
+                            )
+                    except Exception as _upstream_probe_live_err:
+                        log.debug(f"  [LOTTO_UPSTREAM_PROBE_LIVE] scan failed: {_upstream_probe_live_err}")
+                    try:
+                        with positions_lock:
+                            _probe_live_n = enqueue_lotto_real_probe_candidates(
+                                db,
+                                watchlist,
+                                pending_entries,
+                                dict(positions),
+                                now_ts=now,
+                                limit=1,
+                                max_positions=max_positions,
+                            )
+                        if _probe_live_n:
+                            log.info(
+                                f"  [LOTTO_PROBE_LIVE] pending={_probe_live_n} "
+                                f"minMax={LOTTO_REAL_PROBE_MIN_MAX_PNL:.0%} "
+                                f"min15m={LOTTO_REAL_PROBE_MIN_15M_PNL:.0%} "
+                                f"size={LOTTO_REAL_PROBE_SIZE_SOL:.3f}SOL"
+                            )
+                    except Exception as _probe_live_err:
+                        log.debug(f"  [LOTTO_PROBE_LIVE] scan failed: {_probe_live_err}")
+                    try:
+                        with positions_lock:
+                            _ath_probe_live_n = enqueue_ath_real_probe_candidates(
+                                db,
+                                watchlist,
+                                pending_entries,
+                                dict(positions),
+                                now_ts=now,
+                                limit=1,
+                                max_positions=max_positions,
+                            )
+                        if _ath_probe_live_n:
+                            log.info(
+                                f"  [ATH_PROBE_LIVE] pending={_ath_probe_live_n} "
+                                f"minMax={ATH_REAL_PROBE_MIN_MAX_PNL:.0%} "
+                                f"minReclaim={ATH_REAL_PROBE_MIN_RECLAIM_PNL:.0%} "
+                                f"size={ATH_REAL_PROBE_SIZE_SOL:.3f}SOL"
+                            )
+                    except Exception as _ath_probe_live_err:
+                        log.debug(f"  [ATH_PROBE_LIVE] scan failed: {_ath_probe_live_err}")
             except Exception as _missed_err:
                 fatal_sqlite_malformed(_missed_err, context='missed_attribution_update')
                 log.warning(f"  [MISSED_ATTRIBUTION] update failed: {_missed_err}")
@@ -24678,6 +24802,34 @@ def run_monitor(db):
                             f"  [ENTRY_FINAL_GUARD] 🚫 {pending['symbol']} BLOCKED: "
                             f"{_final_fire_block.get('reason')} "
                             f"remaining={_final_fire_block.get('remaining_sec')}s"
+                        )
+                        pending_entries.pop(lifecycle_id, None)
+                        continue
+
+                    _current_source_health = write_signal_source_freshness_health(now_ts=now)
+                    source_fail_closed = bool(_current_source_health.get('fail_closed'))
+                    if source_fail_closed:
+                        record_decision_event(
+                            db,
+                            component='signal_source_freshness',
+                            event_type='entry_block',
+                            decision='block',
+                            reason='source_freshness_fail_closed',
+                            token_ca=pending['token_ca'],
+                            symbol=pending['symbol'],
+                            lifecycle_id=lifecycle_id,
+                            signal_ts=pending['signal_ts'],
+                            signal_id=pending.get('premium_signal_id'),
+                            strategy_stage=_pending_strategy_stage,
+                            route=_pending_signal_route or pending.get('signal_type'),
+                            data_source='premium_signals+source_freshness_health',
+                            payload=with_lifecycle_payload(_current_source_health, _entry_timing_lifecycle),
+                        )
+                        log.info(
+                            f"  [SOURCE_FRESHNESS_FAIL_CLOSED] 🚫 {pending['symbol']} BLOCKED: "
+                            f"status={_current_source_health.get('status')} "
+                            f"age_min={_current_source_health.get('age_minutes')} "
+                            f"mode={pending.get('entry_mode') or timing_reason}"
                         )
                         pending_entries.pop(lifecycle_id, None)
                         continue

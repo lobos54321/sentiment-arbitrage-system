@@ -84,12 +84,12 @@
       "reason": "Primary LOTTO armed state before timing passes."
     },
     "smart_entry_pullback_bounce": {
-      "tier": "live",
+      "tier": "hard_shadow",
       "route": "MIXED",
       "family": "primary",
-      "paper_enabled": true,
+      "paper_enabled": false,
       "size_class": "primary",
-      "reason": "Main pullback entry path; still governed by mode EV."
+      "reason": "Disabled after rolling-24h evidence breached the -20% single-trade loss contract; keep attribution/shadow only until redesigned with hard loss accounting."
     },
     "lotto_concentrated_scout": {
       "tier": "live",
@@ -147,12 +147,12 @@
       "reason": "Controlled post-d162c067 paper-only forward sample; lifetime EV is policy-mixed, so collect clean canary data with quote guards and auto-kill caps."
     },
     "lotto_micro_reclaim_tiny_probe": {
-      "tier": "revival_canary",
+      "tier": "hard_shadow",
       "route": "LOTTO",
       "family": "reclaim_tiny",
-      "paper_enabled": true,
+      "paper_enabled": false,
       "size_class": "ultra_tiny",
-      "reason": "Markov-gated ultra-tiny canary only: open at 0.001 SOL when recent reclaim lifecycle transitions show enough peak30 probability and bounded stop-before-peak risk."
+      "reason": "Disabled after rolling-24h evidence breached the -20% single-trade loss contract; keep Markov/reclaim attribution only until exit and denominator evidence are clean."
     },
     "momentum_direct_entry": {
       "tier": "hard_shadow",

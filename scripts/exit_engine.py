@@ -51,6 +51,7 @@ QUOTE_SANITY_PARTIAL_MIN_PNL = float(os.environ.get("QUOTE_SANITY_PARTIAL_MIN_PN
 OBSERVATION_PROBE_MAX_SIZE_SOL = float(os.environ.get("OBSERVATION_PROBE_MAX_SIZE_SOL", "0.02"))
 OBSERVATION_PROBE_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_HARD_SL", "-0.20"))
 OBSERVATION_PROBE_LOTTO_HARD_SL = float(os.environ.get("OBSERVATION_PROBE_LOTTO_HARD_SL", "-0.22"))
+OBSERVATION_PROBE_MAX_LOSS_CAP = float(os.environ.get("OBSERVATION_PROBE_MAX_LOSS_CAP", "-0.20"))
 QUOTE_MARK_REPRICE_DIVERGENCE = float(os.environ.get("EXIT_QUOTE_REPRICE_DIVERGENCE_PCT", "0.08"))
 QUOTE_PRIMARY_GUARDIAN_EXITS = os.environ.get("QUOTE_PRIMARY_GUARDIAN_EXITS", "true").lower() != "false"
 EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC = float(os.environ.get("EXIT_GUARDIAN_QUOTE_MAX_AGE_SEC", "10"))
@@ -170,6 +171,24 @@ def _is_observation_probe_position(pos):
     if size_sol <= 0 or size_sol > OBSERVATION_PROBE_MAX_SIZE_SOL:
         return False
     return "scout" in entry_mode or "probe" in entry_mode
+
+
+def _observation_probe_hard_sl(base_hard_sl, *, is_lotto_entry=False):
+    """Clamp observation probes so configured probe floors never loosen risk.
+
+    Stop-loss values are negative ratios.  The safer floor is therefore the
+    numerically larger value: -0.10 is tighter than -0.20.  This helper keeps
+    the strategy-level hard SL when it is already tighter, honors stricter env
+    overrides, and never allows an observation probe to drift beyond the global
+    -20% single-trade loss contract.
+    """
+    base = _pct(base_hard_sl, 0.0)
+    configured = _pct(
+        OBSERVATION_PROBE_LOTTO_HARD_SL if is_lotto_entry else OBSERVATION_PROBE_HARD_SL,
+        OBSERVATION_PROBE_MAX_LOSS_CAP,
+    )
+    goal_cap = _pct(OBSERVATION_PROBE_MAX_LOSS_CAP, -0.20)
+    return max(base, configured, goal_cap)
 
 
 def _entry_mode_for_position(pos):
@@ -719,10 +738,7 @@ class ExitGuardianThread(threading.Thread):
 
                 _is_observation_probe = _is_observation_probe_position(pos)
                 if _is_observation_probe:
-                    hard_sl = min(
-                        hard_sl,
-                        OBSERVATION_PROBE_LOTTO_HARD_SL if _is_lotto_entry else OBSERVATION_PROBE_HARD_SL,
-                    )
+                    hard_sl = _observation_probe_hard_sl(hard_sl, is_lotto_entry=_is_lotto_entry)
 
                 # Early DOA cut for MATRIX/ATH: if the trade never goes green and
                 # is already meaningfully red, do not wait for a full -20% hard SL.

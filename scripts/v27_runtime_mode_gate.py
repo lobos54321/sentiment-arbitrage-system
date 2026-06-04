@@ -61,6 +61,10 @@ def strategy_goal_controller_runtime_enabled(env: Mapping[str, str] | None = Non
     return _bool_env("STRATEGY_GOAL_CONTROLLER_RUNTIME_ENFORCEMENT_ENABLED", False, env=env)
 
 
+def strategy_goal_controller_human_approved(env: Mapping[str, str] | None = None) -> bool:
+    return _bool_env("STRATEGY_GOAL_CONTROLLER_HUMAN_APPROVED", False, env=env)
+
+
 def resolve_mode_readiness_path(path: str | os.PathLike[str] | None = None, env: Mapping[str, str] | None = None) -> Path:
     env = env or os.environ
     raw = path or env.get("V27_MODE_READINESS_PATH")
@@ -254,6 +258,17 @@ def _apply_controller_overlay(
             )
             return result
         if action_name in {"TINY_CANARY", "TINY_ONLY"}:
+            if action.get("requires_human_approval") and not strategy_goal_controller_human_approved(env=env):
+                result.update(
+                    {
+                        "pass": False,
+                        "decision": "BLOCK",
+                        "reason": "strategy_goal_controller_human_approval_required",
+                        "strategy_goal_controller_decision": "BLOCK",
+                        "strategy_goal_controller_blocking_action": action,
+                    }
+                )
+                return result
             max_size = action.get("size_sol", action.get("max_size_sol"))
             try:
                 max_size = float(max_size) if max_size is not None else None

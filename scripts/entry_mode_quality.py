@@ -49,7 +49,7 @@ ENTRY_MODE_QUALITY_TAIL_MIN_SAMPLES = max(
 )
 ENTRY_MODE_QUALITY_AVG_PNL_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_AVG_PNL_FLOOR", "0"))
 ENTRY_MODE_QUALITY_P10_PNL_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_P10_PNL_FLOOR", "-0.30"))
-ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR", "-0.80"))
+ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR = float(os.environ.get("ENTRY_MODE_QUALITY_MAX_LOSS_FLOOR", "-0.20"))
 ENTRY_MODE_QUALITY_SHADOW_ONLY_MODES_DEFAULT = ",".join(
     sorted(entry_mode_registry_shadow_only_modes(ENTRY_MODE_REGISTRY))
 )
@@ -229,10 +229,6 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
         })
         return base
 
-    if force_live:
-        base["reason"] = "entry_mode_quality_force_live"
-        return base
-
     if shadow_until > now_ts:
         base.update({
             "decision": "shadow",
@@ -282,6 +278,10 @@ def evaluate_entry_mode_quality(db, entry_mode, *, now_ts=None, force_live=False
                 "auto_action": "downgrade_to_watch_only",
             },
         })
+        return base
+
+    if force_live:
+        base["reason"] = "entry_mode_quality_force_live"
         return base
 
     if stats.get("sample_n", 0) < thresholds["min_samples"]:

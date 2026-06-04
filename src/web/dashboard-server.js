@@ -2157,6 +2157,52 @@ function paperFastLaneHealthPath(env = process.env) {
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
 }
 
+function signalSourceFreshnessHealthPath(env = process.env) {
+  const readModelDir = env.V27_READ_MODEL_DIR || './data/v27_read_models';
+  const raw = env.SIGNAL_SOURCE_FRESHNESS_HEALTH_PATH || join(readModelDir, 'signal_source_freshness.json');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+export function readSignalSourceFreshnessHealth(options = {}) {
+  const healthPath = options.healthPath || signalSourceFreshnessHealthPath(options.env || process.env);
+  try {
+    if (!fs.existsSync(healthPath)) {
+      return {
+        available: false,
+        path: healthPath,
+        status: 'signal_source_freshness_health_missing',
+      };
+    }
+    const payload = JSON.parse(fs.readFileSync(healthPath, 'utf8'));
+    return {
+      available: true,
+      path: healthPath,
+      status: payload?.status || 'unknown',
+      fail_closed: Boolean(payload?.fail_closed),
+      schema_version: payload?.schema_version || null,
+      generated_at: payload?.generated_at || null,
+      generated_at_iso: payload?.generated_at_iso || null,
+      source: payload?.source || null,
+      source_note: payload?.source_note || null,
+      sentiment_db_path: payload?.sentiment_db_path || null,
+      latest_ts: payload?.latest_ts || null,
+      latest_iso: payload?.latest_iso || null,
+      age_minutes: payload?.age_minutes ?? null,
+      total: Number(payload?.total || 0),
+      warn_after_minutes: payload?.warn_after_minutes ?? null,
+      fail_closed_after_minutes: payload?.fail_closed_after_minutes ?? null,
+      entry_action: payload?.entry_action || null,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      path: healthPath,
+      status: 'signal_source_freshness_health_parse_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
 export function readPaperFastLaneHealth(options = {}) {
   const healthPath = options.healthPath || paperFastLaneHealthPath(options.env || process.env);
   try {
@@ -7380,6 +7426,7 @@ const server = http.createServer(async (req, res) => {
       : [];
     const paperFastLaneHealth = readPaperFastLaneHealth();
     const paperDbHealth = readPaperDbRuntimeHealth();
+    const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: global.__startupError || paperDbHealth.status === 'paper_db_integrity_marker_present' ? 'degraded' : 'ok',
@@ -7395,6 +7442,7 @@ const server = http.createServer(async (req, res) => {
       },
       paper_fast_lane_health: paperFastLaneHealth,
       paper_db_health: paperDbHealth,
+      signal_source_freshness_health: signalSourceFreshnessHealth,
     }));
     return;
   } else if (url.pathname === '/dashboard') {
@@ -8129,6 +8177,7 @@ const server = http.createServer(async (req, res) => {
         counters: {},
         external_alpha_health: [],
         premium_signal_gate_health: null,
+        signal_source_freshness_health: readSignalSourceFreshnessHealth(),
         provider_config_health: {
           helius: heliusConfigHealth(),
         },
@@ -8306,6 +8355,8 @@ const server = http.createServer(async (req, res) => {
       if ((health.counters.entry_quote_fail_n || 0) > 0) warnReasons.push('entry_quote_failures_present');
       if ((health.counters.smart_entry_no_price_n || 0) > 5) warnReasons.push('smart_entry_no_price_spike');
       if ((health.counters.exit_quote_fail_n || 0) > 0) warnReasons.push('exit_quote_failures_present');
+      if (health.signal_source_freshness_health?.fail_closed) warnReasons.push('signal_source_freshness_fail_closed');
+      if (health.signal_source_freshness_health?.status === 'stale_warn') warnReasons.push('signal_source_freshness_warn');
       if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.rate_limited_n || 0) > 0) warnReasons.push('premium_signal_provider_rate_limited');
       if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.invalid_api_key_n || 0) > 0) warnReasons.push('premium_signal_provider_auth_failed');
       if (health.premium_signal_gate_health && (health.premium_signal_gate_health.counters.unknown_data_blocked_n || 0) > 0) warnReasons.push('premium_signal_unknown_data_blocks_present');
