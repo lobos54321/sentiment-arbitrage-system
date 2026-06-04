@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 
@@ -107,9 +108,12 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
         "missed",
         "trades",
         "fast_lane",
+        "a_class",
         "entry_mode_performance",
         "route_health",
         "dog_catch_goal",
+        "a_class_p0_discovery",
+        "ai_strategy_review",
     }
     assert snapshot["missed"]["available"] is True
     assert snapshot["missed"]["overall"]["unique_tokens"] == 1
@@ -127,6 +131,7 @@ def test_review_snapshot_worker_handles_legacy_schema(tmp_path):
     assert snapshot["dog_catch_goal"]["available"] is True
     assert snapshot["dog_catch_goal"]["trades"]["fills"] == 1
     assert snapshot["dog_catch_goal"]["missed"]["clean_gold_unique"] == 1
+    assert snapshot["a_class_p0_discovery"]["status"] == "evidence_unavailable"
 
 
 def test_dog_catch_goal_outputs_public_safe_reclaim_pipeline(tmp_path):
@@ -459,3 +464,97 @@ def test_route_health_outputs_clean_dog_capture_metrics(tmp_path):
     assert route["clean_dog_candidates"] == 1
     assert route["clean_dog_capture_rate_pct"] == 0.0
     assert route["clean_dog_reason_counts"]["clean_dog_reclaim_recovery_tradable_signal_stale_watch_only"] == 1
+
+
+def create_a_class_p0_tables(db):
+    db.executescript(
+        """
+        CREATE TABLE paper_missed_signal_attribution (
+          id INTEGER PRIMARY KEY,
+          created_event_ts REAL,
+          token_ca TEXT,
+          route TEXT,
+          component TEXT,
+          reject_reason TEXT,
+          executable_peak_pnl REAL,
+          quote_clean_peak_pnl REAL,
+          tradable_peak_pnl REAL,
+          tradable_missed INTEGER,
+          would_stop_before_peak INTEGER
+        );
+        CREATE TABLE a_class_decision_events (
+          id INTEGER PRIMARY KEY,
+          event_ts REAL,
+          token_ca TEXT,
+          action TEXT,
+          would_action TEXT,
+          hard_blockers_json TEXT,
+          score REAL
+        );
+        """
+    )
+
+
+def seed_a_class_p0_rows(db, n, *, now_ts, raw_peak=1.40):
+    db.executemany(
+        """
+        INSERT INTO paper_missed_signal_attribution (
+          id, created_event_ts, token_ca, route, component, reject_reason,
+          executable_peak_pnl, quote_clean_peak_pnl, tradable_peak_pnl,
+          tradable_missed, would_stop_before_peak
+        ) VALUES (?, ?, ?, 'LOTTO', 'matrix_gate', 'weak_matrix', ?, NULL, NULL, 1, 0)
+        """,
+        [
+            (idx, now_ts - 3600, f"P0_TOKEN_{idx:02d}_SHOULD_NOT_LEAK", raw_peak)
+            for idx in range(1, n + 1)
+        ],
+    )
+    db.executemany(
+        """
+        INSERT INTO a_class_decision_events (
+          id, event_ts, token_ca, action, would_action, hard_blockers_json, score
+        ) VALUES (?, ?, ?, 'WOULD_ENTER', NULL, '[]', 92)
+        """,
+        [
+            (idx, now_ts - 3600, f"P0_TOKEN_{idx:02d}_SHOULD_NOT_LEAK")
+            for idx in range(1, n + 1)
+        ],
+    )
+    db.commit()
+
+
+def test_a_class_p0_discovery_emits_investigate_sourcing_when_seen_below_min(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    create_a_class_p0_tables(db)
+    now_ts = int(time.time())
+    seed_a_class_p0_rows(db, 2, now_ts=now_ts)
+
+    snapshot = build_snapshot(db, 24, 10)
+
+    discovery = snapshot["a_class_p0_discovery"]
+    assert discovery["quote_clean_gold_silver_seen_count"] == 2
+    assert discovery["discovery_exit"]["advisory"] == "INVESTIGATE_SOURCING"
+    assert discovery["discovery_exit"]["reason"] == "quote_clean_gold_silver_seen_below_min"
+
+
+def test_a_class_p0_discovery_promote_advisory_is_materialized_without_token_leak(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    create_a_class_p0_tables(db)
+    now_ts = int(time.time())
+    seed_a_class_p0_rows(db, 30, now_ts=now_ts)
+
+    snapshot = build_snapshot(db, 24, 10)
+
+    discovery = snapshot["a_class_p0_discovery"]
+    assert discovery["quote_clean_gold_silver_seen_count"] == 30
+    assert discovery["quote_clean_gold_silver_would_enter_count"] == 30
+    assert discovery["discovery_exit"]["advisory"] == "PROMOTE_TINY_CANARY"
+    assert discovery["discovery_exit"]["advisory_only"] is True
+    assert discovery["discovery_exit"]["requires_human_approval"] is True
+    assert discovery["missed_blockers"]
+    assert all("token_ca" not in row for row in discovery["missed_blockers"])
+    assert "P0_TOKEN" not in json.dumps(discovery["missed_blockers"])

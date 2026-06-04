@@ -16,6 +16,13 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    from scripts.a_class_expected_rr import build_a_class_p0_discovery
+    from scripts.ai_strategy_reviewer import build_ai_strategy_review
+except ImportError:
+    from a_class_expected_rr import build_a_class_p0_discovery
+    from ai_strategy_reviewer import build_ai_strategy_review
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER_DB = PROJECT_ROOT / "data" / "paper_trades.db"
@@ -54,6 +61,8 @@ def col_expr(cols, name, fallback="NULL", alias=None):
 
 def coalesce_expr(cols, names, fallback="0"):
     available = [name for name in names if name in cols]
+    if not available:
+        return fallback
     available.append(fallback)
     return f"COALESCE({', '.join(available)})"
 
@@ -764,47 +773,54 @@ def a_class_summary(db, since_ts, limit):
         return {"available": False, "reason": "a_class_decision_events_missing"}
     cols = columns(db, "a_class_decision_events")
     event_ts_expr = "event_ts" if "event_ts" in cols else "0"
+    action_expr = "action" if "action" in cols else "'UNKNOWN'"
+    grade_expr = "grade" if "grade" in cols else "'UNKNOWN'"
+    score_expr = "score" if "score" in cols else "0"
+    size_expr = "size_sol" if "size_sol" in cols else "0"
+    source_table_expr = "source_table" if "source_table" in cols else "'unknown'"
+    source_component_expr = "source_component" if "source_component" in cols else "'unknown'"
+    source_reason_expr = "source_reason" if "source_reason" in cols else "'unknown'"
     params = {"since": since_ts, "limit": limit}
     where = f"WHERE {event_ts_expr} >= :since"
     action_summary = rows_as_dicts(db.execute(
         f"""
-        SELECT COALESCE(action, 'UNKNOWN') AS action,
+        SELECT COALESCE({action_expr}, 'UNKNOWN') AS action,
                COUNT(*) AS n,
                MAX({event_ts_expr}) AS latest_event_ts,
-               AVG(COALESCE(score, 0)) AS avg_score,
-               SUM(CASE WHEN action = 'WOULD_ENTER' THEN COALESCE(size_sol, 0) ELSE 0 END) AS would_enter_size_sol
+               AVG(COALESCE({score_expr}, 0)) AS avg_score,
+               SUM(CASE WHEN {action_expr} = 'WOULD_ENTER' THEN COALESCE({size_expr}, 0) ELSE 0 END) AS would_enter_size_sol
         FROM a_class_decision_events
         {where}
-        GROUP BY COALESCE(action, 'UNKNOWN')
+        GROUP BY COALESCE({action_expr}, 'UNKNOWN')
         ORDER BY n DESC
         """,
         params,
     ).fetchall())
     grade_summary = rows_as_dicts(db.execute(
         f"""
-        SELECT COALESCE(grade, 'UNKNOWN') AS grade,
-               COALESCE(action, 'UNKNOWN') AS action,
+        SELECT COALESCE({grade_expr}, 'UNKNOWN') AS grade,
+               COALESCE({action_expr}, 'UNKNOWN') AS action,
                COUNT(*) AS n,
-               AVG(COALESCE(score, 0)) AS avg_score
+               AVG(COALESCE({score_expr}, 0)) AS avg_score
         FROM a_class_decision_events
         {where}
-        GROUP BY COALESCE(grade, 'UNKNOWN'), COALESCE(action, 'UNKNOWN')
+        GROUP BY COALESCE({grade_expr}, 'UNKNOWN'), COALESCE({action_expr}, 'UNKNOWN')
         ORDER BY n DESC
         """,
         params,
     ).fetchall())
     source_summary = rows_as_dicts(db.execute(
         f"""
-        SELECT COALESCE(source_table, 'unknown') AS source_table,
-               COALESCE(source_component, 'unknown') AS source_component,
-               COALESCE(action, 'UNKNOWN') AS action,
+        SELECT COALESCE({source_table_expr}, 'unknown') AS source_table,
+               COALESCE({source_component_expr}, 'unknown') AS source_component,
+               COALESCE({action_expr}, 'UNKNOWN') AS action,
                COUNT(*) AS n,
-               AVG(COALESCE(score, 0)) AS avg_score,
-               SUM(CASE WHEN action = 'WOULD_ENTER' THEN COALESCE(size_sol, 0) ELSE 0 END) AS would_enter_size_sol,
+               AVG(COALESCE({score_expr}, 0)) AS avg_score,
+               SUM(CASE WHEN {action_expr} = 'WOULD_ENTER' THEN COALESCE({size_expr}, 0) ELSE 0 END) AS would_enter_size_sol,
                MAX({event_ts_expr}) AS latest_event_ts
         FROM a_class_decision_events
         {where}
-        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'), COALESCE(action, 'UNKNOWN')
+        GROUP BY COALESCE({source_table_expr}, 'unknown'), COALESCE({source_component_expr}, 'unknown'), COALESCE({action_expr}, 'UNKNOWN')
         ORDER BY n DESC
         LIMIT :limit
         """,
@@ -812,17 +828,17 @@ def a_class_summary(db, since_ts, limit):
     ).fetchall())
     reason_summary = rows_as_dicts(db.execute(
         f"""
-        SELECT COALESCE(source_table, 'unknown') AS source_table,
-               COALESCE(source_component, 'unknown') AS source_component,
-               COALESCE(source_reason, 'unknown') AS source_reason,
-               COALESCE(action, 'UNKNOWN') AS action,
+        SELECT COALESCE({source_table_expr}, 'unknown') AS source_table,
+               COALESCE({source_component_expr}, 'unknown') AS source_component,
+               COALESCE({source_reason_expr}, 'unknown') AS source_reason,
+               COALESCE({action_expr}, 'UNKNOWN') AS action,
                COUNT(*) AS n,
-               MAX(COALESCE(score, 0)) AS max_score,
+               MAX(COALESCE({score_expr}, 0)) AS max_score,
                MAX({event_ts_expr}) AS latest_event_ts
         FROM a_class_decision_events
         {where}
-        GROUP BY COALESCE(source_table, 'unknown'), COALESCE(source_component, 'unknown'),
-                 COALESCE(source_reason, 'unknown'), COALESCE(action, 'UNKNOWN')
+        GROUP BY COALESCE({source_table_expr}, 'unknown'), COALESCE({source_component_expr}, 'unknown'),
+                 COALESCE({source_reason_expr}, 'unknown'), COALESCE({action_expr}, 'UNKNOWN')
         ORDER BY n DESC
         LIMIT :limit
         """,
@@ -866,6 +882,13 @@ def a_class_summary(db, since_ts, limit):
         col_expr(cols, "score", "0"),
         col_expr(cols, "reason"),
         col_expr(cols, "hard_blockers_json"),
+        col_expr(cols, "expected_rr"),
+        col_expr(cols, "expected_upside_pct"),
+        col_expr(cols, "defined_risk_pct"),
+        col_expr(cols, "bottom_ticket_size_sol"),
+        col_expr(cols, "matrix_json"),
+        col_expr(cols, "ai_review_json"),
+        col_expr(cols, "controller_action_json"),
     ]
     recent_events = rows_as_dicts(db.execute(
         f"""
@@ -882,6 +905,12 @@ def a_class_summary(db, since_ts, limit):
             row["hard_blockers"] = json.loads(row.pop("hard_blockers_json") or "[]")
         except (TypeError, json.JSONDecodeError):
             row["hard_blockers"] = []
+        for json_key in ("matrix_json", "ai_review_json", "controller_action_json"):
+            out_key = json_key.replace("_json", "")
+            try:
+                row[out_key] = json.loads(row.pop(json_key) or "{}")
+            except (TypeError, json.JSONDecodeError):
+                row[out_key] = {}
     total = sum(int(row.get("n") or 0) for row in action_summary)
     would_enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "WOULD_ENTER")
     enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "ENTER")
@@ -897,6 +926,60 @@ def a_class_summary(db, since_ts, limit):
         "hard_blockers": hard_blockers,
         "recent_events": recent_events,
     }
+
+
+def a_class_p0_discovery_summary(db, since_ts, until_ts):
+    try:
+        summary = build_a_class_p0_discovery(db, since_ts=since_ts, until_ts=until_ts)
+    except Exception as exc:
+        return {
+            "available": False,
+            "status": "evidence_unavailable",
+            "reason": str(exc),
+            "quote_clean_gold_silver_seen_count": 0,
+            "quote_clean_gold_silver_would_enter_count": 0,
+            "would_enter_no_route_rate": None,
+            "would_enter_trapped_rate": None,
+            "unknown_data_rate": None,
+            "outlier_trimmed_would_rr": None,
+            "missed_blockers": [],
+            "discovery_exit": {
+                "available": False,
+                "advisory": "INVESTIGATE_SOURCING",
+                "advisory_only": True,
+                "requires_human_approval": True,
+                "reason": "evidence_unavailable",
+            },
+        }
+    if (
+        "a_class_decision_events_missing" in set(summary.get("source_issues") or [])
+        or (summary.get("observed_unique_count", 0) == 0 and summary.get("quote_clean_gold_silver_seen_count", 0) == 0)
+    ):
+        summary["status"] = "evidence_unavailable"
+        summary["reason"] = "a_class_p0_evidence_unavailable"
+    return summary
+
+
+def ai_strategy_review_summary(a_class_p0_discovery):
+    try:
+        return build_ai_strategy_review(a_class_p0_discovery)
+    except Exception as exc:
+        return {
+            "schema_version": "v1.ai_strategy_review.bundle",
+            "advisory_only": True,
+            "available": False,
+            "reason": str(exc),
+            "missed_dog_review": {},
+            "counterfactual_audit": {},
+            "controller_actions": {
+                "schema_version": "v1.strategy_goal_controller.advisory",
+                "advisory_only": True,
+                "can_trigger_trade": False,
+                "actions": [{"mode": "A_CLASS_FASTLANE", "action": "SHADOW", "reason": "ai_strategy_review_unavailable"}],
+                "blockers": ["ai_strategy_review_unavailable"],
+                "next_safe_action": "keep_a_class_shadow",
+            },
+        }
 
 
 def branch_ev_summary(db, since_ts, limit):
@@ -1436,7 +1519,7 @@ def build_snapshot(db, hours, limit):
         section_query_ms[name] = int((time.time() - started) * 1000)
         return result
 
-    return {
+    snapshot = {
         "schema_version": 1,
         "snapshot_id": f"paper_live_{hours}h_{now_ts}",
         "generated_at": generated_at,
@@ -1459,6 +1542,21 @@ def build_snapshot(db, hours, limit):
         "route_health": timed_section("route_health", lambda: route_health_summary(db, since_ts, max(limit, 120))),
         "dog_catch_goal": timed_section("dog_catch_goal", lambda: dog_catch_goal_summary(db, since_ts)),
     }
+    discovery = timed_section(
+        "a_class_p0_discovery",
+        lambda: a_class_p0_discovery_summary(db, since_ts, now_ts),
+    )
+    snapshot["a_class_p0_discovery"] = discovery
+    ai_review = timed_section(
+        "ai_strategy_review",
+        lambda: ai_strategy_review_summary(discovery),
+    )
+    snapshot["ai_strategy_review"] = ai_review
+    snapshot["strategy_goal_controller"] = ai_review.get("controller_actions") if isinstance(ai_review, dict) else None
+    if isinstance(snapshot.get("a_class"), dict):
+        snapshot["a_class"]["p0_discovery"] = discovery
+        snapshot["a_class"]["ai_strategy_review"] = ai_review
+    return snapshot
 
 
 def write_atomic(path, data):

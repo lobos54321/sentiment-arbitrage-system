@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from a_class_fastlane import (
+    AClassDecision,
     AClassCandidate,
     candidate_from_decision_event_row,
     candidate_from_fast_queue_row,
@@ -58,6 +59,37 @@ def test_no_route_must_block():
 
     assert decision.action == "BLOCK"
     assert "route_unavailable" in decision.hard_blockers
+
+
+def test_a_class_decision_constructs_without_new_expected_rr_kwargs():
+    decision = AClassDecision(
+        action="SHADOW",
+        grade="REJECT",
+        size_sol=0.0,
+        reason="unit",
+        hard_blockers=[],
+        soft_notes=[],
+        score=0.0,
+        freshness_detail={},
+        budget_detail={},
+        risk_detail={},
+    )
+
+    assert decision.expected_rr_detail == {}
+    assert decision.would_action is None
+    assert decision.denominator_key is None
+
+
+def test_hard_prefilter_still_blocks_green_candidate_with_one_hard_blocker():
+    decision = evaluate_a_class_fastlane(
+        base_candidate(quote_executable=False, source_resonance=True, gmgn_pre_seen=True, fresh_ath_refresh=True),
+        now_ts=1_000,
+        config=load_a_class_config({}),
+    )
+
+    assert decision.action == "BLOCK"
+    assert decision.size_sol == 0
+    assert "quote_not_executable" in decision.hard_blockers
 
 
 def test_quote_not_executable_must_block():
@@ -432,6 +464,7 @@ def test_shadow_scan_records_counterfactual_sources():
         "paper_decision_events",
     }
     assert any(row["action"] == "WOULD_ENTER" for row in source_rows)
+    assert db.execute("SELECT COUNT(*) FROM canonical_trade_ledger").fetchone()[0] == 0
 
 
 def test_shadow_scan_deduplicates_would_enter_by_token_lifecycle_window():

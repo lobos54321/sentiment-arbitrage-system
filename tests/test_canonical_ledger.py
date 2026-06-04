@@ -1,6 +1,8 @@
+import json
 import os
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -153,3 +155,287 @@ def test_no_route_trapped_and_outlier_flags_are_recorded():
     assert row["outlier_flag"] == 1
     assert row["outlier_reason"] == "route_disappeared"
     assert row["accounting_source"] == "no_route_zero_exit"
+
+
+def test_a_class_migration_backfills_source_dedup_key_and_replaces_unique_source_index():
+    db = memory_db()
+    db.executescript(
+        """
+        CREATE TABLE a_class_decision_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_ts REAL NOT NULL,
+            token_ca TEXT,
+            symbol TEXT,
+            lifecycle_id TEXT,
+            route_bucket TEXT,
+            normalized_mode TEXT,
+            source_table TEXT,
+            source_id INTEGER,
+            source_component TEXT,
+            source_reason TEXT,
+            action TEXT NOT NULL,
+            grade TEXT,
+            size_sol REAL DEFAULT 0,
+            score REAL DEFAULT 0,
+            reason TEXT,
+            hard_blockers_json TEXT,
+            soft_notes_json TEXT,
+            freshness_json TEXT,
+            budget_json TEXT,
+            risk_json TEXT,
+            candidate_json TEXT,
+            created_at REAL NOT NULL
+        );
+        CREATE UNIQUE INDEX idx_a_class_decision_source
+          ON a_class_decision_events(source_table, source_id)
+          WHERE source_table IS NOT NULL AND source_id IS NOT NULL;
+        INSERT INTO a_class_decision_events (
+            event_ts, token_ca, route_bucket, source_table, source_id,
+            action, hard_blockers_json, created_at
+        ) VALUES (1000, 'LegacyToken', 'ATH', 'legacy_source', 7, 'BLOCK', '["quote_not_executable"]', 1000);
+        ALTER TABLE a_class_decision_events ADD COLUMN source_dedup_key TEXT;
+        """
+    )
+
+    init_canonical_ledger(db)
+
+    cols = {row["name"] for row in db.execute("PRAGMA table_info(a_class_decision_events)").fetchall()}
+    assert {
+        "source_dedup_key",
+        "would_action",
+        "expected_rr",
+        "expected_rr_detail_json",
+        "denominator_key",
+        "discovery_exit_json",
+    }.issubset(cols)
+    row = db.execute("SELECT source_dedup_key FROM a_class_decision_events WHERE id = 1").fetchone()
+    assert row["source_dedup_key"] == "legacy_source:7"
+    indexes = {
+        row["name"]: row["unique"]
+        for row in db.execute("PRAGMA index_list(a_class_decision_events)").fetchall()
+    }
+    assert indexes["idx_a_class_decision_source"] == 0
+    assert indexes["idx_a_class_decision_dedup"] == 1
+
+    init_canonical_ledger(db)
+    assert db.execute("SELECT COUNT(*) AS n FROM a_class_decision_events").fetchone()["n"] == 1
+
+
+def test_a_class_writer_does_not_rerun_dedup_migration_after_index_exists():
+    db = memory_db()
+    candidate = {
+        "token_ca": "TokenGuard",
+        "symbol": "GUARD",
+        "route_bucket": "ATH",
+    }
+    decision = {
+        "action": "SHADOW",
+        "grade": "REJECT",
+        "size_sol": 0.0,
+        "score": 0.0,
+        "reason": "collecting_evidence",
+        "hard_blockers": [],
+        "soft_notes": [],
+        "freshness_detail": {},
+        "budget_detail": {},
+        "risk_detail": {},
+    }
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=decision,
+        source_table="guard_source",
+        source_id=1,
+        now_ts=1000,
+    )
+    assert db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_a_class_decision_dedup'"
+    ).fetchone()
+
+    statements = []
+    db.set_trace_callback(lambda sql: statements.append(" ".join(sql.split()).lower()))
+    try:
+        record_a_class_decision_event(
+            db,
+            candidate=candidate,
+            decision=decision,
+            source_table="guard_source",
+            source_id=2,
+            now_ts=1001,
+        )
+        record_a_class_decision_event(
+            db,
+            candidate=candidate,
+            decision=decision,
+            source_table="guard_source",
+            source_id=3,
+            now_ts=1002,
+        )
+    finally:
+        db.set_trace_callback(None)
+
+    traced_sql = "\n".join(statements)
+    assert "row_number() over" not in traced_sql
+    assert "drop index if exists idx_a_class_decision_source" not in traced_sql
+    assert "create unique index if not exists idx_a_class_decision_dedup" not in traced_sql
+    assert "update a_class_decision_events set source_dedup_key = case" not in traced_sql
+
+
+def test_a_class_upsert_updates_only_enrichment_and_preserves_safety_fields():
+    db = memory_db()
+    candidate = {
+        "token_ca": "TokenSafe",
+        "symbol": "SAFE",
+        "route_bucket": "ATH",
+    }
+    first_decision = {
+        "action": "BLOCK",
+        "grade": "REJECT",
+        "size_sol": 0.0,
+        "score": 0.0,
+        "reason": "hard_prefilter_failed",
+        "hard_blockers": ["quote_not_executable"],
+        "soft_notes": [],
+        "freshness_detail": {},
+        "budget_detail": {},
+        "risk_detail": {"quote_executable": False},
+    }
+    second_decision = {
+        "action": "ENTER",
+        "grade": "A_PLUS",
+        "size_sol": 0.003,
+        "score": 95.0,
+        "reason": "a_class_fastlane_pass",
+        "hard_blockers": [],
+        "soft_notes": [],
+        "freshness_detail": {},
+        "budget_detail": {},
+        "risk_detail": {"quote_executable": True},
+        "expected_rr_detail": {
+            "denominator_key": "quote_clean_gold_silver_unique:1:2",
+            "outlier_trimmed_would_rr": 3.25,
+        },
+    }
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=first_decision,
+        stored_action="BLOCK",
+        source_table="unit_source",
+        source_id=42,
+        now_ts=1000,
+    )
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=second_decision,
+        stored_action="WOULD_ENTER",
+        source_table="unit_source",
+        source_id=42,
+        now_ts=1001,
+    )
+
+    rows = db.execute("SELECT * FROM a_class_decision_events").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["action"] == "BLOCK"
+    assert row["hard_blockers_json"] == '["quote_not_executable"]'
+    assert row["risk_json"] == '{"quote_executable": false}'
+    assert row["score"] == 0
+    assert row["size_sol"] == 0
+    assert row["would_action"] == "WOULD_ENTER"
+    assert row["expected_rr"] == 3.25
+
+
+def test_a_class_decision_event_records_matrix_rr_ai_and_bottom_ticket_fields():
+    db = memory_db()
+    candidate = SimpleNamespace(
+        token_ca="TokenMatrix",
+        symbol="MATRIX",
+        route_bucket="ATH",
+        source_component="unit",
+        source_reason="matrix_test",
+        opportunity_key="matrix:unit",
+    )
+    decision = SimpleNamespace(
+        action="ENTER",
+        grade="A",
+        size_sol=0.001,
+        score=84,
+        reason="a_class_fastlane_pass",
+        hard_blockers=[],
+        soft_notes=["expected_rr_gate_passed"],
+        freshness_detail={"freshness_sources": ["fresh_quote"]},
+        budget_detail={},
+        risk_detail={},
+        expected_rr=3.0,
+        expected_upside_pct=0.60,
+        defined_risk_pct=0.20,
+        bottom_ticket_size_sol=0.001,
+        expected_rr_detail={"expected_rr": 3.0},
+        matrix_detail={"matrix_version": "v1.a_class_18_cell", "matrix_grade": "A"},
+        ai_review={"schema_version": "v1.ai_strategy_advisory.shadow_only", "ai_grade": "supportive"},
+        principal_recovery_plan={"no_averaging_down": True},
+        moonbag_plan={"keep_tail_after_moonbag": True},
+    )
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=decision,
+        stored_action="WOULD_ENTER",
+        source_table="unit_source",
+        source_id=10,
+        now_ts=2000,
+    )
+
+    row = db.execute("SELECT * FROM a_class_decision_events").fetchone()
+    assert row["expected_rr"] == 3.0
+    assert row["expected_upside_pct"] == 0.60
+    assert row["defined_risk_pct"] == 0.20
+    assert row["bottom_ticket_size_sol"] == 0.001
+    assert json.loads(row["matrix_json"])["matrix_grade"] == "A"
+    assert json.loads(row["ai_review_json"])["ai_grade"] == "supportive"
+    assert json.loads(row["principal_recovery_plan_json"])["no_averaging_down"] is True
+
+
+def test_a_class_null_source_rows_dedup_by_token_route_time_bucket():
+    db = memory_db()
+    candidate = {
+        "token_ca": "TokenNullSource",
+        "symbol": "NULLSRC",
+        "route_bucket": "LOTTO",
+    }
+    decision = {
+        "action": "SHADOW",
+        "grade": "REJECT",
+        "size_sol": 0.0,
+        "score": 0.0,
+        "reason": "collecting_evidence",
+        "hard_blockers": [],
+        "soft_notes": [],
+        "freshness_detail": {},
+        "budget_detail": {},
+        "risk_detail": {},
+    }
+
+    record_a_class_decision_event(db, candidate=candidate, decision=decision, now_ts=1500)
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision={
+            **decision,
+            "expected_rr_detail": {
+                "denominator_key": "quote_clean_gold_silver_unique:1500:1800",
+                "outlier_trimmed_would_rr": 2.5,
+            },
+        },
+        now_ts=1520,
+    )
+
+    rows = db.execute("SELECT source_dedup_key, expected_rr FROM a_class_decision_events").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["source_dedup_key"] == "token:TokenNullSource:LOTTO:5"
+    assert rows[0]["expected_rr"] == 2.5
