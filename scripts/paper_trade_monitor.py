@@ -194,6 +194,14 @@ MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.0
 MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
 PAPER_TINY_SCOUT_ENTRY_MODES = set(PAPER_TINY_SCOUT_MODES)
 A_CLASS_FASTLANE_TINY_CANARY_MODE = 'a_class_fastlane_tiny_canary'
+A_CLASS_ENTRY_MODE_QUALITY_RUNTIME_OVERRIDE_REASONS = {
+    'entry_mode_quality_catastrophic_loss',
+    'entry_mode_shadow_cooldown',
+    'entry_mode_quality_degraded',
+    'entry_mode_quality_tail_loss',
+    'entry_mode_quality_negative_ev',
+    'entry_mode_quality_shadow_only_mode',
+}
 PAPER_TINY_SCOUT_ENTRY_MODES.add(A_CLASS_FASTLANE_TINY_CANARY_MODE)
 PAPER_TINY_SCOUT_SIZE_SOL = float(os.environ.get('PAPER_TINY_SCOUT_SIZE_SOL', '0.003'))
 PRIMARY_PROVING_CAP_ENABLED = os.environ.get('PRIMARY_PROVING_CAP_ENABLED', 'true').lower() != 'false'
@@ -5811,6 +5819,35 @@ def _dog_catcher_branch_entry_mode_quality_override(pending=None, *, entry_mode=
         'entry_branch': branch,
         'paper_only': True,
         'execution_scope': 'paper_only',
+    }
+
+
+def _a_class_entry_mode_quality_runtime_override(pending=None, *, entry_mode=None):
+    """Delegate old entry-mode quality memory to A_CLASS runtime safety.
+
+    The A_CLASS tiny canary still runs through final hard quote/route/security
+    contracts plus hourly, daily, concurrency and realized-loss runtime safety.
+    The legacy entry-mode quality memory should not be the last-mile blocker
+    for a capped 0.001 SOL canary that A_CLASS evidence has already promoted.
+    """
+    pending = pending or {}
+    entry_mode = str(entry_mode or pending.get('entry_mode') or pending.get('scout_mode') or '')
+    if not _is_a_class_fastlane_mode(entry_mode, pending):
+        return {'pass': False, 'reason': 'a_class_entry_mode_quality_override_not_applicable'}
+    detail = pending.get('a_class_fastlane') if isinstance(pending.get('a_class_fastlane'), dict) else {}
+    return {
+        'pass': True,
+        'reason': 'a_class_entry_mode_quality_runtime_safety_override',
+        'entry_mode': entry_mode,
+        'entry_branch': pending.get('entry_branch'),
+        'paper_only': True,
+        'execution_scope': 'paper_only',
+        'runtime_safety_delegated': True,
+        'tiny_canary': True,
+        'max_size_sol': pending.get('kelly_position_sol'),
+        'source_decision_event': detail.get('source_decision_event'),
+        'budget_state': detail.get('budget_state'),
+        'hourly_state': detail.get('hourly_state'),
     }
 
 
@@ -15228,6 +15265,41 @@ def _entry_mode_quality_allows_live(db, *, entry_mode, token_ca=None, symbol=Non
             'decision': 'shadow',
             'reason': markov_reclaim_gate.get('reason') or 'lotto_reclaim_markov_gate_block',
         }
+    if (
+        force_live
+        and _is_a_class_fastlane_mode(entry_mode)
+        and decision.get('decision') == 'shadow'
+        and decision.get('reason') in A_CLASS_ENTRY_MODE_QUALITY_RUNTIME_OVERRIDE_REASONS
+    ):
+        override = dict(decision)
+        override.update({
+            'decision': 'warn',
+            'reason': 'a_class_entry_mode_quality_runtime_safety_override',
+            'original_reason': decision.get('reason'),
+            'a_class_runtime_safety_override': True,
+            'runtime_safety_delegated': True,
+            'paper_only': True,
+            'execution_scope': 'paper_only',
+        })
+        _record_entry_mode_quality_decision(
+            db,
+            decision=override,
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=signal_id,
+            route=route,
+            event_type='live_gate',
+            data_source=data_source,
+            event_ts=event_ts,
+        )
+        log.info(
+            f"  [ENTRY_MODE_QUALITY] ⚠️ {symbol or token_ca} WARN: "
+            f"mode={entry_mode} original={decision.get('reason')} "
+            f"a_class_runtime_safety_override=true"
+        )
+        return True, override
     hard_gate_quality_override = _hard_gate_pass_probe_entry_mode_quality_soft_override(entry_mode, decision)
     if hard_gate_quality_override:
         _record_entry_mode_quality_decision(
@@ -24606,6 +24678,19 @@ def run_monitor(db):
                                     f"  [ENTRY_MODE_QUALITY] force-live {pending['symbol']}: "
                                     f"mode={pending.get('entry_mode')} reason={_entry_mode_force_live.get('reason')} "
                                     f"branch={_entry_mode_force_live.get('entry_branch')}"
+                                )
+                        if not _entry_mode_force_live.get('pass'):
+                            _a_class_entry_mode_force_live = _a_class_entry_mode_quality_runtime_override(
+                                pending,
+                                entry_mode=pending.get('entry_mode') or pending.get('scout_mode'),
+                            )
+                            if _a_class_entry_mode_force_live.get('pass'):
+                                _entry_mode_force_live = _a_class_entry_mode_force_live
+                                pending['entry_mode_quality_force_live'] = _entry_mode_force_live
+                                log.info(
+                                    f"  [ENTRY_MODE_QUALITY] force-live {pending['symbol']}: "
+                                    f"mode={pending.get('entry_mode')} reason={_entry_mode_force_live.get('reason')} "
+                                    f"a_class_runtime_safety=true"
                                 )
                         _entry_mode_live_allowed, _entry_mode_quality = _entry_mode_quality_allows_live(
                             db,

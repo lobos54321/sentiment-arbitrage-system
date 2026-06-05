@@ -12,6 +12,7 @@ from paper_trade_monitor import (
     A_CLASS_FASTLANE_TINY_CANARY_MODE,
     _a_class_ledger_detail_from_pending,
     _a_class_fastlane_scout_quality_soft_override,
+    _entry_mode_quality_allows_live,
     _final_entry_contract_should_enforce,
     active_a_class_fastlane_count,
     enqueue_a_class_fastlane_tiny_candidates,
@@ -264,6 +265,60 @@ def test_a_class_live_enqueue_respects_hourly_cap():
     ).fetchone()
     assert event["decision"] == "block"
     assert event["reason"] == "a_class_live_hourly_cap"
+
+
+def test_a_class_entry_mode_quality_delegates_old_kill_switch_to_runtime_safety():
+    db = _db()
+    db.execute(
+        """
+        CREATE TABLE paper_trades (
+            entry_mode TEXT,
+            entry_ts REAL,
+            exit_ts REAL,
+            peak_pnl REAL,
+            pnl_pct REAL,
+            replay_source TEXT
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT INTO paper_trades (entry_mode, entry_ts, exit_ts, peak_pnl, pnl_pct, replay_source)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (A_CLASS_FASTLANE_TINY_CANARY_MODE, 900, 960, 0.0, -0.21, "live_monitor"),
+    )
+    db.commit()
+
+    allowed, decision = _entry_mode_quality_allows_live(
+        db,
+        entry_mode=A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        token_ca="AClassToken",
+        symbol="ACLASS",
+        lifecycle_id="life-a",
+        signal_ts=900,
+        route="ATH",
+        event_ts=1_000,
+        data_source="pending_entry+paper_trades",
+        force_live=True,
+    )
+
+    assert allowed is True
+    assert decision["decision"] == "warn"
+    assert decision["reason"] == "a_class_entry_mode_quality_runtime_safety_override"
+    assert decision["original_reason"] == "entry_mode_quality_catastrophic_loss"
+    event = db.execute(
+        """
+        SELECT decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE component = 'entry_mode_quality'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert event["decision"] == "warn"
+    assert event["reason"] == "a_class_entry_mode_quality_runtime_safety_override"
+    assert "entry_mode_quality_catastrophic_loss" in event["payload_json"]
 
 
 def test_a_class_fastlane_soft_quality_failure_is_warn_not_block():

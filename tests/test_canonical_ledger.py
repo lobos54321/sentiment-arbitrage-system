@@ -125,6 +125,70 @@ def test_a_class_decision_event_persists_block_cause():
     assert "quote_not_available" in row["blocker_classifications_json"]
 
 
+def test_a_class_decision_event_persists_execution_evidence_columns():
+    db = memory_db()
+    candidate = AClassCandidate.from_mapping(
+        {
+            "token_ca": "TokenHydrated",
+            "symbol": "HYD",
+            "route_bucket": "ATH",
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "quote_source": "jupiter_ultra_provider_hydrate",
+            "quote_age_sec": 0,
+            "route_available": True,
+            "route_failure_reason": "provider_hydrated_route_ok",
+            "data_confidence": "provider_hydrated_quote",
+            "provider_hydrate_outcome": "success",
+            "liquidity_usd": 50_000,
+            "spread_pct": 1.2,
+            "gmgn_pre_seen": True,
+            "gmgn_activity_fresh": True,
+            "gmgn_last_seen_age_sec": 5,
+            "source_resonance": True,
+            "fresh_momentum": True,
+            "fresh_ath_refresh": True,
+            "ath_continuation": True,
+        }
+    )
+    decision = evaluate_a_class_fastlane(candidate, now_ts=1_000, config=load_a_class_config({}))
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=decision,
+        stored_action="WOULD_ENTER",
+        source_table="unit",
+        source_id=11,
+        now_ts=1_000,
+    )
+
+    row = db.execute(
+        """
+        SELECT quote_available, quote_executable, quote_clean, route_available,
+               quote_source, quote_age_sec, data_confidence, evidence_status,
+               route_failure_reason, liquidity_usd, spread_pct,
+               provider_hydrate_outcome, block_cause
+        FROM a_class_decision_events
+        WHERE token_ca = 'TokenHydrated'
+        """
+    ).fetchone()
+    assert row["quote_available"] == 1
+    assert row["quote_executable"] == 1
+    assert row["quote_clean"] == 1
+    assert row["route_available"] == 1
+    assert row["quote_source"] == "jupiter_ultra_provider_hydrate"
+    assert row["quote_age_sec"] == 0
+    assert row["data_confidence"] == "provider_hydrated_quote"
+    assert row["evidence_status"] == "quote_clean_executable"
+    assert row["route_failure_reason"] == "provider_hydrated_route_ok"
+    assert row["liquidity_usd"] == 50_000
+    assert row["spread_pct"] == 1.2
+    assert row["provider_hydrate_outcome"] == "success"
+    assert row["block_cause"] == "UNKNOWN"
+
+
 def test_entry_and_exit_use_sol_accounting():
     db = memory_db()
 

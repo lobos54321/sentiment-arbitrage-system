@@ -163,6 +163,20 @@ def init_canonical_ledger(db):
         ("recoverability", "TEXT"),
         ("classification_reason", "TEXT"),
         ("blocker_classifications_json", "TEXT"),
+        ("quote_available", "INTEGER"),
+        ("quote_executable", "INTEGER"),
+        ("quote_clean", "INTEGER"),
+        ("route_available", "INTEGER"),
+        ("quote_source", "TEXT"),
+        ("quote_age_sec", "REAL"),
+        ("data_confidence", "TEXT"),
+        ("provider_reason", "TEXT"),
+        ("evidence_status", "TEXT"),
+        ("quote_failure_reason", "TEXT"),
+        ("route_failure_reason", "TEXT"),
+        ("liquidity_usd", "REAL"),
+        ("spread_pct", "REAL"),
+        ("provider_hydrate_outcome", "TEXT"),
     ):
         if col_name not in _table_columns(db, "a_class_decision_events"):
             try:
@@ -402,30 +416,54 @@ def record_a_class_decision_event(
     matrix_detail = _get(decision, "matrix_detail", {}) or {}
     ai_review = _get(decision, "ai_review", {}) or {}
     controller_action = _get(decision, "controller_action", {}) or {}
+    risk_detail = _get(decision, "risk_detail", {}) or {}
     principal_recovery_plan = (
         _get(decision, "principal_recovery_plan", {}) or expected_rr_detail.get("principal_recovery_plan") or {}
     )
     moonbag_plan = _get(decision, "moonbag_plan", {}) or expected_rr_detail.get("moonbag_plan") or {}
+    quote_available = _get(candidate, "quote_available", risk_detail.get("quote_available"))
+    quote_executable = _get(candidate, "quote_executable", risk_detail.get("quote_executable"))
+    quote_clean = _get(candidate, "quote_clean", risk_detail.get("quote_clean"))
+    route_available = _get(candidate, "route_available", risk_detail.get("route_available"))
+    quote_source = _get(candidate, "quote_source", risk_detail.get("quote_source"))
+    quote_age_sec = _safe_float(_get(candidate, "quote_age_sec", risk_detail.get("quote_age_sec")), None)
+    data_confidence = _get(candidate, "data_confidence", risk_detail.get("data_confidence"))
+    provider_reason = (
+        _get(candidate, "provider_reason", None)
+        or _get(candidate, "provider_hydrate_reason", None)
+        or risk_detail.get("provider_reason")
+        or risk_detail.get("provider_hydrate_reason")
+    )
+    quote_failure_reason = _get(candidate, "quote_failure_reason", risk_detail.get("quote_failure_reason"))
+    route_failure_reason = _get(candidate, "route_failure_reason", risk_detail.get("route_failure_reason"))
+    liquidity_usd = _safe_float(_get(candidate, "liquidity_usd", risk_detail.get("liquidity_usd")), None)
+    spread_pct = _safe_float(_get(candidate, "spread_pct", risk_detail.get("spread_pct")), None)
+    provider_hydrate_outcome = _get(candidate, "provider_hydrate_outcome", risk_detail.get("provider_hydrate_outcome"))
+    evidence_status = _get(candidate, "evidence_status", None) or (
+        "quote_clean_executable"
+        if _truthy(quote_clean) and _truthy(quote_executable) and _truthy(route_available)
+        else None
+    )
     block_cause = classify_event(
         {
             "action": action,
             "would_action": would_action,
             "hard_blockers_json": _json_dumps(_get(decision, "hard_blockers", [])),
-            "risk_json": _json_dumps(_get(decision, "risk_detail", {})),
+            "risk_json": _json_dumps(risk_detail),
             "candidate_json": _json_dumps(candidate_dict),
             "reason": _get(decision, "reason"),
             "source_reason": _get(candidate, "source_reason"),
-            "data_confidence": _get(candidate, "data_confidence"),
-            "quote_source": _get(candidate, "quote_source"),
-            "quote_available": _get(candidate, "quote_available"),
-            "quote_executable": _get(candidate, "quote_executable"),
-            "route_available": _get(candidate, "route_available"),
-            "liquidity_usd": _get(candidate, "liquidity_usd"),
-            "spread_pct": _get(candidate, "spread_pct"),
-            "route_failure_reason": _get(candidate, "route_failure_reason"),
-            "quote_failure_reason": _get(candidate, "quote_failure_reason"),
-            "provider_reason": _get(candidate, "provider_reason"),
-            "evidence_status": _get(candidate, "evidence_status"),
+            "data_confidence": data_confidence,
+            "quote_source": quote_source,
+            "quote_available": quote_available,
+            "quote_executable": quote_executable,
+            "route_available": route_available,
+            "liquidity_usd": liquidity_usd,
+            "spread_pct": spread_pct,
+            "route_failure_reason": route_failure_reason,
+            "quote_failure_reason": quote_failure_reason,
+            "provider_reason": provider_reason,
+            "evidence_status": evidence_status,
         }
     )
     db.execute(
@@ -441,9 +479,13 @@ def record_a_class_decision_event(
             matrix_json, ai_review_json, controller_action_json, denominator_key,
             discovery_exit_json, principal_recovery_plan_json, moonbag_plan_json,
             block_cause, recoverability, classification_reason,
-            blocker_classifications_json, candidate_json, created_at
+            blocker_classifications_json, quote_available, quote_executable,
+            quote_clean, route_available, quote_source, quote_age_sec,
+            data_confidence, provider_reason, evidence_status,
+            quote_failure_reason, route_failure_reason, liquidity_usd,
+            spread_pct, provider_hydrate_outcome, candidate_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_dedup_key) WHERE source_dedup_key IS NOT NULL DO UPDATE SET
             would_action=excluded.would_action,
             expected_rr=excluded.expected_rr,
@@ -461,7 +503,21 @@ def record_a_class_decision_event(
             block_cause=excluded.block_cause,
             recoverability=excluded.recoverability,
             classification_reason=excluded.classification_reason,
-            blocker_classifications_json=excluded.blocker_classifications_json
+            blocker_classifications_json=excluded.blocker_classifications_json,
+            quote_available=excluded.quote_available,
+            quote_executable=excluded.quote_executable,
+            quote_clean=excluded.quote_clean,
+            route_available=excluded.route_available,
+            quote_source=excluded.quote_source,
+            quote_age_sec=excluded.quote_age_sec,
+            data_confidence=excluded.data_confidence,
+            provider_reason=excluded.provider_reason,
+            evidence_status=excluded.evidence_status,
+            quote_failure_reason=excluded.quote_failure_reason,
+            route_failure_reason=excluded.route_failure_reason,
+            liquidity_usd=excluded.liquidity_usd,
+            spread_pct=excluded.spread_pct,
+            provider_hydrate_outcome=excluded.provider_hydrate_outcome
         """,
         (
             now_ts,
@@ -508,6 +564,20 @@ def record_a_class_decision_event(
             block_cause.get("recoverability"),
             block_cause.get("classification_reason"),
             _json_dumps(block_cause.get("blocker_classifications", [])),
+            1 if _truthy(quote_available) else 0,
+            1 if _truthy(quote_executable) else 0,
+            1 if _truthy(quote_clean) else 0,
+            1 if _truthy(route_available) else 0,
+            quote_source,
+            quote_age_sec,
+            data_confidence,
+            provider_reason,
+            evidence_status,
+            quote_failure_reason,
+            route_failure_reason,
+            liquidity_usd,
+            spread_pct,
+            provider_hydrate_outcome,
             _json_dumps(candidate_dict),
             now_ts,
         ),
@@ -537,19 +607,21 @@ def record_a_class_decision_event(
                     decision_dict.get("freshness_detail", {}).get("opportunity_age_sec"),
                     None,
                 ),
-                "quote_available": _get(candidate, "quote_available", False),
-                "quote_executable": _get(candidate, "quote_executable", False),
-                "quote_clean": _get(candidate, "quote_clean", False),
-                "route_available": _get(candidate, "route_available", False),
-                "liquidity_usd": _safe_float(_get(candidate, "liquidity_usd"), None),
-                "spread_pct": _safe_float(_get(candidate, "spread_pct"), None),
+                "quote_available": quote_available,
+                "quote_executable": quote_executable,
+                "quote_clean": quote_clean,
+                "route_available": route_available,
+                "liquidity_usd": liquidity_usd,
+                "spread_pct": spread_pct,
                 "market_cap": _safe_float(_get(candidate, "market_cap"), None),
-                "quote_source": _get(candidate, "quote_source"),
-                "quote_age_sec": _safe_float(_get(candidate, "quote_age_sec"), None),
-                "data_confidence": _get(candidate, "data_confidence"),
+                "quote_source": quote_source,
+                "quote_age_sec": quote_age_sec,
+                "data_confidence": data_confidence,
                 "provider_data_state": _get(candidate, "provider_data_state"),
-                "provider_reason": _get(candidate, "provider_reason") or _get(decision, "reason"),
-                "provider_hydrate_outcome": _get(candidate, "provider_hydrate_outcome"),
+                "provider_reason": provider_reason or _get(decision, "reason"),
+                "quote_failure_reason": quote_failure_reason,
+                "evidence_status": evidence_status,
+                "provider_hydrate_outcome": provider_hydrate_outcome,
                 "matrix_score": _safe_float(matrix_detail.get("matrix_score"), _safe_float(_get(decision, "score"), None)),
                 "expected_rr": expected_rr,
                 "defined_risk_pct": defined_risk_pct,

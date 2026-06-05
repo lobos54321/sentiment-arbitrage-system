@@ -63,7 +63,16 @@ def fetch_rows(db: sqlite3.Connection, since_ts: float | None, source: str) -> t
                    {_optional(cols, "block_cause")}, {_optional(cols, "recoverability")},
                    {_optional(cols, "classification_reason")},
                    {_optional(cols, "blocker_classifications_json")},
-                   NULL AS hydrate_outcome, 0 AS hydrate_success
+                   {_optional(cols, "quote_available")}, {_optional(cols, "quote_executable")},
+                   {_optional(cols, "quote_clean")}, {_optional(cols, "route_available")},
+                   {_optional(cols, "quote_source")}, {_optional(cols, "quote_age_sec")},
+                   {_optional(cols, "data_confidence")}, NULL AS provider_data_state,
+                   {_optional(cols, "provider_reason")}, {_optional(cols, "evidence_status")},
+                   {_optional(cols, "quote_failure_reason")}, {_optional(cols, "route_failure_reason")},
+                   {_optional(cols, "liquidity_usd")}, {_optional(cols, "spread_pct")},
+                   NULL AS would_enter_a_class, NULL AS did_enter,
+                   {_expr(cols, "provider_hydrate_outcome", "NULL")} AS hydrate_outcome,
+                   CASE WHEN {_expr(cols, "provider_hydrate_outcome", "NULL")} IN ('success', 'cache_hit_success') THEN 1 ELSE 0 END AS hydrate_success
             FROM a_class_decision_events
             {where}
             ORDER BY event_ts DESC, id DESC

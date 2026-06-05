@@ -13092,6 +13092,7 @@ const server = http.createServer(async (req, res) => {
       if ((sourceFilter === 'all' || sourceFilter === 'a_class' || sourceFilter === 'a_class_decision_events') && tableNames.has('a_class_decision_events')) {
         const cols = getTableColumns(paperDb, 'a_class_decision_events');
         const optional = (name, fallback = 'NULL') => cols.has(name) ? name : `${fallback} AS ${name}`;
+        const expr = (name, fallback = 'NULL') => cols.has(name) ? name : fallback;
         rows.push(...paperDb.prepare(`
           SELECT
             id,
@@ -13119,8 +13120,24 @@ const server = http.createServer(async (req, res) => {
             ${optional('recoverability')},
             ${optional('classification_reason')},
             ${optional('blocker_classifications_json')},
-            NULL AS hydrate_outcome,
-            0 AS hydrate_success
+            ${optional('quote_available')},
+            ${optional('quote_executable')},
+            ${optional('quote_clean')},
+            ${optional('route_available')},
+            ${optional('quote_source')},
+            ${optional('quote_age_sec')},
+            ${optional('data_confidence')},
+            NULL AS provider_data_state,
+            ${optional('provider_reason')},
+            ${optional('evidence_status')},
+            ${optional('quote_failure_reason')},
+            ${optional('route_failure_reason')},
+            ${optional('liquidity_usd')},
+            ${optional('spread_pct')},
+            NULL AS would_enter_a_class,
+            NULL AS did_enter,
+            ${expr('provider_hydrate_outcome', 'NULL')} AS hydrate_outcome,
+            CASE WHEN ${expr('provider_hydrate_outcome', 'NULL')} IN ('success', 'cache_hit_success') THEN 1 ELSE 0 END AS hydrate_success
           FROM a_class_decision_events
           ${where}
           ORDER BY event_ts DESC, id DESC
