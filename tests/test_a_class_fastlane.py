@@ -182,6 +182,17 @@ def test_size_thresholds_are_capped():
     assert decide_size(92, config=config) == ("A_PLUS", 0.003)
 
 
+def test_safe_canary_force_defaults_only_for_process_environment(monkeypatch):
+    monkeypatch.setenv("A_CLASS_ENABLED", "false")
+    monkeypatch.delenv("A_CLASS_SAFE_CANARY_FORCE", raising=False)
+
+    assert load_a_class_config().enabled is True
+    assert load_a_class_config({"A_CLASS_ENABLED": "false"}).enabled is False
+    assert load_a_class_config(
+        {"A_CLASS_ENABLED": "false", "A_CLASS_SAFE_CANARY_FORCE": "true"}
+    ).enabled is True
+
+
 def test_decision_event_hydrates_nested_quote_execution_evidence():
     candidate = candidate_from_decision_event_row(
         {

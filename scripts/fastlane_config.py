@@ -99,10 +99,13 @@ class AClassFastlaneConfig:
 
 
 def load_a_class_config(env=None):
+    explicit_env = env is not None
     if env is None:
         env = os.environ
+    safe_canary_force = _env_bool(env, "A_CLASS_SAFE_CANARY_FORCE", not explicit_env)
+    enabled = True if safe_canary_force else _env_bool(env, "A_CLASS_ENABLED", False)
     return AClassFastlaneConfig(
-        enabled=_env_bool(env, "A_CLASS_ENABLED", False),
+        enabled=enabled,
         shadow_eval_enabled=_env_bool(env, "A_CLASS_SHADOW_EVAL_ENABLED", True),
         size_a_sol=_env_float(env, "A_CLASS_SIZE_A_SOL", 0.001),
         size_strong_a_sol=_env_float(env, "A_CLASS_SIZE_STRONG_A_SOL", 0.002),
