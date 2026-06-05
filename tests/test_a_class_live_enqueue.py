@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -281,3 +282,9 @@ def test_a_class_fastlane_forces_final_entry_contract_enforcement(monkeypatch):
         "hard_gate_pass_tiny_probe",
         {"normalizedEntryMode": "LOTTO_TINY_SCOUT"},
     ) is False
+
+    assert _final_entry_contract_should_enforce(
+        "hard_gate_pass_tiny_probe",
+        {"normalizedEntryMode": "LOTTO_TINY_SCOUT"},
+        SimpleNamespace(passed=False),
+    ) is True

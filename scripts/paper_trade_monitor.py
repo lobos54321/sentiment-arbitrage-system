@@ -12846,10 +12846,12 @@ def _is_a_class_fastlane_mode(entry_mode=None, monitor_state=None):
     )
 
 
-def _final_entry_contract_should_enforce(entry_mode=None, monitor_state=None):
+def _final_entry_contract_should_enforce(entry_mode=None, monitor_state=None, final_decision=None):
+    decision_failed = final_decision is not None and not bool(getattr(final_decision, 'passed', True))
     return bool(
         _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False)
         or _is_a_class_fastlane_mode(entry_mode, monitor_state)
+        or decision_failed
     )
 
 
@@ -25650,6 +25652,7 @@ def run_monitor(db):
                             'entry_mode': _raw_entry_mode,
                             'normalized_entry_mode': _normalized_entry_mode,
                         },
+                        _final_entry_decision,
                     )
                     _monitor_state['finalEntryContract'] = _final_entry_decision_payload
                     _monitor_state['finalEntryContractEnforce'] = _final_entry_contract_enforced
