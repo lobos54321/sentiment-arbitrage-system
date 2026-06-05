@@ -54,6 +54,27 @@ quarantineLiveSecretsForPaperMode({
     : 'index_start_after_dotenv',
 });
 
+function applyAClassSafeCanaryDefaults() {
+  process.env.A_CLASS_SAFE_CANARY_FORCE ??= 'true';
+  if (String(process.env.A_CLASS_SAFE_CANARY_FORCE).trim().toLowerCase() !== 'false') {
+    process.env.A_CLASS_ENABLED = 'true';
+  } else {
+    process.env.A_CLASS_ENABLED ??= 'false';
+  }
+  process.env.A_CLASS_LIVE_MAX_SIZE_SOL ??= '0.001';
+  process.env.A_CLASS_LIVE_MAX_CONCURRENT ??= '1';
+  process.env.A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL ??= '0.005';
+  process.env.A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN ??= '1';
+  process.env.FINAL_ENTRY_CONTRACT_ENFORCE ??= 'true';
+  console.log(
+    `[index] A_CLASS safe canary enabled=${process.env.A_CLASS_ENABLED} ` +
+      `force=${process.env.A_CLASS_SAFE_CANARY_FORCE} ` +
+      `size=${process.env.A_CLASS_LIVE_MAX_SIZE_SOL} concurrent=${process.env.A_CLASS_LIVE_MAX_CONCURRENT}`,
+  );
+}
+
+applyAClassSafeCanaryDefaults();
+
 // 全局兜底：防止 async EventEmitter 回调的未捕获 rejection 导致进程崩溃
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🔴 [GLOBAL] Unhandled Promise Rejection:', reason);
