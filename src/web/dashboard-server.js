@@ -7440,6 +7440,7 @@ const server = http.createServer(async (req, res) => {
       port: PORT,
       uptime_seconds: Math.floor(process.uptime()),
       startup_error: global.__startupError || null,
+      runtime_worker: global.__runtimeWorkerStatus || null,
       shadow_sidecars: {
         available: shadowSidecars.length > 0,
         running: shadowSidecars.filter((worker) => worker.running === true).length,
