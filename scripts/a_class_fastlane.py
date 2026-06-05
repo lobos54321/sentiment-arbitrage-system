@@ -14,6 +14,7 @@ from opportunity_freshness import FreshnessDecision, evaluate_opportunity_freshn
 from a_class_opportunity_matrix import evaluate_a_class_opportunity_matrix
 from a_class_rr_model import build_a_class_rr_model
 from ai_candidate_rater import review_a_class_candidate
+from a_class_provider_hydrator import hydrate_provider_quote
 
 
 def _get(value, key, default=None):
@@ -1000,8 +1001,19 @@ def _apply_candidate_evidence(candidate, evidence, now_ts=None):
         "source_component",
         "source_reason",
     }
+    always_replace = {
+        "route_failure_reason",
+        "provider_hydrate_reason",
+        "provider_hydrate_http_status",
+        "provider_hydrate_latency_ms",
+        "provider_hydrate_request_id",
+        "provider_hydrate_out_amount",
+    }
     for key, value in evidence.items():
         if value is None or value == "":
+            continue
+        if key in always_replace:
+            merged[key] = value
             continue
         if key in bool_keys:
             if _truthy(value):
@@ -1034,6 +1046,81 @@ def _apply_candidate_evidence(candidate, evidence, now_ts=None):
         if merged.get(key) in (None, ""):
             merged[key] = value
     return AClassCandidate.from_mapping(merged)
+
+
+def _candidate_has_non_provider_market_red(candidate, config):
+    risk_flag_text = " ".join(str(flag).lower() for flag in (candidate.risk_flags or []))
+    if candidate.creator_close:
+        return True
+    if any(token in risk_flag_text for token in ("rug", "honeypot", "blacklist", "trapped", "creator_dump")):
+        return True
+    route_failure = str(candidate.route_failure_reason or "").lower()
+    if any(token in route_failure for token in ("no_route", "trapped", "token_not_tradable")):
+        return True
+    if candidate.liquidity_usd is not None and candidate.liquidity_usd < config.min_liquidity_for_route(candidate.route_bucket):
+        return True
+    if candidate.top10_pct is not None and candidate.top10_pct > config.top10_hard_max_pct:
+        return True
+    if candidate.bundler_rate is not None and candidate.bundler_rate > config.bundler_hard_max:
+        return True
+    if candidate.rat_trader_rate is not None and candidate.rat_trader_rate > config.rat_trader_hard_max:
+        return True
+    if candidate.entrapment_ratio is not None and candidate.entrapment_ratio > config.entrapment_hard_max:
+        return True
+    return False
+
+
+def _candidate_has_fresh_execution_evidence(candidate, config):
+    quote_age = _safe_float(candidate.quote_age_sec, None)
+    spread_ok = candidate.spread_verified or candidate.spread_pct is not None
+    return bool(
+        candidate.quote_available
+        and candidate.quote_executable
+        and candidate.route_available
+        and quote_age is not None
+        and quote_age <= config.quote_max_age_sec
+        and spread_ok
+    )
+
+
+def _maybe_hydrate_provider_evidence(candidate, *, now_ts, config, provider_budget=None, provider_fetcher=None, logger=None):
+    if not getattr(config, "provider_hydrate_enabled", True):
+        return candidate
+    if _candidate_has_fresh_execution_evidence(candidate, config):
+        return candidate
+    if _candidate_has_non_provider_market_red(candidate, config):
+        return candidate
+    if provider_budget is not None:
+        remaining = int(provider_budget.get("remaining", 0) or 0)
+        if remaining <= 0:
+            return candidate
+        provider_budget["remaining"] = remaining - 1
+    try:
+        evidence = hydrate_provider_quote(candidate, now_ts=now_ts, config=config, fetcher=provider_fetcher)
+    except Exception as exc:
+        evidence = {
+            "quote_available": False,
+            "quote_executable": False,
+            "route_available": False,
+            "quote_source": "jupiter_ultra_provider_hydrate",
+            "quote_age_sec": 0.0,
+            "quote_ts": now_ts,
+            "route_failure_reason": "provider_hydrate_exception",
+            "data_confidence": "provider_hydrate_failed",
+            "provider_hydrate_reason": str(exc),
+        }
+    hydrated = _apply_candidate_evidence(candidate, evidence, now_ts=now_ts)
+    if logger and evidence:
+        logger.info(
+            f"  [A_CLASS_PROVIDER_HYDRATE] symbol={candidate.symbol or 'UNKNOWN'} "
+            f"token={_short_token(candidate.token_ca)} "
+            f"source={evidence.get('quote_source')} "
+            f"quote={bool(evidence.get('quote_executable'))} "
+            f"route={bool(evidence.get('route_available'))} "
+            f"reason={evidence.get('route_failure_reason') or evidence.get('provider_hydrate_reason')} "
+            f"spread={evidence.get('spread_pct')}"
+        )
+    return hydrated
 
 
 def _latest_lotto_quote_shadow_evidence(db, token_ca, now_ts, config):
@@ -1339,7 +1426,16 @@ def _latest_external_alpha_evidence(db, token_ca, now_ts, config):
     return _external_alpha_state_evidence(_row_to_dict(row), now_ts=now_ts)
 
 
-def enrich_candidate_with_db_evidence(db, candidate, *, now_ts=None, config=None):
+def enrich_candidate_with_db_evidence(
+    db,
+    candidate,
+    *,
+    now_ts=None,
+    config=None,
+    provider_budget=None,
+    provider_fetcher=None,
+    logger=None,
+):
     """Hydrate counterfactual candidates from adjacent quote evidence tables.
 
     Decision/missed rows often carry only the blocker reason. The execution
@@ -1361,6 +1457,14 @@ def enrich_candidate_with_db_evidence(db, candidate, *, now_ts=None, config=None
         except Exception:
             evidence = {}
         candidate = _apply_candidate_evidence(candidate, evidence, now_ts=now_ts)
+    candidate = _maybe_hydrate_provider_evidence(
+        candidate,
+        now_ts=now_ts,
+        config=config,
+        provider_budget=provider_budget,
+        provider_fetcher=provider_fetcher,
+        logger=logger,
+    )
     return candidate
 
 
@@ -1893,6 +1997,9 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
         ("paper_decision_events", _query_recent_decision_events, candidate_from_decision_event_row),
     )
     errors = {}
+    provider_budget = {
+        "remaining": max(0, int(getattr(config, "provider_hydrate_max_per_scan", 0) or 0))
+    }
     for source_table, query_func, builder in sources:
         try:
             rows = query_func(db, now_ts, config, per_source_limit)
@@ -1905,7 +2012,14 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
             row_dict = _row_to_dict(row)
             try:
                 candidate = builder(row, now_ts=now_ts)
-                candidate = enrich_candidate_with_db_evidence(db, candidate, now_ts=now_ts, config=config)
+                candidate = enrich_candidate_with_db_evidence(
+                    db,
+                    candidate,
+                    now_ts=now_ts,
+                    config=config,
+                    provider_budget=provider_budget,
+                    logger=logger,
+                )
                 result = _evaluate_and_record_candidate(
                     db,
                     candidate=candidate,

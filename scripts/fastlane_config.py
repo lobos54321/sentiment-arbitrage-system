@@ -36,6 +36,14 @@ def _env_int(env, name, default):
         return int(default)
 
 
+def _env_str(env, name, default):
+    value = env.get(name)
+    if value is None:
+        return str(default)
+    text = str(value).strip()
+    return text or str(default)
+
+
 @dataclass(frozen=True)
 class AClassFastlaneConfig:
     enabled: bool = False
@@ -82,6 +90,13 @@ class AClassFastlaneConfig:
     entrapment_hard_max: float = 0.12
 
     shadow_scan_window_sec: float = 2 * 60 * 60
+
+    provider_hydrate_enabled: bool = True
+    provider_hydrate_max_per_scan: int = 5
+    provider_hydrate_timeout_sec: float = 4.0
+    provider_hydrate_amount_raw: str = "1000000"
+    provider_hydrate_slippage_bps: int = 500
+    provider_hydrate_endpoint_base: str = "https://api.jup.ag/ultra/v1/order"
 
     def min_liquidity_for_route(self, route_bucket):
         route = str(route_bucket or "").upper()
@@ -141,4 +156,14 @@ def load_a_class_config(env=None):
         rat_trader_hard_max=_env_float(env, "A_CLASS_RAT_TRADER_HARD_MAX", 0.20),
         entrapment_hard_max=_env_float(env, "A_CLASS_ENTRAPMENT_HARD_MAX", 0.12),
         shadow_scan_window_sec=_env_float(env, "A_CLASS_SHADOW_SCAN_WINDOW_SEC", 2 * 60 * 60),
+        provider_hydrate_enabled=_env_bool(env, "A_CLASS_PROVIDER_HYDRATE_ENABLED", True),
+        provider_hydrate_max_per_scan=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_MAX_PER_SCAN", 5),
+        provider_hydrate_timeout_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_TIMEOUT_SEC", 4.0),
+        provider_hydrate_amount_raw=_env_str(env, "A_CLASS_PROVIDER_HYDRATE_AMOUNT_RAW", "1000000"),
+        provider_hydrate_slippage_bps=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_SLIPPAGE_BPS", 500),
+        provider_hydrate_endpoint_base=_env_str(
+            env,
+            "A_CLASS_PROVIDER_HYDRATE_ENDPOINT_BASE",
+            "https://api.jup.ag/ultra/v1/order",
+        ),
     )

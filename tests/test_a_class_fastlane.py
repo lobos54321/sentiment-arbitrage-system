@@ -728,3 +728,124 @@ def test_shadow_scan_deduplicates_would_enter_by_token_lifecycle_window():
     assert rows[1]["is_duplicate"] == 1
     assert rows[1]["duplicate_of_id"] == 1
     assert rows[0]["opportunity_key"] == rows[1]["opportunity_key"]
+
+
+def test_provider_hydrator_refreshes_missing_execution_evidence():
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {
+            "status": 200,
+            "latency_ms": 42,
+            "data": {
+                "outAmount": "12345",
+                "priceImpactPct": "0.004",
+                "routePlan": [{"percent": 100}],
+                "requestId": "req-1",
+            },
+        }
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        route_failure_reason="route_unavailable_unknown",
+        spread_pct=None,
+        spread_verified=False,
+    )
+    budget = {"remaining": 1}
+    hydrated = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"}),
+        provider_budget=budget,
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert len(calls) == 1
+    assert budget["remaining"] == 0
+    assert hydrated.quote_available is True
+    assert hydrated.quote_executable is True
+    assert hydrated.route_available is True
+    assert hydrated.quote_source == "jupiter_ultra_provider_hydrate"
+    assert hydrated.quote_age_sec == 0
+    assert hydrated.spread_pct == 0.4
+    assert hydrated.route_failure_reason == "provider_hydrated_route_ok"
+
+    decision = evaluate_a_class_fastlane(
+        hydrated,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "false"}),
+    )
+    assert decision.action == "ENTER"
+
+
+def test_provider_hydrator_failure_stays_fail_closed():
+    def fake_fetcher(**_kwargs):
+        return {
+            "status": 400,
+            "latency_ms": 30,
+            "data": {"errorCode": "COULD_NOT_FIND_ANY_ROUTE", "message": "Could not find any route"},
+        }
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        route_failure_reason="route_unavailable_unknown",
+        spread_pct=None,
+        spread_verified=False,
+    )
+    hydrated = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"}),
+        provider_budget={"remaining": 1},
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert hydrated.route_available is False
+    assert hydrated.route_failure_reason == "no_route"
+    decision = evaluate_a_class_fastlane(
+        hydrated,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "false"}),
+    )
+    assert decision.action == "BLOCK"
+    assert "route_failure_red_flag" in decision.hard_blockers
+
+
+def test_provider_hydrator_budget_prevents_extra_probe():
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {"status": 200, "latency_ms": 1, "data": {"outAmount": "1", "routePlan": [{}]}}
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        spread_pct=None,
+        spread_verified=False,
+    )
+    hydrated = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"}),
+        provider_budget={"remaining": 0},
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert calls == []
+    assert hydrated.quote_executable is False
