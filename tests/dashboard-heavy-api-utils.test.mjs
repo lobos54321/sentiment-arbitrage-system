@@ -1837,6 +1837,13 @@ test('a class status can be served from materialized live snapshot section', () 
       reason_summary: [{ source_table: 'paper_decision_events', source_component: 'scout_quality', source_reason: 'scout_quality_volume_low', action: 'BLOCK', n: 10, max_score: 0 }],
       hard_blockers: [{ blocker: 'quote_not_available', n: 10 }],
       recent_events: [{ id: 1, action: 'WOULD_ENTER', symbol: 'DOG' }],
+      runtime_safety: {
+        available: true,
+        loss_cap_breach_n: 1,
+        mode_circuit_broken: true,
+        downgraded_modes: [{ mode_key: 'A_CLASS_FASTLANE', status: 'CIRCUIT_BROKEN' }],
+        next_safe_action: 'keep_breached_modes_shadow_until_cooldown',
+      },
     },
     a_class_p0_discovery: {
       available: true,
@@ -1886,6 +1893,10 @@ test('a class status can be served from materialized live snapshot section', () 
   assert.equal(status.p0_discovery.outlier_trimmed_would_rr, 4.5);
   assert.equal(status.p0_discovery.missed_blockers[0].token_ca, undefined);
   assert.doesNotMatch(JSON.stringify(status.p0_discovery.missed_blockers), /TOKEN_SHOULD_NOT_LEAK/);
+  assert.equal(status.loss_cap_breach_n, 1);
+  assert.equal(status.mode_circuit_broken, true);
+  assert.equal(status.downgraded_modes[0].mode_key, 'A_CLASS_FASTLANE');
+  assert.equal(status.next_safe_action, 'keep_breached_modes_shadow_until_cooldown');
 });
 
 test('a class materialized helpers degrade to shadow pending without p0 discovery', () => {
@@ -2479,4 +2490,75 @@ test('rolling 24h goal exposes matrix rr ai and controller fields', () => {
   assert.equal(status.ai_advisory.advisory_only, true);
   assert.equal(Array.isArray(status.controller_actions), true);
   assert.equal(status.next_safe_action, 'prepare_0_001_tiny_paper_after_observability_green');
+});
+
+test('rolling 24h goal surfaces runtime loss-cap circuit breaker', () => {
+  const snapshot = {
+    snapshot_id: 'paper_live_runtime_safety',
+    generated_at: '2026-06-04T00:00:00.000Z',
+    window: { since_ts: 1000 },
+    trades: {
+      totals: {
+        closed: 20,
+        wins: 12,
+        min_pnl: -0.12,
+        deployed_sol: 0.05,
+        est_pnl_sol: 0.11,
+      },
+    },
+    dog_catch_goal: {
+      available: true,
+      trades: {
+        closed: 20,
+        captured_gold_silver_unique: 6,
+        deployed_sol: 0.05,
+        realized_pnl_sol: 0.11,
+        realized_roi: 2.2,
+      },
+      missed: { clean_gold_silver_unique: 4 },
+      goal: {
+        eligible_gold_silver_unique: 10,
+        captured_gold_silver_unique: 6,
+        clean_gold_silver_capture_rate: 0.6,
+        pass: true,
+        blockers: [],
+      },
+    },
+    a_class_p0_discovery: {
+      available: true,
+      quote_clean_gold_silver_seen_count: 10,
+      quote_clean_gold_silver_would_enter_count: 6,
+      outlier_trimmed_would_rr: 3.0,
+      would_enter_no_route_rate: 0,
+      would_enter_trapped_rate: 0,
+      unknown_data_rate: 0,
+      missed_blockers: [],
+      discovery_exit: { advisory: 'PROMOTE_TINY_CANARY' },
+    },
+    a_class: {
+      available: true,
+      runtime_safety: {
+        available: true,
+        loss_cap_breach_n: 1,
+        mode_circuit_broken: true,
+        downgraded_modes: [{ mode_key: 'A_CLASS_FASTLANE', status: 'CIRCUIT_BROKEN' }],
+        next_safe_action: 'keep_breached_modes_shadow_until_cooldown',
+      },
+    },
+  };
+
+  const status = buildRolling24hGoalStatusFromLiveSnapshot(snapshot, {
+    generatedAt: '2026-06-04T00:05:00.000Z',
+    nowMs: Date.parse('2026-06-04T00:05:00.000Z'),
+    requestedHours: 24,
+    materializedHours: 24,
+    minClosedTrades: 20,
+    minGoldSilverCandidates: 5,
+  });
+
+  assert.equal(status.pass, false);
+  assert.equal(status.metrics.loss_cap_breach_n, 1);
+  assert.equal(status.metrics.mode_circuit_broken, true);
+  assert.match(status.blockers.join(','), /a_class_mode_runtime_circuit_broken/);
+  assert.equal(status.next_safe_action, 'keep_breached_modes_shadow_until_cooldown');
 });

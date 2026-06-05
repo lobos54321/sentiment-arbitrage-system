@@ -1,0 +1,137 @@
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+
+from a_class_runtime_safety import (
+    A_CLASS_RUNTIME_MODE_KEY,
+    fetch_mode_runtime_state,
+    record_loss_cap_breach_reaction,
+    summarize_runtime_safety,
+)
+from canonical_ledger import record_canonical_trade_entry, record_canonical_trade_exit
+
+
+def memory_db():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def _record_a_class_trade(db, *, trade_id="trade-a", exit_sol=0.00075, exit_ts=1_030):
+    record_canonical_trade_entry(
+        db,
+        {
+            "trade_id": trade_id,
+            "token_ca": "TokenA",
+            "symbol": "AFAST",
+            "entry_ts": 1_000,
+            "entry_size_sol": 0.001,
+            "entry_mode": "a_class_fastlane_tiny_canary",
+            "normalized_mode": "A_GRADE_RESONANCE_FASTLANE",
+            "is_a_class_fastlane": True,
+            "entry_quote_source": "gmgn",
+            "entry_route_available": True,
+            "entry_quote_executable": True,
+        },
+    )
+    record_canonical_trade_exit(
+        db,
+        trade_id,
+        {
+            "exit_ts": exit_ts,
+            "realized_exit_sol": exit_sol,
+            "exit_reason": "hard_stop",
+            "loss_cap_pct": 0.20,
+        },
+    )
+
+
+def test_loss_cap_breach_downgrades_a_class_mode_and_is_idempotent():
+    db = memory_db()
+    _record_a_class_trade(db)
+
+    detail = record_loss_cap_breach_reaction(db, "trade-a", now_ts=1_030, cooldown_sec=600)
+
+    assert detail["breach"] is True
+    assert detail["should_record_event"] is True
+    assert detail["mode_key"] == A_CLASS_RUNTIME_MODE_KEY
+    assert detail["status"] == "CIRCUIT_BROKEN"
+    assert detail["action"] == "SHADOW"
+
+    state = fetch_mode_runtime_state(db, "a_class_fastlane_tiny_canary", now_ts=1_100)
+    assert state["status"] == "CIRCUIT_BROKEN"
+    assert state["circuit_broken"] is True
+    assert state["cooldown_remaining_sec"] == 530
+
+    duplicate = record_loss_cap_breach_reaction(db, "trade-a", now_ts=1_040, cooldown_sec=600)
+    assert duplicate["breach"] is True
+    assert duplicate["should_record_event"] is False
+
+    row = db.execute(
+        "SELECT breach_count, source_trade_id FROM a_class_mode_runtime_state WHERE mode_key = ?",
+        (A_CLASS_RUNTIME_MODE_KEY,),
+    ).fetchone()
+    assert row["breach_count"] == 1
+    assert row["source_trade_id"] == "trade-a"
+
+
+def test_cooldown_expiry_returns_shadow_not_live():
+    db = memory_db()
+    _record_a_class_trade(db)
+
+    record_loss_cap_breach_reaction(db, "trade-a", now_ts=1_030, cooldown_sec=60)
+
+    state = fetch_mode_runtime_state(db, "A_GRADE_RESONANCE_FASTLANE", now_ts=1_200)
+    assert state["status"] == "SHADOW"
+    assert state["action"] == "SHADOW"
+    assert state["circuit_broken"] is False
+    assert state["recovery_required"] is True
+    assert state["reason"] == "cooldown_elapsed_requires_clean_windows"
+
+
+def test_non_breach_and_non_a_class_do_not_downgrade():
+    db = memory_db()
+    record_canonical_trade_entry(
+        db,
+        {
+            "trade_id": "trade-main",
+            "token_ca": "TokenB",
+            "symbol": "MAIN",
+            "entry_ts": 1_000,
+            "entry_size_sol": 0.01,
+            "entry_mode": "main_mode",
+            "normalized_mode": "ATH_CONTINUATION",
+        },
+    )
+    record_canonical_trade_exit(
+        db,
+        "trade-main",
+        {
+            "exit_ts": 1_020,
+            "realized_exit_sol": 0.007,
+            "exit_reason": "hard_stop",
+            "loss_cap_pct": 0.20,
+        },
+    )
+
+    detail = record_loss_cap_breach_reaction(db, "trade-main", now_ts=1_020, cooldown_sec=600)
+    assert detail["breach"] is True
+    assert detail["reason"] == "non_a_class_mode_ignored"
+
+    state = fetch_mode_runtime_state(db, "A_CLASS_FASTLANE", now_ts=1_030)
+    assert state["status"] == "LIVE"
+
+
+def test_runtime_safety_summary_exposes_breach_and_downgraded_mode():
+    db = memory_db()
+    _record_a_class_trade(db)
+    record_loss_cap_breach_reaction(db, "trade-a", now_ts=1_030, cooldown_sec=600)
+
+    summary = summarize_runtime_safety(db, since_ts=900, now_ts=1_100)
+
+    assert summary["loss_cap_breach_n"] == 1
+    assert summary["mode_circuit_broken"] is True
+    assert summary["downgraded_modes"][0]["mode_key"] == A_CLASS_RUNTIME_MODE_KEY
+    assert summary["next_safe_action"] == "keep_breached_modes_shadow_until_cooldown"

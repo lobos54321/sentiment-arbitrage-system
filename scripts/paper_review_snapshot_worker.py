@@ -18,9 +18,11 @@ from pathlib import Path
 
 try:
     from scripts.a_class_expected_rr import build_a_class_p0_discovery
+    from scripts.a_class_runtime_safety import summarize_runtime_safety
     from scripts.ai_strategy_reviewer import build_ai_strategy_review
 except ImportError:
     from a_class_expected_rr import build_a_class_p0_discovery
+    from a_class_runtime_safety import summarize_runtime_safety
     from ai_strategy_reviewer import build_ai_strategy_review
 
 
@@ -914,6 +916,17 @@ def a_class_summary(db, since_ts, limit):
     total = sum(int(row.get("n") or 0) for row in action_summary)
     would_enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "WOULD_ENTER")
     enter = sum(int(row.get("n") or 0) for row in action_summary if row.get("action") == "ENTER")
+    try:
+        runtime_safety = summarize_runtime_safety(db, since_ts=since_ts)
+    except Exception as exc:
+        runtime_safety = {
+            "available": False,
+            "reason": str(exc),
+            "loss_cap_breach_n": 0,
+            "mode_circuit_broken": False,
+            "downgraded_modes": [],
+            "next_safe_action": "runtime_safety_unavailable",
+        }
     return {
         "available": True,
         "total": total,
@@ -925,6 +938,7 @@ def a_class_summary(db, since_ts, limit):
         "reason_summary": reason_summary,
         "hard_blockers": hard_blockers,
         "recent_events": recent_events,
+        "runtime_safety": runtime_safety,
     }
 
 

@@ -4885,10 +4885,109 @@ function routeHealthFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, lim
   };
 }
 
+function effectiveRuntimeModeState(row, nowTs = Math.floor(Date.now() / 1000)) {
+  const cooldownUntil = finiteNumber(row?.cooldown_until_ts, null);
+  const storedStatus = String(row?.status || 'LIVE').toUpperCase();
+  const storedCircuit = Boolean(Number(row?.circuit_broken || 0));
+  const inCooldown = cooldownUntil != null && cooldownUntil > nowTs;
+  let status = storedStatus;
+  let action = String(row?.action || storedStatus).toUpperCase();
+  let circuitBroken = storedCircuit;
+  let recoveryRequired = false;
+  let reason = row?.reason || null;
+  if (storedCircuit && inCooldown) {
+    status = 'CIRCUIT_BROKEN';
+    action = 'SHADOW';
+    circuitBroken = true;
+  } else if (storedCircuit) {
+    status = 'SHADOW';
+    action = 'SHADOW';
+    circuitBroken = false;
+    recoveryRequired = true;
+    reason = 'cooldown_elapsed_requires_clean_windows';
+  }
+  return {
+    mode_key: row?.mode_key || 'A_CLASS_FASTLANE',
+    status,
+    action,
+    circuit_broken: circuitBroken,
+    stored_status: storedStatus,
+    stored_circuit_broken: storedCircuit,
+    reason,
+    source_trade_id: row?.source_trade_id || null,
+    token_ca: row?.token_ca || null,
+    symbol: row?.symbol || null,
+    last_realized_pnl_pct: roundNullableNumber(row?.last_realized_pnl_pct, 6),
+    last_realized_pnl_sol: roundNullableNumber(row?.last_realized_pnl_sol, 9),
+    loss_cap_pct: roundNullableNumber(row?.loss_cap_pct, 6),
+    breach_count: Number(row?.breach_count || 0),
+    last_breach_ts: finiteNumber(row?.last_breach_ts, null),
+    cooldown_until_ts: cooldownUntil,
+    cooldown_remaining_sec: cooldownUntil == null ? 0 : Math.max(0, cooldownUntil - nowTs),
+    recovery_required: recoveryRequired,
+    clean_windows_required: Number(row?.clean_windows_required || 4),
+    detail: parseJsonValue(row?.detail_json, {}),
+  };
+}
+
+function aClassRuntimeSafetyFromDb(paperDb, tableNames, sinceTs = null) {
+  const nowTs = Math.floor(Date.now() / 1000);
+  let lossCapBreachN = 0;
+  let recentBreaches = [];
+  if (tableNames.has('canonical_trade_ledger')) {
+    const cols = getTableColumns(paperDb, 'canonical_trade_ledger');
+    if (cols.has('loss_cap_breach')) {
+      const tsExpr = cols.has('exit_ts')
+        ? 'COALESCE(exit_ts, updated_at, created_at, 0)'
+        : (cols.has('updated_at') ? 'COALESCE(updated_at, created_at, 0)' : '0');
+      const where = sinceTs == null
+        ? 'WHERE COALESCE(loss_cap_breach, 0) = 1'
+        : `WHERE COALESCE(loss_cap_breach, 0) = 1 AND ${tsExpr} >= @sinceTs`;
+      const params = sinceTs == null ? {} : { sinceTs };
+      lossCapBreachN = Number(paperDb.prepare(`SELECT COUNT(*) AS n FROM canonical_trade_ledger ${where}`).get(params)?.n || 0);
+      recentBreaches = paperDb.prepare(`
+        SELECT trade_id, token_ca, symbol, normalized_mode, entry_mode,
+               exit_ts, realized_pnl_pct, realized_pnl_sol, loss_cap_pct,
+               exit_reason, no_route_flag, trapped_flag
+        FROM canonical_trade_ledger
+        ${where}
+        ORDER BY ${tsExpr} DESC
+        LIMIT 20
+      `).all(params);
+    }
+  }
+  const modeStates = tableNames.has('a_class_mode_runtime_state')
+    ? paperDb.prepare('SELECT * FROM a_class_mode_runtime_state ORDER BY updated_at DESC').all().map((row) => effectiveRuntimeModeState(row, nowTs))
+    : [];
+  const downgradedModes = modeStates.filter((state) => state.status !== 'LIVE' || state.recovery_required);
+  const modeCircuitBroken = modeStates.some((state) => state.circuit_broken);
+  return {
+    available: true,
+    schema_version: 'v1.a_class_runtime_safety',
+    loss_cap_breach_n: lossCapBreachN,
+    mode_circuit_broken: modeCircuitBroken,
+    downgraded_modes: downgradedModes,
+    mode_states: modeStates,
+    recent_breaches: recentBreaches,
+    next_safe_action: modeCircuitBroken
+      ? 'keep_breached_modes_shadow_until_cooldown'
+      : (downgradedModes.length ? 'keep_breached_modes_shadow_until_clean_windows' : 'continue_a_class_observation'),
+  };
+}
+
 export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHours, materializedHours = requestedHours, limit = 30 }) {
   const section = liveSnapshot?.a_class || {};
   const rows = (value) => Array.isArray(value) ? value : [];
   const p0Discovery = aClassP0DiscoveryFromSnapshot(liveSnapshot);
+  const runtimeSafety = (section.runtime_safety && typeof section.runtime_safety === 'object')
+    ? section.runtime_safety
+    : {
+        available: false,
+        loss_cap_breach_n: 0,
+        mode_circuit_broken: false,
+        downgraded_modes: [],
+        next_safe_action: null,
+      };
   const shadowPending = !p0Discovery.available;
   return {
     generated_at: new Date().toISOString(),
@@ -4928,6 +5027,11 @@ export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
     })),
     hard_blockers: rows(section.hard_blockers),
     recent_events: rows(section.recent_events).slice(0, limit),
+    runtime_safety: runtimeSafety,
+    loss_cap_breach_n: Number(runtimeSafety.loss_cap_breach_n || 0),
+    mode_circuit_broken: Boolean(runtimeSafety.mode_circuit_broken),
+    downgraded_modes: rows(runtimeSafety.downgraded_modes),
+    next_safe_action: runtimeSafety.next_safe_action || null,
     p0_discovery: p0Discovery,
     shadow_pending: shadowPending,
     note: 'Default is materialized by paper_review_snapshot_worker; pass live=1 for an on-demand DB scan.',
@@ -5122,6 +5226,15 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const snapshotAge = snapshotAvailable ? snapshotAgeMinutes(liveSnapshot, nowMs) : null;
   const snapshotFresh = Boolean(snapshotAvailable && snapshotAge != null && snapshotAge <= maxSnapshotAgeMinutes);
   const aClassP0Discovery = snapshotAvailable ? aClassP0DiscoveryFromSnapshot(liveSnapshot) : sanitizeAClassP0Discovery(null);
+  const runtimeSafety = (liveSnapshot?.a_class?.runtime_safety && typeof liveSnapshot.a_class.runtime_safety === 'object')
+    ? liveSnapshot.a_class.runtime_safety
+    : {
+        available: false,
+        loss_cap_breach_n: 0,
+        mode_circuit_broken: false,
+        downgraded_modes: [],
+        next_safe_action: null,
+      };
   const shadowPending = snapshotAvailable && !aClassP0Discovery.available;
   const dogCatch = snapshotAvailable ? dogCatchGoalFromLiveSnapshot(liveSnapshot, {
     dbPath,
@@ -5155,6 +5268,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   if (!snapshotAvailable) evidenceBlockers.push(liveSnapshot?.error ? 'materialized_review_snapshot_invalid' : 'materialized_review_snapshot_missing');
   if (snapshotAvailable && !snapshotFresh) evidenceBlockers.push('materialized_review_snapshot_stale_or_undated');
   if (shadowPending) evidenceBlockers.push('a_class_p0_shadow_discovery_pending');
+  if (runtimeSafety.mode_circuit_broken) evidenceBlockers.push('a_class_mode_runtime_circuit_broken');
   if (closed < targets.min_closed_trades_24h) sampleBlockers.push('insufficient_closed_trades_24h');
   if (eligibleGoldSilver < targets.min_gold_silver_candidates_24h) sampleBlockers.push('insufficient_gold_silver_denominator_24h');
   if (realizedWinRate == null || realizedWinRate < targets.target_realized_win_rate) metricBlockers.push('realized_win_rate_below_target');
@@ -5193,6 +5307,9 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     would_enter_trapped_rate: aClassP0Discovery.would_enter_trapped_rate,
     unknown_data_rate: aClassP0Discovery.unknown_data_rate,
     outlier_trimmed_would_rr: aClassP0Discovery.outlier_trimmed_would_rr,
+    loss_cap_breach_n: Number(runtimeSafety.loss_cap_breach_n || 0),
+    mode_circuit_broken: Boolean(runtimeSafety.mode_circuit_broken),
+    downgraded_modes: Array.isArray(runtimeSafety.downgraded_modes) ? runtimeSafety.downgraded_modes : [],
     deployed_sol_24h: roundNullableNumber(deployedSol, 6),
     realized_pnl_sol_24h: roundNullableNumber(realizedPnlSol, 6),
   };
@@ -5259,7 +5376,10 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     },
     controller_actions: controllerActions.actions || [],
     controller: controllerActions,
-    next_safe_action: controllerActions.next_safe_action || 'keep_a_class_shadow',
+    runtime_safety: runtimeSafety,
+    next_safe_action: runtimeSafety.mode_circuit_broken
+      ? (runtimeSafety.next_safe_action || 'keep_breached_modes_shadow_until_cooldown')
+      : (controllerActions.next_safe_action || runtimeSafety.next_safe_action || 'keep_a_class_shadow'),
     a_class_p0_discovery: aClassP0Discovery,
     top_missed_blockers: aClassP0Discovery.missed_blockers,
     target_gaps: {
@@ -12900,6 +13020,7 @@ const server = http.createServer(async (req, res) => {
         ORDER BY event_ts DESC, id DESC
         LIMIT @limit
       `).all({ ...params, limit }).map(aClassEventRow);
+      const runtimeSafety = aClassRuntimeSafetyFromDb(paperDb, tableNames, sinceTs);
       res.writeHead(p0ColumnsReady ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         generated_at: new Date().toISOString(),
@@ -12935,6 +13056,11 @@ const server = http.createServer(async (req, res) => {
           .map(([blocker, n]) => ({ blocker, n }))
           .sort((a, b) => b.n - a.n),
         recent_events: recentEvents,
+        runtime_safety: runtimeSafety,
+        loss_cap_breach_n: runtimeSafety.loss_cap_breach_n,
+        mode_circuit_broken: runtimeSafety.mode_circuit_broken,
+        downgraded_modes: runtimeSafety.downgraded_modes,
+        next_safe_action: runtimeSafety.next_safe_action,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, apiJsonHeaders());

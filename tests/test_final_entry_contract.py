@@ -82,6 +82,29 @@ def test_final_entry_contract_blocks_hard_execution_and_risk_failures():
     }.issubset(set(decision.hard_blockers))
 
 
+def test_final_entry_contract_blocks_shadow_and_circuit_broken_modes():
+    shadow = evaluate_final_entry_contract(
+        base_candidate(),
+        mode_state={"status": "SHADOW", "reason": "cooldown_elapsed_requires_clean_windows"},
+        budget_state={"active_count": 0, "max_concurrent": 1},
+        config=load_a_class_config({}),
+        now_ts=1_000,
+    )
+    circuit = evaluate_final_entry_contract(
+        base_candidate(),
+        mode_state={"status": "CIRCUIT_BROKEN", "circuit_broken": True, "reason": "realized_loss_cap_breach"},
+        budget_state={"active_count": 0, "max_concurrent": 1},
+        config=load_a_class_config({}),
+        now_ts=1_000,
+    )
+
+    assert shadow.passed is False
+    assert "mode_disabled" in shadow.hard_blockers
+    assert circuit.passed is False
+    assert "mode_disabled" in circuit.hard_blockers
+    assert "mode_circuit_breaker" in circuit.hard_blockers
+
+
 def test_final_entry_contract_notes_missing_soft_rr_but_does_not_block():
     decision = evaluate_final_entry_contract(
         base_candidate(expected_rr=None, defined_risk_pct=None),

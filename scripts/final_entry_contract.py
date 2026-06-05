@@ -161,7 +161,7 @@ def evaluate_final_entry_contract(
         notes.append("defined_risk_missing")
 
     status = str(mode_state.get("status") or mode_state.get("action") or "LIVE").upper()
-    if status in {"DISABLED", "BLOCK", "BLOCKED", "CIRCUIT_BROKEN"}:
+    if status in {"DISABLED", "BLOCK", "BLOCKED", "CIRCUIT_BROKEN", "SHADOW"}:
         blockers.append("mode_disabled")
     if _truthy(mode_state.get("circuit_broken", False)):
         blockers.append("mode_circuit_breaker")

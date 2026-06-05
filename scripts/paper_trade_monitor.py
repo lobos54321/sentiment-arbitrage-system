@@ -79,6 +79,11 @@ from canonical_ledger import (
     record_canonical_trade_exit,
     record_canonical_trade_path_update,
 )
+from a_class_runtime_safety import (
+    fetch_mode_runtime_state,
+    loss_cap_breach_cooldown_sec,
+    record_loss_cap_breach_reaction,
+)
 from fastlane_config import load_a_class_config
 from final_entry_contract import evaluate_final_entry_contract
 from opportunity_events import record_opportunity_event
@@ -12915,6 +12920,22 @@ def active_a_class_fastlane_count(positions, pending_entries):
     return count
 
 
+def _a_class_final_entry_budget_state(db, positions, pending_entries, *, lifecycle_id=None, now_ts, config):
+    budget = _a_class_live_loss_budget_state(db, now_ts=now_ts, config=config)
+    active_count = active_a_class_fastlane_count(positions, pending_entries)
+    current_pending = (pending_entries or {}).get(lifecycle_id) if lifecycle_id is not None else None
+    if isinstance(current_pending, dict) and _is_a_class_fastlane_mode(
+        current_pending.get('entry_mode') or current_pending.get('scout_mode'),
+        current_pending,
+    ):
+        active_count = max(0, active_count - 1)
+    return {
+        **budget,
+        'active_count': active_count,
+        'max_concurrent': max(1, int(getattr(config, 'live_max_concurrent', getattr(config, 'max_concurrent', 1)) or 1)),
+    }
+
+
 def _a_class_live_loss_budget_state(db, *, now_ts, config):
     budget = float(getattr(config, 'live_daily_loss_budget_sol', 0.005) or 0.005)
     since_ts = float(now_ts or time.time()) - 24 * 60 * 60
@@ -25707,8 +25728,33 @@ def run_monitor(db):
                         token_risk=_token_risk,
                         now_ts=now,
                     )
+                    _is_a_class_final_entry = _is_a_class_fastlane_mode(
+                        _raw_entry_mode,
+                        {
+                            **(_monitor_state if isinstance(_monitor_state, dict) else {}),
+                            'entry_mode': _raw_entry_mode,
+                            'normalized_entry_mode': _normalized_entry_mode,
+                        },
+                    )
+                    _final_entry_mode_state = (
+                        fetch_mode_runtime_state(db, _normalized_entry_mode or _raw_entry_mode, now_ts=now)
+                        if _is_a_class_final_entry else {}
+                    )
+                    _final_entry_budget_state = (
+                        _a_class_final_entry_budget_state(
+                            db,
+                            positions,
+                            pending_entries,
+                            lifecycle_id=lifecycle_id,
+                            now_ts=now,
+                            config=a_class_config,
+                        )
+                        if _is_a_class_final_entry else {}
+                    )
                     _final_entry_decision = evaluate_final_entry_contract(
                         _final_entry_candidate,
+                        mode_state=_final_entry_mode_state,
+                        budget_state=_final_entry_budget_state,
                         config=a_class_config,
                         now_ts=now,
                     )
@@ -27670,6 +27716,40 @@ def run_monitor(db):
                             'loss_cap_pct': 0.20,
                         },
                     )
+                    _runtime_safety_detail = record_loss_cap_breach_reaction(
+                        db,
+                        str(pos.trade_id),
+                        mode=(pos.monitor_state or {}).get('normalizedEntryMode')
+                        or (pos.monitor_state or {}).get('entryMode')
+                        or getattr(pos, 'entry_mode', None),
+                        now_ts=exit_ts,
+                        cooldown_sec=loss_cap_breach_cooldown_sec(a_class_config),
+                    )
+                    if _runtime_safety_detail.get('breach') and _runtime_safety_detail.get('should_record_event'):
+                        record_decision_event(
+                            db,
+                            component='a_class_runtime_safety',
+                            event_type='loss_cap_breach',
+                            decision='mode_downgrade',
+                            reason='realized_loss_cap_breach',
+                            token_ca=pos.token_ca,
+                            symbol=pos.symbol,
+                            lifecycle_id=pos.lifecycle_id,
+                            trade_id=pos.trade_id,
+                            signal_ts=pos.signal_ts,
+                            signal_id=getattr(pos, 'premium_signal_id', None),
+                            strategy_stage=pos.strategy_stage,
+                            route=(pos.monitor_state or {}).get('signalRoute') or getattr(pos, 'signal_type', None),
+                            data_source='canonical_trade_ledger+a_class_mode_runtime_state',
+                            payload=_runtime_safety_detail,
+                            event_ts=exit_ts,
+                        )
+                        log.warning(
+                            f"[A_CLASS_RUNTIME_SAFETY] mode_downgrade "
+                            f"mode={_runtime_safety_detail.get('mode_key')} trade_id={pos.trade_id} "
+                            f"symbol={pos.symbol} realized={_runtime_safety_detail.get('realized_pnl_pct')} "
+                            f"cooldown_until={_runtime_safety_detail.get('cooldown_until_ts')}"
+                        )
                     log.info(
                         f"[LEDGER_EXIT] trade_id={pos.trade_id} symbol={pos.symbol} "
                         f"reason={reason} realized_sol={_safe_float(total_realized_sol, None)} "
