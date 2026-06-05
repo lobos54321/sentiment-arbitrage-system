@@ -2462,6 +2462,313 @@ function aClassEventRow(row) {
   };
 }
 
+function normalizedBlockerText(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function compactContextText(values = []) {
+  return values
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== '')
+    .map((value) => String(value).toLowerCase())
+    .join(' ');
+}
+
+function parseBlockerList(value) {
+  const parsed = Array.isArray(value) ? value : parseJsonValue(value, []);
+  if (Array.isArray(parsed)) return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+  if (parsed == null || parsed === '') return [];
+  return [String(parsed).trim()].filter(Boolean);
+}
+
+function boolishValue(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    return ['1', 'true', 'yes', 'on', 'ok', 'clean', 'available', 'executable', 'pass'].includes(value.trim().toLowerCase());
+  }
+  return Boolean(value);
+}
+
+function inferAClassBlockersFromEvent(row = {}) {
+  const blockers = parseBlockerList(row.hard_blockers_json ?? row.hard_blockers);
+  const hasExplicit = new Set(blockers.map(normalizedBlockerText));
+  const push = (blocker) => {
+    if (!hasExplicit.has(blocker)) {
+      blockers.push(blocker);
+      hasExplicit.add(blocker);
+    }
+  };
+  if ('quote_available' in row && row.quote_available != null && !boolishValue(row.quote_available)) push('quote_not_available');
+  if ('quote_executable' in row && row.quote_executable != null && !boolishValue(row.quote_executable)) push('quote_not_executable');
+  if ('route_available' in row && row.route_available != null && !boolishValue(row.route_available)) push('route_unavailable');
+  if ('liquidity_usd' in row && row.liquidity_usd == null) push('liquidity_unknown');
+  if ('spread_pct' in row && row.spread_pct == null) push('spread_unknown');
+  return blockers;
+}
+
+export function classifyAClassBlocker(blocker, context = {}) {
+  const b = normalizedBlockerText(blocker);
+  const risk = context.risk && typeof context.risk === 'object' ? context.risk : parseJsonValue(context.risk_json, {});
+  const candidate = context.candidate && typeof context.candidate === 'object' ? context.candidate : parseJsonValue(context.candidate_json, {});
+  const dataConfidence = normalizedBlockerText(
+    context.data_confidence
+    ?? risk?.data_confidence
+    ?? candidate?.data_confidence
+    ?? '',
+  );
+  const quoteSource = normalizedBlockerText(
+    context.quote_source
+    ?? risk?.quote_source
+    ?? candidate?.quote_source
+    ?? '',
+  );
+  const evidence = compactContextText([
+    context.route_failure_reason,
+    context.quote_failure_reason,
+    context.provider_reason,
+    context.evidence_status,
+    context.reason,
+    context.source_reason,
+    risk?.route_failure_reason,
+    risk?.quote_failure_reason,
+    risk?.provider_reason,
+    risk?.evidence_status,
+    candidate?.route_failure_reason,
+    candidate?.quote_failure_reason,
+    candidate?.provider_reason,
+    candidate?.evidence_status,
+  ]);
+
+  const marketRouteFailure = /\b(no[_ -]?route|trapped|token[_ -]?not[_ -]?tradable|not tradable|route[_ -]?failure[_ -]?red|honeypot|rug)\b/.test(evidence);
+  const infraContext = !evidence || dataConfidence === 'unknown' || dataConfidence === 'partial' || dataConfidence === 'quote_only' || !quoteSource
+    || /\b(rate[_ -]?limited|429|timeout|provider|missing|unknown|stale|quote[_ -]?failed|unavailable)\b/.test(evidence);
+
+  if (!b) {
+    return {
+      blocker: blocker ?? null,
+      category: 'UNKNOWN',
+      recoverability: 'unknown',
+      reason: 'empty_blocker',
+    };
+  }
+
+  if (/\b(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)\b/.test(b)) {
+    return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'hard_security_or_structure_red_flag' };
+  }
+  if (/\b(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)\b/.test(b)) {
+    return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'market_execution_or_liquidity_red_flag' };
+  }
+  if (b.includes('route_unavailable')) {
+    if (marketRouteFailure) {
+      return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'route_unavailable_confirmed_by_no_route_or_trapped_reason' };
+    }
+    return {
+      blocker,
+      category: infraContext ? 'INFRA' : 'MARKET',
+      recoverability: infraContext ? 'provider_or_evidence_recoverable' : 'exclude_from_clean_denominator',
+      reason: infraContext ? 'route_unavailable_without_market_failure_evidence' : 'route_unavailable_with_market_context',
+    };
+  }
+  if (b.includes('quote_not_executable')) {
+    if (marketRouteFailure) {
+      return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'quote_not_executable_confirmed_by_market_route_failure' };
+    }
+    return { blocker, category: 'INFRA', recoverability: 'provider_or_evidence_recoverable', reason: 'quote_not_executable_without_market_failure_evidence' };
+  }
+  if (/\b(quote[_ -]?(not[_ -]?available|source[_ -]?missing|age[_ -]?unknown|stale|missing|unknown|failed)|liquidity[_ -]?unknown|spread[_ -]?unknown|unknown[_ -]?data|data[_ -]?unknown|provider[_ -]?(missing|failed|rate[_ -]?limited)|rate[_ -]?limited|429)\b/.test(b)) {
+    return { blocker, category: 'INFRA', recoverability: 'provider_or_evidence_recoverable', reason: 'provider_or_evidence_missing' };
+  }
+  if (/(expected[_ -]?rr|defined[_ -]?loss|loss[_ -]?risk|cooldown|budget|circuit|mode[_ -]?(disabled|shadow|down)|max[_ -]?concurrent|duplicate|prior[_ -]?(exposure|fastlane)|already[_ -]?fastlane|counterfactual[_ -]?only|watch[_ -]?only|shadow[_ -]?only|entry[_ -]?mode[_ -]?quality|matrix|matrices|scout[_ -]?quality|buy[_ -]?pressure|volume[_ -]?low|negative[_ -]?trend|momentum)/.test(b)) {
+    return { blocker, category: 'POLICY', recoverability: 'policy_or_strategy_review', reason: 'strategy_or_budget_guardrail' };
+  }
+  return { blocker, category: 'UNKNOWN', recoverability: 'needs_review', reason: 'unmapped_blocker' };
+}
+
+export function classifyAClassBlockCause(row = {}) {
+  const risk = row.risk && typeof row.risk === 'object' ? row.risk : parseJsonValue(row.risk_json, {});
+  const candidate = row.candidate && typeof row.candidate === 'object' ? row.candidate : parseJsonValue(row.candidate_json, {});
+  const blockers = inferAClassBlockersFromEvent(row);
+  const blocker_classifications = blockers.map((blocker) => classifyAClassBlocker(blocker, {
+    ...row,
+    risk,
+    candidate,
+    data_confidence: row.data_confidence ?? risk?.data_confidence ?? candidate?.data_confidence,
+    quote_source: row.quote_source ?? risk?.quote_source ?? candidate?.quote_source,
+  }));
+  const categories = new Set(blocker_classifications.map((item) => item.category));
+  let category = 'UNKNOWN';
+  if (categories.has('MARKET')) category = 'MARKET';
+  else if (categories.has('POLICY')) category = 'POLICY';
+  else if (categories.has('INFRA')) category = 'INFRA';
+
+  const action = String(row.action || '').toUpperCase();
+  const wouldAction = String(row.would_action || '').toUpperCase();
+  const wouldEnter = action === 'WOULD_ENTER'
+    || wouldAction === 'WOULD_ENTER'
+    || boolishValue(row.would_enter_a_class);
+  const didEnter = action === 'ENTER' || boolishValue(row.did_enter);
+  const blocked = blocker_classifications.length > 0 || ['BLOCK', 'SHADOW'].includes(action) || action.includes('BLOCK');
+  return {
+    category,
+    blocked,
+    would_enter_a_class: wouldEnter,
+    did_enter: didEnter,
+    blockers,
+    blocker_classifications,
+    infra_recoverable: category === 'INFRA',
+    market_unexecutable: category === 'MARKET',
+    policy_guardrail: category === 'POLICY',
+  };
+}
+
+function incrementBreakdownGroup(map, key, row, classification, extra = {}) {
+  const group = map.get(key) || {
+    ...extra,
+    n: 0,
+    blocked_n: 0,
+    unique_tokens: 0,
+    would_enter_n: 0,
+    did_enter_n: 0,
+    latest_event_ts: null,
+    token_set: new Set(),
+  };
+  group.n += 1;
+  if (classification.blocked) group.blocked_n += 1;
+  if (classification.would_enter_a_class) group.would_enter_n += 1;
+  if (classification.did_enter) group.did_enter_n += 1;
+  if (row.token_ca) group.token_set.add(row.token_ca);
+  if (row.event_ts != null) group.latest_event_ts = Math.max(Number(group.latest_event_ts || 0), Number(row.event_ts || 0));
+  map.set(key, group);
+  return group;
+}
+
+function finalizeBreakdownGroups(map, sortKey = 'n') {
+  return Array.from(map.values()).map((group) => {
+    const { token_set, ...rest } = group;
+    return {
+      ...rest,
+      unique_tokens: token_set instanceof Set ? token_set.size : Number(rest.unique_tokens || 0),
+      latest_event_ts: rest.latest_event_ts || null,
+      latest_event_iso: rest.latest_event_ts ? new Date(Number(rest.latest_event_ts) * 1000).toISOString() : null,
+    };
+  }).sort((a, b) => Number(b[sortKey] || 0) - Number(a[sortKey] || 0) || Number(b.n || 0) - Number(a.n || 0));
+}
+
+export function buildAClassBlockCauseBreakdown(rows = [], options = {}) {
+  const categoryMap = new Map();
+  const blockerMap = new Map();
+  const sourceMap = new Map();
+  const recent = [];
+  const uniqueTokens = new Set();
+  const limit = Math.max(0, Math.min(Number(options.limit || 50), 500));
+  let total = 0;
+  let blocked = 0;
+  let wouldEnter = 0;
+  let didEnter = 0;
+  let latestEventTs = null;
+
+  for (const raw of Array.isArray(rows) ? rows : []) {
+    const row = raw || {};
+    const classification = classifyAClassBlockCause(row);
+    total += 1;
+    if (classification.blocked) blocked += 1;
+    if (classification.would_enter_a_class) wouldEnter += 1;
+    if (classification.did_enter) didEnter += 1;
+    if (row.token_ca) uniqueTokens.add(row.token_ca);
+    if (row.event_ts != null) latestEventTs = Math.max(Number(latestEventTs || 0), Number(row.event_ts || 0));
+    incrementBreakdownGroup(categoryMap, classification.category, row, classification, {
+      category: classification.category,
+      recoverability: classification.category === 'INFRA'
+        ? 'provider_or_evidence_recoverable'
+        : (classification.category === 'MARKET' ? 'exclude_from_clean_denominator' : (classification.category === 'POLICY' ? 'policy_or_strategy_review' : 'needs_review')),
+    });
+    const sourceKey = [
+      row.source_kind || row.source_table || row.source_type || 'unknown',
+      row.source_component || 'unknown',
+      classification.category,
+    ].join('|');
+    incrementBreakdownGroup(sourceMap, sourceKey, row, classification, {
+      source_kind: row.source_kind || row.source_table || row.source_type || 'unknown',
+      source_component: row.source_component || 'unknown',
+      category: classification.category,
+    });
+    for (const item of classification.blocker_classifications) {
+      const blockerKey = `${item.category}|${item.blocker}`;
+      incrementBreakdownGroup(blockerMap, blockerKey, row, classification, {
+        blocker: item.blocker,
+        category: item.category,
+        recoverability: item.recoverability,
+        classification_reason: item.reason,
+      });
+    }
+    if (recent.length < limit) {
+      recent.push({
+        id: row.id ?? null,
+        source_kind: row.source_kind || row.source_table || row.source_type || 'unknown',
+        event_ts: row.event_ts ?? null,
+        event_iso: row.event_ts ? new Date(Number(row.event_ts) * 1000).toISOString() : null,
+        token_ca: row.token_ca ?? null,
+        symbol: row.symbol ?? null,
+        route_bucket: row.route_bucket ?? row.route ?? null,
+        source_component: row.source_component ?? null,
+        source_reason: row.source_reason ?? row.reason ?? null,
+        action: row.action ?? null,
+        would_action: row.would_action ?? null,
+        category: classification.category,
+        blockers: classification.blockers,
+        blocker_classifications: classification.blocker_classifications,
+        data_confidence: row.data_confidence ?? null,
+        quote_source: row.quote_source ?? null,
+        quote_failure_reason: row.quote_failure_reason ?? row.route_failure_reason ?? null,
+        evidence_status: row.evidence_status ?? null,
+      });
+    }
+  }
+  const categorySummary = finalizeBreakdownGroups(categoryMap);
+  const categoryByKey = Object.fromEntries(categorySummary.map((row) => [row.category, row]));
+  return {
+    schema_version: 'v1.a_class_block_cause_breakdown',
+    generated_at: new Date().toISOString(),
+    total_events: total,
+    blocked_events: blocked,
+    unique_tokens: uniqueTokens.size,
+    would_enter_n: wouldEnter,
+    did_enter_n: didEnter,
+    latest_event_ts: latestEventTs,
+    latest_event_iso: latestEventTs ? new Date(Number(latestEventTs) * 1000).toISOString() : null,
+    infra_recoverable: {
+      events: categoryByKey.INFRA?.n || 0,
+      blocked_events: categoryByKey.INFRA?.blocked_n || 0,
+      unique_tokens: categoryByKey.INFRA?.unique_tokens || 0,
+      would_enter_n: categoryByKey.INFRA?.would_enter_n || 0,
+      did_enter_n: categoryByKey.INFRA?.did_enter_n || 0,
+    },
+    market_unexecutable: {
+      events: categoryByKey.MARKET?.n || 0,
+      blocked_events: categoryByKey.MARKET?.blocked_n || 0,
+      unique_tokens: categoryByKey.MARKET?.unique_tokens || 0,
+      would_enter_n: categoryByKey.MARKET?.would_enter_n || 0,
+      did_enter_n: categoryByKey.MARKET?.did_enter_n || 0,
+    },
+    policy_guardrail: {
+      events: categoryByKey.POLICY?.n || 0,
+      blocked_events: categoryByKey.POLICY?.blocked_n || 0,
+      unique_tokens: categoryByKey.POLICY?.unique_tokens || 0,
+      would_enter_n: categoryByKey.POLICY?.would_enter_n || 0,
+      did_enter_n: categoryByKey.POLICY?.did_enter_n || 0,
+    },
+    category_summary: categorySummary,
+    blocker_summary: finalizeBreakdownGroups(blockerMap).slice(0, 100),
+    source_component_summary: finalizeBreakdownGroups(sourceMap).slice(0, 100),
+    recent_events: recent,
+    interpretation: {
+      infra_recoverable: 'Provider/evidence gaps that should be excluded from clean denominator until quote/route evidence is fixed.',
+      market_unexecutable: 'True market/security/route/liquidity failures that should remain excluded from clean executable denominator.',
+      policy_guardrail: 'Strategy/budget/shadow gates; review with denominator and EV, not provider fixes.',
+    },
+  };
+}
+
 function sanitizeAClassP0Discovery(raw) {
   const section = raw && typeof raw === 'object' ? raw : null;
   if (!section) {
@@ -7952,6 +8259,7 @@ const server = http.createServer(async (req, res) => {
         rolling_24h_goal: `${origin}/api/goal/rolling-24h?token=${tokenHint}`,
         a_class_status: `${origin}/api/a-class/status?token=${tokenHint}&hours=24`,
         a_class_events: `${origin}/api/a-class/events?token=${tokenHint}&hours=24&limit=500`,
+        a_class_block_causes: `${origin}/api/a-class/block-causes?token=${tokenHint}&hours=24&limit=100`,
         a_class_matrix: `${origin}/api/a-class/matrix?token=${tokenHint}&hours=24&limit=500`,
         a_class_ai_reviews: `${origin}/api/a-class/ai-reviews?token=${tokenHint}&hours=24&limit=500`,
         a_class_scorecard: `${origin}/api/scorecard/a-class?token=${tokenHint}&hours=168`,
@@ -12596,6 +12904,134 @@ const server = http.createServer(async (req, res) => {
           .map(([blocker, n]) => ({ blocker, n }))
           .sort((a, b) => b.n - a.n),
         recent_events: recentEvents,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/a-class/block-causes') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
+      const recentLimit = boundedIntParam(url, 'limit', 50, 0, 500);
+      const sourceFilter = String(url.searchParams.get('source') || 'all').trim().toLowerCase();
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      const sourceIssues = [];
+      const rows = [];
+      const params = sinceTs == null ? {} : { sinceTs };
+      const where = sinceTs == null ? '' : 'WHERE event_ts >= @sinceTs';
+
+      if ((sourceFilter === 'all' || sourceFilter === 'a_class' || sourceFilter === 'a_class_decision_events') && tableNames.has('a_class_decision_events')) {
+        const cols = getTableColumns(paperDb, 'a_class_decision_events');
+        const optional = (name, fallback = 'NULL') => cols.has(name) ? name : `${fallback} AS ${name}`;
+        rows.push(...paperDb.prepare(`
+          SELECT
+            id,
+            'a_class_decision_events' AS source_kind,
+            event_ts,
+            token_ca,
+            symbol,
+            lifecycle_id,
+            route_bucket,
+            source_table,
+            source_component,
+            source_reason,
+            action,
+            ${optional('would_action')},
+            reason,
+            hard_blockers_json,
+            ${optional('risk_json')},
+            ${optional('candidate_json')},
+            ${optional('denominator_key')},
+            ${optional('expected_rr')},
+            ${optional('score')},
+            ${optional('grade')},
+            ${optional('size_sol')}
+          FROM a_class_decision_events
+          ${where}
+          ORDER BY event_ts DESC, id DESC
+        `).all(params));
+      } else if (sourceFilter === 'all' || sourceFilter === 'a_class' || sourceFilter === 'a_class_decision_events') {
+        sourceIssues.push('a_class_decision_events_missing');
+      }
+
+      if ((sourceFilter === 'all' || sourceFilter === 'opportunity' || sourceFilter === 'opportunity_events') && tableNames.has('opportunity_events')) {
+        const cols = getTableColumns(paperDb, 'opportunity_events');
+        const optional = (name, fallback = 'NULL') => cols.has(name) ? name : `${fallback} AS ${name}`;
+        const expr = (name, fallback = 'NULL') => cols.has(name) ? name : fallback;
+        const opportunityRows = paperDb.prepare(`
+          SELECT
+            id,
+            'opportunity_events' AS source_kind,
+            event_ts,
+            token_ca,
+            symbol,
+            lifecycle_id,
+            route_bucket,
+            source_type AS source_table,
+            source_component,
+            source_reason,
+            CASE
+              WHEN COALESCE(${expr('did_enter', '0')}, 0) = 1 THEN 'ENTER'
+              WHEN COALESCE(${expr('would_enter_a_class', '0')}, 0) = 1 THEN 'WOULD_ENTER'
+              ELSE 'BLOCK'
+            END AS action,
+            NULL AS would_action,
+            ${expr('quote_failure_reason', 'NULL')} AS reason,
+            hard_blockers_json,
+            NULL AS risk_json,
+            raw_payload_json AS candidate_json,
+            NULL AS denominator_key,
+            expected_rr,
+            matrix_score AS score,
+            NULL AS grade,
+            NULL AS size_sol,
+            ${optional('quote_available', 'NULL')},
+            ${optional('quote_executable', 'NULL')},
+            ${optional('quote_clean', 'NULL')},
+            ${optional('route_available', 'NULL')},
+            ${optional('quote_source', 'NULL')},
+            ${optional('quote_age_sec', 'NULL')},
+            ${optional('data_confidence', 'NULL')},
+            ${optional('provider_data_state', 'NULL')},
+            ${optional('provider_reason', 'NULL')},
+            ${optional('evidence_status', 'NULL')},
+            ${optional('quote_failure_reason', 'NULL')},
+            ${optional('liquidity_usd', 'NULL')},
+            ${optional('spread_pct', 'NULL')},
+            ${optional('would_enter_a_class', '0')},
+            ${optional('did_enter', '0')}
+          FROM opportunity_events
+          ${where}
+          ORDER BY event_ts DESC, id DESC
+        `).all(params);
+        rows.push(...opportunityRows);
+      } else if (sourceFilter === 'all' || sourceFilter === 'opportunity' || sourceFilter === 'opportunity_events') {
+        sourceIssues.push('opportunity_events_missing');
+      }
+
+      rows.sort((a, b) => Number(b.event_ts || 0) - Number(a.event_ts || 0) || Number(b.id || 0) - Number(a.id || 0));
+      const breakdown = buildAClassBlockCauseBreakdown(rows, { limit: recentLimit });
+      res.writeHead(rows.length || sourceIssues.length === 0 ? 200 : 202, apiJsonHeaders());
+      res.end(JSON.stringify({
+        ...breakdown,
+        db_path: paperDbPath,
+        available: rows.length > 0,
+        source_issues: sourceIssues,
+        source_filter: sourceFilter,
+        since_ts: sinceTs,
+        since_iso: sinceTs == null ? null : new Date(sinceTs * 1000).toISOString(),
       }, null, 2));
     } catch (e) {
       res.writeHead(500, apiJsonHeaders());

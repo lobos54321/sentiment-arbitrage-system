@@ -18,7 +18,10 @@ import {
   buildCounterfactualAiAuditFromP0,
   buildGoalControllerActions,
   buildMissedDogAiReviewFromP0,
+  buildAClassBlockCauseBreakdown,
   summarizeAClassMatrixEvents,
+  classifyAClassBlockCause,
+  classifyAClassBlocker,
   buildV27KpiProofStatus,
   buildStorageHealthSnapshot,
   buildLottoQuoteGapAuditSummary,
@@ -2250,6 +2253,82 @@ test('closed loop probe summary uses recent trade window with exit fallback', ()
   assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.fills, 1);
   assert.equal(summary.by_mode.pre_pass_resonance_tiny_probe.avg_pnl_pct, 40);
   db.close();
+});
+
+test('a class block cause classifier separates infra market and policy blocks', () => {
+  const routeInfra = classifyAClassBlocker('route_unavailable', {
+    data_confidence: 'unknown',
+    quote_source: '',
+  });
+  const routeMarket = classifyAClassBlocker('route_unavailable', {
+    route_failure_reason: 'no_route',
+    data_confidence: 'quote_clean',
+    quote_source: 'jupiter',
+  });
+  const quoteInfra = classifyAClassBlocker('quote_not_executable', {
+    data_confidence: 'unknown',
+  });
+  const policy = classifyAClassBlocker('expected_rr_below_2', {});
+
+  assert.equal(routeInfra.category, 'INFRA');
+  assert.equal(routeInfra.recoverability, 'provider_or_evidence_recoverable');
+  assert.equal(routeMarket.category, 'MARKET');
+  assert.equal(quoteInfra.category, 'INFRA');
+  assert.equal(policy.category, 'POLICY');
+
+  const marketWins = classifyAClassBlockCause({
+    action: 'BLOCK',
+    token_ca: 'token-a',
+    hard_blockers_json: JSON.stringify(['quote_not_available', 'creator_close']),
+    risk_json: JSON.stringify({ data_confidence: 'unknown' }),
+  });
+  assert.equal(marketWins.category, 'MARKET');
+  assert.equal(marketWins.infra_recoverable, false);
+
+  const breakdown = buildAClassBlockCauseBreakdown([
+    {
+      id: 1,
+      source_kind: 'a_class_decision_events',
+      event_ts: 1000,
+      token_ca: 'infra-token',
+      symbol: 'INFRA',
+      source_component: 'external_alpha_shadow',
+      action: 'BLOCK',
+      would_action: 'WOULD_ENTER',
+      hard_blockers_json: JSON.stringify(['quote_not_available', 'quote_source_missing', 'route_unavailable']),
+      risk_json: JSON.stringify({ data_confidence: 'unknown' }),
+    },
+    {
+      id: 2,
+      source_kind: 'a_class_decision_events',
+      event_ts: 1001,
+      token_ca: 'market-token',
+      symbol: 'MARKET',
+      source_component: 'external_alpha_shadow',
+      action: 'BLOCK',
+      hard_blockers_json: JSON.stringify(['creator_close', 'quote_not_available']),
+      risk_json: JSON.stringify({ data_confidence: 'unknown' }),
+    },
+    {
+      id: 3,
+      source_kind: 'opportunity_events',
+      event_ts: 1002,
+      token_ca: 'policy-token',
+      symbol: 'POLICY',
+      source_component: 'matrix_evaluator',
+      action: 'BLOCK',
+      hard_blockers_json: JSON.stringify(['matrices not yet aligned']),
+      would_enter_a_class: 0,
+    },
+  ], { limit: 10 });
+
+  assert.equal(breakdown.total_events, 3);
+  assert.equal(breakdown.infra_recoverable.events, 1);
+  assert.equal(breakdown.infra_recoverable.would_enter_n, 1);
+  assert.equal(breakdown.market_unexecutable.events, 1);
+  assert.equal(breakdown.policy_guardrail.events, 1);
+  assert.equal(breakdown.blocker_summary.find((row) => row.blocker === 'creator_close').category, 'MARKET');
+  assert.equal(breakdown.source_component_summary.find((row) => row.category === 'INFRA').source_component, 'external_alpha_shadow');
 });
 
 test('a class matrix and AI advisory helpers summarize shadow evidence safely', () => {
