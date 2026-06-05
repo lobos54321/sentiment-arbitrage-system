@@ -12,6 +12,27 @@ import { dirname } from 'path';
 import { spawn } from 'child_process';
 import { startDashboardServer } from './web/dashboard-server.js';
 
+function applyAClassSafeCanaryDefaults() {
+  process.env.A_CLASS_SAFE_CANARY_FORCE ??= 'true';
+  if (String(process.env.A_CLASS_SAFE_CANARY_FORCE).trim().toLowerCase() !== 'false') {
+    process.env.A_CLASS_ENABLED = 'true';
+  } else {
+    process.env.A_CLASS_ENABLED ??= 'false';
+  }
+  process.env.A_CLASS_LIVE_MAX_SIZE_SOL ??= '0.001';
+  process.env.A_CLASS_LIVE_MAX_CONCURRENT ??= '1';
+  process.env.A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL ??= '0.005';
+  process.env.A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN ??= '1';
+  process.env.FINAL_ENTRY_CONTRACT_ENFORCE ??= 'true';
+  console.log(
+    `[health-bootstrap] A_CLASS safe canary enabled=${process.env.A_CLASS_ENABLED} ` +
+      `force=${process.env.A_CLASS_SAFE_CANARY_FORCE} ` +
+      `size=${process.env.A_CLASS_LIVE_MAX_SIZE_SOL} concurrent=${process.env.A_CLASS_LIVE_MAX_CONCURRENT}`,
+  );
+}
+
+applyAClassSafeCanaryDefaults();
+
 const falsey = new Set(['0', 'false', 'no', 'off']);
 const embeddedDashboardEnabled = !falsey.has(
   String(process.env.EMBEDDED_DASHBOARD_ENABLED ?? 'true').trim().toLowerCase(),
