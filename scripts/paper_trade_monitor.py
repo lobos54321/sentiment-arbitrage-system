@@ -12846,6 +12846,34 @@ def _is_a_class_fastlane_mode(entry_mode=None, monitor_state=None):
     )
 
 
+def _a_class_ledger_detail_from_pending(pending, *, actual_size_sol=None, final_entry_passed=False):
+    pending = pending if isinstance(pending, dict) else {}
+    detail = pending.get('a_class_fastlane') if isinstance(pending.get('a_class_fastlane'), dict) else {}
+    source_result = detail.get('source_decision_event') if isinstance(detail.get('source_decision_event'), dict) else {}
+    source_decision = source_result.get('decision') if isinstance(source_result.get('decision'), dict) else {}
+    grade = source_decision.get('grade') or detail.get('grade')
+    score = _safe_float(source_decision.get('score', detail.get('score')), None)
+    requested_size = _safe_float(source_decision.get('size_sol', detail.get('size_sol')), None)
+    actual_size = _safe_float(actual_size_sol, None)
+    size_rule = source_decision.get('size_rule') or detail.get('size_rule')
+    if not size_rule and actual_size is not None:
+        if requested_size is not None and requested_size > actual_size + 1e-9:
+            size_rule = f"live_canary_cap_{actual_size:.6f}_from_{requested_size:.6f}_sol"
+        else:
+            size_rule = f"live_canary_{actual_size:.6f}_sol"
+    if not grade and final_entry_passed:
+        grade = 'A_CLASS_CONTRACT_PASS'
+    return {
+        'a_class_grade': grade,
+        'a_class_score': score,
+        'a_class_size_rule': size_rule,
+        'source_decision': source_decision,
+        'source_result': source_result,
+        'requested_size_sol': requested_size,
+        'actual_size_sol': actual_size,
+    }
+
+
 def active_a_class_fastlane_count(positions, pending_entries):
     count = 0
     for pending in (pending_entries or {}).values():
@@ -25786,6 +25814,11 @@ def run_monitor(db):
                             or 'fastlane' in _raw_entry_mode_l
                             or 'fast_lane' in _raw_entry_mode_l
                         )
+                        _a_class_ledger_detail = _a_class_ledger_detail_from_pending(
+                            pending,
+                            actual_size_sol=actual_position_size_sol,
+                            final_entry_passed=_final_entry_decision.passed,
+                        ) if _is_a_class_entry else {}
                         record_canonical_trade_entry(
                             db,
                             {
@@ -25815,11 +25848,9 @@ def run_monitor(db):
                                 'no_route_flag': 'route_unavailable' in _final_entry_blockers,
                                 'stale_flag': 'quote_stale' in _final_entry_blockers,
                                 'is_a_class_fastlane': _is_a_class_entry,
-                                'a_class_grade': (
-                                    'A_CLASS_CONTRACT_PASS'
-                                    if _is_a_class_entry and _final_entry_decision.passed
-                                    else None
-                                ),
+                                'a_class_grade': _a_class_ledger_detail.get('a_class_grade'),
+                                'a_class_score': _a_class_ledger_detail.get('a_class_score'),
+                                'a_class_size_rule': _a_class_ledger_detail.get('a_class_size_rule'),
                                 'a_class_hard_prefilter': _final_entry_decision_payload,
                                 'expected_rr': _final_entry_candidate.get('expected_rr'),
                                 'expected_upside_pct': _final_entry_candidate.get('expected_upside_pct'),
@@ -25833,6 +25864,7 @@ def run_monitor(db):
                                     'runtime_mode_gate': _runtime_mode_gate,
                                     'entry_latency_audit': _entry_latency_audit,
                                     'execution': build_execution_audit(execution),
+                                    'a_class_ledger_detail': _a_class_ledger_detail,
                                     'legacy_path_entered_despite_final_contract_block': not _final_entry_decision.passed,
                                 },
                                 'code_version': os.environ.get('GIT_COMMIT') or os.environ.get('COMMIT_SHA'),

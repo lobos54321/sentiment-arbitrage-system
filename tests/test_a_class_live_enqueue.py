@@ -9,6 +9,7 @@ from fastlane_config import load_a_class_config
 from paper_decision_audit import init_decision_audit
 from paper_trade_monitor import (
     A_CLASS_FASTLANE_TINY_CANARY_MODE,
+    _a_class_ledger_detail_from_pending,
     _a_class_fastlane_scout_quality_soft_override,
     active_a_class_fastlane_count,
     enqueue_a_class_fastlane_tiny_candidates,
@@ -151,6 +152,14 @@ def test_a_class_live_enqueue_creates_capped_pending_entry():
     assert pending["expected_rr"] == 5.0
     assert pending["defined_risk_pct"] == 0.2
     assert pending_requires_quote_clean_for_final_entry(pending) is True
+    ledger_detail = _a_class_ledger_detail_from_pending(
+        pending,
+        actual_size_sol=pending["kelly_position_sol"],
+        final_entry_passed=True,
+    )
+    assert ledger_detail["a_class_grade"] == "A_PLUS"
+    assert ledger_detail["a_class_score"] == 100
+    assert ledger_detail["a_class_size_rule"] == "live_canary_cap_0.001000_from_0.003000_sol"
     event = db.execute(
         """
         SELECT decision, reason
