@@ -148,6 +148,10 @@ class AClassCandidate:
     daily_loss_budget_breached: bool = False
     mode_circuit_broken: bool = False
     data_confidence: str = "unknown"
+    provider_hydrate_outcome: Optional[str] = None
+    provider_hydrate_reason: Optional[str] = None
+    provider_hydrate_cache_hit: bool = False
+    provider_hydrate_backoff_remaining_sec: Optional[float] = None
     opportunity_key: Optional[str] = None
     is_duplicate: bool = False
     duplicate_of_event_id: Optional[int] = None
@@ -217,6 +221,10 @@ class AClassCandidate:
             daily_loss_budget_breached=_truthy(merged.get("daily_loss_budget_breached", False)),
             mode_circuit_broken=_truthy(merged.get("mode_circuit_broken", False)),
             data_confidence=str(merged.get("data_confidence") or "unknown"),
+            provider_hydrate_outcome=merged.get("provider_hydrate_outcome"),
+            provider_hydrate_reason=merged.get("provider_hydrate_reason"),
+            provider_hydrate_cache_hit=_truthy(merged.get("provider_hydrate_cache_hit", False)),
+            provider_hydrate_backoff_remaining_sec=_safe_float(merged.get("provider_hydrate_backoff_remaining_sec"), None),
             opportunity_key=merged.get("opportunity_key"),
             is_duplicate=_truthy(merged.get("is_duplicate", False)),
             duplicate_of_event_id=_safe_int(merged.get("duplicate_of_event_id"), None),
@@ -1008,6 +1016,9 @@ def _apply_candidate_evidence(candidate, evidence, now_ts=None):
         "provider_hydrate_latency_ms",
         "provider_hydrate_request_id",
         "provider_hydrate_out_amount",
+        "provider_hydrate_outcome",
+        "provider_hydrate_cache_hit",
+        "provider_hydrate_backoff_remaining_sec",
     }
     for key, value in evidence.items():
         if value is None or value == "":
@@ -1089,11 +1100,16 @@ def _maybe_hydrate_provider_evidence(candidate, *, now_ts, config, provider_budg
     if _candidate_has_fresh_execution_evidence(candidate, config):
         return candidate
     if _candidate_has_non_provider_market_red(candidate, config):
-        return candidate
+        return _apply_candidate_evidence(candidate, {
+            "provider_hydrate_outcome": "skipped_hard_market_red",
+        }, now_ts=now_ts)
     if provider_budget is not None:
         remaining = int(provider_budget.get("remaining", 0) or 0)
         if remaining <= 0:
-            return candidate
+            return _apply_candidate_evidence(candidate, {
+                "provider_hydrate_outcome": "skipped_budget",
+                "data_confidence": candidate.data_confidence or "unknown",
+            }, now_ts=now_ts)
         provider_budget["remaining"] = remaining - 1
     try:
         evidence = hydrate_provider_quote(candidate, now_ts=now_ts, config=config, fetcher=provider_fetcher)

@@ -86,6 +86,45 @@ def test_shadow_decision_event_does_not_create_trade_row():
     assert path_sample["quote_clean"] == 1
 
 
+def test_a_class_decision_event_persists_block_cause():
+    db = memory_db()
+    candidate = {
+        "token_ca": "TokenInfra",
+        "symbol": "INFRA",
+        "route_bucket": "ATH",
+        "quote_available": False,
+        "quote_executable": False,
+        "route_available": False,
+        "data_confidence": "unknown",
+    }
+    decision = {
+        "action": "BLOCK",
+        "reason": "hard_prefilter_failed",
+        "hard_blockers": ["quote_not_available", "route_unavailable"],
+        "risk_detail": {},
+    }
+
+    record_a_class_decision_event(
+        db,
+        candidate=candidate,
+        decision=decision,
+        source_table="unit",
+        source_id=10,
+        now_ts=1_000,
+    )
+
+    row = db.execute(
+        """
+        SELECT block_cause, recoverability, blocker_classifications_json
+        FROM a_class_decision_events
+        WHERE token_ca = 'TokenInfra'
+        """
+    ).fetchone()
+    assert row["block_cause"] == "INFRA"
+    assert row["recoverability"] == "provider_or_evidence_recoverable"
+    assert "quote_not_available" in row["blocker_classifications_json"]
+
+
 def test_entry_and_exit_use_sol_accounting():
     db = memory_db()
 
@@ -126,6 +165,53 @@ def test_entry_and_exit_use_sol_accounting():
     assert row["time_held_sec"] == 60
 
 
+def test_entry_records_soft_bypass_and_exit_flags_loss_cap_breach():
+    db = memory_db()
+
+    record_canonical_trade_entry(
+        db,
+        {
+            "trade_id": "trade-soft",
+            "token_ca": "TokenSoft",
+            "entry_ts": 1_000,
+            "entry_size_sol": 0.001,
+            "entry_quote_source": "gmgn",
+            "entry_route_available": True,
+            "entry_quote_executable": True,
+            "soft_quality_bypass_reason": "scout_quality_volume_low",
+            "soft_bypass_volume_low": True,
+            "soft_quality_bypass": {"reason": "scout_quality_volume_low"},
+        },
+    )
+    record_canonical_trade_exit(
+        db,
+        "trade-soft",
+        {
+            "exit_ts": 1_030,
+            "realized_exit_sol": 0.00075,
+            "exit_reason": "hard_stop",
+            "loss_cap_pct": 0.20,
+        },
+    )
+
+    row = db.execute(
+        """
+        SELECT soft_quality_bypass_reason, soft_bypass_volume_low,
+               soft_quality_bypass_json, loss_cap_breach, loss_cap_pct,
+               loss_cap_detail_json, outlier_reason
+        FROM canonical_trade_ledger
+        WHERE trade_id = 'trade-soft'
+        """
+    ).fetchone()
+    assert row["soft_quality_bypass_reason"] == "scout_quality_volume_low"
+    assert row["soft_bypass_volume_low"] == 1
+    assert "scout_quality_volume_low" in row["soft_quality_bypass_json"]
+    assert row["loss_cap_breach"] == 1
+    assert row["loss_cap_pct"] == 0.20
+    assert "realized_loss_cap_breach" in row["outlier_reason"]
+    assert "realized_pnl_pct" in row["loss_cap_detail_json"]
+
+
 def test_no_route_trapped_and_outlier_flags_are_recorded():
     db = memory_db()
 
@@ -162,7 +248,8 @@ def test_no_route_trapped_and_outlier_flags_are_recorded():
     assert row["no_route_flag"] == 1
     assert row["trapped_flag"] == 1
     assert row["outlier_flag"] == 1
-    assert row["outlier_reason"] == "route_disappeared"
+    assert "route_disappeared" in row["outlier_reason"]
+    assert "realized_loss_cap_breach" in row["outlier_reason"]
     assert row["accounting_source"] == "no_route_zero_exit"
 
 

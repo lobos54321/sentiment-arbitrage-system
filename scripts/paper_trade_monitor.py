@@ -5644,6 +5644,20 @@ def _a_class_fastlane_scout_quality_soft_override(pending, scout_quality):
     if not _dog_catcher_quote_confirmation_present(pending):
         return scout_quality
 
+    bypass_detail = {
+        'reason': reason,
+        'scope': A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        'soft_bypass_volume_low': reason_l in {'scout_quality_volume_low', 'volume_low', 'no_kline_low_volume'},
+        'quote_confirmed': True,
+        'paper_only_scout': True,
+        'size_sol': size_sol,
+    }
+    pending['soft_quality_bypass_reason'] = reason
+    pending['soft_bypass_volume_low'] = bool(bypass_detail['soft_bypass_volume_low'])
+    pending['soft_quality_bypass'] = bypass_detail
+    if isinstance(pending.get('a_class_fastlane'), dict):
+        pending['a_class_fastlane']['soft_quality_bypass'] = bypass_detail
+
     override = dict(scout_quality)
     override.update({
         'pass': True,
@@ -5663,6 +5677,7 @@ def _a_class_fastlane_scout_quality_soft_override(pending, scout_quality):
                 'security_prefilter',
             ],
         },
+        'soft_quality_bypass': bypass_detail,
     })
     return override
 
@@ -12880,6 +12895,11 @@ def _a_class_ledger_detail_from_pending(pending, *, actual_size_sol=None, final_
         'source_result': source_result,
         'requested_size_sol': requested_size,
         'actual_size_sol': actual_size,
+        'soft_quality_bypass_reason': pending.get('soft_quality_bypass_reason'),
+        'soft_bypass_volume_low': bool(pending.get('soft_bypass_volume_low')),
+        'soft_quality_bypass': pending.get('soft_quality_bypass') or detail.get('soft_quality_bypass'),
+        'hourly_state': detail.get('hourly_state'),
+        'budget_state': detail.get('budget_state'),
     }
 
 
@@ -12923,6 +12943,37 @@ def _a_class_live_loss_budget_state(db, *, now_ts, config):
         'loss_used_sol': used,
         'loss_budget_sol': budget,
         'daily_loss_budget_hit': used >= budget if budget > 0 else False,
+    }
+
+
+def _a_class_live_hourly_budget_state(db, *, now_ts, config):
+    max_per_hour = max(0, int(getattr(config, 'live_max_per_hour', 1) or 0))
+    since_ts = float(now_ts or time.time()) - 60 * 60
+    used = 0
+    try:
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_decision_events'"
+        ).fetchone()
+        if table:
+            row = db.execute(
+                """
+                SELECT COUNT(*) AS n
+                FROM paper_decision_events
+                WHERE component = 'a_class_live_enqueue'
+                  AND event_type = 'pending_entry'
+                  AND event_ts >= ?
+                """,
+                (since_ts,),
+            ).fetchone()
+            used = int(_safe_float(_row_value(row, 'n'), 0) or 0) if row else 0
+    except Exception:
+        used = 0
+    return {
+        'window_sec': 60 * 60,
+        'since_ts': since_ts,
+        'used': used,
+        'max_per_hour': max_per_hour,
+        'hourly_cap_hit': max_per_hour > 0 and used >= max_per_hour,
     }
 
 
@@ -12990,6 +13041,20 @@ def enqueue_a_class_fastlane_tiny_candidates(
             reason='a_class_live_daily_loss_budget_hit',
             data_source='canonical_trade_ledger',
             payload=budget_state,
+            event_ts=now_ts,
+        )
+        return 0
+
+    hourly_state = _a_class_live_hourly_budget_state(db, now_ts=now_ts, config=config)
+    if hourly_state.get('hourly_cap_hit'):
+        record_decision_event(
+            db,
+            component='a_class_live_enqueue',
+            event_type='entry_block',
+            decision='block',
+            reason='a_class_live_hourly_cap',
+            data_source='paper_decision_events',
+            payload=hourly_state,
             event_ts=now_ts,
         )
         return 0
@@ -13188,9 +13253,11 @@ def enqueue_a_class_fastlane_tiny_candidates(
                 'live_caps': {
                     'live_max_size_sol': getattr(config, 'live_max_size_sol', 0.001),
                     'live_max_concurrent': getattr(config, 'live_max_concurrent', 1),
+                    'live_max_per_hour': getattr(config, 'live_max_per_hour', 1),
                     'live_daily_loss_budget_sol': getattr(config, 'live_daily_loss_budget_sol', 0.005),
                 },
                 'budget_state': budget_state,
+                'hourly_state': hourly_state,
             },
         }
         stamp_dog_catcher_pending(
@@ -13218,6 +13285,7 @@ def enqueue_a_class_fastlane_tiny_candidates(
                 'position_size_sol': size_sol,
                 'pool': pool,
                 'budget_state': budget_state,
+                'hourly_state': hourly_state,
             },
             event_ts=now_ts,
         )
@@ -25870,6 +25938,9 @@ def run_monitor(db):
                                 'a_class_score': _a_class_ledger_detail.get('a_class_score'),
                                 'a_class_size_rule': _a_class_ledger_detail.get('a_class_size_rule'),
                                 'a_class_hard_prefilter': _final_entry_decision_payload,
+                                'soft_quality_bypass_reason': _a_class_ledger_detail.get('soft_quality_bypass_reason'),
+                                'soft_bypass_volume_low': _a_class_ledger_detail.get('soft_bypass_volume_low'),
+                                'soft_quality_bypass': _a_class_ledger_detail.get('soft_quality_bypass'),
                                 'expected_rr': _final_entry_candidate.get('expected_rr'),
                                 'expected_upside_pct': _final_entry_candidate.get('expected_upside_pct'),
                                 'defined_risk_pct': _final_entry_candidate.get('defined_risk_pct'),
@@ -26017,7 +26088,7 @@ def run_monitor(db):
                         else:
                             _base_sl = get_adaptive_stop_loss()  # returns -0.15
                         if pending_is_paper_tiny_scout(pending):
-                            _base_sl = -0.22 if pending.get('is_lotto') else -0.20
+                            _base_sl = -0.20
                         _final_sl = _base_sl
                         
                         if _spread > 0:
@@ -27596,6 +27667,7 @@ def run_monitor(db):
                             'stale_flag': 'stale' in _exit_reason_l,
                             'outlier_flag': synthetic_exit or is_force_timeout,
                             'outlier_reason': 'synthetic_or_force_timeout_exit' if (synthetic_exit or is_force_timeout) else None,
+                            'loss_cap_pct': 0.20,
                         },
                     )
                     log.info(

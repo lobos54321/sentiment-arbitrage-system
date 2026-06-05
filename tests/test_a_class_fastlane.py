@@ -16,6 +16,7 @@ from a_class_fastlane import (
     hard_prefilter,
     record_a_class_fastlane_shadow_candidates,
 )
+from a_class_provider_hydrator import reset_hydrator_state
 from fastlane_config import load_a_class_config
 
 
@@ -731,6 +732,7 @@ def test_shadow_scan_deduplicates_would_enter_by_token_lifecycle_window():
 
 
 def test_provider_hydrator_refreshes_missing_execution_evidence():
+    reset_hydrator_state()
     calls = []
 
     def fake_fetcher(**kwargs):
@@ -785,6 +787,7 @@ def test_provider_hydrator_refreshes_missing_execution_evidence():
 
 
 def test_provider_hydrator_failure_stays_fail_closed():
+    reset_hydrator_state()
     def fake_fetcher(**_kwargs):
         return {
             "status": 400,
@@ -823,6 +826,7 @@ def test_provider_hydrator_failure_stays_fail_closed():
 
 
 def test_provider_hydrator_budget_prevents_extra_probe():
+    reset_hydrator_state()
     calls = []
 
     def fake_fetcher(**kwargs):
@@ -849,3 +853,91 @@ def test_provider_hydrator_budget_prevents_extra_probe():
 
     assert calls == []
     assert hydrated.quote_executable is False
+
+
+def test_provider_hydrator_caches_successful_quote():
+    reset_hydrator_state()
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {"status": 200, "latency_ms": 1, "data": {"outAmount": "1", "routePlan": [{}]}}
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        spread_pct=None,
+        spread_verified=False,
+    )
+    config = load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"})
+    first = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=config,
+        provider_budget={"remaining": 2},
+        provider_fetcher=fake_fetcher,
+    )
+    second = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_005,
+        config=config,
+        provider_budget={"remaining": 2},
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert len(calls) == 1
+    assert first.provider_hydrate_outcome == "success"
+    assert second.provider_hydrate_outcome == "success"
+    assert second.provider_hydrate_cache_hit is True
+
+
+def test_provider_hydrator_rate_limit_enters_backoff():
+    reset_hydrator_state()
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {"status": 429, "latency_ms": 1, "data": {"message": "rate limit"}}
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        spread_pct=None,
+        spread_verified=False,
+    )
+    config = load_a_class_config(
+        {
+            "A_CLASS_PROVIDER_HYDRATE_ENABLED": "true",
+            "A_CLASS_PROVIDER_HYDRATE_FAILURE_CACHE_TTL_SEC": "0",
+            "A_CLASS_PROVIDER_HYDRATE_RATE_LIMIT_BACKOFF_SEC": "60",
+        }
+    )
+    first = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=config,
+        provider_budget={"remaining": 2},
+        provider_fetcher=fake_fetcher,
+    )
+    second = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_010,
+        config=config,
+        provider_budget={"remaining": 2},
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert len(calls) == 1
+    assert first.provider_hydrate_outcome == "infra_fail"
+    assert second.provider_hydrate_outcome == "skipped_backoff"
+    assert second.provider_hydrate_backoff_remaining_sec > 0

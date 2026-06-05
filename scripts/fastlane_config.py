@@ -61,6 +61,7 @@ class AClassFastlaneConfig:
     live_max_concurrent: int = 1
     live_daily_loss_budget_sol: float = 0.005
     live_max_enqueues_per_scan: int = 1
+    live_max_per_hour: int = 1
     consecutive_loss_circuit_breaker: int = 5
     mode_consecutive_loss_circuit_breaker: int = 3
     mode_min_sample_to_upgrade: int = 30
@@ -93,6 +94,10 @@ class AClassFastlaneConfig:
 
     provider_hydrate_enabled: bool = True
     provider_hydrate_max_per_scan: int = 5
+    provider_hydrate_cache_ttl_sec: float = 20.0
+    provider_hydrate_failure_cache_ttl_sec: float = 8.0
+    provider_hydrate_rate_limit_backoff_sec: float = 60.0
+    provider_hydrate_backoff_max_sec: float = 300.0
     provider_hydrate_timeout_sec: float = 4.0
     provider_hydrate_amount_raw: str = "1000000"
     provider_hydrate_slippage_bps: int = 500
@@ -133,6 +138,7 @@ def load_a_class_config(env=None):
         live_max_concurrent=_env_int(env, "A_CLASS_LIVE_MAX_CONCURRENT", 1),
         live_daily_loss_budget_sol=_env_float(env, "A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL", 0.005),
         live_max_enqueues_per_scan=_env_int(env, "A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN", 1),
+        live_max_per_hour=_env_int(env, "A_CLASS_LIVE_MAX_PER_HOUR", _env_int(env, "A_CLASS_CANARY_MAX_PER_HOUR", 1)),
         consecutive_loss_circuit_breaker=_env_int(env, "A_CLASS_CONSECUTIVE_LOSS_CIRCUIT_BREAKER", 5),
         mode_consecutive_loss_circuit_breaker=_env_int(env, "A_CLASS_MODE_CONSECUTIVE_LOSS_CIRCUIT_BREAKER", 3),
         mode_min_sample_to_upgrade=_env_int(env, "A_CLASS_MODE_MIN_SAMPLE_TO_UPGRADE", 30),
@@ -158,6 +164,10 @@ def load_a_class_config(env=None):
         shadow_scan_window_sec=_env_float(env, "A_CLASS_SHADOW_SCAN_WINDOW_SEC", 2 * 60 * 60),
         provider_hydrate_enabled=_env_bool(env, "A_CLASS_PROVIDER_HYDRATE_ENABLED", True),
         provider_hydrate_max_per_scan=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_MAX_PER_SCAN", 5),
+        provider_hydrate_cache_ttl_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_CACHE_TTL_SEC", 20.0),
+        provider_hydrate_failure_cache_ttl_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_FAILURE_CACHE_TTL_SEC", 8.0),
+        provider_hydrate_rate_limit_backoff_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_RATE_LIMIT_BACKOFF_SEC", 60.0),
+        provider_hydrate_backoff_max_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_BACKOFF_MAX_SEC", 300.0),
         provider_hydrate_timeout_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_TIMEOUT_SEC", 4.0),
         provider_hydrate_amount_raw=_env_str(env, "A_CLASS_PROVIDER_HYDRATE_AMOUNT_RAW", "1000000"),
         provider_hydrate_slippage_bps=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_SLIPPAGE_BPS", 500),

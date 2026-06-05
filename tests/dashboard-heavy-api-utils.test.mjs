@@ -2291,6 +2291,26 @@ test('a class block cause classifier separates infra market and policy blocks', 
   assert.equal(marketWins.category, 'MARKET');
   assert.equal(marketWins.infra_recoverable, false);
 
+  const persistedWins = classifyAClassBlockCause({
+    action: 'BLOCK',
+    token_ca: 'token-persisted',
+    block_cause: 'INFRA',
+    recoverability: 'provider_or_evidence_recoverable',
+    classification_reason: 'persisted_at_write_time',
+    hard_blockers_json: JSON.stringify(['creator_close']),
+    blocker_classifications_json: JSON.stringify([
+      {
+        blocker: 'quote_not_available',
+        category: 'INFRA',
+        recoverability: 'provider_or_evidence_recoverable',
+        reason: 'quote_provider_or_freshness_missing',
+      },
+    ]),
+  });
+  assert.equal(persistedWins.category, 'INFRA');
+  assert.equal(persistedWins.recoverability, 'provider_or_evidence_recoverable');
+  assert.equal(persistedWins.infra_recoverable, true);
+
   const breakdown = buildAClassBlockCauseBreakdown([
     {
       id: 1,

@@ -2498,11 +2498,13 @@ function inferAClassBlockersFromEvent(row = {}) {
       hasExplicit.add(blocker);
     }
   };
+  const action = String(row.action || '').trim().toUpperCase();
+  const blockedish = action === 'BLOCK' || action === 'SHADOW' || action.includes('BLOCK');
   if ('quote_available' in row && row.quote_available != null && !boolishValue(row.quote_available)) push('quote_not_available');
   if ('quote_executable' in row && row.quote_executable != null && !boolishValue(row.quote_executable)) push('quote_not_executable');
   if ('route_available' in row && row.route_available != null && !boolishValue(row.route_available)) push('route_unavailable');
-  if ('liquidity_usd' in row && row.liquidity_usd == null) push('liquidity_unknown');
-  if ('spread_pct' in row && row.spread_pct == null) push('spread_unknown');
+  if (blockedish && 'liquidity_usd' in row && row.liquidity_usd == null) push('liquidity_unknown');
+  if (blockedish && 'spread_pct' in row && row.spread_pct == null) push('spread_unknown');
   return blockers;
 }
 
@@ -2585,6 +2587,35 @@ export function classifyAClassBlocker(blocker, context = {}) {
 }
 
 export function classifyAClassBlockCause(row = {}) {
+  const persistedCategory = String(row.block_cause || '').trim().toUpperCase();
+  if (['INFRA', 'MARKET', 'POLICY', 'UNKNOWN'].includes(persistedCategory)) {
+    const persistedClassifications = parseJsonValue(row.blocker_classifications_json, []);
+    const blockers = inferAClassBlockersFromEvent(row);
+    const blocker_classifications = Array.isArray(persistedClassifications) && persistedClassifications.length
+      ? persistedClassifications
+      : blockers.map((blocker) => classifyAClassBlocker(blocker, row));
+    const action = String(row.action || '').toUpperCase();
+    const wouldAction = String(row.would_action || '').toUpperCase();
+    const wouldEnter = action === 'WOULD_ENTER'
+      || wouldAction === 'WOULD_ENTER'
+      || boolishValue(row.would_enter_a_class);
+    const didEnter = action === 'ENTER' || boolishValue(row.did_enter);
+    const blocked = blocker_classifications.length > 0 || ['BLOCK', 'SHADOW'].includes(action) || action.includes('BLOCK');
+    return {
+      category: persistedCategory,
+      recoverability: row.recoverability || null,
+      classification_reason: row.classification_reason || null,
+      blocked,
+      would_enter_a_class: wouldEnter,
+      did_enter: didEnter,
+      blockers,
+      blocker_classifications,
+      infra_recoverable: persistedCategory === 'INFRA',
+      market_unexecutable: persistedCategory === 'MARKET',
+      policy_guardrail: persistedCategory === 'POLICY',
+    };
+  }
+
   const risk = row.risk && typeof row.risk === 'object' ? row.risk : parseJsonValue(row.risk_json, {});
   const candidate = row.candidate && typeof row.candidate === 'object' ? row.candidate : parseJsonValue(row.candidate_json, {});
   const blockers = inferAClassBlockersFromEvent(row);
@@ -12957,7 +12988,13 @@ const server = http.createServer(async (req, res) => {
             ${optional('expected_rr')},
             ${optional('score')},
             ${optional('grade')},
-            ${optional('size_sol')}
+            ${optional('size_sol')},
+            ${optional('block_cause')},
+            ${optional('recoverability')},
+            ${optional('classification_reason')},
+            ${optional('blocker_classifications_json')},
+            NULL AS hydrate_outcome,
+            0 AS hydrate_success
           FROM a_class_decision_events
           ${where}
           ORDER BY event_ts DESC, id DESC
@@ -13011,7 +13048,13 @@ const server = http.createServer(async (req, res) => {
             ${optional('liquidity_usd', 'NULL')},
             ${optional('spread_pct', 'NULL')},
             ${optional('would_enter_a_class', '0')},
-            ${optional('did_enter', '0')}
+            ${optional('did_enter', '0')},
+            ${optional('block_cause', 'NULL')},
+            ${optional('recoverability', 'NULL')},
+            ${optional('classification_reason', 'NULL')},
+            ${optional('blocker_classifications_json', 'NULL')},
+            ${optional('hydrate_outcome', 'NULL')},
+            ${optional('hydrate_success', '0')}
           FROM opportunity_events
           ${where}
           ORDER BY event_ts DESC, id DESC

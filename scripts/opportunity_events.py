@@ -11,6 +11,8 @@ import json
 import time
 from typing import Any
 
+from a_class_block_cause import classify_event
+
 
 OPPORTUNITY_EVENT_EXTRA_COLUMNS = (
     ("quote_source", "TEXT"),
@@ -21,6 +23,12 @@ OPPORTUNITY_EVENT_EXTRA_COLUMNS = (
     ("provider_attempts_json", "TEXT"),
     ("evidence_status", "TEXT"),
     ("quote_failure_reason", "TEXT"),
+    ("block_cause", "TEXT"),
+    ("recoverability", "TEXT"),
+    ("classification_reason", "TEXT"),
+    ("blocker_classifications_json", "TEXT"),
+    ("hydrate_outcome", "TEXT"),
+    ("hydrate_success", "INTEGER DEFAULT 0"),
     ("path_sample_count", "INTEGER DEFAULT 0"),
 )
 
@@ -105,6 +113,58 @@ def _evidence_status(event: Any) -> str:
     if not _truthy(_get(event, "quote_executable", False)):
         return "quote_not_executable"
     return "partial_or_unknown"
+
+
+def _hydrate_outcome(event: Any) -> tuple[str | None, bool]:
+    explicit = _get(event, "provider_hydrate_outcome")
+    if explicit:
+        text = str(explicit)
+        return text, text in {"success", "cache_hit_success"}
+    confidence = str(_get(event, "data_confidence") or "").lower()
+    reason = str(
+        _get(event, "provider_reason")
+        or _get(event, "quote_failure_reason")
+        or _get(event, "route_failure_reason")
+        or ""
+    ).lower()
+    if confidence == "provider_hydrated_quote":
+        return "success", True
+    if confidence == "provider_hydrate_failed":
+        if any(token in reason for token in ("no_route", "not_tradable", "trapped")):
+            return "market_fail", False
+        return "infra_fail", False
+    return None, False
+
+
+def _block_cause_payload(event: Any) -> dict[str, Any]:
+    hard_blockers = _get(event, "hard_blockers", _get(event, "hard_blockers_json", []))
+    hard_json = hard_blockers if isinstance(hard_blockers, str) else _json_dumps(hard_blockers)
+    cls = classify_event(
+        {
+            "action": "ENTER" if _truthy(_get(event, "did_enter", False)) else (
+                "WOULD_ENTER" if _truthy(_get(event, "would_enter_a_class", False)) else "BLOCK"
+            ),
+            "hard_blockers_json": hard_json,
+            "risk_json": _json_dumps(_get(event, "risk_detail", _get(event, "risk_json", {}))),
+            "candidate_json": _json_dumps(_get(event, "raw_payload", event if isinstance(event, dict) else {})),
+            "quote_available": _get(event, "quote_available"),
+            "quote_executable": _get(event, "quote_executable"),
+            "route_available": _get(event, "route_available"),
+            "liquidity_usd": _get(event, "liquidity_usd"),
+            "spread_pct": _get(event, "spread_pct"),
+            "data_confidence": _get(event, "data_confidence"),
+            "quote_source": _get(event, "quote_source"),
+            "route_failure_reason": _get(event, "route_failure_reason"),
+            "quote_failure_reason": _get(event, "quote_failure_reason"),
+            "provider_reason": _get(event, "provider_reason"),
+            "evidence_status": _get(event, "evidence_status") or _evidence_status(event),
+            "reason": _get(event, "reason"),
+            "source_reason": _get(event, "source_reason"),
+            "would_enter_a_class": _get(event, "would_enter_a_class"),
+            "did_enter": _get(event, "did_enter"),
+        }
+    )
+    return cls
 
 
 def init_opportunity_events(db):
@@ -332,6 +392,8 @@ def record_opportunity_event(db, event: Any) -> str:
     source_type = _get(event, "source_type", _get(event, "source_table", ""))
     source_id = _get(event, "source_id", _get(event, "id", ""))
     opportunity_key = _get(event, "opportunity_key") or f"{source_type}:{source_id}:{token_ca}:{int(event_ts)}"
+    block_cause = _block_cause_payload(event)
+    hydrate_outcome, hydrate_success = _hydrate_outcome(event)
 
     db.execute(
         """
@@ -426,6 +488,30 @@ def record_opportunity_event(db, event: Any) -> str:
             _get(event, "quote_failure_reason"),
         ),
     )
+    try:
+        db.execute(
+            """
+            UPDATE opportunity_events
+               SET block_cause = ?,
+                   recoverability = ?,
+                   classification_reason = ?,
+                   blocker_classifications_json = ?,
+                   hydrate_outcome = ?,
+                   hydrate_success = ?
+             WHERE opportunity_key = ?
+            """,
+            (
+                block_cause.get("category"),
+                block_cause.get("recoverability"),
+                block_cause.get("classification_reason"),
+                _json_dumps(block_cause.get("blocker_classifications", [])),
+                hydrate_outcome,
+                1 if hydrate_success else 0,
+                str(opportunity_key),
+            ),
+        )
+    except Exception:
+        pass
     if _get(event, "record_decision_sample", True):
         record_decision_time_path_sample(db, str(opportunity_key), event, event_ts=event_ts)
     try:

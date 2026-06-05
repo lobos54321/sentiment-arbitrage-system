@@ -9,8 +9,6 @@ guardrails.
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sqlite3
 import time
 from collections import Counter, defaultdict
@@ -18,48 +16,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from a_class_block_cause import (
+    classify_blocker,
+    classify_event,
+    infer_blockers,
+)
+
 
 SCHEMA_VERSION = "v1.a_class_block_cause_breakdown"
-
-
-def _json_loads(value: Any, fallback: Any) -> Any:
-    if value is None:
-        return fallback
-    if isinstance(value, (list, dict)):
-        return value
-    if not isinstance(value, str):
-        return fallback
-    try:
-        return json.loads(value)
-    except Exception:
-        return fallback
-
-
-def _truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on", "ok", "clean", "available", "executable", "pass"}
-    return bool(value)
-
-
-def _norm(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def _compact_text(*values: Any) -> str:
-    return " ".join(str(v).lower() for v in values if v is not None and str(v).strip())
-
-
-def _blocker_list(value: Any) -> list[str]:
-    parsed = value if isinstance(value, list) else _json_loads(value, [])
-    if isinstance(parsed, list):
-        return [str(x).strip() for x in parsed if str(x or "").strip()]
-    if parsed:
-        return [str(parsed).strip()]
-    return []
 
 
 def _table_exists(db: sqlite3.Connection, name: str) -> bool:
@@ -81,108 +45,6 @@ def _expr(cols: set[str], name: str, fallback: str = "NULL") -> str:
     return name if name in cols else fallback
 
 
-def infer_blockers(row: dict[str, Any]) -> list[str]:
-    blockers = _blocker_list(row.get("hard_blockers_json") or row.get("hard_blockers"))
-    seen = {_norm(x) for x in blockers}
-
-    def push(blocker: str) -> None:
-        if blocker not in seen:
-            blockers.append(blocker)
-            seen.add(blocker)
-
-    if "quote_available" in row and row.get("quote_available") is not None and not _truthy(row.get("quote_available")):
-        push("quote_not_available")
-    if "quote_executable" in row and row.get("quote_executable") is not None and not _truthy(row.get("quote_executable")):
-        push("quote_not_executable")
-    if "route_available" in row and row.get("route_available") is not None and not _truthy(row.get("route_available")):
-        push("route_unavailable")
-    if "liquidity_usd" in row and row.get("liquidity_usd") is None:
-        push("liquidity_unknown")
-    if "spread_pct" in row and row.get("spread_pct") is None:
-        push("spread_unknown")
-    return blockers
-
-
-def classify_blocker(blocker: str, row: dict[str, Any]) -> dict[str, Any]:
-    b = _norm(blocker)
-    risk = _json_loads(row.get("risk_json"), {})
-    candidate = _json_loads(row.get("candidate_json"), {})
-    data_confidence = _norm(row.get("data_confidence") or risk.get("data_confidence") or candidate.get("data_confidence"))
-    quote_source = _norm(row.get("quote_source") or risk.get("quote_source") or candidate.get("quote_source"))
-    evidence = _compact_text(
-        row.get("route_failure_reason"),
-        row.get("quote_failure_reason"),
-        row.get("provider_reason"),
-        row.get("evidence_status"),
-        row.get("reason"),
-        row.get("source_reason"),
-        risk.get("route_failure_reason"),
-        risk.get("quote_failure_reason"),
-        risk.get("provider_reason"),
-        risk.get("evidence_status"),
-        candidate.get("route_failure_reason"),
-        candidate.get("quote_failure_reason"),
-        candidate.get("provider_reason"),
-        candidate.get("evidence_status"),
-    )
-    market_route_failure = re.search(r"\b(no[_ -]?route|trapped|token[_ -]?not[_ -]?tradable|not tradable|route[_ -]?failure[_ -]?red|honeypot|rug)\b", evidence)
-    infra_context = (
-        not evidence
-        or data_confidence in {"unknown", "partial", "quote_only"}
-        or not quote_source
-        or re.search(r"\b(rate[_ -]?limited|429|timeout|provider|missing|unknown|stale|quote[_ -]?failed|unavailable)\b", evidence)
-    )
-
-    if not b:
-        return {"blocker": blocker, "category": "UNKNOWN", "recoverability": "unknown", "reason": "empty_blocker"}
-    if re.search(r"(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)", b):
-        return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "hard_security_or_structure_red_flag"}
-    if re.search(r"(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)", b):
-        return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "market_execution_or_liquidity_red_flag"}
-    if "route_unavailable" in b:
-        if market_route_failure:
-            return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "route_unavailable_confirmed_by_no_route_or_trapped_reason"}
-        return {
-            "blocker": blocker,
-            "category": "INFRA" if infra_context else "MARKET",
-            "recoverability": "provider_or_evidence_recoverable" if infra_context else "exclude_from_clean_denominator",
-            "reason": "route_unavailable_without_market_failure_evidence" if infra_context else "route_unavailable_with_market_context",
-        }
-    if "quote_not_executable" in b:
-        if market_route_failure:
-            return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "quote_not_executable_confirmed_by_market_route_failure"}
-        return {"blocker": blocker, "category": "INFRA", "recoverability": "provider_or_evidence_recoverable", "reason": "quote_not_executable_without_market_failure_evidence"}
-    if re.search(r"\b(quote[_ -]?(not[_ -]?available|source[_ -]?missing|age[_ -]?unknown|stale|missing|unknown|failed)|liquidity[_ -]?unknown|spread[_ -]?unknown|unknown[_ -]?data|data[_ -]?unknown|provider[_ -]?(missing|failed|rate[_ -]?limited)|rate[_ -]?limited|429)\b", b):
-        return {"blocker": blocker, "category": "INFRA", "recoverability": "provider_or_evidence_recoverable", "reason": "provider_or_evidence_missing"}
-    if re.search(r"(expected[_ -]?rr|defined[_ -]?loss|loss[_ -]?risk|cooldown|budget|circuit|mode[_ -]?(disabled|shadow|down)|max[_ -]?concurrent|duplicate|prior[_ -]?(exposure|fastlane)|already[_ -]?fastlane|counterfactual[_ -]?only|watch[_ -]?only|shadow[_ -]?only|entry[_ -]?mode[_ -]?quality|matrix|matrices|scout[_ -]?quality|buy[_ -]?pressure|volume[_ -]?low|negative[_ -]?trend|momentum)", b):
-        return {"blocker": blocker, "category": "POLICY", "recoverability": "policy_or_strategy_review", "reason": "strategy_or_budget_guardrail"}
-    return {"blocker": blocker, "category": "UNKNOWN", "recoverability": "needs_review", "reason": "unmapped_blocker"}
-
-
-def classify_event(row: dict[str, Any]) -> dict[str, Any]:
-    blockers = infer_blockers(row)
-    classified = [classify_blocker(blocker, row) for blocker in blockers]
-    categories = {item["category"] for item in classified}
-    if "MARKET" in categories:
-        category = "MARKET"
-    elif "POLICY" in categories:
-        category = "POLICY"
-    elif "INFRA" in categories:
-        category = "INFRA"
-    else:
-        category = "UNKNOWN"
-    action = _norm(row.get("action")).upper()
-    would_action = _norm(row.get("would_action")).upper()
-    return {
-        "category": category,
-        "blocked": bool(classified) or action in {"BLOCK", "SHADOW"} or "BLOCK" in action,
-        "would_enter_a_class": action == "WOULD_ENTER" or would_action == "WOULD_ENTER" or _truthy(row.get("would_enter_a_class")),
-        "did_enter": action == "ENTER" or _truthy(row.get("did_enter")),
-        "blockers": blockers,
-        "blocker_classifications": classified,
-    }
-
-
 def fetch_rows(db: sqlite3.Connection, since_ts: float | None, source: str) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     issues: list[str] = []
@@ -197,7 +59,11 @@ def fetch_rows(db: sqlite3.Connection, since_ts: float | None, source: str) -> t
                    action, {_optional(cols, "would_action")}, reason, hard_blockers_json,
                    {_optional(cols, "risk_json")}, {_optional(cols, "candidate_json")},
                    {_optional(cols, "denominator_key")}, {_optional(cols, "expected_rr")},
-                   {_optional(cols, "score")}, {_optional(cols, "grade")}, {_optional(cols, "size_sol")}
+                   {_optional(cols, "score")}, {_optional(cols, "grade")}, {_optional(cols, "size_sol")},
+                   {_optional(cols, "block_cause")}, {_optional(cols, "recoverability")},
+                   {_optional(cols, "classification_reason")},
+                   {_optional(cols, "blocker_classifications_json")},
+                   NULL AS hydrate_outcome, 0 AS hydrate_success
             FROM a_class_decision_events
             {where}
             ORDER BY event_ts DESC, id DESC
@@ -226,7 +92,10 @@ def fetch_rows(db: sqlite3.Connection, since_ts: float | None, source: str) -> t
                    {_optional(cols, "provider_reason")}, {_optional(cols, "evidence_status")},
                    {_optional(cols, "quote_failure_reason")}, {_optional(cols, "liquidity_usd")},
                    {_optional(cols, "spread_pct")}, {_optional(cols, "would_enter_a_class", "0")},
-                   {_optional(cols, "did_enter", "0")}
+                   {_optional(cols, "did_enter", "0")}, {_optional(cols, "block_cause")},
+                   {_optional(cols, "recoverability")}, {_optional(cols, "classification_reason")},
+                   {_optional(cols, "blocker_classifications_json")},
+                   {_optional(cols, "hydrate_outcome")}, {_optional(cols, "hydrate_success", "0")}
             FROM opportunity_events
             {where}
             ORDER BY event_ts DESC, id DESC

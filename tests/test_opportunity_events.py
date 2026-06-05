@@ -72,6 +72,7 @@ def test_record_opportunity_event_upserts_by_opportunity_key():
     assert rows[0]["did_enter"] == 1
     assert rows[0]["linked_trade_id"] == "trade-1"
     assert rows[0]["evidence_status"] == "quote_clean_executable"
+    assert rows[0]["block_cause"] == "UNKNOWN"
     assert rows[0]["path_sample_count"] == 1
 
     sample = db.execute(
@@ -102,12 +103,39 @@ def test_record_opportunity_event_marks_route_unavailable_as_path_sample():
 
     event = fetch_opportunity_events(db)[0]
     assert event["evidence_status"] == "no_route_or_route_unavailable"
+    assert event["block_cause"] == "INFRA"
+    assert event["recoverability"] == "provider_or_evidence_recoverable"
     sample = db.execute(
         "SELECT no_route_flag, quote_clean FROM opportunity_event_path_samples WHERE opportunity_key = ?",
         (key,),
     ).fetchone()
     assert sample["no_route_flag"] == 1
     assert sample["quote_clean"] == 0
+
+
+def test_record_opportunity_event_persists_provider_hydrate_outcome():
+    db = memory_db()
+    key = record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "source:hydrate:TOKEN",
+            "event_ts": 2_500,
+            "token_ca": "TOKEN",
+            "source_type": "unit",
+            "route_bucket": "ATH",
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "route_available": True,
+            "data_confidence": "provider_hydrated_quote",
+            "provider_hydrate_outcome": "success",
+        },
+    )
+
+    event = fetch_opportunity_events(db)[0]
+    assert key == "source:hydrate:TOKEN"
+    assert event["hydrate_outcome"] == "success"
+    assert event["hydrate_success"] == 1
 
 
 def test_linked_trade_path_sample_updates_all_linked_opportunities():

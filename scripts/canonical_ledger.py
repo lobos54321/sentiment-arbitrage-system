@@ -7,6 +7,8 @@ out of canonical_trade_ledger so EV is not polluted by non-trades.
 import json
 import time
 
+from a_class_block_cause import classify_event
+
 
 def _json_default(value):
     try:
@@ -157,6 +159,10 @@ def init_canonical_ledger(db):
         ("discovery_exit_json", "TEXT"),
         ("principal_recovery_plan_json", "TEXT"),
         ("moonbag_plan_json", "TEXT"),
+        ("block_cause", "TEXT"),
+        ("recoverability", "TEXT"),
+        ("classification_reason", "TEXT"),
+        ("blocker_classifications_json", "TEXT"),
     ):
         if col_name not in _table_columns(db, "a_class_decision_events"):
             try:
@@ -307,6 +313,12 @@ def init_canonical_ledger(db):
         ("a_class_matrix_json", "TEXT"),
         ("ai_review_json", "TEXT"),
         ("controller_action_json", "TEXT"),
+        ("soft_quality_bypass_reason", "TEXT"),
+        ("soft_bypass_volume_low", "INTEGER DEFAULT 0"),
+        ("soft_quality_bypass_json", "TEXT"),
+        ("loss_cap_breach", "INTEGER DEFAULT 0"),
+        ("loss_cap_pct", "REAL"),
+        ("loss_cap_detail_json", "TEXT"),
     ):
         if col_name not in _table_columns(db, "canonical_trade_ledger"):
             try:
@@ -394,6 +406,28 @@ def record_a_class_decision_event(
         _get(decision, "principal_recovery_plan", {}) or expected_rr_detail.get("principal_recovery_plan") or {}
     )
     moonbag_plan = _get(decision, "moonbag_plan", {}) or expected_rr_detail.get("moonbag_plan") or {}
+    block_cause = classify_event(
+        {
+            "action": action,
+            "would_action": would_action,
+            "hard_blockers_json": _json_dumps(_get(decision, "hard_blockers", [])),
+            "risk_json": _json_dumps(_get(decision, "risk_detail", {})),
+            "candidate_json": _json_dumps(candidate_dict),
+            "reason": _get(decision, "reason"),
+            "source_reason": _get(candidate, "source_reason"),
+            "data_confidence": _get(candidate, "data_confidence"),
+            "quote_source": _get(candidate, "quote_source"),
+            "quote_available": _get(candidate, "quote_available"),
+            "quote_executable": _get(candidate, "quote_executable"),
+            "route_available": _get(candidate, "route_available"),
+            "liquidity_usd": _get(candidate, "liquidity_usd"),
+            "spread_pct": _get(candidate, "spread_pct"),
+            "route_failure_reason": _get(candidate, "route_failure_reason"),
+            "quote_failure_reason": _get(candidate, "quote_failure_reason"),
+            "provider_reason": _get(candidate, "provider_reason"),
+            "evidence_status": _get(candidate, "evidence_status"),
+        }
+    )
     db.execute(
         """
         INSERT INTO a_class_decision_events (
@@ -406,9 +440,10 @@ def record_a_class_decision_event(
             defined_risk_pct, bottom_ticket_size_sol, expected_rr_detail_json,
             matrix_json, ai_review_json, controller_action_json, denominator_key,
             discovery_exit_json, principal_recovery_plan_json, moonbag_plan_json,
-            candidate_json, created_at
+            block_cause, recoverability, classification_reason,
+            blocker_classifications_json, candidate_json, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_dedup_key) WHERE source_dedup_key IS NOT NULL DO UPDATE SET
             would_action=excluded.would_action,
             expected_rr=excluded.expected_rr,
@@ -422,7 +457,11 @@ def record_a_class_decision_event(
             denominator_key=excluded.denominator_key,
             discovery_exit_json=excluded.discovery_exit_json,
             principal_recovery_plan_json=excluded.principal_recovery_plan_json,
-            moonbag_plan_json=excluded.moonbag_plan_json
+            moonbag_plan_json=excluded.moonbag_plan_json,
+            block_cause=excluded.block_cause,
+            recoverability=excluded.recoverability,
+            classification_reason=excluded.classification_reason,
+            blocker_classifications_json=excluded.blocker_classifications_json
         """,
         (
             now_ts,
@@ -465,6 +504,10 @@ def record_a_class_decision_event(
             _json_dumps(discovery_exit) if discovery_exit is not None else None,
             _json_dumps(principal_recovery_plan),
             _json_dumps(moonbag_plan),
+            block_cause.get("category"),
+            block_cause.get("recoverability"),
+            block_cause.get("classification_reason"),
+            _json_dumps(block_cause.get("blocker_classifications", [])),
             _json_dumps(candidate_dict),
             now_ts,
         ),
@@ -506,6 +549,7 @@ def record_a_class_decision_event(
                 "data_confidence": _get(candidate, "data_confidence"),
                 "provider_data_state": _get(candidate, "provider_data_state"),
                 "provider_reason": _get(candidate, "provider_reason") or _get(decision, "reason"),
+                "provider_hydrate_outcome": _get(candidate, "provider_hydrate_outcome"),
                 "matrix_score": _safe_float(matrix_detail.get("matrix_score"), _safe_float(_get(decision, "score"), None)),
                 "expected_rr": expected_rr,
                 "defined_risk_pct": defined_risk_pct,
@@ -552,9 +596,11 @@ def record_canonical_trade_entry(db, trade):
             defined_risk_pct, bottom_ticket_size_sol, principal_recovery_plan_json,
             moonbag_plan_json, a_class_matrix_json, ai_review_json,
             controller_action_json, security_flags_json, gmgn_policy_json,
+            soft_quality_bypass_reason, soft_bypass_volume_low,
+            soft_quality_bypass_json,
             metadata_json, code_version, deploy_version, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trade_id) DO UPDATE SET
             updated_at=excluded.updated_at
         """
@@ -606,6 +652,9 @@ def record_canonical_trade_entry(db, trade):
             _json_dumps(_get(trade, "controller_action", {})),
             _json_dumps(_get(trade, "security_flags", [])),
             _json_dumps(_get(trade, "gmgn_policy", {})),
+            _get(trade, "soft_quality_bypass_reason"),
+            1 if _truthy(_get(trade, "soft_bypass_volume_low", False)) else 0,
+            _json_dumps(_get(trade, "soft_quality_bypass", {})),
             _json_dumps(_get(trade, "metadata", {})),
             _get(trade, "code_version"),
             _get(trade, "deploy_version"),
@@ -636,6 +685,12 @@ def record_canonical_trade_exit(db, trade_id, exit_data):
     realized_pnl_pct = None
     if realized_pnl_sol is not None and entry_size_sol:
         realized_pnl_pct = realized_pnl_sol / entry_size_sol
+    loss_cap_pct = abs(_safe_float(_get(exit_data, "loss_cap_pct"), 0.20) or 0.20)
+    loss_cap_breach = realized_pnl_pct is not None and realized_pnl_pct < -loss_cap_pct - 1e-9
+    if loss_cap_breach:
+        reason = str(_get(exit_data, "outlier_reason") or "")
+        reason = f"{reason}|realized_loss_cap_breach" if reason else "realized_loss_cap_breach"
+        exit_data = {**(exit_data if isinstance(exit_data, dict) else {}), "outlier_reason": reason}
     entry_ts = _safe_float(row[1], None)
     exit_ts = _safe_float(_get(exit_data, "exit_ts"), now_ts)
     time_held_sec = None if entry_ts is None or exit_ts is None else max(0.0, exit_ts - entry_ts)
@@ -650,7 +705,11 @@ def record_canonical_trade_exit(db, trade_id, exit_data):
             max_drawdown_pct = ?, time_to_peak_sec = ?, time_held_sec = ?,
             positive_feedback_seen = ?, first_positive_feedback_sec = ?,
             trapped_flag = ?, no_route_flag = ?, stale_flag = ?, outlier_flag = ?,
-            outlier_reason = COALESCE(?, outlier_reason), updated_at = ?
+            outlier_reason = COALESCE(?, outlier_reason),
+            loss_cap_breach = ?,
+            loss_cap_pct = ?,
+            loss_cap_detail_json = COALESCE(?, loss_cap_detail_json),
+            updated_at = ?
         WHERE trade_id = ?
         """,
         (
@@ -680,6 +739,15 @@ def record_canonical_trade_exit(db, trade_id, exit_data):
             1 if _truthy(_get(exit_data, "stale_flag", False)) else 0,
             1 if _truthy(_get(exit_data, "outlier_flag", False)) else 0,
             _get(exit_data, "outlier_reason"),
+            1 if loss_cap_breach else 0,
+            loss_cap_pct,
+            _json_dumps({
+                "cap_pct": loss_cap_pct,
+                "realized_pnl_pct": realized_pnl_pct,
+                "realized_pnl_sol": realized_pnl_sol,
+                "entry_size_sol": entry_size_sol,
+                "breach": loss_cap_breach,
+            }) if loss_cap_breach else None,
             now_ts,
             str(trade_id),
         ),

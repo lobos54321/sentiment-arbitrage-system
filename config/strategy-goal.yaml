@@ -56,6 +56,19 @@ a_class_p0_discovery_exit:
   canary_max_concurrent: 1
   canary_max_per_hour: 1
 
+a_class_exploration_canary:
+  # This is the current live tiny evidence-collection path. It is intentionally
+  # separate from a_class_p0_discovery_exit, which still requires human approval
+  # before treating a mode as promoted by evidence.
+  enabled_by_default: true
+  requires_human_approval: false
+  purpose: collect_real_quote_clean_tiny_samples_before_discovery_exit_promotion
+  canary_size_sol: 0.001
+  canary_max_concurrent: 1
+  canary_max_per_hour: 1
+  daily_loss_budget_sol: 0.005
+  promotion_gate: a_class_p0_discovery_exit
+
 strategy_buckets:
   enabled: [ATH_CONTINUATION, SOURCE_RESONANCE_RECLAIM, LOTTO_QUOTE_CLEAN_EARLY, A_CLASS_FASTLANE, NORMAL_MAIN_TRADE]
 

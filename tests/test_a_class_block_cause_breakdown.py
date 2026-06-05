@@ -41,6 +41,24 @@ def test_event_market_red_flag_wins_over_infra_quote_missing():
     assert event["blocked"] is True
 
 
+def test_persisted_block_cause_wins_over_legacy_fallback():
+    event = classify_event(
+        {
+            "action": "WOULD_ENTER",
+            "block_cause": "INFRA",
+            "recoverability": "provider_or_evidence_recoverable",
+            "classification_reason": "persisted_at_write_time",
+            "hard_blockers_json": '["creator_close"]',
+            "blocker_classifications_json": '[{"blocker":"quote_not_available","category":"INFRA","recoverability":"provider_or_evidence_recoverable","reason":"quote_provider_or_freshness_missing"}]',
+        }
+    )
+
+    assert event["category"] == "INFRA"
+    assert event["recoverability"] == "provider_or_evidence_recoverable"
+    assert event["classification_reason"] == "persisted_at_write_time"
+    assert event["would_enter_a_class"] is True
+
+
 def test_live_market_red_flag_names_are_market():
     assert classify_blocker("liquidity_below_min", {})["category"] == "MARKET"
     assert classify_blocker("entrapment_red_flag", {})["category"] == "MARKET"

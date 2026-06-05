@@ -153,6 +153,8 @@ def test_a_class_live_enqueue_creates_capped_pending_entry():
     assert pending["final_reclaim_quote_executable"] is True
     assert pending["expected_rr"] == 5.0
     assert pending["defined_risk_pct"] == 0.2
+    assert pending["a_class_fastlane"]["live_caps"]["live_max_per_hour"] == 1
+    assert pending["a_class_fastlane"]["hourly_state"]["used"] == 0
     assert pending_requires_quote_clean_for_final_entry(pending) is True
     ledger_detail = _a_class_ledger_detail_from_pending(
         pending,
@@ -220,6 +222,50 @@ def test_a_class_live_enqueue_respects_daily_loss_budget():
     assert event["reason"] == "a_class_live_daily_loss_budget_hit"
 
 
+def test_a_class_live_enqueue_respects_hourly_cap():
+    db = _db()
+    db.execute(
+        """
+        INSERT INTO paper_decision_events (
+            event_ts, component, event_type, decision, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (995, "a_class_live_enqueue", "pending_entry", "pending", "a_class_fastlane_tiny_canary_armed", 995),
+    )
+    db.commit()
+    pending_entries = {}
+
+    enqueued = enqueue_a_class_fastlane_tiny_candidates(
+        db,
+        DummyWatchlist(),
+        pending_entries,
+        {},
+        a_class_summary={"enter_candidates": [_enter_result()]},
+        now_ts=1000,
+        config=load_a_class_config(
+            {
+                "A_CLASS_ENABLED": "true",
+                "A_CLASS_LIVE_MAX_PER_HOUR": "1",
+            }
+        ),
+        max_positions=10,
+    )
+
+    assert enqueued == 0
+    assert pending_entries == {}
+    event = db.execute(
+        """
+        SELECT decision, reason
+        FROM paper_decision_events
+        WHERE component = 'a_class_live_enqueue'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert event["decision"] == "block"
+    assert event["reason"] == "a_class_live_hourly_cap"
+
+
 def test_a_class_fastlane_soft_quality_failure_is_warn_not_block():
     pending = {
         "entry_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
@@ -244,6 +290,9 @@ def test_a_class_fastlane_soft_quality_failure_is_warn_not_block():
     assert override["reason"] == "a_class_fastlane_soft_quality_warn"
     assert override["original_reason"] == "scout_quality_buy_pressure_weak"
     assert override["a_class_fastlane_soft_quality_override"] is True
+    assert override["soft_quality_bypass"]["reason"] == "scout_quality_buy_pressure_weak"
+    assert pending["soft_quality_bypass_reason"] == "scout_quality_buy_pressure_weak"
+    assert pending["soft_bypass_volume_low"] is False
     assert override["override_confirmation"]["hard_gates_still_required"] == [
         "final_quote_clean",
         "execution_quote",
@@ -268,6 +317,29 @@ def test_a_class_fastlane_soft_quality_bypass_does_not_cover_hard_or_unquoted_ca
     soft = {"pass": False, "reason": "scout_quality_volume_low"}
 
     assert _a_class_fastlane_scout_quality_soft_override(no_quote_pending, soft) is soft
+
+
+def test_a_class_fastlane_soft_volume_bypass_is_tagged_for_scorecard():
+    pending = {
+        "entry_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "scout_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": 0.001,
+        "quote_clean_seen": True,
+        "source_quote_clean_seen": True,
+        "final_reclaim_quote_executable": True,
+        "a_class_fastlane": {},
+    }
+    soft = {"pass": False, "reason": "scout_quality_volume_low"}
+
+    override = _a_class_fastlane_scout_quality_soft_override(pending, soft)
+    detail = _a_class_ledger_detail_from_pending(pending, actual_size_sol=0.001, final_entry_passed=True)
+
+    assert override["pass"] is True
+    assert pending["soft_bypass_volume_low"] is True
+    assert pending["a_class_fastlane"]["soft_quality_bypass"]["soft_bypass_volume_low"] is True
+    assert detail["soft_bypass_volume_low"] is True
+    assert detail["soft_quality_bypass_reason"] == "scout_quality_volume_low"
 
 
 def test_a_class_fastlane_forces_final_entry_contract_enforcement(monkeypatch):
