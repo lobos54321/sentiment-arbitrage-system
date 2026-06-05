@@ -8,8 +8,11 @@ from canonical_ledger import init_canonical_ledger
 from fastlane_config import load_a_class_config
 from paper_decision_audit import init_decision_audit
 from paper_trade_monitor import (
+    A_CLASS_FASTLANE_TINY_CANARY_MODE,
+    _a_class_fastlane_scout_quality_soft_override,
     active_a_class_fastlane_count,
     enqueue_a_class_fastlane_tiny_candidates,
+    pending_is_paper_tiny_scout,
     pending_requires_quote_clean_for_final_entry,
 )
 
@@ -140,7 +143,8 @@ def test_a_class_live_enqueue_creates_capped_pending_entry():
     assert enqueued == 1
     assert active_a_class_fastlane_count({}, pending_entries) == 1
     pending = next(iter(pending_entries.values()))
-    assert pending["entry_mode"] == "a_class_fastlane_tiny_canary"
+    assert pending["entry_mode"] == A_CLASS_FASTLANE_TINY_CANARY_MODE
+    assert pending_is_paper_tiny_scout(pending) is True
     assert pending["kelly_position_sol"] == 0.001
     assert pending["paper_only_scout"] is True
     assert pending["final_reclaim_quote_executable"] is True
@@ -203,3 +207,53 @@ def test_a_class_live_enqueue_respects_daily_loss_budget():
     ).fetchone()
     assert event["decision"] == "block"
     assert event["reason"] == "a_class_live_daily_loss_budget_hit"
+
+
+def test_a_class_fastlane_soft_quality_failure_is_warn_not_block():
+    pending = {
+        "entry_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "scout_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "entry_branch": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": 0.001,
+        "quote_clean_seen": True,
+        "source_quote_clean_seen": True,
+        "final_reclaim_quote_executable": True,
+    }
+    scout_quality = {
+        "pass": False,
+        "reason": "scout_quality_buy_pressure_weak",
+        "observed": {"buy_sell_ratio": None},
+    }
+
+    override = _a_class_fastlane_scout_quality_soft_override(pending, scout_quality)
+
+    assert override["pass"] is True
+    assert override["decision"] == "warn"
+    assert override["reason"] == "a_class_fastlane_soft_quality_warn"
+    assert override["original_reason"] == "scout_quality_buy_pressure_weak"
+    assert override["a_class_fastlane_soft_quality_override"] is True
+    assert override["override_confirmation"]["hard_gates_still_required"] == [
+        "final_quote_clean",
+        "execution_quote",
+        "runtime_budget",
+        "security_prefilter",
+    ]
+
+
+def test_a_class_fastlane_soft_quality_bypass_does_not_cover_hard_or_unquoted_cases():
+    pending = {
+        "entry_mode": A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        "paper_only_scout": True,
+        "kelly_position_sol": 0.001,
+        "quote_clean_seen": True,
+    }
+    hard = {"pass": False, "reason": "scout_quality_top10_high"}
+
+    assert _a_class_fastlane_scout_quality_soft_override(pending, hard) is hard
+
+    no_quote_pending = dict(pending)
+    no_quote_pending["quote_clean_seen"] = False
+    soft = {"pass": False, "reason": "scout_quality_volume_low"}
+
+    assert _a_class_fastlane_scout_quality_soft_override(no_quote_pending, soft) is soft

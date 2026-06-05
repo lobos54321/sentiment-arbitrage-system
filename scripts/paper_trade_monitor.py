@@ -188,6 +188,8 @@ MATRIX_ATH_HALF_MC_MAX = float(os.environ.get('MATRIX_ATH_HALF_MC_MAX', '200000'
 MATRIX_ATH_FULL_SIZE_SOL = float(os.environ.get('MATRIX_ATH_FULL_SIZE_SOL', '0.08'))
 MATRIX_ATH_HALF_SIZE_SOL = float(os.environ.get('MATRIX_ATH_HALF_SIZE_SOL', '0.04'))
 PAPER_TINY_SCOUT_ENTRY_MODES = set(PAPER_TINY_SCOUT_MODES)
+A_CLASS_FASTLANE_TINY_CANARY_MODE = 'a_class_fastlane_tiny_canary'
+PAPER_TINY_SCOUT_ENTRY_MODES.add(A_CLASS_FASTLANE_TINY_CANARY_MODE)
 PAPER_TINY_SCOUT_SIZE_SOL = float(os.environ.get('PAPER_TINY_SCOUT_SIZE_SOL', '0.003'))
 PRIMARY_PROVING_CAP_ENABLED = os.environ.get('PRIMARY_PROVING_CAP_ENABLED', 'true').lower() != 'false'
 PRIMARY_PROVING_CAP_SIZE_SOL = float(os.environ.get('PRIMARY_PROVING_CAP_SIZE_SOL', '0.005'))
@@ -5435,6 +5437,17 @@ HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS = {
     'scout_quality_tx_low',
     'scout_quality_negative_trend',
 }
+A_CLASS_FASTLANE_BYPASSABLE_SOFT_QUALITY_REASONS = {
+    'scout_quality_buy_pressure_weak',
+    'scout_quality_volume_low',
+    'scout_quality_tx_low',
+    'scout_quality_negative_trend',
+    'weak_buying_pressure',
+    'volume_low',
+    'tx_low',
+    'negative_trend',
+    'no_kline_low_volume',
+}
 DOG_CATCHER_SOFT_QUALITY_REASONS = {
     *HARD_GATE_PASS_BASELINE_SOFT_QUALITY_REASONS,
     'no_kline_low_volume',
@@ -5598,6 +5611,58 @@ def _hard_gate_pass_probe_scout_quality_soft_override(pending, scout_quality):
         'original_reason': scout_quality.get('reason'),
         'override_scope': HARD_GATE_PASS_TINY_PROBE_MODE,
         'baseline_soft_quality_override': True,
+    })
+    return override
+
+
+def _a_class_fastlane_scout_quality_soft_override(pending, scout_quality):
+    """Let live A_CLASS tiny canaries bypass only slow activity soft gates.
+
+    A_CLASS already passed its hard prefilter, provider quote hydration, expected
+    RR contract, and budget guard before it is enqueued. The old scout-quality
+    layer can still be useful telemetry, but its buy-pressure/volume/tx/trend
+    checks are slow confirmations and should not delete an A_CLASS pending entry.
+    """
+    if not isinstance(pending, dict) or not isinstance(scout_quality, dict):
+        return scout_quality
+    mode = pending.get('entry_mode') or pending.get('scout_mode')
+    if not _is_a_class_fastlane_mode(mode, pending):
+        return scout_quality
+    if scout_quality.get('pass'):
+        return scout_quality
+    reason = str(scout_quality.get('reason') or '').strip()
+    reason_l = reason.lower()
+    if reason_l not in A_CLASS_FASTLANE_BYPASSABLE_SOFT_QUALITY_REASONS:
+        return scout_quality
+    if classify_rejection_hardness(reason_l) == 'hard_reject':
+        return scout_quality
+    size_sol = _safe_float(pending.get('kelly_position_sol'), 0.0)
+    if size_sol <= 0 or size_sol > 0.003 + 1e-9:
+        return scout_quality
+    if not bool(pending.get('paper_only_scout')):
+        return scout_quality
+    if not _dog_catcher_quote_confirmation_present(pending):
+        return scout_quality
+
+    override = dict(scout_quality)
+    override.update({
+        'pass': True,
+        'decision': 'warn',
+        'reason': 'a_class_fastlane_soft_quality_warn',
+        'original_reason': scout_quality.get('reason'),
+        'override_scope': A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        'a_class_fastlane_soft_quality_override': True,
+        'override_confirmation': {
+            'quote_confirmed': True,
+            'paper_only_scout': True,
+            'size_sol': size_sol,
+            'hard_gates_still_required': [
+                'final_quote_clean',
+                'execution_quote',
+                'runtime_budget',
+                'security_prefilter',
+            ],
+        },
     })
     return override
 
@@ -13045,13 +13110,13 @@ def enqueue_a_class_fastlane_tiny_candidates(
             'first_fire_pc_m5': raw.get('price_change_m5') or raw.get('momentum_pct'),
             'spread_abort_count': 0,
             'timing_passed': True,
-            'entry_mode': 'a_class_fastlane_tiny_canary',
-            'scout_mode': 'a_class_fastlane_tiny_canary',
-            'entry_branch': 'a_class_fastlane_tiny_canary',
+            'entry_mode': A_CLASS_FASTLANE_TINY_CANARY_MODE,
+            'scout_mode': A_CLASS_FASTLANE_TINY_CANARY_MODE,
+            'entry_branch': A_CLASS_FASTLANE_TINY_CANARY_MODE,
             'paper_only_scout': True,
             'execution_scope': 'paper_only',
             'replay_source': 'live_monitor_a_class_fastlane',
-            'stage_outcome': 'a_class_fastlane_tiny_canary_armed',
+            'stage_outcome': f'{A_CLASS_FASTLANE_TINY_CANARY_MODE}_armed',
             'source_component': candidate.get('source_component'),
             'source_reject_reason': candidate.get('source_reason') or decision.get('reason'),
             'quote_clean_seen': True,
@@ -13093,7 +13158,7 @@ def enqueue_a_class_fastlane_tiny_candidates(
         }
         stamp_dog_catcher_pending(
             pending,
-            branch='a_class_fastlane_tiny_canary',
+            branch=A_CLASS_FASTLANE_TINY_CANARY_MODE,
             flags=['a_class_fastlane', 'paper_only_tiny'],
             detail=pending['a_class_fastlane'],
         )
@@ -13103,7 +13168,7 @@ def enqueue_a_class_fastlane_tiny_candidates(
             component='a_class_live_enqueue',
             event_type='pending_entry',
             decision='pending',
-            reason='a_class_fastlane_tiny_canary_armed',
+            reason=f'{A_CLASS_FASTLANE_TINY_CANARY_MODE}_armed',
             token_ca=token_ca,
             symbol=symbol,
             lifecycle_id=lifecycle_id,
@@ -24233,6 +24298,22 @@ def run_monitor(db):
                             token_risk=_token_risk,
                             spread_memory=pending.get('spread_abort_memory'),
                             position_size_sol=pending.get('kelly_position_sol'),
+                            liquidity_usd=(
+                                pending.get('liquidity_usd')
+                                if _is_a_class_fastlane_mode(
+                                    pending.get('entry_mode') or pending.get('scout_mode'),
+                                    pending,
+                                )
+                                else None
+                            ),
+                            top10_pct=(
+                                pending.get('top10_pct')
+                                if _is_a_class_fastlane_mode(
+                                    pending.get('entry_mode') or pending.get('scout_mode'),
+                                    pending,
+                                )
+                                else None
+                            ),
                         )
                         _raw_scout_quality = _scout_quality
                         _scout_quality = _ath_no_kline_scout_quality_soft_override(
@@ -24246,6 +24327,10 @@ def run_monitor(db):
                             _scout_quality,
                         )
                         _scout_quality = _dog_catcher_branch_scout_quality_soft_override(
+                            pending,
+                            _scout_quality,
+                        )
+                        _scout_quality = _a_class_fastlane_scout_quality_soft_override(
                             pending,
                             _scout_quality,
                         )
@@ -24288,6 +24373,12 @@ def run_monitor(db):
                                 f"  [SCOUT_QUALITY] ⚠️ {pending['symbol']} WARN: "
                                 f"{_scout_quality.get('reason')} original={_scout_quality.get('original_reason')}"
                             )
+                            if _scout_quality.get('a_class_fastlane_soft_quality_override'):
+                                log.info(
+                                    f"  [A_CLASS_SOFT_QUALITY_BYPASS] {pending['symbol']} "
+                                    f"original={_scout_quality.get('original_reason')} "
+                                    f"mode={pending.get('entry_mode')} size={pending.get('kelly_position_sol')}"
+                                )
                         if not _scout_quality.get('pass'):
                             if _discovery_is_soft_quality_reason(_scout_quality.get('reason')):
                                 _pending_route_for_tracking = _pending_signal_route or pending.get('signal_type')
