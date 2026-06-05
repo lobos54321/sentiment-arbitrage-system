@@ -31,28 +31,17 @@ def test_counterfactual_replay_uses_path_samples_when_available():
             "would_enter_a_class": True,
         },
     )
-    db.execute(
-        """
-        CREATE TABLE opportunity_event_path_samples (
-            opportunity_key TEXT,
-            sample_ts REAL,
-            quote_pnl_pct REAL,
-            quote_clean INTEGER,
-            quote_executable INTEGER,
-            route_available INTEGER
-        )
-        """
-    )
     db.executemany(
         """
         INSERT INTO opportunity_event_path_samples (
-            opportunity_key, sample_ts, quote_pnl_pct, quote_clean, quote_executable, route_available
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            opportunity_key, sample_ts, quote_pnl_pct, quote_clean,
+            quote_executable, route_available, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-            (key, 1_700_000_010, 0.10, 1, 1, 1),
-            (key, 1_700_000_020, 0.55, 1, 1, 1),
-            (key, 1_700_000_030, -0.30, 1, 1, 1),
+            (key, 1_700_000_010, 0.10, 1, 1, 1, 1_700_000_010, 1_700_000_010),
+            (key, 1_700_000_020, 0.55, 1, 1, 1, 1_700_000_020, 1_700_000_020),
+            (key, 1_700_000_030, -0.30, 1, 1, 1, 1_700_000_030, 1_700_000_030),
         ],
     )
 

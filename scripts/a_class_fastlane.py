@@ -1246,6 +1246,99 @@ def _latest_fast_queue_evidence(db, token_ca, now_ts, config):
     return {key: value for key, value in evidence.items() if value is not None}
 
 
+def _external_alpha_state_evidence(data, *, now_ts=None):
+    payload = _json_loads(data.get("last_snapshot_json"))
+    evidence = _payload_quote_evidence(payload, now_ts=now_ts)
+    last_seen_ts = _normalize_ts_sec(data.get("last_seen_ts"))
+    last_seen_age_sec = None
+    if last_seen_ts is not None and now_ts is not None:
+        last_seen_age_sec = max(0.0, float(now_ts) - last_seen_ts)
+    momentum_confirmed = _truthy(data.get("momentum_confirmed"))
+    volume_confirmed = _truthy(data.get("volume_confirmed"))
+    source = data.get("source_last") or payload.get("source") or "external_alpha_shadow"
+    category = data.get("category_last") or payload.get("category")
+    buy_pressure = _safe_float(data.get("buy_pressure"), None)
+    evidence.update({
+        "market_cap": evidence.get("market_cap") or data.get("last_market_cap"),
+        "liquidity_usd": evidence.get("liquidity_usd") or data.get("last_liquidity"),
+        "current_price": evidence.get("current_price") or payload.get("price"),
+        "quote_ts": evidence.get("quote_ts") or last_seen_ts,
+        "gmgn_pre_seen": True,
+        "gmgn_activity_fresh": last_seen_age_sec is not None and last_seen_age_sec <= 60,
+        "gmgn_last_seen_age_sec": last_seen_age_sec,
+        "fresh_source_hit": True,
+        "fresh_momentum": momentum_confirmed or volume_confirmed,
+        "momentum_pct": data.get("momentum_gain_pct"),
+        "source_resonance": _safe_int(data.get("seen_count"), 0) >= 2 or _safe_int(data.get("changed_count"), 0) >= 1,
+        "premium_source_repeat_hit": _safe_int(data.get("seen_count"), 0) >= 2,
+        "lotto_early_momentum": _candidate_route_from_text(category, source) == "LOTTO" or momentum_confirmed,
+        "reclaim_resonance": _candidate_route_from_text(category, source) == "RECLAIM",
+        "ath_continuation": _candidate_route_from_text(category, source) == "ATH",
+        "data_confidence": "external_alpha_shadow",
+        "source_component": "external_alpha_shadow",
+        "source_reason": category or source,
+    })
+    if evidence.get("quote_age_sec") is None and evidence.get("quote_ts") is not None and now_ts is not None:
+        quote_ts = _normalize_ts_sec(evidence.get("quote_ts"))
+        if quote_ts is not None:
+            evidence["quote_age_sec"] = max(0.0, float(now_ts) - quote_ts)
+    if buy_pressure is not None and buy_pressure >= 1.2:
+        evidence["fresh_momentum"] = True
+    return {key: value for key, value in evidence.items() if value is not None}
+
+
+def _latest_external_alpha_evidence(db, token_ca, now_ts, config):
+    if not token_ca or not _table_exists(db, "external_alpha_state"):
+        return {}
+    cols = _table_columns(db, "external_alpha_state")
+    if "token_ca" not in cols:
+        return {}
+    present_cols = [
+        name
+        for name in (
+            "chain",
+            "token_ca",
+            "first_seen_ts",
+            "last_seen_ts",
+            "seen_count",
+            "changed_count",
+            "source_last",
+            "category_last",
+            "symbol",
+            "name",
+            "last_market_cap",
+            "last_liquidity",
+            "last_volume",
+            "last_swaps",
+            "last_buys",
+            "last_sells",
+            "momentum_rounds",
+            "momentum_start_mc",
+            "momentum_gain_pct",
+            "momentum_confirmed",
+            "volume_confirmed",
+            "buy_pressure",
+            "last_snapshot_json",
+            "updated_at",
+        )
+        if name in cols
+    ]
+    row = db.execute(
+        f"""
+        SELECT {', '.join(present_cols) if present_cols else 'token_ca'}
+        FROM external_alpha_state
+        WHERE token_ca = ?
+          AND COALESCE(last_seen_ts, 0) >= ?
+        ORDER BY COALESCE(last_seen_ts, 0) DESC
+        LIMIT 1
+        """,
+        (token_ca, float(now_ts) - float(config.shadow_scan_window_sec)),
+    ).fetchone()
+    if not row:
+        return {}
+    return _external_alpha_state_evidence(_row_to_dict(row), now_ts=now_ts)
+
+
 def enrich_candidate_with_db_evidence(db, candidate, *, now_ts=None, config=None):
     """Hydrate counterfactual candidates from adjacent quote evidence tables.
 
@@ -1261,6 +1354,7 @@ def enrich_candidate_with_db_evidence(db, candidate, *, now_ts=None, config=None
         _latest_lotto_quote_shadow_evidence,
         _latest_source_resonance_evidence,
         _latest_fast_queue_evidence,
+        _latest_external_alpha_evidence,
     ):
         try:
             evidence = lookup(db, candidate.token_ca, now_ts, config)
@@ -1390,6 +1484,27 @@ def candidate_from_source_resonance_row(row, now_ts=None):
         "reclaim_resonance": route_bucket == "RECLAIM",
         "spread_verified": quote_clean and (quote_shadow.get("spread_pct") is None and quote_shadow.get("quote_gap_pct") is None),
         "data_confidence": payload.get("data_confidence") or "source_resonance_shadow",
+    })
+    _extract_quote_fields(merged, payload, now_ts=now_ts)
+    return AClassCandidate.from_mapping(merged)
+
+
+def candidate_from_external_alpha_row(row, now_ts=None):
+    data = _row_to_dict(row)
+    payload = _json_loads(data.get("last_snapshot_json"))
+    source = data.get("source_last") or payload.get("source") or "external_alpha_shadow"
+    category = data.get("category_last") or payload.get("category")
+    text = " ".join(str(value or "") for value in (source, category, data.get("symbol"), data.get("name")))
+    merged = {**payload, **data}
+    merged.update({
+        "token_ca": data.get("token_ca") or payload.get("ca") or payload.get("address"),
+        "symbol": data.get("symbol") or payload.get("symbol"),
+        "route_bucket": _candidate_route_from_text(text),
+        "source_component": "external_alpha_shadow",
+        "source_reason": category or source,
+        "signal_ts": data.get("first_seen_ts"),
+        "opportunity_ts": data.get("last_seen_ts"),
+        **_external_alpha_state_evidence(data, now_ts=now_ts),
     })
     _extract_quote_fields(merged, payload, now_ts=now_ts)
     return AClassCandidate.from_mapping(merged)
@@ -1705,6 +1820,37 @@ def _query_recent_source_resonance(db, now_ts, config, limit):
     ).fetchall()
 
 
+def _query_recent_external_alpha(db, now_ts, config, limit):
+    if not _table_exists(db, "external_alpha_state"):
+        return []
+    return db.execute(
+        """
+        SELECT rowid AS id, s.*
+        FROM external_alpha_state s
+        WHERE COALESCE(s.last_seen_ts, 0) >= ?
+          AND COALESCE(s.token_ca, '') != ''
+          AND (
+              COALESCE(s.momentum_confirmed, 0) = 1
+              OR COALESCE(s.volume_confirmed, 0) = 1
+              OR COALESCE(s.buy_pressure, 0) >= 1.2
+              OR COALESCE(s.changed_count, 0) >= 1
+              OR COALESCE(s.seen_count, 0) >= 2
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM a_class_decision_events ace
+              WHERE ace.source_table = 'external_alpha_state'
+                AND ace.source_id = s.rowid
+          )
+        ORDER BY COALESCE(s.momentum_confirmed, 0) DESC,
+                 COALESCE(s.buy_pressure, 0) DESC,
+                 COALESCE(s.last_seen_ts, 0) DESC
+        LIMIT ?
+        """,
+        (now_ts - config.shadow_scan_window_sec, int(limit)),
+    ).fetchall()
+
+
 def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, config=None, logger=None):
     """Evaluate shadow/counterfactual A-class candidates and record evidence.
 
@@ -1724,6 +1870,7 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
         ("paper_missed_signal_attribution", _query_recent_missed_attribution, candidate_from_missed_row),
         ("paper_fast_entry_queue", _query_recent_fast_queue, candidate_from_fast_queue_row),
         ("source_resonance_candidates", _query_recent_source_resonance, candidate_from_source_resonance_row),
+        ("external_alpha_state", _query_recent_external_alpha, candidate_from_external_alpha_row),
         ("paper_decision_events", _query_recent_decision_events, candidate_from_decision_event_row),
     )
     errors = {}

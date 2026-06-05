@@ -8,6 +8,7 @@ from a_class_fastlane import (
     AClassDecision,
     AClassCandidate,
     candidate_from_decision_event_row,
+    candidate_from_external_alpha_row,
     candidate_from_fast_queue_row,
     decide_size,
     enrich_candidate_with_db_evidence,
@@ -385,6 +386,33 @@ def test_shadow_scan_records_counterfactual_sources():
             data_source TEXT,
             payload_json TEXT
         );
+        CREATE TABLE external_alpha_state (
+            chain TEXT NOT NULL,
+            token_ca TEXT NOT NULL,
+            first_seen_ts INTEGER NOT NULL,
+            last_seen_ts INTEGER NOT NULL,
+            seen_count INTEGER DEFAULT 0,
+            changed_count INTEGER DEFAULT 0,
+            source_last TEXT,
+            category_last TEXT,
+            symbol TEXT,
+            name TEXT,
+            last_market_cap REAL,
+            last_liquidity REAL,
+            last_volume REAL,
+            last_swaps REAL,
+            last_buys REAL,
+            last_sells REAL,
+            momentum_rounds INTEGER DEFAULT 1,
+            momentum_start_mc REAL,
+            momentum_gain_pct REAL DEFAULT 0,
+            momentum_confirmed INTEGER DEFAULT 0,
+            volume_confirmed INTEGER DEFAULT 0,
+            buy_pressure REAL DEFAULT 0,
+            last_snapshot_json TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chain, token_ca)
+        );
         """
     )
     db.execute(
@@ -443,6 +471,42 @@ def test_shadow_scan_records_counterfactual_sources():
             '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_age_sec":4,"route_available":true,"route_stable_recent":true,"liquidity_usd":80000,"spread_pct":0.8,"gmgn_pre_seen":true,"gmgn_activity_fresh":true,"source_resonance":true,"fresh_ath_refresh":true,"top10_pct":35,"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}',
         ),
     )
+    db.execute(
+        """
+        INSERT INTO external_alpha_state (
+            chain, token_ca, first_seen_ts, last_seen_ts, seen_count, changed_count,
+            source_last, category_last, symbol, name, last_market_cap, last_liquidity,
+            last_volume, last_swaps, last_buys, last_sells, momentum_rounds,
+            momentum_start_mc, momentum_gain_pct, momentum_confirmed,
+            volume_confirmed, buy_pressure, last_snapshot_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "sol",
+            "AlphaToken",
+            900,
+            999,
+            3,
+            2,
+            "gmgn",
+            "lotto_momentum",
+            "ALPHA",
+            "Alpha",
+            120000,
+            70000,
+            42000,
+            35,
+            24,
+            8,
+            3,
+            90000,
+            33.3,
+            1,
+            1,
+            3.0,
+            '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_ts":999,"route_available":true,"route_stable_recent":true,"liquidity_usd":70000,"spread_pct":0.9,"top10_pct":38,"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}',
+        ),
+    )
 
     summary = record_a_class_fastlane_shadow_candidates(
         db,
@@ -451,20 +515,62 @@ def test_shadow_scan_records_counterfactual_sources():
         config=load_a_class_config({"A_CLASS_ENABLED": "false"}),
     )
 
-    assert summary["candidates"] == 3
+    assert summary["candidates"] == 4
     assert summary["sources"]["paper_fast_entry_queue"]["candidates"] == 1
     assert summary["sources"]["source_resonance_candidates"]["candidates"] == 1
+    assert summary["sources"]["external_alpha_state"]["candidates"] == 1
     assert summary["sources"]["paper_decision_events"]["candidates"] == 1
     source_rows = db.execute(
         "SELECT source_table, action FROM a_class_decision_events ORDER BY source_table"
     ).fetchall()
     assert {row["source_table"] for row in source_rows} == {
+        "external_alpha_state",
         "paper_fast_entry_queue",
         "source_resonance_candidates",
         "paper_decision_events",
     }
     assert any(row["action"] == "WOULD_ENTER" for row in source_rows)
     assert db.execute("SELECT COUNT(*) FROM canonical_trade_ledger").fetchone()[0] == 0
+
+
+def test_external_alpha_candidate_uses_gmgn_state_and_snapshot_quote():
+    row = {
+        "chain": "sol",
+        "token_ca": "AlphaToken",
+        "first_seen_ts": 900,
+        "last_seen_ts": 999,
+        "seen_count": 3,
+        "changed_count": 2,
+        "source_last": "gmgn",
+        "category_last": "lotto_momentum",
+        "symbol": "ALPHA",
+        "last_market_cap": 120000,
+        "last_liquidity": 70000,
+        "last_volume": 42000,
+        "last_swaps": 35,
+        "last_buys": 24,
+        "last_sells": 8,
+        "momentum_rounds": 3,
+        "momentum_start_mc": 90000,
+        "momentum_gain_pct": 33.3,
+        "momentum_confirmed": 1,
+        "volume_confirmed": 1,
+        "buy_pressure": 3.0,
+        "last_snapshot_json": '{"quote_available":true,"quote_executable":true,"quote_clean":true,"quote_source":"jupiter","quote_ts":999,"route_available":true,"route_stable_recent":true,"liquidity_usd":70000,"spread_pct":0.9}',
+    }
+
+    candidate = candidate_from_external_alpha_row(row, now_ts=1000)
+
+    assert candidate.source_component == "external_alpha_shadow"
+    assert candidate.route_bucket == "LOTTO"
+    assert candidate.gmgn_pre_seen is True
+    assert candidate.gmgn_activity_fresh is True
+    assert candidate.fresh_momentum is True
+    assert candidate.quote_available is True
+    assert candidate.quote_executable is True
+    assert candidate.route_available is True
+    assert candidate.quote_age_sec == 1
+    assert candidate.liquidity_usd == 70000
 
 
 def test_shadow_scan_deduplicates_would_enter_by_token_lifecycle_window():

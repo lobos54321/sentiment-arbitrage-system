@@ -16,6 +16,7 @@ from canonical_ledger import (
     record_canonical_trade_path_update,
 )
 from fastlane_config import load_a_class_config
+from opportunity_events import record_opportunity_event
 
 
 def memory_db():
@@ -74,8 +75,15 @@ def test_shadow_decision_event_does_not_create_trade_row():
 
     events = fetch_a_class_events(db, limit=5)
     trade_count = db.execute("SELECT COUNT(*) AS n FROM canonical_trade_ledger").fetchone()["n"]
+    opportunity = db.execute("SELECT * FROM opportunity_events").fetchone()
+    path_sample = db.execute("SELECT * FROM opportunity_event_path_samples").fetchone()
     assert events[0]["action"] == "WOULD_ENTER"
     assert trade_count == 0
+    assert opportunity["token_ca"] == "TokenCA123"
+    assert opportunity["would_enter_a_class"] == 1
+    assert opportunity["evidence_status"] == "quote_clean_executable"
+    assert path_sample["quote_pnl_pct"] == 0
+    assert path_sample["quote_clean"] == 1
 
 
 def test_entry_and_exit_use_sol_accounting():
@@ -173,6 +181,21 @@ def test_path_update_keeps_best_quote_peak_and_first_positive_feedback():
             "entry_quote_executable": True,
         },
     )
+    record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "trade-path-opp",
+            "event_ts": 1_000,
+            "token_ca": "TokenCA789",
+            "route_bucket": "ATH",
+            "source_type": "unit",
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "route_available": True,
+            "linked_trade_id": "trade-path",
+        },
+    )
     record_canonical_trade_path_update(
         db,
         "trade-path",
@@ -208,6 +231,19 @@ def test_path_update_keeps_best_quote_peak_and_first_positive_feedback():
     assert row["positive_feedback_seen"] == 1
     assert row["first_positive_feedback_sec"] == 20
     assert row["time_to_peak_sec"] == 20
+    samples = db.execute(
+        """
+        SELECT sample_ts, quote_pnl_pct
+        FROM opportunity_event_path_samples
+        WHERE opportunity_key = 'trade-path-opp'
+        ORDER BY sample_ts
+        """
+    ).fetchall()
+    assert [(row["sample_ts"], row["quote_pnl_pct"]) for row in samples] == [
+        (1_000, 0),
+        (1_020, 0.12),
+        (1_050, -0.04),
+    ]
 
 
 def test_a_class_migration_backfills_source_dedup_key_and_replaces_unique_source_index():

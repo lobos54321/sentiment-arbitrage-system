@@ -470,6 +470,60 @@ def record_a_class_decision_event(
         ),
     )
     try:
+        from opportunity_events import record_opportunity_event
+
+        record_opportunity_event(
+            db,
+            {
+                "opportunity_key": opportunity_key,
+                "event_ts": now_ts,
+                "token_ca": _get(candidate, "token_ca"),
+                "symbol": _get(candidate, "symbol"),
+                "lifecycle_id": _get(candidate, "lifecycle_id"),
+                "source_type": source_table or "a_class_decision_events",
+                "source_id": source_id,
+                "source_component": _get(candidate, "source_component"),
+                "source_reason": _get(candidate, "source_reason"),
+                "route_bucket": _get(candidate, "route_bucket"),
+                "raw_signal_ts": _safe_float(_get(candidate, "signal_ts"), None),
+                "opportunity_ts": _safe_float(
+                    decision_dict.get("freshness_detail", {}).get("opportunity_ts"),
+                    _safe_float(_get(candidate, "opportunity_ts"), None),
+                ),
+                "opportunity_age_sec": _safe_float(
+                    decision_dict.get("freshness_detail", {}).get("opportunity_age_sec"),
+                    None,
+                ),
+                "quote_available": _get(candidate, "quote_available", False),
+                "quote_executable": _get(candidate, "quote_executable", False),
+                "quote_clean": _get(candidate, "quote_clean", False),
+                "route_available": _get(candidate, "route_available", False),
+                "liquidity_usd": _safe_float(_get(candidate, "liquidity_usd"), None),
+                "spread_pct": _safe_float(_get(candidate, "spread_pct"), None),
+                "market_cap": _safe_float(_get(candidate, "market_cap"), None),
+                "quote_source": _get(candidate, "quote_source"),
+                "quote_age_sec": _safe_float(_get(candidate, "quote_age_sec"), None),
+                "data_confidence": _get(candidate, "data_confidence"),
+                "provider_data_state": _get(candidate, "provider_data_state"),
+                "provider_reason": _get(candidate, "provider_reason") or _get(decision, "reason"),
+                "matrix_score": _safe_float(matrix_detail.get("matrix_score"), _safe_float(_get(decision, "score"), None)),
+                "expected_rr": expected_rr,
+                "defined_risk_pct": defined_risk_pct,
+                "hard_blockers": _get(decision, "hard_blockers", []),
+                "soft_notes": _get(decision, "soft_notes", []),
+                "would_enter_a_class": action == "WOULD_ENTER",
+                "did_enter": action == "ENTER",
+                "final_entry_decision": decision_dict,
+                "raw_payload": {
+                    "candidate": candidate_dict,
+                    "decision": decision_dict,
+                    "source_dedup_key": source_dedup_key,
+                },
+            },
+        )
+    except Exception:
+        pass
+    try:
         db.commit()
     except Exception:
         pass
@@ -631,6 +685,31 @@ def record_canonical_trade_exit(db, trade_id, exit_data):
         ),
     )
     try:
+        from opportunity_events import record_linked_trade_path_sample
+
+        record_linked_trade_path_sample(
+            db,
+            str(trade_id),
+            {
+                "sample_ts": exit_ts,
+                "quote_pnl_pct": realized_pnl_pct,
+                "quote_clean": _get(exit_data, "exit_quote_executable", False)
+                and _get(exit_data, "exit_route_available", False),
+                "quote_executable": _get(exit_data, "exit_quote_executable", False),
+                "route_available": _get(exit_data, "exit_route_available", False),
+                "quote_source": _get(exit_data, "exit_quote_source"),
+                "quote_age_sec": _safe_float(_get(exit_data, "exit_quote_age_sec"), None),
+                "valuation_sol": realized_exit_sol,
+                "no_route_flag": _get(exit_data, "no_route_flag", False),
+                "trapped_flag": _get(exit_data, "trapped_flag", False),
+                "provider_reason": _get(exit_data, "exit_reason"),
+                "data_confidence": _get(exit_data, "accounting_source", "sol_accounting"),
+                "raw_payload": exit_data,
+            },
+        )
+    except Exception:
+        pass
+    try:
         db.commit()
     except Exception:
         pass
@@ -725,6 +804,30 @@ def record_canonical_trade_path_update(db, trade_id, path_data):
             str(trade_id),
         ),
     )
+    try:
+        from opportunity_events import record_linked_trade_path_sample
+
+        current_quote_pnl = _safe_float(_get(path_data, "current_quote_pnl_pct"), None)
+        record_linked_trade_path_sample(
+            db,
+            str(trade_id),
+            {
+                "sample_ts": now_ts,
+                "quote_pnl_pct": current_quote_pnl,
+                "quote_clean": _get(path_data, "quote_clean", current_quote_pnl is not None),
+                "quote_executable": _get(path_data, "quote_executable", current_quote_pnl is not None),
+                "route_available": _get(path_data, "route_available", True),
+                "quote_source": _get(path_data, "quote_source"),
+                "quote_age_sec": _safe_float(_get(path_data, "quote_age_sec"), None),
+                "valuation_sol": _safe_float(_get(path_data, "valuation_sol"), None),
+                "no_route_flag": _get(path_data, "no_route_flag", False),
+                "trapped_flag": _get(path_data, "trapped_flag", False),
+                "data_confidence": _get(path_data, "data_confidence", "canonical_path_update"),
+                "raw_payload": path_data,
+            },
+        )
+    except Exception:
+        pass
     try:
         db.commit()
     except Exception:

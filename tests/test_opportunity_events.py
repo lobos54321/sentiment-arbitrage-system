@@ -4,7 +4,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from opportunity_events import fetch_opportunity_events, init_opportunity_events, record_opportunity_event
+from opportunity_events import (
+    fetch_opportunity_events,
+    init_opportunity_events,
+    record_linked_trade_path_sample,
+    record_opportunity_event,
+)
 
 
 def memory_db():
@@ -66,3 +71,79 @@ def test_record_opportunity_event_upserts_by_opportunity_key():
     assert rows[0]["matrix_score"] == 92
     assert rows[0]["did_enter"] == 1
     assert rows[0]["linked_trade_id"] == "trade-1"
+    assert rows[0]["evidence_status"] == "quote_clean_executable"
+    assert rows[0]["path_sample_count"] == 1
+
+    sample = db.execute(
+        "SELECT quote_pnl_pct, quote_clean, route_available FROM opportunity_event_path_samples WHERE opportunity_key = ?",
+        (key,),
+    ).fetchone()
+    assert sample["quote_pnl_pct"] == 0
+    assert sample["quote_clean"] == 1
+    assert sample["route_available"] == 1
+
+
+def test_record_opportunity_event_marks_route_unavailable_as_path_sample():
+    db = memory_db()
+    key = record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "source:2:TOKEN",
+            "event_ts": 2_000,
+            "token_ca": "TOKEN",
+            "source_type": "unit",
+            "route_bucket": "ATH",
+            "quote_available": False,
+            "quote_executable": False,
+            "route_available": False,
+            "hard_blockers": ["quote_not_available", "route_unavailable"],
+        },
+    )
+
+    event = fetch_opportunity_events(db)[0]
+    assert event["evidence_status"] == "no_route_or_route_unavailable"
+    sample = db.execute(
+        "SELECT no_route_flag, quote_clean FROM opportunity_event_path_samples WHERE opportunity_key = ?",
+        (key,),
+    ).fetchone()
+    assert sample["no_route_flag"] == 1
+    assert sample["quote_clean"] == 0
+
+
+def test_linked_trade_path_sample_updates_all_linked_opportunities():
+    db = memory_db()
+    record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "source:trade:TOKEN",
+            "event_ts": 1_000,
+            "token_ca": "TOKEN",
+            "source_type": "unit",
+            "route_bucket": "ATH",
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "route_available": True,
+            "linked_trade_id": "trade-1",
+        },
+    )
+
+    count = record_linked_trade_path_sample(
+        db,
+        "trade-1",
+        {
+            "sample_ts": 1_020,
+            "quote_pnl_pct": 0.55,
+            "quote_clean": True,
+            "quote_executable": True,
+            "route_available": True,
+            "quote_source": "gmgn",
+        },
+    )
+
+    assert count == 1
+    samples = db.execute(
+        "SELECT quote_pnl_pct FROM opportunity_event_path_samples WHERE opportunity_key = ? ORDER BY sample_ts",
+        ("source:trade:TOKEN",),
+    ).fetchall()
+    assert [row["quote_pnl_pct"] for row in samples] == [0, 0.55]

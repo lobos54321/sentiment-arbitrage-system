@@ -12597,6 +12597,128 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/opportunity/evidence') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    try {
+      const sinceTs = boundedWindowedSinceTs(url, 24, 24 * 120, { allowAll: true });
+      const limit = boundedIntParam(url, 'limit', 100, 1, 500);
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tableNames.has('opportunity_events')) {
+        res.writeHead(202, apiJsonHeaders());
+        res.end(JSON.stringify({
+          generated_at: new Date().toISOString(),
+          db_path: paperDbPath,
+          available: false,
+          reason: 'opportunity_events table not found',
+          summary: {},
+          events: [],
+        }, null, 2));
+        return;
+      }
+      const cols = getTableColumns(paperDb, 'opportunity_events');
+      const optional = (name, fallback = 'NULL') => cols.has(name) ? name : `${fallback} AS ${name}`;
+      const expr = (name, fallback = 'NULL') => cols.has(name) ? name : fallback;
+      const filters = [];
+      const params = { limit };
+      if (sinceTs != null) {
+        filters.push('event_ts >= @sinceTs');
+        params.sinceTs = sinceTs;
+      }
+      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+      const summary = paperDb.prepare(`
+        SELECT COUNT(*) AS total,
+               COUNT(DISTINCT token_ca) AS unique_tokens,
+               SUM(CASE WHEN COALESCE(${expr('quote_available', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS quote_available_n,
+               SUM(CASE WHEN COALESCE(${expr('quote_executable', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS quote_executable_n,
+               SUM(CASE WHEN COALESCE(${expr('route_available', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS route_available_n,
+               SUM(CASE WHEN COALESCE(${expr('quote_clean', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean_n,
+               SUM(CASE WHEN COALESCE(${expr('path_sample_count', '0')}, 0) > 0 THEN 1 ELSE 0 END) AS path_sampled_n,
+               SUM(CASE WHEN COALESCE(${expr('would_enter_a_class', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS would_enter_a_class_n,
+               SUM(CASE WHEN COALESCE(${expr('did_enter', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS did_enter_n
+        FROM opportunity_events
+        ${where}
+      `).get(params);
+      const evidenceStatus = cols.has('evidence_status')
+        ? paperDb.prepare(`
+            SELECT COALESCE(evidence_status, 'unknown') AS evidence_status, COUNT(*) AS n
+            FROM opportunity_events
+            ${where}
+            GROUP BY COALESCE(evidence_status, 'unknown')
+            ORDER BY n DESC
+            LIMIT 30
+          `).all(params)
+        : [];
+      const sourceSummary = paperDb.prepare(`
+        SELECT COALESCE(source_type, 'unknown') AS source_type,
+               COALESCE(source_component, 'unknown') AS source_component,
+               COUNT(*) AS n,
+               SUM(CASE WHEN COALESCE(${expr('quote_clean', '0')}, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean_n,
+               SUM(CASE WHEN COALESCE(${expr('path_sample_count', '0')}, 0) > 0 THEN 1 ELSE 0 END) AS path_sampled_n,
+               MAX(event_ts) AS latest_event_ts
+        FROM opportunity_events
+        ${where}
+        GROUP BY COALESCE(source_type, 'unknown'), COALESCE(source_component, 'unknown')
+        ORDER BY n DESC
+        LIMIT 50
+      `).all(params);
+      const pathSummary = tableNames.has('opportunity_event_path_samples')
+        ? paperDb.prepare(`
+            SELECT COUNT(*) AS samples,
+                   SUM(CASE WHEN COALESCE(quote_clean, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean_samples,
+                   SUM(CASE WHEN COALESCE(no_route_flag, 0) = 1 THEN 1 ELSE 0 END) AS no_route_samples,
+                   SUM(CASE WHEN COALESCE(trapped_flag, 0) = 1 THEN 1 ELSE 0 END) AS trapped_samples,
+                   MAX(sample_ts) AS latest_sample_ts
+            FROM opportunity_event_path_samples
+            ${sinceTs == null ? '' : 'WHERE sample_ts >= @sinceTs'}
+          `).get(sinceTs == null ? {} : { sinceTs })
+        : { samples: 0, quote_clean_samples: 0, no_route_samples: 0, trapped_samples: 0, latest_sample_ts: null };
+      const events = paperDb.prepare(`
+        SELECT id, opportunity_key, event_ts, token_ca, symbol, lifecycle_id,
+               source_type, source_component, source_reason, route_bucket,
+               quote_available, quote_executable, quote_clean, route_available,
+               liquidity_usd, spread_pct, market_cap,
+               ${optional('quote_source')},
+               ${optional('quote_age_sec')},
+               ${optional('data_confidence')},
+               ${optional('provider_data_state')},
+               ${optional('provider_reason')},
+               ${optional('evidence_status')},
+               ${optional('path_sample_count', '0')},
+               expected_rr, defined_risk_pct, would_enter_a_class, did_enter,
+               linked_trade_id
+        FROM opportunity_events
+        ${where}
+        ORDER BY event_ts DESC, id DESC
+        LIMIT @limit
+      `).all(params);
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: true,
+        since_ts: sinceTs,
+        summary,
+        evidence_status: evidenceStatus,
+        source_summary: sourceSummary,
+        path_summary: pathSummary,
+        events,
+        note: 'Opportunity evidence is the executable denominator bridge for A_CLASS and triple-barrier counterfactual replay.',
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/a-class/events') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
