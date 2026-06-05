@@ -7,6 +7,16 @@ export ZEABUR_LOG_TRIM_MAX_MB="${ZEABUR_LOG_TRIM_MAX_MB:-64}"
 export ZEABUR_LOG_TRIM_KEEP_MB="${ZEABUR_LOG_TRIM_KEEP_MB:-16}"
 export ZEABUR_MAINTENANCE_INTERVAL_SEC="${ZEABUR_MAINTENANCE_INTERVAL_SEC:-300}"
 
+# A_CLASS is paper-only tiny canary by construction.  Zeabur can still disable
+# it explicitly with A_CLASS_ENABLED=false, but the production paper runtime
+# should not stay stuck in shadow-only once the live-safe wiring is deployed.
+export A_CLASS_ENABLED="${A_CLASS_ENABLED:-true}"
+export A_CLASS_LIVE_MAX_SIZE_SOL="${A_CLASS_LIVE_MAX_SIZE_SOL:-0.001}"
+export A_CLASS_LIVE_MAX_CONCURRENT="${A_CLASS_LIVE_MAX_CONCURRENT:-1}"
+export A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL="${A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL:-0.005}"
+export A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN="${A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN:-1}"
+export FINAL_ENTRY_CONTRACT_ENFORCE="${FINAL_ENTRY_CONTRACT_ENFORCE:-true}"
+
 shutdown() {
   echo "[SHUTDOWN] Forwarding termination signal..."
   kill -TERM \
