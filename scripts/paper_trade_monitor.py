@@ -12846,6 +12846,13 @@ def _is_a_class_fastlane_mode(entry_mode=None, monitor_state=None):
     )
 
 
+def _final_entry_contract_should_enforce(entry_mode=None, monitor_state=None):
+    return bool(
+        _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False)
+        or _is_a_class_fastlane_mode(entry_mode, monitor_state)
+    )
+
+
 def _a_class_ledger_detail_from_pending(pending, *, actual_size_sol=None, final_entry_passed=False):
     pending = pending if isinstance(pending, dict) else {}
     detail = pending.get('a_class_fastlane') if isinstance(pending.get('a_class_fastlane'), dict) else {}
@@ -25636,8 +25643,16 @@ def run_monitor(db):
                         now_ts=now,
                     )
                     _final_entry_decision_payload = _final_entry_decision.to_dict()
+                    _final_entry_contract_enforced = _final_entry_contract_should_enforce(
+                        _raw_entry_mode,
+                        {
+                            **(_monitor_state if isinstance(_monitor_state, dict) else {}),
+                            'entry_mode': _raw_entry_mode,
+                            'normalized_entry_mode': _normalized_entry_mode,
+                        },
+                    )
                     _monitor_state['finalEntryContract'] = _final_entry_decision_payload
-                    _monitor_state['finalEntryContractEnforce'] = _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False)
+                    _monitor_state['finalEntryContractEnforce'] = _final_entry_contract_enforced
                     record_decision_event(
                         db,
                         component='final_entry_contract',
@@ -25655,10 +25670,10 @@ def run_monitor(db):
                         payload=with_lifecycle_payload({
                             **_final_entry_decision_payload,
                             'candidate': _final_entry_candidate,
-                            'enforced': _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False),
+                            'enforced': _final_entry_contract_enforced,
                         }, _entry_lifecycle),
                     )
-                    if (not _final_entry_decision.passed) and _env_flag('FINAL_ENTRY_CONTRACT_ENFORCE', False):
+                    if (not _final_entry_decision.passed) and _final_entry_contract_enforced:
                         try:
                             record_monitor_opportunity_event(
                                 db,

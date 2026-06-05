@@ -11,6 +11,7 @@ from paper_trade_monitor import (
     A_CLASS_FASTLANE_TINY_CANARY_MODE,
     _a_class_ledger_detail_from_pending,
     _a_class_fastlane_scout_quality_soft_override,
+    _final_entry_contract_should_enforce,
     active_a_class_fastlane_count,
     enqueue_a_class_fastlane_tiny_candidates,
     pending_is_paper_tiny_scout,
@@ -266,3 +267,17 @@ def test_a_class_fastlane_soft_quality_bypass_does_not_cover_hard_or_unquoted_ca
     soft = {"pass": False, "reason": "scout_quality_volume_low"}
 
     assert _a_class_fastlane_scout_quality_soft_override(no_quote_pending, soft) is soft
+
+
+def test_a_class_fastlane_forces_final_entry_contract_enforcement(monkeypatch):
+    monkeypatch.setenv("FINAL_ENTRY_CONTRACT_ENFORCE", "false")
+
+    assert _final_entry_contract_should_enforce(
+        A_CLASS_FASTLANE_TINY_CANARY_MODE,
+        {"normalizedEntryMode": "A_CLASS_FASTLANE"},
+    ) is True
+
+    assert _final_entry_contract_should_enforce(
+        "hard_gate_pass_tiny_probe",
+        {"normalizedEntryMode": "LOTTO_TINY_SCOUT"},
+    ) is False
