@@ -1619,7 +1619,11 @@ def _evaluate_and_record_candidate(
             f"reason={candidate.source_reason or 'unknown'}"
         )
     decision = evaluate_a_class_fastlane(candidate, config=config, now_ts=now_ts)
-    stored_action = "WOULD_ENTER" if decision.action == "ENTER" and not config.enabled else decision.action
+    # Evaluation is not execution.  Even when live tiny mode is enabled, this
+    # scanner records a WOULD_ENTER counterfactual; the monitor writes the real
+    # did_enter evidence only after the normal paper entry path fills.
+    live_ready = bool(config.enabled and decision.action == "ENTER")
+    stored_action = "WOULD_ENTER" if decision.action == "ENTER" else decision.action
     opportunity_key = a_class_opportunity_key(candidate, now_ts=now_ts, config=config)
     candidate.opportunity_key = opportunity_key
     if stored_action in {"WOULD_ENTER", "ENTER"}:
@@ -1659,7 +1663,15 @@ def _evaluate_and_record_candidate(
             f"blockers={decision.hard_blockers} "
             f"sources={decision.freshness_detail.get('freshness_sources', [])}"
         )
-    return stored_action
+    return {
+        "action": stored_action,
+        "live_ready": live_ready and stored_action == "WOULD_ENTER",
+        "candidate": candidate.to_dict(),
+        "decision": decision.to_dict(),
+        "source_table": source_table,
+        "source_id": source_id,
+        "opportunity_key": opportunity_key,
+    }
 
 
 def _update_summary(summary, source_table, stored_action):
@@ -1865,7 +1877,14 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
     init_canonical_ledger(db)
     now_ts = float(now_ts if now_ts is not None else time.time())
     per_source_limit = max(1, int(limit))
-    summary = {"candidates": 0, "would_enter": 0, "shadow": 0, "block": 0, "sources": {}}
+    summary = {
+        "candidates": 0,
+        "would_enter": 0,
+        "shadow": 0,
+        "block": 0,
+        "sources": {},
+        "enter_candidates": [],
+    }
     sources = (
         ("paper_missed_signal_attribution", _query_recent_missed_attribution, candidate_from_missed_row),
         ("paper_fast_entry_queue", _query_recent_fast_queue, candidate_from_fast_queue_row),
@@ -1887,7 +1906,7 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
             try:
                 candidate = builder(row, now_ts=now_ts)
                 candidate = enrich_candidate_with_db_evidence(db, candidate, now_ts=now_ts, config=config)
-                stored_action = _evaluate_and_record_candidate(
+                result = _evaluate_and_record_candidate(
                     db,
                     candidate=candidate,
                     source_table=source_table,
@@ -1902,8 +1921,11 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
                 if logger:
                     logger.debug(f"  [A_CLASS_CANDIDATE] {source_table} id={row_dict.get('id')} failed: {exc}")
                 continue
-            if stored_action:
+            if result:
+                stored_action = result.get("action")
                 _update_summary(summary, source_table, stored_action)
+                if result.get("live_ready"):
+                    summary["enter_candidates"].append(result)
     if errors:
         summary["errors"] = errors
     return summary

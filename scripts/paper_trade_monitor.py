@@ -2895,6 +2895,8 @@ def pending_requires_quote_clean_for_final_entry(pending, entry_branch=None):
     mode = str(pending.get('entry_mode') or pending.get('scout_mode') or '').lower()
     branch = str(entry_branch or pending.get('entry_branch') or '').lower()
     replay_source = str(pending.get('replay_source') or '').lower()
+    if 'a_class' in mode or 'fastlane' in mode or 'a_class' in branch:
+        return True
     if mode in {SOURCE_RESONANCE_TINY_PROBE_MODE, HARD_GATE_PASS_TINY_PROBE_MODE}:
         return True
     if mode == PRE_PASS_RESONANCE_TINY_PROBE_MODE:
@@ -12658,6 +12660,9 @@ def build_final_entry_contract_candidate(
     execution = execution if isinstance(execution, dict) else {}
     now_ts = float(now_ts or time.time())
     rr_fields = _entry_contract_rr_fields(entry_decision_contract)
+    pending_expected_rr = _safe_float(pending.get('expected_rr'), None)
+    pending_expected_upside_pct = _safe_float(pending.get('expected_upside_pct'), None)
+    pending_defined_risk_pct = _safe_float(pending.get('defined_risk_pct'), None)
     executable = bool(execution.get('success')) and not bool(execution.get('syntheticPaperEntry'))
     quote_age_sec = _quote_age_sec_from_execution(execution, now_ts)
     route_available = executable and str(execution.get('failureReason') or '').lower() not in {
@@ -12689,9 +12694,9 @@ def build_final_entry_contract_candidate(
         'liquidity_usd': liquidity_usd,
         'market_cap': market_cap,
         'data_confidence': 'quote_only' if executable else entry_execution_availability,
-        'expected_rr': rr_fields.get('expected_rr'),
-        'expected_upside_pct': rr_fields.get('expected_upside_pct'),
-        'defined_risk_pct': rr_fields.get('defined_risk_pct'),
+        'expected_rr': rr_fields.get('expected_rr') or pending_expected_rr,
+        'expected_upside_pct': rr_fields.get('expected_upside_pct') or pending_expected_upside_pct,
+        'defined_risk_pct': rr_fields.get('defined_risk_pct') or pending_defined_risk_pct,
         'risk_flags': _final_contract_risk_flags(pending, token_risk=token_risk),
         'creator_close': pending.get('creator_close'),
         'creator_dump': pending.get('creator_dump'),
@@ -12755,6 +12760,372 @@ def record_monitor_opportunity_event(db, *, final_candidate, final_decision, eve
             'raw_payload': candidate,
         },
     )
+
+
+def _a_class_entry_mode_text(value):
+    return str(value or '').lower()
+
+
+def _is_a_class_fastlane_mode(entry_mode=None, monitor_state=None):
+    mode = _a_class_entry_mode_text(entry_mode)
+    state = monitor_state if isinstance(monitor_state, dict) else {}
+    normalized = _a_class_entry_mode_text(state.get('normalizedEntryMode') or state.get('normalized_entry_mode'))
+    raw = _a_class_entry_mode_text(state.get('entryMode') or state.get('entry_mode'))
+    return (
+        'a_class' in mode
+        or 'fastlane' in mode
+        or 'a_class' in normalized
+        or 'fastlane' in normalized
+        or 'a_class' in raw
+        or 'fastlane' in raw
+    )
+
+
+def active_a_class_fastlane_count(positions, pending_entries):
+    count = 0
+    for pending in (pending_entries or {}).values():
+        if isinstance(pending, dict) and _is_a_class_fastlane_mode(pending.get('entry_mode') or pending.get('scout_mode')):
+            count += 1
+    for pos in _iter_position_values(positions):
+        state = getattr(pos, 'monitor_state', None) or {}
+        if _is_a_class_fastlane_mode(getattr(pos, 'entry_mode', None), state):
+            count += 1
+    return count
+
+
+def _a_class_live_loss_budget_state(db, *, now_ts, config):
+    budget = float(getattr(config, 'live_daily_loss_budget_sol', 0.005) or 0.005)
+    since_ts = float(now_ts or time.time()) - 24 * 60 * 60
+    used = 0.0
+    try:
+        table = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='canonical_trade_ledger'"
+        ).fetchone()
+        if table:
+            row = db.execute(
+                """
+                SELECT COALESCE(SUM(CASE WHEN realized_pnl_sol < 0 THEN -realized_pnl_sol ELSE 0 END), 0) AS loss_sol
+                FROM canonical_trade_ledger
+                WHERE COALESCE(is_a_class_fastlane, 0) = 1
+                  AND exit_ts IS NOT NULL
+                  AND exit_ts >= ?
+                """,
+                (since_ts,),
+            ).fetchone()
+            used = _safe_float(_row_value(row, 'loss_sol'), 0.0) if row else 0.0
+    except Exception:
+        used = 0.0
+    return {
+        'window_sec': 24 * 60 * 60,
+        'since_ts': since_ts,
+        'loss_used_sol': used,
+        'loss_budget_sol': budget,
+        'daily_loss_budget_hit': used >= budget if budget > 0 else False,
+    }
+
+
+def _a_class_live_pending_size(decision, config):
+    requested = _safe_float((decision or {}).get('size_sol'), 0.0)
+    caps = [
+        requested if requested and requested > 0 else getattr(config, 'size_a_sol', 0.001),
+        getattr(config, 'max_size_sol', 0.003),
+        getattr(config, 'live_max_size_sol', 0.001),
+    ]
+    return max(0.0, min(float(value) for value in caps if value is not None))
+
+
+def _a_class_live_first_number(*values):
+    for value in values:
+        number = _safe_float(value, None)
+        if number is not None and number > 0:
+            return number
+    return None
+
+
+def _a_class_live_candidate_payload(result):
+    result = result if isinstance(result, dict) else {}
+    candidate = result.get('candidate') if isinstance(result.get('candidate'), dict) else {}
+    decision = result.get('decision') if isinstance(result.get('decision'), dict) else {}
+    raw = candidate.get('raw_payload') if isinstance(candidate.get('raw_payload'), dict) else {}
+    return candidate, decision, raw
+
+
+def enqueue_a_class_fastlane_tiny_candidates(
+    db,
+    watchlist,
+    pending_entries,
+    positions,
+    *,
+    a_class_summary,
+    now_ts,
+    config,
+    max_positions=None,
+    logger=None,
+):
+    """Promote live-enabled A_CLASS WOULD_ENTER evidence into normal paper pending entries.
+
+    The normal entry pipeline still owns quote execution, final hard gates,
+    runtime mode gating, ledger writes, and exit policy.
+    """
+    if not getattr(config, 'enabled', False):
+        return 0
+    candidates = list((a_class_summary or {}).get('enter_candidates') or [])
+    if not candidates:
+        return 0
+
+    live_max_concurrent = max(0, int(getattr(config, 'live_max_concurrent', 1) or 1))
+    live_max_per_scan = max(0, int(getattr(config, 'live_max_enqueues_per_scan', 1) or 1))
+    if live_max_concurrent <= 0 or live_max_per_scan <= 0:
+        return 0
+
+    budget_state = _a_class_live_loss_budget_state(db, now_ts=now_ts, config=config)
+    if budget_state.get('daily_loss_budget_hit'):
+        record_decision_event(
+            db,
+            component='a_class_live_enqueue',
+            event_type='entry_block',
+            decision='block',
+            reason='a_class_live_daily_loss_budget_hit',
+            data_source='canonical_trade_ledger',
+            payload=budget_state,
+            event_ts=now_ts,
+        )
+        return 0
+
+    active_count = active_a_class_fastlane_count(positions, pending_entries)
+    if active_count >= live_max_concurrent:
+        record_decision_event(
+            db,
+            component='a_class_live_enqueue',
+            event_type='entry_block',
+            decision='block',
+            reason='a_class_live_concurrency_cap',
+            data_source='pending_entries+positions',
+            payload={
+                'active_count': active_count,
+                'live_max_concurrent': live_max_concurrent,
+                'budget_state': budget_state,
+            },
+            event_ts=now_ts,
+        )
+        return 0
+
+    enqueued = 0
+    for result in sorted(
+        candidates,
+        key=lambda item: (
+            _safe_float(((item or {}).get('decision') or {}).get('score'), 0.0),
+            _safe_float(((item or {}).get('decision') or {}).get('expected_rr'), 0.0),
+        ),
+        reverse=True,
+    ):
+        if enqueued >= live_max_per_scan:
+            break
+        if max_positions is not None and len(positions) + len(pending_entries) >= max_positions:
+            break
+        if active_a_class_fastlane_count(positions, pending_entries) >= live_max_concurrent:
+            break
+
+        candidate, decision, raw = _a_class_live_candidate_payload(result)
+        token_ca = str(candidate.get('token_ca') or '').strip()
+        if not token_ca:
+            continue
+        route = str(candidate.get('route_bucket') or 'A_GRADE').upper()
+        signal_ts = normalize_signal_ts_seconds(candidate.get('signal_ts')) or normalize_signal_ts_seconds(candidate.get('opportunity_ts')) or int(now_ts)
+        lifecycle_id = candidate.get('lifecycle_id') or build_lifecycle_id(token_ca, signal_ts)
+        symbol = candidate.get('symbol') or token_ca[:8]
+
+        existing_probe = probe_token_mutex_detail(pending_entries, positions, token_ca)
+        if lifecycle_id in pending_entries or existing_probe:
+            record_decision_event(
+                db,
+                component='a_class_live_enqueue',
+                event_type='skip',
+                decision='skip',
+                reason='already_pending_or_holding',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=signal_ts,
+                route=route,
+                data_source='a_class_decision_events+pending_entries',
+                payload={
+                    'existing': existing_probe,
+                    'a_class_result': result,
+                },
+                event_ts=now_ts,
+            )
+            continue
+
+        pool = (
+            candidate.get('pool')
+            or candidate.get('pool_address')
+            or raw.get('pool')
+            or raw.get('pool_address')
+            or raw.get('pair_address')
+        )
+        if not pool:
+            pool = get_pool_address(token_ca)
+        if not pool:
+            record_decision_event(
+                db,
+                component='a_class_live_enqueue',
+                event_type='entry_block',
+                decision='block',
+                reason='pool_not_found',
+                token_ca=token_ca,
+                symbol=symbol,
+                lifecycle_id=lifecycle_id,
+                signal_ts=signal_ts,
+                route=route,
+                data_source='a_class_decision_events+pool_lookup',
+                payload={'a_class_result': result},
+                event_ts=now_ts,
+            )
+            continue
+
+        size_sol = _a_class_live_pending_size(decision, config)
+        if size_sol <= 0:
+            continue
+        signal_price = _a_class_live_first_number(
+            candidate.get('current_price'),
+            raw.get('signal_price'),
+            raw.get('entry_price'),
+            raw.get('baseline_price'),
+        )
+        market_cap = _a_class_live_first_number(candidate.get('market_cap'), raw.get('market_cap'), raw.get('signal_mc')) or 0
+        liquidity_usd = _a_class_live_first_number(candidate.get('liquidity_usd'), raw.get('liquidity_usd'))
+        expected_upside = _safe_float(decision.get('expected_upside_pct'), None)
+        defined_risk = _safe_float(decision.get('defined_risk_pct'), None)
+
+        w_entry = watchlist.register(
+            ca=token_ca,
+            symbol=symbol,
+            signal_type=route,
+            pool_address=pool,
+            signal_ts=signal_ts,
+            premium_signal_id=raw.get('premium_signal_id') or raw.get('signal_id'),
+            signal_price=signal_price,
+            signal_mc=market_cap,
+            signal_super=raw.get('signal_super') or 0,
+            signal_holders=raw.get('holders') or raw.get('holder_count') or 0,
+            signal_vol24h=raw.get('volume_24h') or raw.get('vol24h') or raw.get('last_volume') or 0,
+            signal_tx24h=raw.get('tx24h') or raw.get('tx_m5') or raw.get('last_swaps') or 0,
+            signal_top10=candidate.get('top10_pct') or raw.get('top10_pct') or 0,
+        )
+        if w_entry:
+            try:
+                watchlist.update_position_state(w_entry['id'], signal_route=route)
+                w_entry = watchlist.get_by_id(w_entry['id']) or w_entry
+            except Exception:
+                pass
+
+        pending = {
+            'token_ca': token_ca,
+            'symbol': symbol,
+            'signal_ts': signal_ts,
+            'premium_signal_id': raw.get('premium_signal_id') or raw.get('signal_id'),
+            'signal_type': route,
+            'signal_route': route,
+            'signal_price': signal_price,
+            'market_cap': market_cap,
+            'liquidity_usd': liquidity_usd,
+            'pool': pool,
+            'staged_at': time.time(),
+            'trigger_price': signal_price,
+            'watchlist_id': (w_entry or {}).get('id'),
+            'kelly_position_sol': size_sol,
+            'matrix_scores': {},
+            'smart_entry_retries': 0,
+            'attempts': 0,
+            'last_debug_at': 0,
+            'w_entry': w_entry,
+            'momentum_snapshots': [],
+            'momentum_pct': _safe_float(candidate.get('momentum_pct'), 0.0) or 0.0,
+            'first_fire_pc_m5': raw.get('price_change_m5') or raw.get('momentum_pct'),
+            'spread_abort_count': 0,
+            'timing_passed': True,
+            'entry_mode': 'a_class_fastlane_tiny_canary',
+            'scout_mode': 'a_class_fastlane_tiny_canary',
+            'entry_branch': 'a_class_fastlane_tiny_canary',
+            'paper_only_scout': True,
+            'execution_scope': 'paper_only',
+            'replay_source': 'live_monitor_a_class_fastlane',
+            'stage_outcome': 'a_class_fastlane_tiny_canary_armed',
+            'source_component': candidate.get('source_component'),
+            'source_reject_reason': candidate.get('source_reason') or decision.get('reason'),
+            'quote_clean_seen': True,
+            'source_quote_clean_seen': True,
+            'final_reclaim_quote_executable': True,
+            'gmgn_pre_seen': bool(candidate.get('gmgn_pre_seen')),
+            'source_resonance': bool(candidate.get('source_resonance')),
+            'top10_pct': candidate.get('top10_pct'),
+            'bundler_rate': candidate.get('bundler_rate'),
+            'rat_trader_rate': candidate.get('rat_trader_rate'),
+            'entrapment_ratio': candidate.get('entrapment_ratio'),
+            'creator_close': candidate.get('creator_close'),
+            'risk_flags': candidate.get('risk_flags') or [],
+            'expected_rr': _safe_float(decision.get('expected_rr'), None),
+            'expected_upside_pct': expected_upside,
+            'defined_risk_pct': defined_risk,
+            'bottom_ticket_size_sol': size_sol,
+            'entry_readiness_policy': {
+                'lifecycle_profile': 'A_CLASS_FASTLANE',
+                'min_p_follow': 0.0,
+                'expected_upside_pct': (expected_upside * 100.0) if expected_upside is not None else 40.0,
+                'expected_loss_pct': (defined_risk * 100.0) if defined_risk is not None else 20.0,
+                'min_odds_r': 2.0,
+                'reason': 'a_class_fastlane_contract',
+            },
+            'a_class_fastlane': {
+                'enabled': True,
+                'source_decision_event': result,
+                'grade': decision.get('grade'),
+                'score': decision.get('score'),
+                'size_sol': size_sol,
+                'live_caps': {
+                    'live_max_size_sol': getattr(config, 'live_max_size_sol', 0.001),
+                    'live_max_concurrent': getattr(config, 'live_max_concurrent', 1),
+                    'live_daily_loss_budget_sol': getattr(config, 'live_daily_loss_budget_sol', 0.005),
+                },
+                'budget_state': budget_state,
+            },
+        }
+        stamp_dog_catcher_pending(
+            pending,
+            branch='a_class_fastlane_tiny_canary',
+            flags=['a_class_fastlane', 'paper_only_tiny'],
+            detail=pending['a_class_fastlane'],
+        )
+        pending_entries[lifecycle_id] = pending
+        record_decision_event(
+            db,
+            component='a_class_live_enqueue',
+            event_type='pending_entry',
+            decision='pending',
+            reason='a_class_fastlane_tiny_canary_armed',
+            token_ca=token_ca,
+            symbol=symbol,
+            lifecycle_id=lifecycle_id,
+            signal_ts=signal_ts,
+            signal_id=raw.get('premium_signal_id') or raw.get('signal_id'),
+            route=route,
+            data_source='a_class_decision_events+paper_monitor',
+            payload={
+                'a_class_result': result,
+                'position_size_sol': size_sol,
+                'pool': pool,
+                'budget_state': budget_state,
+            },
+            event_ts=now_ts,
+        )
+        if logger:
+            logger.info(
+                f"  [A_CLASS_LIVE_ENQUEUE] {symbol} pending "
+                f"route={route} size={size_sol:.3f}SOL score={_safe_float(decision.get('score'), 0.0):.1f}"
+            )
+        enqueued += 1
+    return enqueued
 
 
 def _scout_event_key(row):
@@ -21182,6 +21553,22 @@ def run_monitor(db):
                         limit=50,
                         logger=log,
                     )
+                    _a_class_live_enqueued = 0
+                    if a_class_config.enabled and not source_fail_closed and (_a_class_summary or {}).get('enter_candidates'):
+                        with positions_lock:
+                            _a_class_live_enqueued = enqueue_a_class_fastlane_tiny_candidates(
+                                db,
+                                watchlist,
+                                pending_entries,
+                                dict(positions),
+                                a_class_summary=_a_class_summary,
+                                now_ts=now,
+                                config=a_class_config,
+                                max_positions=max_positions,
+                                logger=log,
+                            )
+                        if _a_class_live_enqueued:
+                            last_progress = time.time()
                     if (_a_class_summary or {}).get('candidates'):
                         _a_class_sources = ",".join(
                             f"{_src}:{_detail.get('candidates', 0)}/{_detail.get('would_enter', 0)}/{_detail.get('block', 0)}"
@@ -21193,7 +21580,8 @@ def run_monitor(db):
                             f"shadow={_a_class_summary.get('shadow', 0)} "
                             f"block={_a_class_summary.get('block', 0)} "
                             f"sources={_a_class_sources or 'none'} "
-                            f"live_entry=false"
+                            f"live_entry={str(bool(a_class_config.enabled)).lower()} "
+                            f"live_enqueued={_a_class_live_enqueued}"
                         )
                 except Exception as _a_class_shadow_err:
                     log.debug(f"  [A_CLASS_SHADOW_SCAN] scan failed: {_a_class_shadow_err}")

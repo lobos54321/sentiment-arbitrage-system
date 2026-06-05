@@ -533,6 +533,80 @@ def test_shadow_scan_records_counterfactual_sources():
     assert db.execute("SELECT COUNT(*) FROM canonical_trade_ledger").fetchone()[0] == 0
 
 
+def test_live_enabled_shadow_scan_keeps_would_enter_and_returns_enter_candidates():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        CREATE TABLE paper_decision_events (
+            id INTEGER PRIMARY KEY,
+            event_ts REAL,
+            token_ca TEXT,
+            symbol TEXT,
+            lifecycle_id TEXT,
+            signal_ts INTEGER,
+            route TEXT,
+            component TEXT,
+            event_type TEXT,
+            decision TEXT,
+            reason TEXT,
+            data_source TEXT,
+            payload_json TEXT
+        );
+        """
+    )
+    payload_json = (
+        '{"quote_available":true,"quote_executable":true,"quote_clean":true,'
+        '"quote_source":"jupiter","quote_age_sec":4,"route_available":true,'
+        '"route_stable_recent":true,"liquidity_usd":90000,"spread_pct":0.8,'
+        '"gmgn_pre_seen":true,"gmgn_activity_fresh":true,'
+        '"source_resonance":true,"fresh_ath_refresh":true,"top10_pct":35,'
+        '"bundler_rate":0.01,"rat_trader_rate":0.01,"entrapment_ratio":0.01}'
+    )
+    db.execute(
+        """
+        INSERT INTO paper_decision_events (
+            id, event_ts, token_ca, symbol, lifecycle_id, signal_ts, route,
+            component, event_type, decision, reason, data_source, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            31,
+            996,
+            "LiveReadyToken",
+            "LIVE",
+            "life-live",
+            100,
+            "ATH",
+            "ath_uncertainty_scout",
+            "reject",
+            "block",
+            "scout_quality_buy_pressure_weak",
+            "paper_decision_events",
+            payload_json,
+        ),
+    )
+
+    summary = record_a_class_fastlane_shadow_candidates(
+        db,
+        now_ts=1000,
+        limit=10,
+        config=load_a_class_config({"A_CLASS_ENABLED": "true"}),
+    )
+
+    assert summary["candidates"] == 1
+    assert summary["would_enter"] == 1
+    assert len(summary["enter_candidates"]) == 1
+    row = db.execute("SELECT action FROM a_class_decision_events").fetchone()
+    assert row["action"] == "WOULD_ENTER"
+    opportunity = db.execute(
+        "SELECT would_enter_a_class, did_enter FROM opportunity_events"
+    ).fetchone()
+    assert opportunity["would_enter_a_class"] == 1
+    assert opportunity["did_enter"] == 0
+    assert db.execute("SELECT COUNT(*) FROM canonical_trade_ledger").fetchone()[0] == 0
+
+
 def test_external_alpha_candidate_uses_gmgn_state_and_snapshot_quote():
     row = {
         "chain": "sol",
