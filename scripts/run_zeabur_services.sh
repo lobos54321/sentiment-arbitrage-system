@@ -7,10 +7,16 @@ export ZEABUR_LOG_TRIM_MAX_MB="${ZEABUR_LOG_TRIM_MAX_MB:-64}"
 export ZEABUR_LOG_TRIM_KEEP_MB="${ZEABUR_LOG_TRIM_KEEP_MB:-16}"
 export ZEABUR_MAINTENANCE_INTERVAL_SEC="${ZEABUR_MAINTENANCE_INTERVAL_SEC:-300}"
 
-# A_CLASS is paper-only tiny canary by construction.  Zeabur can still disable
-# it explicitly with A_CLASS_ENABLED=false, but the production paper runtime
-# should not stay stuck in shadow-only once the live-safe wiring is deployed.
-export A_CLASS_ENABLED="${A_CLASS_ENABLED:-true}"
+# A_CLASS is paper-only tiny canary by construction.  The Zeabur service had
+# A_CLASS_ENABLED=false from the shadow phase, so use a separate force switch to
+# move the production paper runtime into the safe 0.001-SOL canary phase.
+# Set A_CLASS_SAFE_CANARY_FORCE=false to keep it shadow-only.
+export A_CLASS_SAFE_CANARY_FORCE="${A_CLASS_SAFE_CANARY_FORCE:-true}"
+if [ "${A_CLASS_SAFE_CANARY_FORCE}" != "false" ]; then
+  export A_CLASS_ENABLED=true
+else
+  export A_CLASS_ENABLED="${A_CLASS_ENABLED:-false}"
+fi
 export A_CLASS_LIVE_MAX_SIZE_SOL="${A_CLASS_LIVE_MAX_SIZE_SOL:-0.001}"
 export A_CLASS_LIVE_MAX_CONCURRENT="${A_CLASS_LIVE_MAX_CONCURRENT:-1}"
 export A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL="${A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL:-0.005}"
