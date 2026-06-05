@@ -32,7 +32,9 @@ PAPER_DB_BACKUP_KEEP = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_KEEP", "12"))
 PAPER_DB_BACKUP_MIN_INTERVAL_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_MIN_INTERVAL_SEC", "3600"))
 
 LOG_NAMES = [
+    "dashboard.log",
     "node.log",
+    "maintenance.log",
     "runtime.log",
     "paper-trader.log",
     "paper-fast-lane.log",

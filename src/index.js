@@ -170,6 +170,11 @@ function premiumLiveExecutionEnabled(config = {}) {
 }
 
 function startDashboardOnce() {
+  if (!envFlag('EMBEDDED_DASHBOARD_ENABLED', true)) {
+    global.__dashboardStarted = true;
+    console.log('[Dashboard] embedded dashboard disabled; expecting standalone dashboard supervisor');
+    return;
+  }
   if (global.__dashboardStarted) return;
   global.__dashboardStarted = true;
   startDashboardServer();

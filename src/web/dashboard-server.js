@@ -1512,7 +1512,7 @@ const originalConsoleError = console.error;
 const originalConsoleWarn = console.warn;
 
 // 日志文件路径
-const logsDir = join(projectRoot, 'logs');
+const logsDir = process.env.DASHBOARD_RUNTIME_LOG_DIR || join(projectRoot, 'logs');
 const runtimeLogPath = join(logsDir, 'runtime.log');
 const DASHBOARD_AUDIT_SCHEMA_VERSION = 'v2.7.0.audit_log_integrity.v1';
 const DASHBOARD_AUDIT_GENESIS_HASH = 'GENESIS';
@@ -2366,7 +2366,9 @@ export function buildStorageHealthSnapshot(options = {}) {
     ['lifecycle_tracks_wal', `${lifecycleDbPath}-wal`],
   ].map(describeFile);
   const logFiles = [
+    'dashboard.log',
     'node.log',
+    'maintenance.log',
     'paper-trader.log',
     'paper-fast-lane.log',
     'paper-db-retention.log',
@@ -7433,6 +7435,10 @@ const server = http.createServer(async (req, res) => {
       message: 'Sentiment Arbitrage API Running',
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
+      runtime_role: process.env.DASHBOARD_RUNTIME_ROLE || (process.env.EMBEDDED_DASHBOARD_ENABLED === 'false' ? 'worker' : 'standalone_or_embedded_dashboard'),
+      pid: process.pid,
+      port: PORT,
+      uptime_seconds: Math.floor(process.uptime()),
       startup_error: global.__startupError || null,
       shadow_sidecars: {
         available: shadowSidecars.length > 0,

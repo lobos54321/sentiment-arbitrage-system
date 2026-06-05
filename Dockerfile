@@ -30,6 +30,7 @@ RUN pip3 install --no-cache-dir --break-system-packages redis
 # Copy application code
 COPY . .
 
-EXPOSE 3000
+ENV PORT=8080
+EXPOSE 8080
 
 CMD ["bash", "scripts/run_zeabur_services.sh"]

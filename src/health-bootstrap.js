@@ -7,8 +7,16 @@
 
 import { startDashboardServer } from './web/dashboard-server.js';
 
+const embeddedDashboardEnabled = !['0', 'false', 'no', 'off'].includes(
+  String(process.env.EMBEDDED_DASHBOARD_ENABLED ?? 'true').trim().toLowerCase(),
+);
+
 global.__dashboardStarted = true;
-startDashboardServer();
+if (embeddedDashboardEnabled) {
+  startDashboardServer();
+} else {
+  console.log('[health-bootstrap] embedded dashboard disabled; runtime will not bind PORT');
+}
 
 try {
   const runtime = await import('./index.js');
