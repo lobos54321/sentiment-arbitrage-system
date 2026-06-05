@@ -2269,12 +2269,18 @@ test('a class block cause classifier separates infra market and policy blocks', 
     data_confidence: 'unknown',
   });
   const policy = classifyAClassBlocker('expected_rr_below_2', {});
+  const lowLiquidity = classifyAClassBlocker('liquidity_below_min', {});
+  const entrapmentRed = classifyAClassBlocker('entrapment_red_flag', {});
+  const bundlerRed = classifyAClassBlocker('bundler_red_flag', {});
 
   assert.equal(routeInfra.category, 'INFRA');
   assert.equal(routeInfra.recoverability, 'provider_or_evidence_recoverable');
   assert.equal(routeMarket.category, 'MARKET');
   assert.equal(quoteInfra.category, 'INFRA');
   assert.equal(policy.category, 'POLICY');
+  assert.equal(lowLiquidity.category, 'MARKET');
+  assert.equal(entrapmentRed.category, 'MARKET');
+  assert.equal(bundlerRed.category, 'MARKET');
 
   const marketWins = classifyAClassBlockCause({
     action: 'BLOCK',

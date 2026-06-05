@@ -2552,10 +2552,10 @@ export function classifyAClassBlocker(blocker, context = {}) {
     };
   }
 
-  if (/\b(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)\b/.test(b)) {
+  if (/(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)/.test(b)) {
     return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'hard_security_or_structure_red_flag' };
   }
-  if (/\b(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)\b/.test(b)) {
+  if (/(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)/.test(b)) {
     return { blocker, category: 'MARKET', recoverability: 'exclude_from_clean_denominator', reason: 'market_execution_or_liquidity_red_flag' };
   }
   if (b.includes('route_unavailable')) {

@@ -41,6 +41,12 @@ def test_event_market_red_flag_wins_over_infra_quote_missing():
     assert event["blocked"] is True
 
 
+def test_live_market_red_flag_names_are_market():
+    assert classify_blocker("liquidity_below_min", {})["category"] == "MARKET"
+    assert classify_blocker("entrapment_red_flag", {})["category"] == "MARKET"
+    assert classify_blocker("bundler_red_flag", {})["category"] == "MARKET"
+
+
 def test_build_breakdown_from_a_class_and_opportunity_events():
     db = memory_db()
     db.executescript(

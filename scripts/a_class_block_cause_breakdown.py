@@ -135,9 +135,9 @@ def classify_blocker(blocker: str, row: dict[str, Any]) -> dict[str, Any]:
 
     if not b:
         return {"blocker": blocker, "category": "UNKNOWN", "recoverability": "unknown", "reason": "empty_blocker"}
-    if re.search(r"\b(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)\b", b):
+    if re.search(r"(creator[_ -]?(close|dump)|rug|security|honeypot|bundler|rat[_ -]?trader|entrapment|top10|mint[_ -]?authority|freeze[_ -]?authority)", b):
         return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "hard_security_or_structure_red_flag"}
-    if re.search(r"\b(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)\b", b):
+    if re.search(r"(liquidity[_ -]?(below|min|too[_ -]?low)|spread[_ -]?(extreme|too[_ -]?high)|route[_ -]?failure[_ -]?red|trapped|token[_ -]?not[_ -]?tradable|no[_ -]?route)", b):
         return {"blocker": blocker, "category": "MARKET", "recoverability": "exclude_from_clean_denominator", "reason": "market_execution_or_liquidity_red_flag"}
     if "route_unavailable" in b:
         if market_route_failure:
