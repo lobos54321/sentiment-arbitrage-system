@@ -180,6 +180,161 @@ function startDashboardOnce() {
   startDashboardServer();
 }
 
+let indexRuntimeChild = null;
+let indexRuntimeSupervisorStopping = false;
+
+function indexRuntimeLogPath() {
+  return process.env.NODE_RUNTIME_LOG_PATH || join(
+    process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data',
+    'node.log',
+  );
+}
+
+function appendIndexRuntimeOutput(chunk, stream = process.stdout) {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+  try {
+    stream.write(text);
+  } catch {}
+  try {
+    const logPath = indexRuntimeLogPath();
+    fs.mkdirSync(dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, text);
+  } catch {}
+}
+
+function indexRuntimeSupervisorEnabled(mode) {
+  if (mode !== 'premium') return false;
+  if (envFlag('HEALTH_BOOTSTRAP_CHILD', false)) return false;
+  if (!envFlag('EMBEDDED_DASHBOARD_ENABLED', true)) return false;
+  return envFlag('INDEX_RUNTIME_SUPERVISOR_ENABLED', true);
+}
+
+function indexRuntimeRestartDelayMs() {
+  return Math.max(
+    1000,
+    Number(process.env.INDEX_RUNTIME_RESTART_MS || process.env.HEALTH_BOOTSTRAP_RUNTIME_RESTART_MS || 15000) || 15000,
+  );
+}
+
+function indexRuntimeArgs() {
+  return [
+    ...process.execArgv,
+    'src/index.js',
+    ...process.argv.slice(2),
+  ];
+}
+
+function updateIndexRuntimeStatus(patch = {}) {
+  global.__runtimeWorkerStatus = {
+    schema_version: 'index_runtime_worker.v1',
+    mode: 'premium',
+    child_runtime_enabled: true,
+    pid: indexRuntimeChild?.pid || null,
+    running: Boolean(indexRuntimeChild && indexRuntimeChild.exitCode == null && indexRuntimeChild.signalCode == null),
+    updated_at: new Date().toISOString(),
+    ...(global.__runtimeWorkerStatus || {}),
+    ...patch,
+  };
+}
+
+function startIndexRuntimeChild() {
+  if (indexRuntimeSupervisorStopping) return;
+  const args = indexRuntimeArgs();
+  updateIndexRuntimeStatus({
+    running: false,
+    last_start_attempt_at: new Date().toISOString(),
+    command: `${process.execPath} ${args.join(' ')}`,
+  });
+  global.__startupError = null;
+  appendIndexRuntimeOutput(`[index-supervisor] ${new Date().toISOString()} starting runtime child: ${args.join(' ')}\n`);
+  indexRuntimeChild = spawn(process.execPath, args, {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      EMBEDDED_DASHBOARD_ENABLED: 'false',
+      HEALTH_BOOTSTRAP_CHILD: '1',
+      INDEX_RUNTIME_SUPERVISOR_ENABLED: 'false',
+      DASHBOARD_RUNTIME_LOG_DIR: process.env.DASHBOARD_RUNTIME_LOG_DIR || (process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data'),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  updateIndexRuntimeStatus({
+    pid: indexRuntimeChild.pid,
+    running: true,
+    started_at: new Date().toISOString(),
+    last_error: null,
+  });
+  indexRuntimeChild.stdout.on('data', (chunk) => appendIndexRuntimeOutput(chunk, process.stdout));
+  indexRuntimeChild.stderr.on('data', (chunk) => appendIndexRuntimeOutput(chunk, process.stderr));
+  indexRuntimeChild.on('error', (error) => {
+    const message = error?.message || String(error);
+    global.__startupError = {
+      message,
+      stack: error?.stack || null,
+      at: new Date().toISOString(),
+      mode: 'premium',
+      component: 'index_runtime_child_spawn',
+    };
+    updateIndexRuntimeStatus({
+      running: false,
+      last_error: message,
+      last_exit_at: new Date().toISOString(),
+    });
+    appendIndexRuntimeOutput(`[index-supervisor] runtime child spawn error: ${message}\n`, process.stderr);
+  });
+  indexRuntimeChild.on('exit', (code, signal) => {
+    const exitedAt = new Date().toISOString();
+    const restartDelayMs = indexRuntimeSupervisorStopping ? null : indexRuntimeRestartDelayMs();
+    const message = `runtime child exited code=${code} signal=${signal || ''}`;
+    global.__startupError = {
+      message,
+      stack: null,
+      at: exitedAt,
+      mode: 'premium',
+      component: 'index_runtime_child_exit',
+    };
+    updateIndexRuntimeStatus({
+      running: false,
+      pid: null,
+      last_exit_at: exitedAt,
+      last_exit_code: code,
+      last_exit_signal: signal || null,
+      restart_delay_ms: restartDelayMs,
+    });
+    appendIndexRuntimeOutput(
+      `[index-supervisor] ${exitedAt} ${message}${indexRuntimeSupervisorStopping ? '' : `; restarting in ${restartDelayMs}ms`}\n`,
+      code === 0 ? process.stdout : process.stderr,
+    );
+    indexRuntimeChild = null;
+    if (!indexRuntimeSupervisorStopping) {
+      setTimeout(startIndexRuntimeChild, restartDelayMs).unref();
+    }
+  });
+}
+
+function stopIndexRuntimeSupervisor(signal) {
+  indexRuntimeSupervisorStopping = true;
+  updateIndexRuntimeStatus({
+    shutdown_signal: signal,
+    shutdown_at: new Date().toISOString(),
+  });
+  if (indexRuntimeChild && indexRuntimeChild.exitCode == null && indexRuntimeChild.signalCode == null) {
+    try {
+      indexRuntimeChild.kill('SIGTERM');
+    } catch {}
+  }
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+function startIndexRuntimeSupervisor() {
+  process.env.DASHBOARD_RUNTIME_ROLE ||= 'index_dashboard_supervisor';
+  startDashboardOnce();
+  updateIndexRuntimeStatus();
+  process.on('SIGTERM', () => stopIndexRuntimeSupervisor('SIGTERM'));
+  process.on('SIGINT', () => stopIndexRuntimeSupervisor('SIGINT'));
+  startIndexRuntimeChild();
+}
+
 function startPythonSidecar({ name, args, env = {}, logPath }) {
   let child = null;
   let stopped = false;
@@ -1715,13 +1870,18 @@ class PremiumChannelSystem {
 // ==========================================
 
 export async function main() {
-  runVolumePreflightOnce();
-  runPaperDbRetentionPreflightOnce();
-  runV27EventLogRecoveryPreflightOnce();
-
   const mode = process.argv.includes('--premium') || process.env.PREMIUM_MODE_ENABLED === 'true'
     ? 'premium'
     : 'default';
+
+  if (indexRuntimeSupervisorEnabled(mode)) {
+    startIndexRuntimeSupervisor();
+    return;
+  }
+
+  runVolumePreflightOnce();
+  runPaperDbRetentionPreflightOnce();
+  runV27EventLogRecoveryPreflightOnce();
 
   // In Zeabur, keep the dashboard/health endpoint alive even if the trading
   // runtime cannot start because a SQLite file or the persistent volume is in a

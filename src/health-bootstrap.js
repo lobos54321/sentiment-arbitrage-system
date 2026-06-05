@@ -162,6 +162,7 @@ if (childRuntimeEnabled) {
   startRuntimeChild();
 } else {
   try {
+    process.env.INDEX_RUNTIME_SUPERVISOR_ENABLED ||= 'false';
     const runtime = await import('./index.js');
     await runtime.main();
   } catch (error) {
