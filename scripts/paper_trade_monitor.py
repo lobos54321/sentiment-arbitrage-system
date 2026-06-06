@@ -12781,6 +12781,9 @@ def build_final_entry_contract_candidate(
     pending = pending or {}
     execution = execution if isinstance(execution, dict) else {}
     now_ts = float(now_ts or time.time())
+    a_class_detail = pending.get('a_class_fastlane') if isinstance(pending.get('a_class_fastlane'), dict) else {}
+    source_result = a_class_detail.get('source_decision_event') if isinstance(a_class_detail.get('source_decision_event'), dict) else {}
+    source_candidate = source_result.get('candidate') if isinstance(source_result.get('candidate'), dict) else {}
     rr_fields = _entry_contract_rr_fields(entry_decision_contract)
     pending_expected_rr = _safe_float(pending.get('expected_rr'), None)
     pending_expected_upside_pct = _safe_float(pending.get('expected_upside_pct'), None)
@@ -12816,6 +12819,21 @@ def build_final_entry_contract_candidate(
         'liquidity_usd': liquidity_usd,
         'market_cap': market_cap,
         'data_confidence': 'quote_only' if executable else entry_execution_availability,
+        'provider_hydrate_outcome': (
+            pending.get('provider_hydrate_outcome')
+            or source_candidate.get('provider_hydrate_outcome')
+        ),
+        'provider_hydrate_reason': (
+            pending.get('provider_hydrate_reason')
+            or source_candidate.get('provider_hydrate_reason')
+        ),
+        'provider_hydrate_source_table': pending.get('provider_hydrate_source_table') or source_result.get('source_table'),
+        'provider_hydrate_source_component': (
+            pending.get('provider_hydrate_source_component')
+            or source_candidate.get('source_component')
+            or source_result.get('source_component')
+        ),
+        'source_opportunity_key': pending.get('source_opportunity_key') or source_result.get('opportunity_key'),
         'expected_rr': rr_fields.get('expected_rr') or pending_expected_rr,
         'expected_upside_pct': rr_fields.get('expected_upside_pct') or pending_expected_upside_pct,
         'defined_risk_pct': rr_fields.get('defined_risk_pct') or pending_defined_risk_pct,
@@ -12868,6 +12886,14 @@ def record_monitor_opportunity_event(db, *, final_candidate, final_decision, eve
             'quote_executable': candidate.get('quote_executable'),
             'quote_clean': candidate.get('quote_clean'),
             'route_available': candidate.get('route_available'),
+            'quote_source': candidate.get('quote_source'),
+            'quote_age_sec': candidate.get('quote_age_sec'),
+            'data_confidence': candidate.get('data_confidence'),
+            'provider_hydrate_outcome': candidate.get('provider_hydrate_outcome'),
+            'provider_hydrate_reason': candidate.get('provider_hydrate_reason'),
+            'provider_reason': candidate.get('provider_hydrate_reason') or candidate.get('provider_reason'),
+            'route_failure_reason': candidate.get('route_failure_reason'),
+            'quote_failure_reason': candidate.get('quote_failure_reason'),
             'liquidity_usd': candidate.get('liquidity_usd'),
             'spread_pct': candidate.get('spread_pct'),
             'market_cap': candidate.get('market_cap'),
@@ -13279,6 +13305,11 @@ def enqueue_a_class_fastlane_tiny_candidates(
             'stage_outcome': f'{A_CLASS_FASTLANE_TINY_CANARY_MODE}_armed',
             'source_component': candidate.get('source_component'),
             'source_reject_reason': candidate.get('source_reason') or decision.get('reason'),
+            'source_opportunity_key': result.get('opportunity_key'),
+            'provider_hydrate_outcome': candidate.get('provider_hydrate_outcome'),
+            'provider_hydrate_reason': candidate.get('provider_hydrate_reason'),
+            'provider_hydrate_source_table': result.get('source_table'),
+            'provider_hydrate_source_component': candidate.get('source_component'),
             'quote_clean_seen': True,
             'source_quote_clean_seen': True,
             'final_reclaim_quote_executable': True,
