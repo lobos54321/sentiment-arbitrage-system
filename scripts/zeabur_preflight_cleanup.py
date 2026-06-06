@@ -133,6 +133,7 @@ def should_quarantine(path: Path, reason: str) -> bool:
         or "database disk image" in reason_l
         or "file is not a database" in reason_l
         or "quick_check" in reason_l
+        or "zero-byte" in reason_l
     )
 
 
@@ -233,6 +234,13 @@ def checkpoint_db(path: Path) -> None:
             return
     if path.name == "paper_trades.db" and sqlite_header_invalid(path):
         reason = "file is not a database: invalid sqlite header"
+        log(f"WARN checkpoint failed {path.name}: {reason}")
+        write_integrity_marker(path, reason)
+        if should_quarantine(path, reason):
+            quarantine_db_family(path, reason)
+        return
+    if path.name == "paper_trades.db" and path.exists() and path.stat().st_size == 0:
+        reason = "zero-byte paper DB: live path must be recreated from schema"
         log(f"WARN checkpoint failed {path.name}: {reason}")
         write_integrity_marker(path, reason)
         if should_quarantine(path, reason):
