@@ -17,6 +17,15 @@ from ai_candidate_rater import review_a_class_candidate
 from a_class_provider_hydrator import hydrate_provider_quote
 
 
+DEFAULT_PROVIDER_HYDRATE_SOURCE_BUDGETS = {
+    "paper_missed_signal_attribution": 6,
+    "paper_fast_entry_queue": 8,
+    "source_resonance_candidates": 10,
+    "external_alpha_state": 10,
+    "paper_decision_events": 4,
+}
+
+
 def _get(value, key, default=None):
     if isinstance(value, dict):
         return value.get(key, default)
@@ -1102,15 +1111,24 @@ def _maybe_hydrate_provider_evidence(candidate, *, now_ts, config, provider_budg
     if _candidate_has_non_provider_market_red(candidate, config):
         return _apply_candidate_evidence(candidate, {
             "provider_hydrate_outcome": "skipped_hard_market_red",
+            "provider_hydrate_reason": "non_provider_market_red",
         }, now_ts=now_ts)
     if provider_budget is not None:
         remaining = int(provider_budget.get("remaining", 0) or 0)
-        if remaining <= 0:
+        source = provider_budget.get("source")
+        source_remaining = None
+        source_remaining_map = provider_budget.get("source_remaining")
+        if source and isinstance(source_remaining_map, dict):
+            source_remaining = int(source_remaining_map.get(source, 0) or 0)
+        if remaining <= 0 or (source_remaining is not None and source_remaining <= 0):
             return _apply_candidate_evidence(candidate, {
-                "provider_hydrate_outcome": "skipped_budget",
+                "provider_hydrate_outcome": "skipped_budget" if remaining <= 0 else "skipped_source_budget",
+                "provider_hydrate_reason": "global_budget_exhausted" if remaining <= 0 else f"source_budget_exhausted:{source}",
                 "data_confidence": candidate.data_confidence or "unknown",
             }, now_ts=now_ts)
         provider_budget["remaining"] = remaining - 1
+        if source_remaining is not None:
+            source_remaining_map[source] = source_remaining - 1
     try:
         evidence = hydrate_provider_quote(candidate, now_ts=now_ts, config=config, fetcher=provider_fetcher)
     except Exception as exc:
@@ -1812,6 +1830,55 @@ def _update_summary(summary, source_table, stored_action):
         source_summary["shadow"] += 1
 
 
+def _parse_provider_hydrate_source_budgets(config, sources):
+    raw = getattr(config, "provider_hydrate_source_budget_json", "") or ""
+    parsed = {}
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                parsed = {
+                    str(key): max(0, int(value or 0))
+                    for key, value in data.items()
+                }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+    budgets = dict(DEFAULT_PROVIDER_HYDRATE_SOURCE_BUDGETS)
+    budgets.update(parsed)
+    return {
+        source_table: max(0, int(budgets.get(source_table, 0) or 0))
+        for source_table, _query_func, _builder in sources
+    }
+
+
+def _provider_hydrate_outcome_for_summary(candidate, config):
+    outcome = getattr(candidate, "provider_hydrate_outcome", None)
+    if outcome:
+        return str(outcome)
+    if _candidate_has_fresh_execution_evidence(candidate, config):
+        return "existing_fresh_evidence"
+    if not getattr(config, "provider_hydrate_enabled", True):
+        return "provider_disabled"
+    return "not_attempted"
+
+
+def _update_hydration_summary(summary, source_table, candidate, config):
+    outcome = _provider_hydrate_outcome_for_summary(candidate, config)
+    hydration = summary.setdefault("hydration", {})
+    outcomes = hydration.setdefault("outcomes", {})
+    outcomes[outcome] = int(outcomes.get(outcome, 0) or 0) + 1
+    if getattr(candidate, "quote_executable", False) and getattr(candidate, "quote_clean", False):
+        hydration["quote_clean_candidates"] = int(hydration.get("quote_clean_candidates", 0) or 0) + 1
+    source_summary = summary.setdefault("sources", {}).setdefault(
+        source_table,
+        {"candidates": 0, "would_enter": 0, "shadow": 0, "block": 0},
+    )
+    source_hydration = source_summary.setdefault("hydration_outcomes", {})
+    source_hydration[outcome] = int(source_hydration.get(outcome, 0) or 0) + 1
+    if getattr(candidate, "quote_executable", False) and getattr(candidate, "quote_clean", False):
+        source_summary["quote_clean_candidates"] = int(source_summary.get("quote_clean_candidates", 0) or 0) + 1
+
+
 def _query_recent_missed_attribution(db, now_ts, config, limit):
     if not _table_exists(db, "paper_missed_signal_attribution"):
         return []
@@ -2003,6 +2070,12 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
         "shadow": 0,
         "block": 0,
         "sources": {},
+        "hydration": {
+            "outcomes": {},
+            "quote_clean_candidates": 0,
+            "global_budget_initial": max(0, int(getattr(config, "provider_hydrate_max_per_scan", 0) or 0)),
+            "global_budget_remaining": max(0, int(getattr(config, "provider_hydrate_max_per_scan", 0) or 0)),
+        },
         "enter_candidates": [],
     }
     sources = (
@@ -2013,9 +2086,12 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
         ("paper_decision_events", _query_recent_decision_events, candidate_from_decision_event_row),
     )
     errors = {}
+    source_budgets = _parse_provider_hydrate_source_budgets(config, sources)
     provider_budget = {
-        "remaining": max(0, int(getattr(config, "provider_hydrate_max_per_scan", 0) or 0))
+        "remaining": max(0, int(getattr(config, "provider_hydrate_max_per_scan", 0) or 0)),
+        "source_remaining": dict(source_budgets),
     }
+    summary["hydration"]["source_budget_initial"] = dict(source_budgets)
     for source_table, query_func, builder in sources:
         try:
             rows = query_func(db, now_ts, config, per_source_limit)
@@ -2028,6 +2104,7 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
             row_dict = _row_to_dict(row)
             try:
                 candidate = builder(row, now_ts=now_ts)
+                provider_budget["source"] = source_table
                 candidate = enrich_candidate_with_db_evidence(
                     db,
                     candidate,
@@ -2036,6 +2113,7 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
                     provider_budget=provider_budget,
                     logger=logger,
                 )
+                _update_hydration_summary(summary, source_table, candidate, config)
                 result = _evaluate_and_record_candidate(
                     db,
                     candidate=candidate,
@@ -2058,4 +2136,6 @@ def record_a_class_fastlane_shadow_candidates(db, *, now_ts=None, limit=50, conf
                     summary["enter_candidates"].append(result)
     if errors:
         summary["errors"] = errors
+    summary["hydration"]["global_budget_remaining"] = int(provider_budget.get("remaining", 0) or 0)
+    summary["hydration"]["source_budget_remaining"] = dict(provider_budget.get("source_remaining") or {})
     return summary

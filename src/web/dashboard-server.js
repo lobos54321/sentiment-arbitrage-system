@@ -2685,10 +2685,36 @@ function finalizeBreakdownGroups(map, sortKey = 'n') {
   }).sort((a, b) => Number(b[sortKey] || 0) - Number(a[sortKey] || 0) || Number(b.n || 0) - Number(a.n || 0));
 }
 
+function incrementHydrationGroup(map, key, row, extra = {}) {
+  const group = map.get(key) || {
+    ...extra,
+    n: 0,
+    unique_tokens: 0,
+    quote_clean_n: 0,
+    would_enter_n: 0,
+    did_enter_n: 0,
+    latest_event_ts: null,
+    token_set: new Set(),
+  };
+  group.n += 1;
+  if (row.token_ca) group.token_set.add(row.token_ca);
+  if (boolishValue(row.quote_clean)) group.quote_clean_n += 1;
+  const action = String(row.action || '').toUpperCase();
+  if (action === 'WOULD_ENTER' || String(row.would_action || '').toUpperCase() === 'WOULD_ENTER' || boolishValue(row.would_enter_a_class)) {
+    group.would_enter_n += 1;
+  }
+  if (action === 'ENTER' || boolishValue(row.did_enter)) group.did_enter_n += 1;
+  if (row.event_ts != null) group.latest_event_ts = Math.max(Number(group.latest_event_ts || 0), Number(row.event_ts || 0));
+  map.set(key, group);
+  return group;
+}
+
 export function buildAClassBlockCauseBreakdown(rows = [], options = {}) {
   const categoryMap = new Map();
   const blockerMap = new Map();
   const sourceMap = new Map();
+  const hydrationMap = new Map();
+  const hydrationSourceMap = new Map();
   const recent = [];
   const uniqueTokens = new Set();
   const limit = Math.max(0, Math.min(Number(options.limit || 50), 500));
@@ -2707,6 +2733,23 @@ export function buildAClassBlockCauseBreakdown(rows = [], options = {}) {
     if (classification.did_enter) didEnter += 1;
     if (row.token_ca) uniqueTokens.add(row.token_ca);
     if (row.event_ts != null) latestEventTs = Math.max(Number(latestEventTs || 0), Number(row.event_ts || 0));
+    const hydrateOutcome = String(row.hydrate_outcome ?? row.provider_hydrate_outcome ?? 'not_recorded') || 'not_recorded';
+    const dataConfidence = String(row.data_confidence ?? 'unknown') || 'unknown';
+    incrementHydrationGroup(hydrationMap, hydrateOutcome, row, {
+      provider_hydrate_outcome: hydrateOutcome,
+    });
+    const hydrationSourceKey = [
+      row.source_kind || row.source_table || row.source_type || 'unknown',
+      row.source_component || 'unknown',
+      hydrateOutcome,
+      dataConfidence,
+    ].join('|');
+    incrementHydrationGroup(hydrationSourceMap, hydrationSourceKey, row, {
+      source_kind: row.source_kind || row.source_table || row.source_type || 'unknown',
+      source_component: row.source_component || 'unknown',
+      provider_hydrate_outcome: hydrateOutcome,
+      data_confidence: dataConfidence,
+    });
     incrementBreakdownGroup(categoryMap, classification.category, row, classification, {
       category: classification.category,
       recoverability: classification.category === 'INFRA'
@@ -2752,6 +2795,8 @@ export function buildAClassBlockCauseBreakdown(rows = [], options = {}) {
         quote_source: row.quote_source ?? null,
         quote_failure_reason: row.quote_failure_reason ?? row.route_failure_reason ?? null,
         evidence_status: row.evidence_status ?? null,
+        hydrate_outcome: hydrateOutcome,
+        hydrate_success: boolishValue(row.hydrate_success),
       });
     }
   }
@@ -2791,6 +2836,8 @@ export function buildAClassBlockCauseBreakdown(rows = [], options = {}) {
     category_summary: categorySummary,
     blocker_summary: finalizeBreakdownGroups(blockerMap).slice(0, 100),
     source_component_summary: finalizeBreakdownGroups(sourceMap).slice(0, 100),
+    hydrate_summary: finalizeBreakdownGroups(hydrationMap).slice(0, 100),
+    hydrate_source_summary: finalizeBreakdownGroups(hydrationSourceMap).slice(0, 100),
     recent_events: recent,
     interpretation: {
       infra_recoverable: 'Provider/evidence gaps that should be excluded from clean denominator until quote/route evidence is fixed.',

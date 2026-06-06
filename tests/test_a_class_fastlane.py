@@ -14,6 +14,7 @@ from a_class_fastlane import (
     enrich_candidate_with_db_evidence,
     evaluate_a_class_fastlane,
     hard_prefilter,
+    _parse_provider_hydrate_source_budgets,
     record_a_class_fastlane_shadow_candidates,
 )
 from a_class_provider_hydrator import reset_hydrator_state
@@ -853,6 +854,117 @@ def test_provider_hydrator_budget_prevents_extra_probe():
 
     assert calls == []
     assert hydrated.quote_executable is False
+
+
+def test_provider_hydrator_respects_source_budget_without_spending_global_budget():
+    reset_hydrator_state()
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {"status": 200, "latency_ms": 1, "data": {"outAmount": "1", "routePlan": [{}]}}
+
+    candidate = base_candidate(
+        quote_available=False,
+        quote_executable=False,
+        quote_source=None,
+        quote_age_sec=None,
+        route_available=False,
+        spread_pct=None,
+        spread_verified=False,
+    )
+    budget = {
+        "remaining": 3,
+        "source": "source_resonance_candidates",
+        "source_remaining": {"source_resonance_candidates": 0},
+    }
+    hydrated = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        candidate,
+        now_ts=2_000,
+        config=load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"}),
+        provider_budget=budget,
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert calls == []
+    assert budget["remaining"] == 3
+    assert budget["source_remaining"]["source_resonance_candidates"] == 0
+    assert hydrated.provider_hydrate_outcome == "skipped_source_budget"
+    assert hydrated.provider_hydrate_reason == "source_budget_exhausted:source_resonance_candidates"
+
+
+def test_provider_hydrator_spends_source_and_global_budget_together():
+    reset_hydrator_state()
+    calls = []
+
+    def fake_fetcher(**kwargs):
+        calls.append(kwargs)
+        return {"status": 200, "latency_ms": 1, "data": {"outAmount": "1", "routePlan": [{}]}}
+
+    budget = {
+        "remaining": 2,
+        "source": "external_alpha_state",
+        "source_remaining": {"external_alpha_state": 1},
+    }
+    config = load_a_class_config({"A_CLASS_PROVIDER_HYDRATE_ENABLED": "true"})
+    first = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        base_candidate(
+            token_ca="TokenCA123",
+            quote_available=False,
+            quote_executable=False,
+            quote_source=None,
+            quote_age_sec=None,
+            route_available=False,
+            spread_pct=None,
+            spread_verified=False,
+        ),
+        now_ts=2_000,
+        config=config,
+        provider_budget=budget,
+        provider_fetcher=fake_fetcher,
+    )
+    second = enrich_candidate_with_db_evidence(
+        sqlite3.connect(":memory:"),
+        base_candidate(
+            token_ca="TokenCA456",
+            quote_available=False,
+            quote_executable=False,
+            quote_source=None,
+            quote_age_sec=None,
+            route_available=False,
+            spread_pct=None,
+            spread_verified=False,
+        ),
+        now_ts=2_001,
+        config=config,
+        provider_budget=budget,
+        provider_fetcher=fake_fetcher,
+    )
+
+    assert len(calls) == 1
+    assert first.provider_hydrate_outcome == "success"
+    assert budget["remaining"] == 1
+    assert budget["source_remaining"]["external_alpha_state"] == 0
+    assert second.provider_hydrate_outcome == "skipped_source_budget"
+
+
+def test_provider_hydrate_source_budget_config_is_per_source():
+    sources = (
+        ("paper_missed_signal_attribution", None, None),
+        ("source_resonance_candidates", None, None),
+        ("external_alpha_state", None, None),
+    )
+    config = load_a_class_config({
+        "A_CLASS_PROVIDER_HYDRATE_SOURCE_BUDGET_JSON": '{"source_resonance_candidates": 12}'
+    })
+
+    budgets = _parse_provider_hydrate_source_budgets(config, sources)
+
+    assert budgets["paper_missed_signal_attribution"] == 6
+    assert budgets["source_resonance_candidates"] == 12
+    assert budgets["external_alpha_state"] == 10
 
 
 def test_provider_hydrator_caches_successful_quote():

@@ -21837,12 +21837,21 @@ def run_monitor(db):
                             f"{_src}:{_detail.get('candidates', 0)}/{_detail.get('would_enter', 0)}/{_detail.get('block', 0)}"
                             for _src, _detail in ((_a_class_summary or {}).get('sources') or {}).items()
                         )
+                        _hydrate_outcomes = ((_a_class_summary or {}).get('hydration') or {}).get('outcomes') or {}
+                        _a_class_hydrate = ",".join(
+                            f"{_outcome}:{_n}"
+                            for _outcome, _n in sorted(_hydrate_outcomes.items(), key=lambda _item: str(_item[0]))
+                        )
+                        _hydrate_budget = (_a_class_summary or {}).get('hydration') or {}
                         log.info(
                             f"  [A_CLASS_SHADOW_SCAN] candidates={_a_class_summary.get('candidates', 0)} "
                             f"would_enter={_a_class_summary.get('would_enter', 0)} "
                             f"shadow={_a_class_summary.get('shadow', 0)} "
                             f"block={_a_class_summary.get('block', 0)} "
                             f"sources={_a_class_sources or 'none'} "
+                            f"hydrate={_a_class_hydrate or 'none'} "
+                            f"quote_clean={_hydrate_budget.get('quote_clean_candidates', 0)} "
+                            f"provider_budget={_hydrate_budget.get('global_budget_remaining', 'n/a')}/{_hydrate_budget.get('global_budget_initial', 'n/a')} "
                             f"live_entry={str(bool(a_class_config.enabled)).lower()} "
                             f"live_enqueued={_a_class_live_enqueued}"
                         )

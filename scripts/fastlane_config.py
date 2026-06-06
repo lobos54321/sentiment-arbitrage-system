@@ -93,7 +93,14 @@ class AClassFastlaneConfig:
     shadow_scan_window_sec: float = 2 * 60 * 60
 
     provider_hydrate_enabled: bool = True
-    provider_hydrate_max_per_scan: int = 5
+    provider_hydrate_max_per_scan: int = 30
+    provider_hydrate_source_budget_json: str = (
+        '{"paper_missed_signal_attribution":6,'
+        '"paper_fast_entry_queue":8,'
+        '"source_resonance_candidates":10,'
+        '"external_alpha_state":10,'
+        '"paper_decision_events":4}'
+    )
     provider_hydrate_cache_ttl_sec: float = 20.0
     provider_hydrate_failure_cache_ttl_sec: float = 8.0
     provider_hydrate_rate_limit_backoff_sec: float = 60.0
@@ -163,7 +170,16 @@ def load_a_class_config(env=None):
         entrapment_hard_max=_env_float(env, "A_CLASS_ENTRAPMENT_HARD_MAX", 0.12),
         shadow_scan_window_sec=_env_float(env, "A_CLASS_SHADOW_SCAN_WINDOW_SEC", 2 * 60 * 60),
         provider_hydrate_enabled=_env_bool(env, "A_CLASS_PROVIDER_HYDRATE_ENABLED", True),
-        provider_hydrate_max_per_scan=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_MAX_PER_SCAN", 5),
+        provider_hydrate_max_per_scan=_env_int(env, "A_CLASS_PROVIDER_HYDRATE_MAX_PER_SCAN", 30),
+        provider_hydrate_source_budget_json=_env_str(
+            env,
+            "A_CLASS_PROVIDER_HYDRATE_SOURCE_BUDGET_JSON",
+            '{"paper_missed_signal_attribution":6,'
+            '"paper_fast_entry_queue":8,'
+            '"source_resonance_candidates":10,'
+            '"external_alpha_state":10,'
+            '"paper_decision_events":4}',
+        ),
         provider_hydrate_cache_ttl_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_CACHE_TTL_SEC", 20.0),
         provider_hydrate_failure_cache_ttl_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_FAILURE_CACHE_TTL_SEC", 8.0),
         provider_hydrate_rate_limit_backoff_sec=_env_float(env, "A_CLASS_PROVIDER_HYDRATE_RATE_LIMIT_BACKOFF_SEC", 60.0),

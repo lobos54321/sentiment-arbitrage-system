@@ -2334,6 +2334,8 @@ test('a class block cause classifier separates infra market and policy blocks', 
       would_action: 'WOULD_ENTER',
       hard_blockers_json: JSON.stringify(['quote_not_available', 'quote_source_missing', 'route_unavailable']),
       risk_json: JSON.stringify({ data_confidence: 'unknown' }),
+      hydrate_outcome: 'skipped_source_budget',
+      quote_clean: 0,
     },
     {
       id: 2,
@@ -2345,6 +2347,8 @@ test('a class block cause classifier separates infra market and policy blocks', 
       action: 'BLOCK',
       hard_blockers_json: JSON.stringify(['creator_close', 'quote_not_available']),
       risk_json: JSON.stringify({ data_confidence: 'unknown' }),
+      hydrate_outcome: 'skipped_hard_market_red',
+      quote_clean: 0,
     },
     {
       id: 3,
@@ -2356,6 +2360,8 @@ test('a class block cause classifier separates infra market and policy blocks', 
       action: 'BLOCK',
       hard_blockers_json: JSON.stringify(['matrices not yet aligned']),
       would_enter_a_class: 0,
+      hydrate_outcome: 'success',
+      quote_clean: 1,
     },
   ], { limit: 10 });
 
@@ -2366,6 +2372,12 @@ test('a class block cause classifier separates infra market and policy blocks', 
   assert.equal(breakdown.policy_guardrail.events, 1);
   assert.equal(breakdown.blocker_summary.find((row) => row.blocker === 'creator_close').category, 'MARKET');
   assert.equal(breakdown.source_component_summary.find((row) => row.category === 'INFRA').source_component, 'external_alpha_shadow');
+  assert.equal(breakdown.hydrate_summary.find((row) => row.provider_hydrate_outcome === 'success').quote_clean_n, 1);
+  assert.equal(breakdown.hydrate_summary.find((row) => row.provider_hydrate_outcome === 'skipped_source_budget').would_enter_n, 1);
+  assert.equal(
+    breakdown.hydrate_source_summary.find((row) => row.provider_hydrate_outcome === 'skipped_hard_market_red').source_component,
+    'external_alpha_shadow',
+  );
 });
 
 test('a class matrix and AI advisory helpers summarize shadow evidence safely', () => {

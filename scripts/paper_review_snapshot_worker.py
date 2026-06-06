@@ -782,6 +782,9 @@ def a_class_summary(db, since_ts, limit):
     source_table_expr = "source_table" if "source_table" in cols else "'unknown'"
     source_component_expr = "source_component" if "source_component" in cols else "'unknown'"
     source_reason_expr = "source_reason" if "source_reason" in cols else "'unknown'"
+    hydrate_outcome_expr = "provider_hydrate_outcome" if "provider_hydrate_outcome" in cols else "'not_recorded'"
+    quote_clean_expr = "quote_clean" if "quote_clean" in cols else "0"
+    data_confidence_expr = "data_confidence" if "data_confidence" in cols else "'unknown'"
     params = {"since": since_ts, "limit": limit}
     where = f"WHERE {event_ts_expr} >= :since"
     action_summary = rows_as_dicts(db.execute(
@@ -846,6 +849,43 @@ def a_class_summary(db, since_ts, limit):
         """,
         params,
     ).fetchall())
+    hydrate_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE({hydrate_outcome_expr}, 'not_recorded') AS provider_hydrate_outcome,
+               COUNT(*) AS n,
+               SUM(CASE WHEN COALESCE({quote_clean_expr}, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean_n,
+               SUM(CASE WHEN {action_expr} = 'WOULD_ENTER' THEN 1 ELSE 0 END) AS would_enter_n,
+               SUM(CASE WHEN {action_expr} = 'ENTER' THEN 1 ELSE 0 END) AS enter_n,
+               MAX({event_ts_expr}) AS latest_event_ts
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE({hydrate_outcome_expr}, 'not_recorded')
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
+    hydrate_source_summary = rows_as_dicts(db.execute(
+        f"""
+        SELECT COALESCE({source_table_expr}, 'unknown') AS source_table,
+               COALESCE({source_component_expr}, 'unknown') AS source_component,
+               COALESCE({hydrate_outcome_expr}, 'not_recorded') AS provider_hydrate_outcome,
+               COALESCE({data_confidence_expr}, 'unknown') AS data_confidence,
+               COUNT(*) AS n,
+               SUM(CASE WHEN COALESCE({quote_clean_expr}, 0) = 1 THEN 1 ELSE 0 END) AS quote_clean_n,
+               SUM(CASE WHEN {action_expr} = 'WOULD_ENTER' THEN 1 ELSE 0 END) AS would_enter_n,
+               MAX({event_ts_expr}) AS latest_event_ts
+        FROM a_class_decision_events
+        {where}
+        GROUP BY COALESCE({source_table_expr}, 'unknown'),
+                 COALESCE({source_component_expr}, 'unknown'),
+                 COALESCE({hydrate_outcome_expr}, 'not_recorded'),
+                 COALESCE({data_confidence_expr}, 'unknown')
+        ORDER BY n DESC
+        LIMIT :limit
+        """,
+        params,
+    ).fetchall())
     blocker_counts = {}
     blocker_rows = db.execute(
         f"""
@@ -891,6 +931,9 @@ def a_class_summary(db, since_ts, limit):
         col_expr(cols, "matrix_json"),
         col_expr(cols, "ai_review_json"),
         col_expr(cols, "controller_action_json"),
+        col_expr(cols, "quote_clean", "0"),
+        col_expr(cols, "data_confidence"),
+        col_expr(cols, "provider_hydrate_outcome"),
     ]
     recent_events = rows_as_dicts(db.execute(
         f"""
@@ -936,6 +979,8 @@ def a_class_summary(db, since_ts, limit):
         "grade_summary": grade_summary,
         "source_summary": source_summary,
         "reason_summary": reason_summary,
+        "hydrate_summary": hydrate_summary,
+        "hydrate_source_summary": hydrate_source_summary,
         "hard_blockers": hard_blockers,
         "recent_events": recent_events,
         "runtime_safety": runtime_safety,
