@@ -242,6 +242,10 @@ def checkpoint_db(path: Path) -> None:
         conn = sqlite3.connect(str(path), timeout=5)
         try:
             conn.execute("PRAGMA busy_timeout=5000")
+            try:
+                conn.execute("PRAGMA mmap_size=0")
+            except sqlite3.OperationalError:
+                pass
             size = path.stat().st_size
             if size <= QUICK_CHECK_MAX_BYTES:
                 row = conn.execute("PRAGMA quick_check").fetchone()

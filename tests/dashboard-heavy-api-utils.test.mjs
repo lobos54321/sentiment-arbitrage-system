@@ -166,6 +166,31 @@ test('paper db runtime health surfaces integrity marker without opening sqlite',
   assert.match(health.integrity_marker.text_preview, /database disk image is malformed/);
 });
 
+test('paper db runtime health treats zero-byte live db as unavailable', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-db-empty-health-'));
+  const paper = join(dir, 'paper_trades.db');
+  fs.writeFileSync(paper, '');
+
+  const health = readPaperDbRuntimeHealth({ paperDbPath: paper });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'paper_db_empty');
+  assert.equal(health.size_bytes, 0);
+  assert.equal(health.reason, 'paper_trades_db_zero_bytes');
+});
+
+test('paper db runtime health detects invalid sqlite header without opening db', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-db-invalid-health-'));
+  const paper = join(dir, 'paper_trades.db');
+  fs.writeFileSync(paper, 'not a sqlite database');
+
+  const health = readPaperDbRuntimeHealth({ paperDbPath: paper });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'paper_db_invalid_sqlite_header');
+  assert.equal(health.reason, 'paper_trades_db_header_not_sqlite');
+});
+
 test('incident artifact snapshot lists allowed evidence and blocks path escape', () => {
   const dir = fs.mkdtempSync(join(os.tmpdir(), 'incident-artifacts-'));
   const backupDir = join(dir, 'backup', 'paper-db-family');
@@ -1816,6 +1841,77 @@ test('rolling 24h goal status is calculated from materialized snapshot', () => {
   assert.equal(status.mode_actions[0].mode, 'A_CLASS_FASTLANE');
   assert.equal(status.mode_actions[0].status, 'SHADOW');
   assert.equal(status.mode_actions[0].recommended_action, 'prepare_0_001_tiny_paper_after_observability_green');
+});
+
+test('rolling 24h goal fails loud when live paper db is unavailable', () => {
+  const status = buildRolling24hGoalStatusFromLiveSnapshot({
+    snapshot_id: 'paper_live_24h_goal_test',
+    generated_at: '2026-06-04T00:50:00.000Z',
+    window: { since_ts: 1000, since_iso: '2026-06-03T00:50:00.000Z' },
+    trades: {
+      totals: {
+        total: 24,
+        closed: 20,
+        wins: 12,
+        min_pnl: -0.12,
+        deployed_sol: 0.05,
+        est_pnl_sol: 0.11,
+      },
+    },
+    dog_catch_goal: {
+      available: true,
+      trades: {
+        fills: 24,
+        closed: 20,
+        captured_gold_silver_unique: 6,
+        realized_pnl_sol: 0.11,
+        deployed_sol: 0.05,
+        realized_roi: 2.2,
+      },
+      missed: {
+        clean_gold_silver_unique: 4,
+        by_blocker: [],
+      },
+      goal: {
+        eligible_gold_silver_unique: 10,
+        captured_gold_silver_unique: 6,
+        clean_gold_silver_capture_rate: 0.6,
+        pass: true,
+        blockers: [],
+      },
+    },
+    a_class_p0_discovery: {
+      available: true,
+      quote_clean_gold_silver_seen_count: 10,
+      quote_clean_gold_silver_would_enter_count: 6,
+      would_enter_no_route_rate: 0,
+      would_enter_trapped_rate: 0,
+      unknown_data_rate: 0,
+      outlier_trimmed_would_rr: 3,
+      missed_blockers: [],
+      discovery_exit: { advisory: 'PROMOTE_TINY_CANARY' },
+    },
+  }, {
+    generatedAt: '2026-06-04T01:00:00.000Z',
+    nowMs: Date.parse('2026-06-04T01:00:00.000Z'),
+    requestedHours: 24,
+    materializedHours: 24,
+    dbPath: '/tmp/paper.db',
+    minClosedTrades: 20,
+    minGoldSilverCandidates: 5,
+    paperDbHealth: {
+      available: true,
+      status: 'paper_db_empty',
+      size_bytes: 0,
+      reason: 'paper_trades_db_zero_bytes',
+    },
+  });
+
+  assert.equal(status.pass, false);
+  assert.equal(status.available, false);
+  assert.equal(status.status, 'evidence_unavailable');
+  assert.match(status.evidence_blockers.join(','), /live_paper_db_empty/);
+  assert.equal(status.live_paper_db_health.status, 'paper_db_empty');
 });
 
 test('a class status can be served from materialized live snapshot section', () => {

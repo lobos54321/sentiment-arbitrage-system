@@ -17430,6 +17430,10 @@ def connect_paper_db(path):
     db = sqlite3.connect(path, timeout=PAPER_SQLITE_TIMEOUT_SEC)
     db.execute(f"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}")
     try:
+        db.execute("PRAGMA mmap_size = 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
         db.execute("PRAGMA journal_mode = WAL")
     except sqlite3.OperationalError:
         pass

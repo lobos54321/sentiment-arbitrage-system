@@ -1013,6 +1013,11 @@ class SentimentArbitrageSystem {
   constructor() {
     this.config = this.loadConfig();
     this.db = new Database(this.config.DB_PATH);
+    try {
+      this.db.pragma('mmap_size = 0');
+    } catch (error) {
+      console.warn('[SQLite] mmap disable skipped:', error?.message || error);
+    }
 
     // Initialize services
     this.telegramService = new TelegramUserListener(this.config, this.db);
@@ -1656,6 +1661,11 @@ class PremiumChannelSystem {
   constructor() {
     this.config = this.loadConfig();
     this.db = new Database(this.config.DB_PATH);
+    try {
+      this.db.pragma('mmap_size = 0');
+    } catch (error) {
+      console.warn('[SQLite] mmap disable skipped:', error?.message || error);
+    }
     this.listener = new PremiumChannelListener(this.config);
     this.engine = new PremiumSignalEngine(this.config, this.db);
     this.autonomySidecar = null;

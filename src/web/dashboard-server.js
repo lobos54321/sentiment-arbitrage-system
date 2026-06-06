@@ -1759,10 +1759,21 @@ console.warn = (...args) => {
 };
 
 let db;
+function openDashboardSqlite(dbPath, options) {
+  const database = options === undefined ? new Database(dbPath) : new Database(dbPath, options);
+  try {
+    database.pragma('mmap_size = 0');
+  } catch {
+    // Best-effort SIGBUS mitigation. Some readonly or older SQLite builds can
+    // reject the pragma; the caller should still be able to use the connection.
+  }
+  return database;
+}
+
 function getDb() {
   if (!db) {
     try {
-      db = new Database(resolvedDbPath);
+      db = openDashboardSqlite(resolvedDbPath);
     } catch (e) {
       console.error('❌ Failed to open database:', e.message);
     }
@@ -1887,7 +1898,7 @@ async function createSqliteDownloadSnapshot(sourcePath, prefix, options = {}) {
   let sourceDb;
   let snapshotPath = null;
   try {
-    sourceDb = new Database(sourcePath, { readonly: true, fileMustExist: true, timeout });
+    sourceDb = openDashboardSqlite(sourcePath, { readonly: true, fileMustExist: true, timeout });
     try { sourceDb.pragma(`busy_timeout = ${timeout}`); } catch {}
     try { sourceDb.pragma('wal_checkpoint(PASSIVE)'); } catch {}
     if (typeof sourceDb.backup !== 'function') {
@@ -2260,6 +2271,27 @@ export function readPaperDbRuntimeHealth(options = {}) {
       health.size_bytes = stats.size;
       health.size_mb = Math.round((stats.size / (1024 * 1024)) * 100) / 100;
       health.mtime = stats.mtime.toISOString();
+      if (stats.size === 0) {
+        health.status = 'paper_db_empty';
+        health.reason = 'paper_trades_db_zero_bytes';
+      } else {
+        try {
+          const fd = fs.openSync(paperDbPath, 'r');
+          try {
+            const header = Buffer.alloc(16);
+            fs.readSync(fd, header, 0, 16, 0);
+            if (!header.equals(Buffer.from('SQLite format 3\0', 'binary'))) {
+              health.status = 'paper_db_invalid_sqlite_header';
+              health.reason = 'paper_trades_db_header_not_sqlite';
+            }
+          } finally {
+            fs.closeSync(fd);
+          }
+        } catch (headerError) {
+          health.status = 'paper_db_header_check_failed';
+          health.reason = headerError?.message || String(headerError);
+        }
+      }
     }
     if (fs.existsSync(markerPath)) {
       const markerStats = fs.statSync(markerPath);
@@ -2280,6 +2312,10 @@ export function readPaperDbRuntimeHealth(options = {}) {
       error: error?.message || String(error),
     };
   }
+}
+
+function paperDbHealthIsUsable(health) {
+  return Boolean(health && health.available && health.status === 'ok');
 }
 
 export function resolveDashboardLogPath(pathname, env = process.env) {
@@ -5261,6 +5297,8 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const materializedHours = Math.max(1, Math.min(24, parseInt(String(options.materializedHours ?? requestedHours), 10) || requestedHours));
   const maxSnapshotAgeMinutes = Math.max(1, Math.min(1440, parseInt(String(options.maxSnapshotAgeMinutes ?? 30), 10) || 30));
   const dbPath = options.dbPath || getPaperDbPath();
+  const paperDbHealth = options.paperDbHealth || null;
+  const livePaperDbUsable = paperDbHealth ? paperDbHealthIsUsable(paperDbHealth) : true;
   const targets = {
     target_realized_win_rate: finiteNumber(options.targetRealizedWinRate, finiteNumber(process.env.ROLLING_GOAL_WIN_RATE, 0.60)),
     target_gold_silver_capture_rate: finiteNumber(options.targetGoldSilverCaptureRate, finiteNumber(process.env.DOG_CATCH_GOAL_CAPTURE_RATE, 0.60)),
@@ -5312,6 +5350,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
   const metricBlockers = [];
   const sampleBlockers = [];
   const evidenceBlockers = [];
+  if (!livePaperDbUsable) evidenceBlockers.push(`live_${paperDbHealth?.status || 'paper_db_unavailable'}`);
   if (!snapshotAvailable) evidenceBlockers.push(liveSnapshot?.error ? 'materialized_review_snapshot_invalid' : 'materialized_review_snapshot_missing');
   if (snapshotAvailable && !snapshotFresh) evidenceBlockers.push('materialized_review_snapshot_stale_or_undated');
   if (shadowPending) evidenceBlockers.push('a_class_p0_shadow_discovery_pending');
@@ -5398,7 +5437,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     goal: 'rolling_24h_convexity_capture',
     materialized: true,
     live_query: false,
-    available: snapshotAvailable && !shadowPending,
+    available: snapshotAvailable && !shadowPending && livePaperDbUsable,
     shadow_pending: shadowPending,
     pass,
     status,
@@ -5411,6 +5450,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     materialized_path: livePaperReviewPath(materializedHours),
     snapshot_age_minutes: snapshotAge,
     max_snapshot_age_minutes: maxSnapshotAgeMinutes,
+    live_paper_db_health: paperDbHealth,
     targets,
     metrics,
     matrix_summary: matrixSummary,
@@ -6440,7 +6480,7 @@ function cleanupOpenPaperPositions({ reason = 'manual_cleanup', pnlPct = 0 } = {
     throw error;
   }
 
-  const paperDb = new Database(paperDbPath);
+  const paperDb = openDashboardSqlite(paperDbPath);
   try {
     const tableExists = paperDb.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='paper_trades'`).get();
     if (!tableExists) {
@@ -7936,7 +7976,7 @@ const server = http.createServer(async (req, res) => {
     const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: global.__startupError || paperDbHealth.status === 'paper_db_integrity_marker_present' ? 'degraded' : 'ok',
+      status: global.__startupError || !paperDbHealthIsUsable(paperDbHealth) ? 'degraded' : 'ok',
       message: 'Sentiment Arbitrage API Running',
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
@@ -8489,7 +8529,7 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = boundedIntParam(url, 'limit', 10000, 1, 100000);
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const tables = {};
       for (const table of ['canonical_trade_ledger', 'a_class_decision_events', 'paper_missed_signal_attribution']) {
@@ -8568,7 +8608,7 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       const limit = boundedIntParam(url, 'limit', 50, 1, 100);
       const sinceTs = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('paper_trades')) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -8671,7 +8711,7 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       const sinceTs = boundedWindowedSinceTs(url, 2, 2);
       const nowSec = Math.floor(Date.now() / 1000);
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const health = {
         status: 'ok',
@@ -8813,7 +8853,7 @@ const server = http.createServer(async (req, res) => {
 
       if (fs.existsSync(resolvedDbPath)) {
         try {
-          signalDb = new Database(resolvedDbPath, { readonly: true });
+          signalDb = openDashboardSqlite(resolvedDbPath, { readonly: true });
           const signalTables = new Set(signalDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
           if (signalTables.has('premium_signals')) {
             const signalCols = getTableColumns(signalDb, 'premium_signals');
@@ -8948,7 +8988,7 @@ const server = http.createServer(async (req, res) => {
       let paperTrades = [];
       let missedAttributions = [];
       if (fs.existsSync(paperDbPath)) {
-        paperDb = new Database(paperDbPath, { readonly: true });
+        paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
         const paperTables = new Set(
           paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
         );
@@ -9157,7 +9197,7 @@ const server = http.createServer(async (req, res) => {
       const timings = includeTiming ? {} : null;
       const windows = [6, 24];
       signalDb = getDb();
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
       const byWindow = {};
       for (const hours of windows) {
         const sinceTs = nowSec - hours * 3600;
@@ -9279,7 +9319,7 @@ const server = http.createServer(async (req, res) => {
       const timings = {};
 
       signalDb = includeSignals && includeClosedLoop ? getDb() : null;
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: paperDbTimeoutMs });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -9396,7 +9436,7 @@ const server = http.createServer(async (req, res) => {
       const tradeLimit = boundedIntParam(url, 'trade_limit', 500, 1, 5000);
       const limit = boundedIntParam(url, 'limit', 50, 1, 200);
       const includePathSamples = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_path_samples') || '0').toLowerCase());
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -9604,7 +9644,7 @@ const server = http.createServer(async (req, res) => {
         ? true
         : (['0', 'false', 'no'].includes(revivalCanaryRaw) ? false : null);
       const bootstrapIterations = Math.max(250, liveGuard.bootstrap_iterations);
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
       if (!hasTable) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -9703,7 +9743,7 @@ const server = http.createServer(async (req, res) => {
       const limit = boundedIntParam(url, 'limit', 200, 1, 1000);
       const recentLimit = boundedIntParam(url, 'recent_limit', 25, 0, 100);
       const sinceTs = boundedWindowedSinceTs(url, 2, 24);
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('paper_decision_events')) {
         res.writeHead(404, apiJsonHeaders());
@@ -9766,7 +9806,7 @@ const server = http.createServer(async (req, res) => {
       const requestedHours = boundedIntParam(url, 'hours', 2, 1, 72);
       const sinceTs = boundedWindowedSinceTs(url, 2, 72);
       const missedSinceTs = Math.max(0, sinceTs - maxJoinDeltaSec);
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('paper_decision_events')) {
         res.writeHead(404, apiJsonHeaders());
@@ -10077,7 +10117,7 @@ const server = http.createServer(async (req, res) => {
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
       const startedAt = Date.now();
-      paperDb = new Database(paperDbPath, {
+      paperDb = openDashboardSqlite(paperDbPath, {
         readonly: true,
         timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000),
       });
@@ -10162,7 +10202,7 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       limit = liveGuard.limit;
       sinceTs = liveGuard.since_ts;
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const hasTable = paperDb.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_trades'").get();
       if (!hasTable) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -10369,7 +10409,7 @@ const server = http.createServer(async (req, res) => {
       const defaultLossOnly = tradeId || hasExplicitReplayWindow ? '0' : '1';
       const lossOnly = !['0', 'false', 'no'].includes(String(url.searchParams.get('loss_only') || defaultLossOnly).toLowerCase());
       const includeTimeline = !['0', 'false', 'no'].includes(String(url.searchParams.get('include_timeline') || (tradeId ? '1' : '0')).toLowerCase());
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('paper_trades')) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -10487,7 +10527,7 @@ const server = http.createServer(async (req, res) => {
       const eventLimit = Math.max(limit, boundedIntParam(url, 'event_limit', 3000, 100, 8000));
       const sinceTs = boundedWindowedSinceTs(url, 1, 2);
       const statusFilter = (url.searchParams.get('status') || 'all').toLowerCase();
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('paper_decision_events')) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -10912,7 +10952,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const missedEventTsExpr = 'COALESCE(created_event_ts, signal_ts, baseline_ts, 0)';
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -11248,7 +11288,7 @@ const server = http.createServer(async (req, res) => {
       }
       const eventTsExpr = 'COALESCE(m.created_event_ts, m.signal_ts, m.baseline_ts, 0)';
       const whereParams = sinceTs ? { since: sinceTs } : {};
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -11684,7 +11724,7 @@ const server = http.createServer(async (req, res) => {
       const whereSql = sinceTs ? 'AND m.created_event_ts >= @since' : '';
       const eventWhereSql = sinceTs ? 'AND event_ts >= @since' : '';
       const snapshotWhereSql = sinceTs ? 'AND snapshot_ts >= @since' : '';
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -12065,7 +12105,7 @@ const server = http.createServer(async (req, res) => {
       if (!releasePaperReport) return;
       const hoursBack = boundedIntParam(url, 'hours', 24, 1, 24);
       const sinceTs = Math.floor(Date.now() / 1000) - hoursBack * 3600;
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name)
       );
@@ -12171,7 +12211,7 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -12210,7 +12250,7 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = boundedIntParam(url, 'limit', 50, 1, 200);
-      paperDb = new Database(paperDbPath, { readonly: true });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -12543,9 +12583,11 @@ const server = http.createServer(async (req, res) => {
     const requestedHours = boundedIntParam(url, 'hours', 24, 1, 24);
     const materializedHours = nearestLivePaperReviewHours(requestedHours);
     const liveSnapshot = readLivePaperReview(materializedHours);
+    const paperDbHealth = readPaperDbRuntimeHealth();
     const status = buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, {
       requestedHours,
       materializedHours,
+      paperDbHealth,
       maxSnapshotAgeMinutes: boundedIntParam(url, 'max_snapshot_age_minutes', 30, 1, 1440),
       targetRealizedWinRate: Number(url.searchParams.get('target_win_rate') || 0.60),
       targetGoldSilverCaptureRate: Number(url.searchParams.get('target_capture') || 0.60),
@@ -12632,7 +12674,7 @@ const server = http.createServer(async (req, res) => {
       }
       releasePaperReport = beginLivePaperReport(res, url.pathname);
       if (!releasePaperReport) return;
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
       const progress = buildDogCatchGoalProgress(paperDb, tableNames, liveGuard.since_ts, {
         targetCatchRate: Number(url.searchParams.get('target_capture') || 0.60),
@@ -12685,7 +12727,7 @@ const server = http.createServer(async (req, res) => {
       const hours = liveGuard.window_hours;
       const sinceTs = liveGuard.since_ts;
       const requestedHours = Number.parseInt(url.searchParams.get('hours') || String(hours), 10) || hours;
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(
         paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
       );
@@ -12931,6 +12973,22 @@ const server = http.createServer(async (req, res) => {
     const forceLive = ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
       || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
     const limit = boundedIntParam(url, 'limit', 30, 1, 200);
+    const paperDbHealth = readPaperDbRuntimeHealth({ paperDbPath });
+    if (!paperDbHealthIsUsable(paperDbHealth)) {
+      res.writeHead(202, apiJsonHeaders());
+      res.end(JSON.stringify({
+        generated_at: new Date().toISOString(),
+        db_path: paperDbPath,
+        available: false,
+        materialized: !forceLive,
+        live_query: forceLive,
+        requested_window_hours: requestedHours,
+        reason: 'live_paper_db_unavailable',
+        paper_db_health: paperDbHealth,
+        note: 'Materialized A_CLASS evidence is suppressed while the live paper DB is missing, empty, malformed, or integrity-marked.',
+      }, null, 2));
+      return;
+    }
     if (!forceLive) {
       const materializedHours = nearestLivePaperReviewHours(Math.min(requestedHours, 24));
       const liveSnapshot = readLivePaperReview(materializedHours);
@@ -12965,7 +13023,7 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('a_class_decision_events')) {
         res.writeHead(200, apiJsonHeaders());
@@ -13129,7 +13187,7 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
       const recentLimit = boundedIntParam(url, 'limit', 50, 0, 500);
       const sourceFilter = String(url.searchParams.get('source') || 'all').trim().toLowerCase();
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const sourceIssues = [];
       const rows = [];
@@ -13285,7 +13343,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const sinceTs = boundedWindowedSinceTs(url, 24, 24 * 120, { allowAll: true });
       const limit = boundedIntParam(url, 'limit', 100, 1, 500);
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('opportunity_events')) {
         res.writeHead(202, apiJsonHeaders());
@@ -13408,7 +13466,7 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
       const limit = boundedIntParam(url, 'limit', 100, 1, 500);
       const action = String(url.searchParams.get('action') || '').trim().toUpperCase();
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('a_class_decision_events')) {
         res.writeHead(200, apiJsonHeaders());
@@ -13489,7 +13547,7 @@ const server = http.createServer(async (req, res) => {
       const limit = boundedIntParam(url, 'limit', 100, 1, 1000);
       const mode = String(url.searchParams.get('mode') || '').trim();
       const aClassOnly = url.pathname === '/api/a-class/trades' || String(url.searchParams.get('a_class') || '').toLowerCase() === 'true';
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('canonical_trade_ledger')) {
         res.writeHead(200, apiJsonHeaders());
@@ -13590,7 +13648,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const sinceTs = boundedWindowedSinceTs(url, 24 * 7, 24 * 120, { allowAll: true });
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('canonical_trade_ledger')) {
         res.writeHead(200, apiJsonHeaders());
@@ -13673,7 +13731,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const sinceTs = boundedWindowedSinceTs(url, 24, 168, { allowAll: true });
       const limit = boundedIntParam(url, 'limit', 100, 1, 500);
-      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       if (!tableNames.has('a_class_decision_events')) {
         res.writeHead(202, apiJsonHeaders());

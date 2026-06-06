@@ -43,6 +43,10 @@ def connect(path):
     db = sqlite3.connect(path, timeout=float(os.environ.get("PAPER_REVIEW_SQLITE_TIMEOUT_SEC", "30")))
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout = 30000")
+    try:
+        db.execute("PRAGMA mmap_size = 0")
+    except sqlite3.OperationalError:
+        pass
     return db
 
 
