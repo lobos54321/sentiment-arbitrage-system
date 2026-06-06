@@ -20,10 +20,12 @@ try:
     from scripts.a_class_expected_rr import build_a_class_p0_discovery
     from scripts.a_class_runtime_safety import summarize_runtime_safety
     from scripts.ai_strategy_reviewer import build_ai_strategy_review
+    from scripts.paper_db_integrity_guard import require_unmarked_paper_db
 except ImportError:
     from a_class_expected_rr import build_a_class_p0_discovery
     from a_class_runtime_safety import summarize_runtime_safety
     from ai_strategy_reviewer import build_ai_strategy_review
+    from paper_db_integrity_guard import require_unmarked_paper_db
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +42,7 @@ CLEAN_DOG_RECLAIM_BRANCHES = {
 
 
 def connect(path):
+    require_unmarked_paper_db(path, component="paper_review_snapshot_worker")
     db = sqlite3.connect(path, timeout=float(os.environ.get("PAPER_REVIEW_SQLITE_TIMEOUT_SEC", "30")))
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout = 30000")

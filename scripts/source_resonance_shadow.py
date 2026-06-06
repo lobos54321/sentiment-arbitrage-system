@@ -17,6 +17,7 @@ import sqlite3
 import time
 
 from sqlite_write_coordinator import SQLiteSingleWriterLock
+from paper_db_integrity_guard import require_unmarked_paper_db
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +120,7 @@ def connect_db(path, *, readonly=False):
         uri = f"file:{db_path}?mode=ro"
         db = sqlite3.connect(uri, uri=True, timeout=timeout_sec)
     else:
+        require_unmarked_paper_db(db_path, component="source_resonance_shadow")
         db_path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(db_path, timeout=timeout_sec)
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")

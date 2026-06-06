@@ -21,6 +21,7 @@ import time
 import uuid
 
 from sqlite_write_coordinator import sqlite_single_writer
+from paper_db_integrity_guard import require_unmarked_paper_db
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -126,6 +127,7 @@ RETENTION_POLICIES = [
 
 
 def connect_db(db_path: str | os.PathLike) -> sqlite3.Connection:
+    require_unmarked_paper_db(db_path, component="paper_db_retention")
     db = sqlite3.connect(str(db_path), timeout=_env_float("PAPER_DB_RETENTION_SQLITE_TIMEOUT_SEC", 30.0))
     db.execute(f"PRAGMA busy_timeout={_env_int('PAPER_DB_RETENTION_BUSY_TIMEOUT_MS', 30000)}")
     db.row_factory = sqlite3.Row

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from sqlite_write_coordinator import SQLiteSingleWriterLock
+from paper_db_integrity_guard import require_unmarked_paper_db
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -188,6 +189,7 @@ def _with_sqlite_write_retry(db, writer, *, swallow_locked=False, fallback=None)
 
 def connect_external_alpha_db(db_path=None):
     path = Path(db_path or os.environ.get("EXTERNAL_ALPHA_DB") or os.environ.get("PAPER_DB") or DEFAULT_EXTERNAL_ALPHA_DB)
+    require_unmarked_paper_db(path, component="external_alpha_shadow")
     path.parent.mkdir(parents=True, exist_ok=True)
     timeout_sec = float(os.environ.get("EXTERNAL_ALPHA_SQLITE_TIMEOUT_SEC", "60"))
     db = sqlite3.connect(path, timeout=timeout_sec)

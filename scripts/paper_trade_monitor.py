@@ -96,6 +96,7 @@ from entry_readiness_policy import (
     evaluate_entry_readiness_policy,
 )
 from provider_budget import provider_request_allowed, record_provider_result
+from paper_db_integrity_guard import require_unmarked_paper_db
 from sqlite_write_coordinator import sqlite_single_writer
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
@@ -17458,6 +17459,7 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 # === Database Setup ===
 
 def connect_paper_db(path):
+    require_unmarked_paper_db(path, component="paper_trade_monitor")
     db = sqlite3.connect(path, timeout=PAPER_SQLITE_TIMEOUT_SEC)
     db.execute(f"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}")
     try:
@@ -17666,11 +17668,7 @@ def init_paper_db(db_path=None):
         _create_schema(db)
     except sqlite3.DatabaseError as e:
         if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
-            logging.getLogger('paper_trade').warning(f"Paper DB corrupted ({e}), recreating {path}")
-            if os.path.exists(path):
-                os.remove(path)
-            db = connect_paper_db(path)
-            _create_schema(db)
+            fatal_sqlite_malformed(e, context="paper_db_init", db_path=path)
         else:
             raise
             

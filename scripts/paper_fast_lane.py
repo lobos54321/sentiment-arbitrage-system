@@ -34,6 +34,7 @@ from entry_readiness_policy import (
 )
 from paper_evidence_log import append_paper_evidence_event
 from sqlite_write_coordinator import SQLiteSingleWriterLock
+from paper_db_integrity_guard import require_unmarked_paper_db
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 
 
@@ -400,6 +401,7 @@ SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
 
 def connect_db(path, *, ensure_wal=True):
     timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "15"))
+    require_unmarked_paper_db(path, component="paper_fast_lane")
     db = sqlite3.connect(path, timeout=timeout_sec, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")

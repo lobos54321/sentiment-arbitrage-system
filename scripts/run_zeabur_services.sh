@@ -22,6 +22,31 @@ export A_CLASS_LIVE_MAX_CONCURRENT="${A_CLASS_LIVE_MAX_CONCURRENT:-1}"
 export A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL="${A_CLASS_LIVE_DAILY_LOSS_BUDGET_SOL:-0.005}"
 export A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN="${A_CLASS_LIVE_MAX_ENQUEUES_PER_SCAN:-1}"
 export FINAL_ENTRY_CONTRACT_ENFORCE="${FINAL_ENTRY_CONTRACT_ENFORCE:-true}"
+# This script is the Zeabur process supervisor.  Do not let the Node runtime
+# spawn the same paper DB sidecars again; duplicate supervisors can leave orphan
+# workers after SIGBUS and keep touching a marked/corrupt paper DB.
+export SOURCE_SHADOW_WORKERS_ENABLED="${SOURCE_SHADOW_WORKERS_ENABLED:-false}"
+
+PAPER_DB_PATH="${PAPER_DB_PATH:-/app/data/paper_trades.db}"
+PAPER_DB_INTEGRITY_MARKER="${PAPER_DB_PATH}.integrity_error"
+
+run_marker_aware_preflight() {
+  local reason="${1:-runtime}"
+  if [ -f "$PAPER_DB_INTEGRITY_MARKER" ]; then
+    echo "[preflight] $(date -u '+%Y-%m-%dT%H:%M:%SZ') paper DB integrity marker present after ${reason}; running quarantine preflight" | tee -a /app/data/preflight.log
+    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=true \
+    ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
+      python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+  else
+    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false \
+    ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
+      python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+  fi
+}
+
+paper_db_marked() {
+  [ -f "$PAPER_DB_INTEGRITY_MARKER" ]
+}
 
 shutdown() {
   echo "[SHUTDOWN] Forwarding termination signal..."
@@ -93,9 +118,16 @@ echo "[STARTUP] Starting runtime volume/log maintenance..."
   while true; do
     sleep "$ZEABUR_MAINTENANCE_INTERVAL_SEC"
     echo "[maintenance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') running log trim" | tee -a /app/data/maintenance.log
-    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED="${ZEABUR_RUNTIME_DB_CHECK_ENABLED:-false}" \
-    ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
-    python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+    if [ -f "$PAPER_DB_INTEGRITY_MARKER" ]; then
+      echo "[maintenance] paper DB integrity marker present; running quarantine preflight" | tee -a /app/data/maintenance.log
+      ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=true \
+      ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
+        python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+    else
+      ZEABUR_PREFLIGHT_DB_CHECK_ENABLED="${ZEABUR_RUNTIME_DB_CHECK_ENABLED:-false}" \
+      ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
+        python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+    fi
   done
 ) &
 MAINTENANCE_PID=$!
@@ -145,7 +177,7 @@ echo "[STARTUP] Starting Node.js..."
     EXIT_CODE=${PIPESTATUS[0]}
     set -e
     echo "[node] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/node.log
-    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+    run_marker_aware_preflight "node_exit"
     sleep 15
   done
 ) &
@@ -170,6 +202,10 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
   while true; do
     echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/paper-trader.log
     set +e
+    if paper_db_marked; then
+      echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') paper DB integrity marker present before start; running quarantine preflight" | tee -a /app/data/paper-trader.log
+      run_marker_aware_preflight "paper_start_guard"
+    fi
     PAPER_DB=/app/data/paper_trades.db \
     KLINE_DB=/app/data/kline_cache.db \
     SENTIMENT_DB=/app/data/sentiment_arb.db \
@@ -183,7 +219,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     EXIT_CODE=${PIPESTATUS[0]}
     set -e
     echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/paper-trader.log
-    ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+    run_marker_aware_preflight "paper_trader_exit"
     sleep 15
   done
 ) &
@@ -193,6 +229,12 @@ echo "[STARTUP] Starting GMGN external-alpha scout..."
 (
   while true; do
     echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/gmgn-scout.log
+    if paper_db_marked; then
+      echo "[gmgn-scout] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/gmgn-scout.log
+      run_marker_aware_preflight "gmgn_scout_start_guard"
+      sleep 15
+      continue
+    fi
     PAPER_DB=/app/data/paper_trades.db \
     EXTERNAL_ALPHA_DB=/app/data/paper_trades.db \
     PYTHONUNBUFFERED=1 \
@@ -212,6 +254,12 @@ echo "[STARTUP] Starting source-resonance shadow..."
 (
   while true; do
     echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/source-resonance.log
+    if paper_db_marked; then
+      echo "[source-resonance] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/source-resonance.log
+      run_marker_aware_preflight "source_resonance_start_guard"
+      sleep 15
+      continue
+    fi
     PAPER_DB=/app/data/paper_trades.db \
     SENTIMENT_DB=/app/data/sentiment_arb.db \
     PYTHONUNBUFFERED=1 \
