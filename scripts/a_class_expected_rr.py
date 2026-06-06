@@ -381,6 +381,7 @@ def _fetch_opportunity_path_records(db, since_ts: float, until_ts: float) -> tup
           {ts_expr} AS event_ts,
           {_optional_select(event_cols, "source_type", "'opportunity_events'")},
           {_optional_select(event_cols, "source_component", "'unknown'")},
+          {_optional_select(event_cols, "hydrate_outcome", "'not_recorded'")},
           {_optional_select(event_cols, "would_enter_a_class", "0")},
           {_optional_select(event_cols, "did_enter", "0")},
           CASE
@@ -433,6 +434,7 @@ def _fetch_opportunity_path_records(db, since_ts: float, until_ts: float) -> tup
             "trapped_flag": _truthy(row.get("trapped_flag")),
             "outlier_flag": False,
             "source_component": row.get("source_component") or "unknown",
+            "hydrate_outcome": row.get("hydrate_outcome") or "not_recorded",
             "would_enter_a_class": _truthy(row.get("would_enter_a_class")) or _truthy(row.get("did_enter")),
             "path_sample_count": sample_count,
         })
@@ -595,6 +597,21 @@ def _defined_risk(config: dict) -> float:
     return max(fast_stop, hard_cap, 0.15)
 
 
+def _denominator_exclusion_reason(record: dict, silver_threshold: float) -> str:
+    adjusted = _safe_float(record.get("adjusted_peak"), None)
+    if not record.get("quote_clean_known"):
+        return "quote_clean_unknown"
+    if not record.get("quote_clean"):
+        return "quote_not_clean"
+    if adjusted is None:
+        return "path_peak_missing"
+    if record.get("would_stop_before_peak"):
+        return "would_stop_before_peak"
+    if adjusted < silver_threshold:
+        return "below_silver_threshold"
+    return "eligible"
+
+
 def _missed_blocker_ranking(db, since_ts: float, until_ts: float, silver_threshold: float) -> list[dict]:
     records, _issues = _fetch_missed_records(db, since_ts, until_ts)
     caught = _caught_tokens(db, since_ts, until_ts)
@@ -720,11 +737,28 @@ def calculate_a_class_expected_rr(
 
     source_breakdown: dict[str, int] = {}
     source_component_breakdown: dict[str, int] = {}
+    hydrate_outcome_breakdown: dict[str, int] = {}
     for _token, record in eligible:
         source = str(record.get("source") or "unknown")
         source_breakdown[source] = source_breakdown.get(source, 0) + 1
         component = str(record.get("source_component") or source)
         source_component_breakdown[component] = source_component_breakdown.get(component, 0) + 1
+        hydrate = str(record.get("hydrate_outcome") or "not_recorded")
+        hydrate_outcome_breakdown[hydrate] = hydrate_outcome_breakdown.get(hydrate, 0) + 1
+
+    denominator_exclusion_breakdown: dict[str, int] = {}
+    unknown_reason_breakdown: dict[str, int] = {}
+    observed_hydrate_outcome_breakdown: dict[str, int] = {}
+    hydrate_outcome_exclusion_breakdown: dict[str, int] = {}
+    for _token, record in selected.items():
+        reason = _denominator_exclusion_reason(record, silver_threshold)
+        denominator_exclusion_breakdown[reason] = denominator_exclusion_breakdown.get(reason, 0) + 1
+        if reason in {"quote_clean_unknown", "path_peak_missing"}:
+            unknown_reason_breakdown[reason] = unknown_reason_breakdown.get(reason, 0) + 1
+        hydrate = str(record.get("hydrate_outcome") or "not_recorded")
+        observed_hydrate_outcome_breakdown[hydrate] = observed_hydrate_outcome_breakdown.get(hydrate, 0) + 1
+        outcome_key = f"{hydrate}:{reason}"
+        hydrate_outcome_exclusion_breakdown[outcome_key] = hydrate_outcome_exclusion_breakdown.get(outcome_key, 0) + 1
 
     result = {
         "available": True,
@@ -742,6 +776,11 @@ def calculate_a_class_expected_rr(
         "source_issues": sorted(set(source_issues)),
         "source_breakdown": source_breakdown,
         "source_component_breakdown": source_component_breakdown,
+        "hydrate_outcome_breakdown": hydrate_outcome_breakdown,
+        "observed_hydrate_outcome_breakdown": observed_hydrate_outcome_breakdown,
+        "denominator_exclusion_breakdown": denominator_exclusion_breakdown,
+        "hydrate_outcome_exclusion_breakdown": hydrate_outcome_exclusion_breakdown,
+        "unknown_reason_breakdown": unknown_reason_breakdown,
         "quote_clean_gold_silver_seen_count": len(eligible),
         "quote_clean_gold_silver_gold_count": sum(
             1 for _token, record in eligible if (_safe_float(record.get("adjusted_peak"), 0.0) or 0.0) >= gold_threshold

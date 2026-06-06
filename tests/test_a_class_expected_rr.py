@@ -200,6 +200,7 @@ def test_opportunity_path_samples_feed_quote_clean_gold_silver_denominator():
             "quote_clean": False,
             "route_available": False,
             "would_enter_a_class": True,
+            "provider_hydrate_outcome": "skipped_source_budget",
             "current_price": 1.0,
         },
     )
@@ -230,6 +231,11 @@ def test_opportunity_path_samples_feed_quote_clean_gold_silver_denominator():
     assert summary["quote_clean_gold_silver_would_enter_count"] == 1
     assert summary["source_breakdown"] == {"opportunity_events": 1}
     assert summary["source_component_breakdown"] == {"source_resonance_shadow": 1}
+    assert summary["hydrate_outcome_breakdown"] == {"skipped_source_budget": 1}
+    assert summary["observed_hydrate_outcome_breakdown"] == {"skipped_source_budget": 1}
+    assert summary["denominator_exclusion_breakdown"] == {"eligible": 1}
+    assert summary["hydrate_outcome_exclusion_breakdown"] == {"skipped_source_budget:eligible": 1}
+    assert summary["unknown_reason_breakdown"] == {}
     assert summary["unknown_data_count"] == 0
 
 

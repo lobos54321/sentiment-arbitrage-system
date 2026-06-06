@@ -2898,6 +2898,11 @@ function sanitizeAClassP0Discovery(raw) {
       outlier_trimmed_would_rr: null,
       source_breakdown: {},
       source_component_breakdown: {},
+      hydrate_outcome_breakdown: {},
+      observed_hydrate_outcome_breakdown: {},
+      denominator_exclusion_breakdown: {},
+      hydrate_outcome_exclusion_breakdown: {},
+      unknown_reason_breakdown: {},
       missed_blockers: [],
       discovery_exit: null,
     };
@@ -2932,6 +2937,21 @@ function sanitizeAClassP0Discovery(raw) {
       : {},
     source_component_breakdown: section.source_component_breakdown && typeof section.source_component_breakdown === 'object'
       ? { ...section.source_component_breakdown }
+      : {},
+    hydrate_outcome_breakdown: section.hydrate_outcome_breakdown && typeof section.hydrate_outcome_breakdown === 'object'
+      ? { ...section.hydrate_outcome_breakdown }
+      : {},
+    observed_hydrate_outcome_breakdown: section.observed_hydrate_outcome_breakdown && typeof section.observed_hydrate_outcome_breakdown === 'object'
+      ? { ...section.observed_hydrate_outcome_breakdown }
+      : {},
+    denominator_exclusion_breakdown: section.denominator_exclusion_breakdown && typeof section.denominator_exclusion_breakdown === 'object'
+      ? { ...section.denominator_exclusion_breakdown }
+      : {},
+    hydrate_outcome_exclusion_breakdown: section.hydrate_outcome_exclusion_breakdown && typeof section.hydrate_outcome_exclusion_breakdown === 'object'
+      ? { ...section.hydrate_outcome_exclusion_breakdown }
+      : {},
+    unknown_reason_breakdown: section.unknown_reason_breakdown && typeof section.unknown_reason_breakdown === 'object'
+      ? { ...section.unknown_reason_breakdown }
       : {},
     source_issues: Array.isArray(section.source_issues) ? section.source_issues.map(String) : [],
     missed_blockers: missedBlockers,
@@ -5076,6 +5096,11 @@ export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
     quote_clean_gold_silver_would_enter_count: p0Discovery.quote_clean_gold_silver_would_enter_count,
     source_breakdown: p0Discovery.source_breakdown || {},
     source_component_breakdown: p0Discovery.source_component_breakdown || {},
+    hydrate_outcome_breakdown: p0Discovery.hydrate_outcome_breakdown || {},
+    observed_hydrate_outcome_breakdown: p0Discovery.observed_hydrate_outcome_breakdown || {},
+    denominator_exclusion_breakdown: p0Discovery.denominator_exclusion_breakdown || {},
+    hydrate_outcome_exclusion_breakdown: p0Discovery.hydrate_outcome_exclusion_breakdown || {},
+    unknown_reason_breakdown: p0Discovery.unknown_reason_breakdown || {},
   };
   const runtimeSafety = (section.runtime_safety && typeof section.runtime_safety === 'object')
     ? section.runtime_safety
@@ -5426,6 +5451,11 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     quote_clean_gold_silver_would_enter_count: aClassP0Discovery.quote_clean_gold_silver_would_enter_count,
     source_breakdown: aClassP0Discovery.source_breakdown || {},
     source_component_breakdown: aClassP0Discovery.source_component_breakdown || {},
+    hydrate_outcome_breakdown: aClassP0Discovery.hydrate_outcome_breakdown || {},
+    observed_hydrate_outcome_breakdown: aClassP0Discovery.observed_hydrate_outcome_breakdown || {},
+    denominator_exclusion_breakdown: aClassP0Discovery.denominator_exclusion_breakdown || {},
+    hydrate_outcome_exclusion_breakdown: aClassP0Discovery.hydrate_outcome_exclusion_breakdown || {},
+    unknown_reason_breakdown: aClassP0Discovery.unknown_reason_breakdown || {},
     recent_event_rr: aClassEvents
       .filter((event) => event.expected_rr != null)
       .slice(0, 20)

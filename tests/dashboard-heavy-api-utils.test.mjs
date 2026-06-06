@@ -1952,6 +1952,11 @@ test('a class status can be served from materialized live snapshot section', () 
       outlier_trimmed_would_rr: 4.5,
       source_breakdown: { opportunity_events: 3, canonical_trade_ledger: 1 },
       source_component_breakdown: { source_resonance_shadow: 2, external_alpha_shadow: 1 },
+      hydrate_outcome_breakdown: { skipped_source_budget: 1 },
+      observed_hydrate_outcome_breakdown: { success: 4, skipped_source_budget: 1 },
+      denominator_exclusion_breakdown: { eligible: 4, path_peak_missing: 2 },
+      hydrate_outcome_exclusion_breakdown: { 'skipped_source_budget:eligible': 1 },
+      unknown_reason_breakdown: { path_peak_missing: 2 },
       missed_blockers: [
         {
           token_ca: 'TOKEN_SHOULD_NOT_LEAK',
@@ -1992,6 +1997,9 @@ test('a class status can be served from materialized live snapshot section', () 
   assert.equal(status.p0_discovery.source_breakdown.opportunity_events, 3);
   assert.equal(status.p0_discovery.source_component_breakdown.source_resonance_shadow, 2);
   assert.equal(status.rr_summary.source_component_breakdown.external_alpha_shadow, 1);
+  assert.equal(status.p0_discovery.hydrate_outcome_breakdown.skipped_source_budget, 1);
+  assert.equal(status.rr_summary.denominator_exclusion_breakdown.path_peak_missing, 2);
+  assert.equal(status.rr_summary.unknown_reason_breakdown.path_peak_missing, 2);
   assert.equal(status.p0_discovery.missed_blockers[0].token_ca, undefined);
   assert.doesNotMatch(JSON.stringify(status.p0_discovery.missed_blockers), /TOKEN_SHOULD_NOT_LEAK/);
   assert.equal(status.loss_cap_breach_n, 1);

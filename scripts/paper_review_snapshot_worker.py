@@ -1007,6 +1007,11 @@ def a_class_p0_discovery_summary(db, since_ts, until_ts):
             "outlier_trimmed_would_rr": None,
             "source_breakdown": {},
             "source_component_breakdown": {},
+            "hydrate_outcome_breakdown": {},
+            "observed_hydrate_outcome_breakdown": {},
+            "denominator_exclusion_breakdown": {},
+            "hydrate_outcome_exclusion_breakdown": {},
+            "unknown_reason_breakdown": {},
             "missed_blockers": [],
             "discovery_exit": {
                 "available": False,
