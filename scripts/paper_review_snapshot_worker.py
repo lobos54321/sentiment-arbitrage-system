@@ -1005,6 +1005,8 @@ def a_class_p0_discovery_summary(db, since_ts, until_ts):
             "would_enter_trapped_rate": None,
             "unknown_data_rate": None,
             "outlier_trimmed_would_rr": None,
+            "source_breakdown": {},
+            "source_component_breakdown": {},
             "missed_blockers": [],
             "discovery_exit": {
                 "available": False,

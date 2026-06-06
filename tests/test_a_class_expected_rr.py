@@ -5,6 +5,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from a_class_expected_rr import build_a_class_p0_discovery, calculate_a_class_expected_rr, trim10_mean
+from opportunity_events import record_opportunity_event, record_opportunity_path_sample
 
 
 NOW_TS = 10_000
@@ -178,6 +179,58 @@ def test_denominator_precedence_haircut_mark_fallback_and_defined_risk_rr():
         "silver_n": 0,
         "max_adjusted_peak": 1.07,
     }
+
+
+def test_opportunity_path_samples_feed_quote_clean_gold_silver_denominator():
+    db = memory_db()
+    create_rr_schema(db)
+    ts = NOW_TS - 1800
+    key = record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "opp:path:T_PATH",
+            "event_ts": ts,
+            "token_ca": "T_PATH",
+            "symbol": "PATH",
+            "source_type": "opportunity_events",
+            "source_component": "source_resonance_shadow",
+            "route_bucket": "ATH",
+            "quote_available": False,
+            "quote_executable": False,
+            "quote_clean": False,
+            "route_available": False,
+            "would_enter_a_class": True,
+            "current_price": 1.0,
+        },
+    )
+    record_opportunity_path_sample(
+        db,
+        key,
+        {
+            "sample_ts": ts + 120,
+            "quote_pnl_pct": 0.65,
+            "quote_clean": True,
+            "quote_executable": True,
+            "route_available": True,
+        },
+    )
+
+    summary = calculate_a_class_expected_rr(
+        db,
+        since_ts=NOW_TS - 24 * 3600,
+        until_ts=NOW_TS,
+        config=relaxed_config(
+            min_quote_clean_gold_silver_seen_24h=1,
+            min_quote_clean_gold_silver_would_enter_count=1,
+        ),
+    )
+
+    assert summary["quote_clean_gold_silver_seen_count"] == 1
+    assert summary["quote_clean_gold_silver_silver_count"] == 1
+    assert summary["quote_clean_gold_silver_would_enter_count"] == 1
+    assert summary["source_breakdown"] == {"opportunity_events": 1}
+    assert summary["source_component_breakdown"] == {"source_resonance_shadow": 1}
+    assert summary["unknown_data_count"] == 0
 
 
 def test_investigate_sourcing_when_seen_below_min():

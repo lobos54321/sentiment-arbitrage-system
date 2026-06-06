@@ -350,6 +350,95 @@ def _fetch_paper_records(db, since_ts: float, until_ts: float) -> tuple[list[dic
     return records, []
 
 
+def _fetch_opportunity_path_records(db, since_ts: float, until_ts: float) -> tuple[list[dict], list[str]]:
+    if not _table_exists(db, "opportunity_events"):
+        return [], ["opportunity_events_missing"]
+    if not _table_exists(db, "opportunity_event_path_samples"):
+        return [], ["opportunity_event_path_samples_missing"]
+    event_cols = _columns(db, "opportunity_events")
+    sample_cols = _columns(db, "opportunity_event_path_samples")
+    required_event = {"opportunity_key", "token_ca"}
+    required_sample = {"opportunity_key", "quote_pnl_pct"}
+    if not required_event.issubset(event_cols):
+        return [], ["opportunity_events_core_columns_missing"]
+    if not required_sample.issubset(sample_cols):
+        return [], ["opportunity_path_samples_core_columns_missing"]
+    ts_expr = "event_ts" if "event_ts" in event_cols else ("created_at" if "created_at" in event_cols else "0")
+    sample_clean_expr = "COALESCE(s.quote_clean, 0) = 1" if "quote_clean" in sample_cols else "1 = 1"
+    sample_exec_expr = "COALESCE(s.quote_executable, 0) = 1" if "quote_executable" in sample_cols else "1 = 1"
+    sample_route_expr = "COALESCE(s.route_available, 0) = 1" if "route_available" in sample_cols else "1 = 1"
+    event_quote_clean_expr = "COALESCE(e.quote_clean, 0) = 1" if "quote_clean" in event_cols else "0 = 1"
+    event_quote_exec_expr = "COALESCE(e.quote_executable, 0) = 1" if "quote_executable" in event_cols else "0 = 1"
+    event_route_expr = "COALESCE(e.route_available, 0) = 1" if "route_available" in event_cols else "0 = 1"
+    would_expr = "COALESCE(e.would_enter_a_class, 0) = 1" if "would_enter_a_class" in event_cols else "0 = 1"
+    did_expr = "COALESCE(e.did_enter, 0) = 1" if "did_enter" in event_cols else "0 = 1"
+    no_route_expr = "MAX(COALESCE(s.no_route_flag, 0))" if "no_route_flag" in sample_cols else "0"
+    trapped_expr = "MAX(COALESCE(s.trapped_flag, 0))" if "trapped_flag" in sample_cols else "0"
+    rows = _rows_as_dicts(db.execute(
+        f"""
+        SELECT
+          e.token_ca,
+          {ts_expr} AS event_ts,
+          {_optional_select(event_cols, "source_type", "'opportunity_events'")},
+          {_optional_select(event_cols, "source_component", "'unknown'")},
+          {_optional_select(event_cols, "would_enter_a_class", "0")},
+          {_optional_select(event_cols, "did_enter", "0")},
+          CASE
+            WHEN {event_quote_clean_expr} AND {event_quote_exec_expr} AND {event_route_expr}
+            THEN 1 ELSE 0
+          END AS event_quote_clean,
+          MAX(
+            CASE
+              WHEN {sample_clean_expr} AND {sample_exec_expr} AND {sample_route_expr}
+              THEN 1 ELSE 0
+            END
+          ) AS sample_quote_clean,
+          MAX(
+            CASE
+              WHEN {sample_clean_expr} AND {sample_exec_expr} AND {sample_route_expr}
+              THEN s.quote_pnl_pct
+              ELSE NULL
+            END
+          ) AS raw_peak,
+          COUNT(s.id) AS sample_count,
+          {no_route_expr} AS no_route_flag,
+          {trapped_expr} AS trapped_flag
+        FROM opportunity_events e
+        LEFT JOIN opportunity_event_path_samples s
+          ON s.opportunity_key = e.opportunity_key
+        WHERE {ts_expr} >= :since_ts
+          AND {ts_expr} <= :until_ts
+          AND COALESCE(e.token_ca, '') != ''
+          AND ({would_expr} OR {did_expr} OR ({event_quote_clean_expr} AND {event_quote_exec_expr} AND {event_route_expr}))
+        GROUP BY e.opportunity_key
+        """,
+        {"since_ts": since_ts, "until_ts": until_ts},
+    ).fetchall())
+    records = []
+    for row in rows:
+        raw_peak = _safe_float(row.get("raw_peak"), None)
+        sample_count = _safe_int(row.get("sample_count"), 0)
+        quote_clean = _truthy(row.get("event_quote_clean")) or _truthy(row.get("sample_quote_clean"))
+        records.append({
+            "source": "opportunity_events",
+            "source_rank": 3,
+            "token_ca": str(row.get("token_ca") or ""),
+            "event_ts": _safe_float(row.get("event_ts"), 0.0) or 0.0,
+            "raw_peak": raw_peak,
+            "adjusted_peak": None if raw_peak is None else max(0.0, raw_peak),
+            "quote_clean_known": _truthy(row.get("event_quote_clean")) or sample_count > 0,
+            "quote_clean": quote_clean,
+            "would_stop_before_peak": False,
+            "no_route_flag": _truthy(row.get("no_route_flag")),
+            "trapped_flag": _truthy(row.get("trapped_flag")),
+            "outlier_flag": False,
+            "source_component": row.get("source_component") or "unknown",
+            "would_enter_a_class": _truthy(row.get("would_enter_a_class")) or _truthy(row.get("did_enter")),
+            "path_sample_count": sample_count,
+        })
+    return records, []
+
+
 def _fetch_missed_records(db, since_ts: float, until_ts: float) -> tuple[list[dict], list[str]]:
     if not _table_exists(db, "paper_missed_signal_attribution"):
         return [], ["paper_missed_signal_attribution_missing"]
@@ -386,7 +475,7 @@ def _fetch_missed_records(db, since_ts: float, until_ts: float) -> tuple[list[di
         stopped = _truthy(row.get("would_stop_before_peak"))
         records.append({
             "source": "paper_missed_signal_attribution",
-            "source_rank": 3,
+            "source_rank": 4,
             "token_ca": str(row.get("token_ca") or ""),
             "event_ts": _safe_float(row.get("event_ts"), 0.0) or 0.0,
             "raw_peak": raw_peak,
@@ -405,29 +494,54 @@ def _fetch_missed_records(db, since_ts: float, until_ts: float) -> tuple[list[di
 
 
 def _would_enter_tokens(db, since_ts: float, until_ts: float) -> tuple[set[str], list[str]]:
-    if not _table_exists(db, "a_class_decision_events"):
-        return set(), ["a_class_decision_events_missing"]
-    cols = _columns(db, "a_class_decision_events")
-    if "token_ca" not in cols or "event_ts" not in cols:
-        return set(), ["a_class_decision_events_core_columns_missing"]
-    if "would_action" in cols and "action" in cols:
-        action_expr = "COALESCE(would_action, action)"
-    elif "would_action" in cols:
-        action_expr = "would_action"
+    tokens: set[str] = set()
+    issues: list[str] = []
+    if _table_exists(db, "a_class_decision_events"):
+        cols = _columns(db, "a_class_decision_events")
+        if "token_ca" not in cols or "event_ts" not in cols:
+            issues.append("a_class_decision_events_core_columns_missing")
+        else:
+            if "would_action" in cols and "action" in cols:
+                action_expr = "COALESCE(would_action, action)"
+            elif "would_action" in cols:
+                action_expr = "would_action"
+            else:
+                action_expr = "action"
+            rows = db.execute(
+                f"""
+                SELECT DISTINCT token_ca
+                FROM a_class_decision_events
+                WHERE event_ts >= :since_ts
+                  AND event_ts <= :until_ts
+                  AND COALESCE(token_ca, '') != ''
+                  AND {action_expr} = :would_enter
+                """,
+                {"since_ts": since_ts, "until_ts": until_ts, "would_enter": WOULD_ENTER_ACTION},
+            ).fetchall()
+            tokens.update(str(row[0]) for row in rows if row[0])
     else:
-        action_expr = "action"
-    rows = db.execute(
-        f"""
-        SELECT DISTINCT token_ca
-        FROM a_class_decision_events
-        WHERE event_ts >= :since_ts
-          AND event_ts <= :until_ts
-          AND COALESCE(token_ca, '') != ''
-          AND {action_expr} = :would_enter
-        """,
-        {"since_ts": since_ts, "until_ts": until_ts, "would_enter": WOULD_ENTER_ACTION},
-    ).fetchall()
-    return {str(row[0]) for row in rows if row[0]}, []
+        issues.append("a_class_decision_events_missing")
+
+    if _table_exists(db, "opportunity_events"):
+        cols = _columns(db, "opportunity_events")
+        if {"token_ca", "event_ts"}.issubset(cols):
+            would_expr = "COALESCE(would_enter_a_class, 0) = 1" if "would_enter_a_class" in cols else "0 = 1"
+            did_expr = "COALESCE(did_enter, 0) = 1" if "did_enter" in cols else "0 = 1"
+            rows = db.execute(
+                f"""
+                SELECT DISTINCT token_ca
+                FROM opportunity_events
+                WHERE event_ts >= :since_ts
+                  AND event_ts <= :until_ts
+                  AND COALESCE(token_ca, '') != ''
+                  AND ({would_expr} OR {did_expr})
+                """,
+                {"since_ts": since_ts, "until_ts": until_ts},
+            ).fetchall()
+            tokens.update(str(row[0]) for row in rows if row[0])
+        else:
+            issues.append("opportunity_events_core_columns_missing")
+    return tokens, sorted(set(issues))
 
 
 def _caught_tokens(db, since_ts: float, until_ts: float) -> set[str]:
@@ -565,7 +679,7 @@ def calculate_a_class_expected_rr(
 
     source_issues: list[str] = []
     records: list[dict] = []
-    for fetcher in (_fetch_canonical_records, _fetch_paper_records, _fetch_missed_records):
+    for fetcher in (_fetch_canonical_records, _fetch_paper_records, _fetch_opportunity_path_records, _fetch_missed_records):
         source_records, issues = fetcher(db, since_ts, until_ts)
         records.extend(source_records)
         source_issues.extend(issues)
@@ -605,9 +719,12 @@ def calculate_a_class_expected_rr(
     trapped_n = sum(1 for _token, record in would_enter if record.get("trapped_flag"))
 
     source_breakdown: dict[str, int] = {}
+    source_component_breakdown: dict[str, int] = {}
     for _token, record in eligible:
         source = str(record.get("source") or "unknown")
         source_breakdown[source] = source_breakdown.get(source, 0) + 1
+        component = str(record.get("source_component") or source)
+        source_component_breakdown[component] = source_component_breakdown.get(component, 0) + 1
 
     result = {
         "available": True,
@@ -619,10 +736,12 @@ def calculate_a_class_expected_rr(
         "source_precedence": [
             "canonical_trade_ledger",
             "paper_trades",
+            "opportunity_events",
             "paper_missed_signal_attribution",
         ],
         "source_issues": sorted(set(source_issues)),
         "source_breakdown": source_breakdown,
+        "source_component_breakdown": source_component_breakdown,
         "quote_clean_gold_silver_seen_count": len(eligible),
         "quote_clean_gold_silver_gold_count": sum(
             1 for _token, record in eligible if (_safe_float(record.get("adjusted_peak"), 0.0) or 0.0) >= gold_threshold

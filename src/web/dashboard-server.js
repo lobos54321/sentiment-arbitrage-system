@@ -2896,6 +2896,8 @@ function sanitizeAClassP0Discovery(raw) {
       would_enter_trapped_rate: null,
       unknown_data_rate: null,
       outlier_trimmed_would_rr: null,
+      source_breakdown: {},
+      source_component_breakdown: {},
       missed_blockers: [],
       discovery_exit: null,
     };
@@ -2927,6 +2929,9 @@ function sanitizeAClassP0Discovery(raw) {
     defined_risk_pct: roundNullableNumber(section.defined_risk_pct, 6),
     source_breakdown: section.source_breakdown && typeof section.source_breakdown === 'object'
       ? { ...section.source_breakdown }
+      : {},
+    source_component_breakdown: section.source_component_breakdown && typeof section.source_component_breakdown === 'object'
+      ? { ...section.source_component_breakdown }
       : {},
     source_issues: Array.isArray(section.source_issues) ? section.source_issues.map(String) : [],
     missed_blockers: missedBlockers,
@@ -5062,6 +5067,16 @@ export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
   const section = liveSnapshot?.a_class || {};
   const rows = (value) => Array.isArray(value) ? value : [];
   const p0Discovery = aClassP0DiscoveryFromSnapshot(liveSnapshot);
+  const rrSummary = {
+    schema_version: 'v1.a_class_rr_summary',
+    available: Boolean(p0Discovery.available),
+    outlier_trimmed_would_rr: p0Discovery.outlier_trimmed_would_rr,
+    defined_risk_pct: p0Discovery.defined_risk_pct,
+    quote_clean_gold_silver_seen_count: p0Discovery.quote_clean_gold_silver_seen_count,
+    quote_clean_gold_silver_would_enter_count: p0Discovery.quote_clean_gold_silver_would_enter_count,
+    source_breakdown: p0Discovery.source_breakdown || {},
+    source_component_breakdown: p0Discovery.source_component_breakdown || {},
+  };
   const runtimeSafety = (section.runtime_safety && typeof section.runtime_safety === 'object')
     ? section.runtime_safety
     : {
@@ -5111,6 +5126,7 @@ export function aClassStatusFromLiveSnapshot(liveSnapshot, { dbPath, requestedHo
     hard_blockers: rows(section.hard_blockers),
     recent_events: rows(section.recent_events).slice(0, limit),
     runtime_safety: runtimeSafety,
+    rr_summary: rrSummary,
     loss_cap_breach_n: Number(runtimeSafety.loss_cap_breach_n || 0),
     mode_circuit_broken: Boolean(runtimeSafety.mode_circuit_broken),
     downgraded_modes: rows(runtimeSafety.downgraded_modes),
@@ -5408,6 +5424,8 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     defined_risk_pct: aClassP0Discovery.defined_risk_pct,
     quote_clean_gold_silver_seen_count: aClassP0Discovery.quote_clean_gold_silver_seen_count,
     quote_clean_gold_silver_would_enter_count: aClassP0Discovery.quote_clean_gold_silver_would_enter_count,
+    source_breakdown: aClassP0Discovery.source_breakdown || {},
+    source_component_breakdown: aClassP0Discovery.source_component_breakdown || {},
     recent_event_rr: aClassEvents
       .filter((event) => event.expected_rr != null)
       .slice(0, 20)

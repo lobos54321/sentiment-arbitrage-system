@@ -52,6 +52,33 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _positive_float(value: Any) -> float | None:
+    number = _safe_float(value, None)
+    return number if number is not None and number > 0 else None
+
+
+def _valuation_from_event(event: Any) -> float | None:
+    for key in (
+        "valuation_sol",
+        "current_valuation_sol",
+        "current_price",
+        "price_sol_per_token",
+        "entry_price",
+        "quote_price",
+        "mark_price",
+        "price",
+    ):
+        number = _positive_float(_get(event, key))
+        if number is not None:
+            return number
+    out_amount = _positive_float(_get(event, "provider_hydrate_out_amount"))
+    if out_amount is not None:
+        # Jupiter buy quotes use fixed SOL input and variable token output.
+        # Inverting token output gives a stable price proxy for relative PnL.
+        return 1.0 / out_amount
+    return None
+
+
 def _truthy(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on", "ok", "clean", "available", "executable"}
@@ -278,9 +305,34 @@ def record_opportunity_path_sample(db, opportunity_key: str, sample: Any) -> boo
     sample_ts = _safe_float(_get(sample, "sample_ts", _get(sample, "event_ts", _get(sample, "ts"))), now_ts)
     if sample_ts is None:
         return False
+    valuation = _positive_float(_get(sample, "valuation_sol"))
+    if valuation is None:
+        valuation = _valuation_from_event(sample)
     quote_clean = _quote_clean_from_event(sample)
     no_route = _no_route_from_event(sample)
     trapped = _truthy(_get(sample, "trapped_flag", False)) or str(_get(sample, "status", "")).lower() == "trapped"
+    quote_pnl = _safe_float(_get(sample, "quote_pnl_pct", _get(sample, "current_quote_pnl_pct")), None)
+    if quote_pnl is None and valuation is not None:
+        try:
+            baseline_row = db.execute(
+                """
+                SELECT valuation_sol
+                FROM opportunity_event_path_samples
+                WHERE opportunity_key = ?
+                  AND valuation_sol IS NOT NULL
+                  AND valuation_sol > 0
+                ORDER BY sample_ts ASC, id ASC
+                LIMIT 1
+                """,
+                (str(opportunity_key),),
+            ).fetchone()
+            baseline = _positive_float(baseline_row[0] if baseline_row is not None else None)
+        except Exception:
+            baseline = None
+        if baseline is not None:
+            quote_pnl = (valuation - baseline) / baseline
+    if quote_pnl is None and quote_clean:
+        quote_pnl = 0.0
     db.execute(
         """
         INSERT INTO opportunity_event_path_samples (
@@ -312,7 +364,7 @@ def record_opportunity_path_sample(db, opportunity_key: str, sample: Any) -> boo
         (
             str(opportunity_key),
             float(sample_ts),
-            _safe_float(_get(sample, "quote_pnl_pct", _get(sample, "current_quote_pnl_pct")), None),
+            quote_pnl,
             1 if quote_clean else 0,
             1 if _truthy(_get(sample, "quote_executable", False)) else 0,
             1 if _truthy(_get(sample, "route_available", False)) else 0,
@@ -320,7 +372,7 @@ def record_opportunity_path_sample(db, opportunity_key: str, sample: Any) -> boo
             1 if trapped else 0,
             _safe_float(_get(sample, "liquidity_usd"), None),
             _safe_float(_get(sample, "spread_pct"), None),
-            _safe_float(_get(sample, "valuation_sol"), None),
+            valuation,
             _get(sample, "quote_source"),
             _safe_float(_get(sample, "quote_age_sec"), None),
             _get(sample, "data_confidence"),
@@ -359,6 +411,9 @@ def record_decision_time_path_sample(db, opportunity_key: str, event: Any, *, ev
     quote_pnl = _safe_float(_get(event, "quote_pnl_pct", _get(event, "current_quote_pnl_pct")), None)
     if quote_pnl is None and quote_clean:
         quote_pnl = 0.0
+    valuation = _valuation_from_event(event)
+    if valuation is None:
+        valuation = _positive_float(_get(event, "entry_size_sol"))
     return record_opportunity_path_sample(
         db,
         opportunity_key,
@@ -372,9 +427,11 @@ def record_decision_time_path_sample(db, opportunity_key: str, event: Any, *, ev
             "trapped_flag": _truthy(_get(event, "trapped_flag", False)),
             "liquidity_usd": _get(event, "liquidity_usd"),
             "spread_pct": _get(event, "spread_pct"),
-            "valuation_sol": _get(event, "valuation_sol", _get(event, "entry_size_sol")),
+            "valuation_sol": valuation,
             "quote_source": _get(event, "quote_source"),
             "quote_age_sec": _get(event, "quote_age_sec"),
+            "current_price": _get(event, "current_price"),
+            "provider_hydrate_out_amount": _get(event, "provider_hydrate_out_amount"),
             "data_confidence": _get(event, "data_confidence"),
             "provider_data_state": _get(event, "provider_data_state"),
             "provider_reason": _get(event, "provider_reason"),

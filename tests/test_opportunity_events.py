@@ -9,6 +9,7 @@ from opportunity_events import (
     init_opportunity_events,
     record_linked_trade_path_sample,
     record_opportunity_event,
+    record_opportunity_path_sample,
 )
 
 
@@ -136,6 +137,49 @@ def test_record_opportunity_event_persists_provider_hydrate_outcome():
     assert key == "source:hydrate:TOKEN"
     assert event["hydrate_outcome"] == "success"
     assert event["hydrate_success"] == 1
+
+
+def test_path_sample_derives_pnl_from_repeated_current_price_observations():
+    db = memory_db()
+    key = record_opportunity_event(
+        db,
+        {
+            "opportunity_key": "source:path-price:TOKEN",
+            "event_ts": 1_000,
+            "token_ca": "TOKEN",
+            "source_type": "unit",
+            "route_bucket": "ATH",
+            "quote_available": True,
+            "quote_executable": True,
+            "quote_clean": True,
+            "route_available": True,
+            "current_price": 1.0,
+            "would_enter_a_class": True,
+        },
+    )
+
+    ok = record_opportunity_path_sample(
+        db,
+        key,
+        {
+            "sample_ts": 1_060,
+            "quote_clean": True,
+            "quote_executable": True,
+            "route_available": True,
+            "current_price": 1.6,
+        },
+    )
+
+    assert ok is True
+    samples = db.execute(
+        "SELECT sample_ts, quote_pnl_pct, valuation_sol FROM opportunity_event_path_samples WHERE opportunity_key = ? ORDER BY sample_ts",
+        (key,),
+    ).fetchall()
+    assert len(samples) == 2
+    assert samples[0]["quote_pnl_pct"] == 0
+    assert samples[0]["valuation_sol"] == 1.0
+    assert round(samples[1]["quote_pnl_pct"], 6) == 0.6
+    assert samples[1]["valuation_sol"] == 1.6
 
 
 def test_linked_trade_path_sample_updates_all_linked_opportunities():
