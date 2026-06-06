@@ -13,6 +13,24 @@ with DexScreener, Jupiter/shared quotes, Helius, lifecycle classification, and
 GMGN read-only data, then paper-trades only after route-specific gates,
 readiness checks, SmartEntry timing, and Jupiter-compatible quote simulation.
 
+## Operating Doctrine
+
+All diagnosis, strategy changes, and production reviews should follow
+[`docs/problem-solving-operating-principles.md`](problem-solving-operating-principles.md).
+
+The required sequence is:
+
+1. understand the real live situation first;
+2. verify the measurement chain before interpreting strategy performance;
+3. decompose the problem into smallest effective observable units;
+4. rank contradictions by dependency and evidence;
+5. lock one main contradiction;
+6. change one lever and verify one expected metric.
+
+In practice, this means no gate, score, AI, exit, or sizing change should be made
+while live DB continuity, signal freshness, quote-clean denominator, or realized
+SOL accounting is still unresolved.
+
 ## Runtime Ownership
 
 - Node receives and parses premium signals.
