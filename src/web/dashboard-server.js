@@ -2461,6 +2461,114 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
   }
 }
 
+function envBool(name, defaultValue = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return Boolean(defaultValue);
+  const value = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  return Boolean(defaultValue);
+}
+
+function envInt(name, defaultValue, minValue, maxValue) {
+  const raw = parseInt(String(process.env[name] ?? defaultValue), 10);
+  const value = Number.isFinite(raw) ? raw : defaultValue;
+  return Math.max(minValue, Math.min(maxValue, value));
+}
+
+let rawDogDiscoveryObserverTimer = null;
+let rawDogDiscoveryObserverBusy = false;
+const rawDogDiscoveryObserverState = {
+  schema_version: 'raw_dog_discovery_observer.v1',
+  enabled: false,
+  running: false,
+  interval_sec: null,
+  window_hours: null,
+  limit: null,
+  last_started_at: null,
+  last_completed_at: null,
+  last_duration_ms: null,
+  last_persisted_rows: null,
+  last_summary: null,
+  last_diagnostics: null,
+  error_count: 0,
+  last_error: null,
+};
+
+function rawDogDiscoveryObserverStatus() {
+  return {
+    ...rawDogDiscoveryObserverState,
+    running: Boolean(rawDogDiscoveryObserverTimer),
+    busy: Boolean(rawDogDiscoveryObserverBusy),
+  };
+}
+
+function startRawDogDiscoveryObserver() {
+  if (rawDogDiscoveryObserverTimer) return rawDogDiscoveryObserverStatus();
+  if (!envBool('RAW_DOG_DISCOVERY_OBSERVER_ENABLED', true)) {
+    rawDogDiscoveryObserverState.enabled = false;
+    rawDogDiscoveryObserverState.last_error = 'disabled_by_RAW_DOG_DISCOVERY_OBSERVER_ENABLED';
+    return rawDogDiscoveryObserverStatus();
+  }
+  const intervalSec = envInt('RAW_DOG_DISCOVERY_OBSERVER_INTERVAL_SEC', 300, 60, 3600);
+  const initialDelaySec = envInt('RAW_DOG_DISCOVERY_OBSERVER_INITIAL_DELAY_SEC', 20, 0, 300);
+  const windowHours = envInt('RAW_DOG_DISCOVERY_OBSERVER_WINDOW_HOURS', 24, 1, 168);
+  const limit = envInt('RAW_DOG_DISCOVERY_OBSERVER_LIMIT', 20000, 100, 50000);
+  const horizonSec = envInt('RAW_DOG_DISCOVERY_OBSERVER_HORIZON_SEC', 7200, 300, 24 * 3600);
+  const baselineMaxLagSec = envInt('RAW_DOG_DISCOVERY_OBSERVER_BASELINE_MAX_LAG_SEC', 300, 0, 3600);
+  const coverageTargetPct = envInt('RAW_DOG_DISCOVERY_OBSERVER_COVERAGE_TARGET_PCT', 80, 0, 100);
+  rawDogDiscoveryObserverState.enabled = true;
+  rawDogDiscoveryObserverState.interval_sec = intervalSec;
+  rawDogDiscoveryObserverState.window_hours = windowHours;
+  rawDogDiscoveryObserverState.limit = limit;
+
+  const runOnce = () => {
+    if (rawDogDiscoveryObserverBusy) return;
+    rawDogDiscoveryObserverBusy = true;
+    const started = Date.now();
+    const nowTs = Math.floor(started / 1000);
+    rawDogDiscoveryObserverState.last_started_at = new Date(started).toISOString();
+    rawDogDiscoveryObserverState.last_error = null;
+    try {
+      const signalDb = getDb();
+      const snapshot = buildRawDogDiscoverySnapshot({
+        signalDb,
+        sinceTs: nowTs - windowHours * 3600,
+        limit,
+        nowTs,
+        horizonSec,
+        baselineMaxLagSec,
+        coverageTargetPct,
+        persist: true,
+      });
+      rawDogDiscoveryObserverState.last_completed_at = new Date().toISOString();
+      rawDogDiscoveryObserverState.last_duration_ms = Date.now() - started;
+      rawDogDiscoveryObserverState.last_persisted_rows = snapshot.diagnostics?.raw_db?.persisted_rows ?? null;
+      rawDogDiscoveryObserverState.last_summary = snapshot.report?.summary || null;
+      rawDogDiscoveryObserverState.last_diagnostics = snapshot.diagnostics || null;
+      if (!snapshot.available || snapshot.diagnostics?.raw_db?.error) {
+        rawDogDiscoveryObserverState.error_count += 1;
+        rawDogDiscoveryObserverState.last_error = snapshot.error || snapshot.diagnostics?.raw_db?.error || 'raw_discovery_snapshot_unavailable';
+      }
+      console.log(`[RAW_DOG_DISCOVERY_OBSERVER] persisted=${rawDogDiscoveryObserverState.last_persisted_rows ?? 'n/a'} coverage=${rawDogDiscoveryObserverState.last_summary?.raw_kline_coverage_pct ?? 'n/a'} status=${rawDogDiscoveryObserverState.last_summary?.denominator_status || 'unknown'}`);
+    } catch (error) {
+      rawDogDiscoveryObserverState.error_count += 1;
+      rawDogDiscoveryObserverState.last_error = error?.message || String(error);
+      rawDogDiscoveryObserverState.last_completed_at = new Date().toISOString();
+      rawDogDiscoveryObserverState.last_duration_ms = Date.now() - started;
+      console.warn(`[RAW_DOG_DISCOVERY_OBSERVER] failed: ${rawDogDiscoveryObserverState.last_error}`);
+    } finally {
+      rawDogDiscoveryObserverBusy = false;
+    }
+  };
+
+  const initial = setTimeout(runOnce, initialDelaySec * 1000);
+  if (typeof initial.unref === 'function') initial.unref();
+  rawDogDiscoveryObserverTimer = setInterval(runOnce, intervalSec * 1000);
+  if (typeof rawDogDiscoveryObserverTimer.unref === 'function') rawDogDiscoveryObserverTimer.unref();
+  return rawDogDiscoveryObserverStatus();
+}
+
 function fileInfo(label, filePath) {
   try {
     const stats = fs.statSync(filePath);
@@ -8718,6 +8826,7 @@ const server = http.createServer(async (req, res) => {
       paper_fast_lane_health: paperFastLaneHealth,
       paper_db_health: paperDbHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
+      raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
     }));
     return;
   } else if (url.pathname === '/dashboard') {
@@ -15271,6 +15380,7 @@ export function startDashboardServer(attempt = 0) {
   try {
     server.listen(targetPort, '0.0.0.0', () => {
       console.log(`🌐 Dashboard server running at http://0.0.0.0:${targetPort}`);
+      startRawDogDiscoveryObserver();
     });
   } catch (error) {
     console.error(`❌ Sync listen error:`, error);
