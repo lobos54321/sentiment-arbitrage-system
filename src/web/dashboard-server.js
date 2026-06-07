@@ -9591,9 +9591,8 @@ const server = http.createServer(async (req, res) => {
     return;
   } else if (url.pathname === '/api/paper/raw-dog-discovery') {
     if (!checkAuth(req, url, res)) return;
-    let signalDb;
     try {
-      signalDb = getDb();
+      const signalDb = getDb();
       const sinceTs = reportSinceTs(url, '6h');
       const limit = boundedIntParam(url, 'limit', 5000, 1, 20000);
       const nowTs = parseUnixishTime(url.searchParams.get('now_ts')) || Math.floor(Date.now() / 1000);
@@ -9631,8 +9630,6 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(500, apiJsonHeaders());
       res.end(JSON.stringify({ error: e.message }, null, 2));
-    } finally {
-      try { if (signalDb) signalDb.close(); } catch {}
     }
     return;
   } else if (url.pathname === '/api/paper/premium-signal-outcome-audit') {
