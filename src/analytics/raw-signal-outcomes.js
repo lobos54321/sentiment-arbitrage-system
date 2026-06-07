@@ -79,6 +79,23 @@ function groupByToken(rows) {
   return out;
 }
 
+function uniqueTokenCount(rows) {
+  return new Set((rows || []).map((row) => String(row.token_ca || '').trim()).filter(Boolean)).size;
+}
+
+function uniqueByTokenBest(rows, scoreFn = (row) => Number(row.max_sustained_peak_pct || 0)) {
+  const byToken = new Map();
+  for (const row of rows || []) {
+    const token = String(row.token_ca || '').trim();
+    if (!token) continue;
+    const current = byToken.get(token);
+    const currentScore = current ? Number(scoreFn(current) || 0) : -Infinity;
+    const nextScore = Number(scoreFn(row) || 0);
+    if (!current || nextScore > currentScore) byToken.set(token, row);
+  }
+  return [...byToken.values()];
+}
+
 function normalizeSignal(row) {
   const signalTs = normalizeTimestampSec(row.signal_ts ?? row.timestamp_sec ?? row.timestamp ?? row.receive_ts ?? row.created_ts);
   return {
@@ -417,16 +434,22 @@ function buildRawSignalOutcomeReport({
     && row.sustained_evaluable
   ));
   const rawDogs = eligible.filter((row) => row.raw_primary_tier === 'gold' || row.raw_primary_tier === 'silver');
-  const rawGold = rawDogs.filter((row) => row.raw_primary_tier === 'gold');
-  const rawSilver = rawDogs.filter((row) => row.raw_primary_tier === 'silver');
-  const entered = rawDogs.filter((row) => row.raw_dog_entered);
-  const realized = rawDogs.filter((row) => row.raw_dog_realized);
+  const rawDogUniqueRows = uniqueByTokenBest(rawDogs);
+  const rawGoldUniqueRows = uniqueByTokenBest(rawDogs.filter((row) => row.raw_primary_tier === 'gold'));
+  const rawSilverUniqueRows = uniqueByTokenBest(rawDogs.filter((row) => row.raw_primary_tier === 'silver'));
+  const entered = uniqueByTokenBest(rawDogs.filter((row) => row.raw_dog_entered));
+  const realized = uniqueByTokenBest(rawDogs.filter((row) => row.raw_dog_realized));
+  const wickGoldSilver = matured.filter((row) => row.raw_wick_tier === 'gold' || row.raw_wick_tier === 'silver');
+  const wickOnlyGoldSilver = matured.filter((row) => (
+    (row.raw_wick_tier === 'gold' || row.raw_wick_tier === 'silver')
+    && !(row.raw_primary_tier === 'gold' || row.raw_primary_tier === 'silver')
+  ));
   const coveragePct = matured.length ? (eligible.length / matured.length) * 100.0 : null;
-  const rawEnteredRate = rawDogs.length ? entered.length / rawDogs.length : null;
-  const rawRealizedRate = rawDogs.length ? realized.length / rawDogs.length : null;
+  const rawEnteredRate = rawDogUniqueRows.length ? entered.length / rawDogUniqueRows.length : null;
+  const rawRealizedRate = rawDogUniqueRows.length ? realized.length / rawDogUniqueRows.length : null;
   let denominatorStatus = 'undefined';
   if (coveragePct != null && coveragePct < coverageTargetPct) denominatorStatus = 'evidence_unavailable';
-  else if (rawDogs.length > 0) denominatorStatus = 'evaluable';
+  else if (rawDogUniqueRows.length > 0) denominatorStatus = 'evaluable';
   return {
     schema_version: 'raw_signal_discovery_report.v1',
     generated_at: new Date(nowTs * 1000).toISOString(),
@@ -435,16 +458,17 @@ function buildRawSignalOutcomeReport({
       matured_signals: matured.length,
       pending_signals: pending.length,
       right_censored_open: pending.length,
-      raw_denominator_matured_only: eligible.length,
+      raw_denominator_matured_only: uniqueTokenCount(eligible),
+      raw_denominator_event_rows: eligible.length,
       raw_kline_coverage_pct: coveragePct == null ? null : roundNumber(coveragePct, 2),
-      raw_sustained_gold_unique: rawGold.length,
-      raw_sustained_silver_unique: rawSilver.length,
-      raw_sustained_gold_silver_unique: rawDogs.length,
-      raw_wick_gold_silver_unique: matured.filter((row) => row.raw_wick_tier === 'gold' || row.raw_wick_tier === 'silver').length,
-      raw_wick_only_gold_silver_unique: matured.filter((row) => (
-        (row.raw_wick_tier === 'gold' || row.raw_wick_tier === 'silver')
-        && !(row.raw_primary_tier === 'gold' || row.raw_primary_tier === 'silver')
-      )).length,
+      raw_sustained_gold_unique: rawGoldUniqueRows.length,
+      raw_sustained_silver_unique: rawSilverUniqueRows.length,
+      raw_sustained_gold_silver_unique: rawDogUniqueRows.length,
+      raw_sustained_gold_silver_event_rows: rawDogs.length,
+      raw_wick_gold_silver_unique: uniqueTokenCount(wickGoldSilver),
+      raw_wick_gold_silver_event_rows: wickGoldSilver.length,
+      raw_wick_only_gold_silver_unique: uniqueTokenCount(wickOnlyGoldSilver),
+      raw_wick_only_gold_silver_event_rows: wickOnlyGoldSilver.length,
       raw_gold_silver_entered: entered.length,
       raw_gold_silver_realized: realized.length,
       raw_dog_entered_rate: rawEnteredRate == null ? null : roundNumber(rawEnteredRate, 4),
@@ -458,10 +482,10 @@ function buildRawSignalOutcomeReport({
       by_signal_type: countBy(outcomes, (row) => row.signal_type),
       by_hard_gate_status: countBy(outcomes, (row) => row.hard_gate_status),
     },
-    top_raw_dogs: [...rawDogs]
+    top_raw_dogs: rawDogUniqueRows
       .sort((a, b) => Number(b.max_sustained_peak_pct || 0) - Number(a.max_sustained_peak_pct || 0))
       .slice(0, 50),
-    missed_raw_dogs: rawDogs
+    missed_raw_dogs: rawDogUniqueRows
       .filter((row) => !row.raw_dog_realized)
       .sort((a, b) => Number(b.max_sustained_peak_pct || 0) - Number(a.max_sustained_peak_pct || 0))
       .slice(0, 50),

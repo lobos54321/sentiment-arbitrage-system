@@ -147,3 +147,32 @@ test('held-to-silver counts as realized raw dog capture', () => {
   assert.equal(report.summary.raw_dog_realized_rate, 1);
   assert.equal(report.outcomes[0].held_to_silver, true);
 });
+
+test('duplicate premium signal rows for the same token do not inflate dog counts', () => {
+  const report = buildRawSignalOutcomeReport({
+    nowTs: 10_000,
+    horizonSec: 7200,
+    signals: [
+      signal({ id: 1, token_ca: 'DUP', signal_ts: 1000 }),
+      signal({ id: 2, token_ca: 'DUP', signal_ts: 1000 }),
+      signal({ id: 3, token_ca: 'DUP', signal_ts: 1000 }),
+    ],
+    klineRows: [
+      kline(1000, 1.0, { token_ca: 'DUP' }),
+      kline(1060, 1.75, { token_ca: 'DUP', high: 1.8, close: 1.75, volume: 500 }),
+      kline(1120, 1.65, { token_ca: 'DUP', high: 1.75, close: 1.65, volume: 450 }),
+    ],
+    paperTrades: [
+      { id: 9, token_ca: 'DUP', entry_ts: 1010, exit_ts: 1200, peak_pnl: 0.6, exit_reason: 'runner_floor' },
+    ],
+  });
+
+  assert.equal(report.summary.raw_denominator_event_rows, 3);
+  assert.equal(report.summary.raw_denominator_matured_only, 1);
+  assert.equal(report.summary.raw_sustained_gold_silver_event_rows, 3);
+  assert.equal(report.summary.raw_sustained_gold_silver_unique, 1);
+  assert.equal(report.summary.raw_gold_silver_entered, 1);
+  assert.equal(report.summary.raw_gold_silver_realized, 1);
+  assert.equal(report.top_raw_dogs.length, 1);
+  assert.equal(report.top_raw_dogs[0].token_ca, 'DUP');
+});

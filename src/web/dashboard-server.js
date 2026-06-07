@@ -2297,22 +2297,71 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
     }
     const eligibleSql = rawOutcomeEligibleSql();
     const summary = db.prepare(`
+      WITH
+      rows AS (
+        SELECT *
+        FROM raw_signal_outcomes
+        WHERE signal_ts >= @since
+      ),
+      eligible AS (
+        SELECT *
+        FROM rows
+        WHERE ${eligibleSql}
+      ),
+      dog_events AS (
+        SELECT *
+        FROM eligible
+        WHERE raw_primary_tier IN ('gold', 'silver')
+      ),
+      dog_tokens AS (
+        SELECT
+          token_ca,
+          MAX(CASE WHEN raw_primary_tier = 'gold' THEN 1 ELSE 0 END) AS is_gold,
+          MAX(CASE WHEN raw_primary_tier = 'silver' THEN 1 ELSE 0 END) AS is_silver,
+          MAX(COALESCE(raw_dog_entered, 0)) AS raw_dog_entered,
+          MAX(COALESCE(raw_dog_realized, 0)) AS raw_dog_realized,
+          MAX(COALESCE(sold_before_silver, 0)) AS sold_before_silver,
+          MAX(COALESCE(sold_before_gold, 0)) AS sold_before_gold
+        FROM dog_events
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+        GROUP BY token_ca
+      ),
+      eligible_tokens AS (
+        SELECT DISTINCT token_ca
+        FROM eligible
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+      ),
+      wick_tokens AS (
+        SELECT DISTINCT token_ca
+        FROM rows
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+          AND raw_wick_tier IN ('gold', 'silver')
+      ),
+      wick_only_tokens AS (
+        SELECT DISTINCT token_ca
+        FROM rows
+        WHERE token_ca IS NOT NULL AND token_ca != ''
+          AND raw_wick_tier IN ('gold', 'silver')
+          AND raw_primary_tier NOT IN ('gold', 'silver')
+      )
       SELECT
-        COUNT(*) AS total_signals,
-        SUM(CASE WHEN observation_status = 'matured' THEN 1 ELSE 0 END) AS matured_signals,
-        SUM(CASE WHEN COALESCE(right_censored, 0) = 1 THEN 1 ELSE 0 END) AS right_censored_open,
-        SUM(CASE WHEN ${eligibleSql} THEN 1 ELSE 0 END) AS raw_denominator_matured_only,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_sustained_gold_silver_unique,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'gold' THEN 1 ELSE 0 END) AS raw_sustained_gold_unique,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'silver' THEN 1 ELSE 0 END) AS raw_sustained_silver_unique,
-        SUM(CASE WHEN raw_wick_tier IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_wick_gold_silver_unique,
-        SUM(CASE WHEN raw_wick_tier IN ('gold', 'silver') AND raw_primary_tier NOT IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_wick_only_gold_silver_unique,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(raw_dog_entered, 0) = 1 THEN 1 ELSE 0 END) AS raw_gold_silver_entered,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(raw_dog_realized, 0) = 1 THEN 1 ELSE 0 END) AS raw_gold_silver_realized,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(sold_before_silver, 0) = 1 THEN 1 ELSE 0 END) AS sold_before_silver,
-        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'gold' AND COALESCE(sold_before_gold, 0) = 1 THEN 1 ELSE 0 END) AS sold_before_gold
-      FROM raw_signal_outcomes
-      WHERE signal_ts >= @since
+        (SELECT COUNT(*) FROM rows) AS total_signals,
+        (SELECT SUM(CASE WHEN observation_status = 'matured' THEN 1 ELSE 0 END) FROM rows) AS matured_signals,
+        (SELECT SUM(CASE WHEN COALESCE(right_censored, 0) = 1 THEN 1 ELSE 0 END) FROM rows) AS right_censored_open,
+        (SELECT COUNT(*) FROM eligible_tokens) AS raw_denominator_matured_only,
+        (SELECT COUNT(*) FROM eligible) AS raw_denominator_event_rows,
+        (SELECT COUNT(*) FROM dog_tokens) AS raw_sustained_gold_silver_unique,
+        (SELECT COUNT(*) FROM dog_events) AS raw_sustained_gold_silver_event_rows,
+        (SELECT SUM(CASE WHEN is_gold = 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS raw_sustained_gold_unique,
+        (SELECT SUM(CASE WHEN is_silver = 1 AND is_gold != 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS raw_sustained_silver_unique,
+        (SELECT COUNT(*) FROM wick_tokens) AS raw_wick_gold_silver_unique,
+        (SELECT COUNT(*) FROM rows WHERE raw_wick_tier IN ('gold', 'silver')) AS raw_wick_gold_silver_event_rows,
+        (SELECT COUNT(*) FROM wick_only_tokens) AS raw_wick_only_gold_silver_unique,
+        (SELECT COUNT(*) FROM rows WHERE raw_wick_tier IN ('gold', 'silver') AND raw_primary_tier NOT IN ('gold', 'silver')) AS raw_wick_only_gold_silver_event_rows,
+        (SELECT SUM(CASE WHEN raw_dog_entered = 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS raw_gold_silver_entered,
+        (SELECT SUM(CASE WHEN raw_dog_realized = 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS raw_gold_silver_realized,
+        (SELECT SUM(CASE WHEN sold_before_silver = 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS sold_before_silver,
+        (SELECT SUM(CASE WHEN sold_before_gold = 1 THEN 1 ELSE 0 END) FROM dog_tokens) AS sold_before_gold
     `).get({ since: sinceTs }) || {};
     const matured = Number(summary.matured_signals || 0);
     const denominator = Number(summary.raw_denominator_matured_only || 0);
@@ -2356,12 +2405,16 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
         matured_signals: matured,
         right_censored_open: Number(summary.right_censored_open || 0),
         raw_denominator_matured_only: denominator,
+        raw_denominator_event_rows: Number(summary.raw_denominator_event_rows || 0),
         raw_kline_coverage_pct: coveragePct,
         raw_sustained_gold_unique: Number(summary.raw_sustained_gold_unique || 0),
         raw_sustained_silver_unique: Number(summary.raw_sustained_silver_unique || 0),
         raw_sustained_gold_silver_unique: rawDogs,
+        raw_sustained_gold_silver_event_rows: Number(summary.raw_sustained_gold_silver_event_rows || 0),
         raw_wick_gold_silver_unique: Number(summary.raw_wick_gold_silver_unique || 0),
+        raw_wick_gold_silver_event_rows: Number(summary.raw_wick_gold_silver_event_rows || 0),
         raw_wick_only_gold_silver_unique: Number(summary.raw_wick_only_gold_silver_unique || 0),
+        raw_wick_only_gold_silver_event_rows: Number(summary.raw_wick_only_gold_silver_event_rows || 0),
         raw_gold_silver_entered: entered,
         raw_gold_silver_realized: realized,
         raw_dog_entered_rate: rawDogs ? roundNumber(entered / rawDogs, 4) : null,
