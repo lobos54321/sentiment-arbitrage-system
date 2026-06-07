@@ -18374,6 +18374,7 @@ def run_due_missed_attribution_update(
     db,
     *,
     historical_price_fetcher=None,
+    historical_path_fetcher=None,
     live_price_fetcher=None,
     now=None,
     limit=250,
@@ -18398,6 +18399,7 @@ def run_due_missed_attribution_update(
             updated = update_due_missed_attributions(
                 db,
                 historical_price_fetcher=historical_price_fetcher,
+                historical_path_fetcher=historical_path_fetcher,
                 live_price_fetcher=live_price_fetcher,
                 now=now,
                 limit=limit,
@@ -20894,6 +20896,57 @@ def fetch_kline_close_at_or_after(token_ca, target_ts, max_lag_sec=180):
         return None
 
 
+def fetch_kline_path_for_attribution(token_ca, start_ts, end_ts, max_points=90):
+    """Return cached 1m path samples for missed-dog peak attribution.
+
+    This intentionally uses cached non-shadow K-line data only.  Horizon closes
+    can miss very fast meme moves, while the path high/low samples let the
+    attribution layer see quick +50%/+100% peaks and whether a stop would have
+    fired first.
+    """
+    try:
+        start_ts = int(start_ts)
+        end_ts = int(end_ts)
+    except (TypeError, ValueError):
+        return []
+    if end_ts < start_ts:
+        return []
+    try:
+        with sqlite3.connect(KLINE_DB) as kdb:
+            kdb.row_factory = sqlite3.Row
+            rows = kdb.execute(
+                """
+                SELECT timestamp, low, high, close, provider
+                FROM kline_1m
+                WHERE token_ca = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                (token_ca, start_ts, end_ts, int(max_points)),
+            ).fetchall()
+            samples = []
+            for row in rows:
+                if not row["timestamp"]:
+                    continue
+                close = row["close"]
+                high = row["high"]
+                low = row["low"]
+                if (close is None or close <= 0) and (high is None or high <= 0) and (low is None or low <= 0):
+                    continue
+                samples.append({
+                    "timestamp": int(row["timestamp"]),
+                    "low": float(low) if low and low > 0 else None,
+                    "high": float(high) if high and high > 0 else None,
+                    "close": float(close) if close and close > 0 else None,
+                    "source": f"kline_1m:{row['provider'] or 'unknown'}",
+                })
+            return samples
+    except Exception:
+        return []
+
+
 def fetch_live_price_for_attribution(token_ca):
     """Best-effort live price fallback for very fresh missed-signal attribution."""
     try:
@@ -21720,6 +21773,7 @@ def run_monitor(db):
                 _missed_result = run_due_missed_attribution_update(
                     db,
                     historical_price_fetcher=fetch_kline_close_at_or_after,
+                    historical_path_fetcher=fetch_kline_path_for_attribution,
                     live_price_fetcher=fetch_live_price_for_attribution,
                     now=now,
                     limit=250,

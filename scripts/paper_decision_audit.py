@@ -183,7 +183,7 @@ MISSED_HORIZONS = {
 
 
 MISSED_BASELINE_LIVE_GRACE_SEC = 5 * 60
-MISSED_TRADABILITY_VERSION = "v1_horizon_samples"
+MISSED_TRADABILITY_VERSION = "v2_path_samples"
 MISSED_TRADABLE_MIN_PEAK_PNL = float(os.environ.get("MISSED_TRADABLE_MIN_PEAK_PNL", "0.25"))
 MISSED_TRADABLE_RECLAIM_PNL = float(os.environ.get("MISSED_TRADABLE_RECLAIM_PNL", "0.15"))
 MISSED_TRADABLE_MAX_PEAK_SEC = int(os.environ.get("MISSED_TRADABLE_MAX_PEAK_SEC", str(60 * 60)))
@@ -591,16 +591,116 @@ def _missed_horizon_points(row, changes):
             "horizon": name,
             "offset": int(offset),
             "pnl": pnl,
+            "source": "horizon_quote_clean_proxy",
+            "rank": 1,
         })
+    return points
+
+
+def _sample_value(sample, *keys):
+    if isinstance(sample, dict):
+        for key in keys:
+            if key in sample and sample.get(key) is not None:
+                return sample.get(key)
+    else:
+        for key in keys:
+            if hasattr(sample, key):
+                value = getattr(sample, key)
+                if value is not None:
+                    return value
+            try:
+                value = sample[key]
+            except Exception:
+                continue
+            if value is not None:
+                return value
+    return None
+
+
+def _normalize_path_sample(sample):
+    """Return (timestamp, low_price, high_price, close_price, source)."""
+    if sample is None:
+        return None
+    if isinstance(sample, (tuple, list)):
+        if len(sample) >= 5:
+            return sample[0], sample[1], sample[2], sample[3], sample[4]
+        if len(sample) >= 3:
+            # Backward-friendly tuple support: either (ts, price, source) or
+            # (price, source, ts).  Timestamps are unix seconds, so they are
+            # much larger than meme token prices.
+            first = _float_or_none(sample[0])
+            if first is not None and first > 1_000_000_000:
+                return sample[0], None, sample[1], sample[1], sample[2]
+            return sample[2], None, sample[0], sample[0], sample[1]
+        return None
+    ts = _sample_value(sample, "timestamp", "ts", "event_ts", "time")
+    low = _sample_value(sample, "low")
+    high = _sample_value(sample, "high")
+    close = _sample_value(sample, "close", "price", "mark_price")
+    source = _sample_value(sample, "provider", "source", "price_source")
+    return ts, low, high, close, source
+
+
+def _missed_path_points(samples, *, baseline_price, base_ts):
+    """Convert cached path samples to PnL points for missed-dog attribution.
+
+    Fixed 5m/15m/60m samples miss very fast meme moves.  The path points use
+    1m K-line highs for peak detection and lows for conservative stop-before-
+    peak attribution.
+    """
+    points = []
+    baseline = _float_or_none(baseline_price)
+    if not samples or baseline is None or baseline <= 0:
+        return points
+    try:
+        base = int(base_ts)
+    except (TypeError, ValueError):
+        return points
+
+    for sample in samples:
+        normalized = _normalize_path_sample(sample)
+        if not normalized:
+            continue
+        ts, low, high, close, source = normalized
+        try:
+            ts_int = int(float(ts))
+        except (TypeError, ValueError):
+            continue
+        offset = ts_int - base
+        if offset < 0 or offset > MISSED_TRADABLE_MAX_PEAK_SEC:
+            continue
+        source_prefix = f"path:{source or 'unknown'}"
+
+        low_f = _float_or_none(low)
+        if low_f is not None and low_f > 0:
+            points.append({
+                "horizon": f"path_{offset}s_low",
+                "offset": int(offset),
+                "pnl": (low_f / baseline) - 1.0,
+                "source": f"{source_prefix}:low",
+                "rank": 0,
+            })
+
+        high_f = _float_or_none(high)
+        close_f = _float_or_none(close)
+        peak_price = high_f if high_f is not None and high_f > 0 else close_f
+        if peak_price is not None and peak_price > 0:
+            points.append({
+                "horizon": f"path_{offset}s_high" if high_f is not None and high_f > 0 else f"path_{offset}s",
+                "offset": int(offset),
+                "pnl": (peak_price / baseline) - 1.0,
+                "source": f"{source_prefix}:high" if high_f is not None and high_f > 0 else source_prefix,
+                "rank": 1,
+            })
     return points
 
 
 def evaluate_missed_tradability(route, points, *, base_ts=None):
     """Classify whether a missed dog was actually tradable under current risk.
 
-    v1 uses the same horizon samples already stored for missed attribution
-    (5m/15m/60m/24h). It is conservative and intentionally marks path precision
-    in tradability_version so later tick-level versions can replace it.
+    v2 uses both fixed horizon samples (5m/15m/60m/24h) and cached 1m path
+    samples.  The path samples keep fast pumps visible even when no exact 5m
+    close was cached.
     """
     stop_floor = _route_stop_floor(route)
     result = {
@@ -627,8 +727,14 @@ def evaluate_missed_tradability(route, points, *, base_ts=None):
     if not points:
         return result
 
+    points = sorted(points, key=lambda point: (point["offset"], point.get("rank", 1)))
     peak = max(points, key=lambda point: (point["pnl"], -point["offset"]))
-    prior_points = [point for point in points if point["offset"] < peak["offset"]]
+    peak_position = (peak["offset"], peak.get("rank", 1))
+    prior_points = [
+        point
+        for point in points
+        if (point["offset"], point.get("rank", 1)) < peak_position
+    ]
     prior_pnls = [0.0] + [point["pnl"] for point in prior_points]
     mae_before_peak = min(prior_pnls)
     would_stop = mae_before_peak <= stop_floor
@@ -688,7 +794,7 @@ def evaluate_missed_tradability(route, points, *, base_ts=None):
             ),
             "quote_clean_peak_pnl": peak["pnl"],
             "executable_peak_pnl": peak["pnl"],
-            "executable_peak_source": "horizon_quote_clean_proxy",
+            "executable_peak_source": peak.get("source") or "horizon_quote_clean_proxy",
             "executable_peak_horizon": peak["horizon"],
             "tradable_missed": 1,
         })
@@ -804,11 +910,17 @@ def update_due_missed_attributions(
     db,
     *,
     historical_price_fetcher=None,
+    historical_path_fetcher=None,
     live_price_fetcher=None,
     now=None,
     limit=50,
 ):
-    """Fill missed-signal 5m/15m/60m/24h outcomes from non-shadow price data."""
+    """Fill missed-signal outcomes from non-shadow price data.
+
+    Fixed horizons preserve old reporting fields.  Path samples populate the
+    peak/tradability fields so fast 1-4 minute meme moves do not disappear just
+    because no exact 5m close was cached.
+    """
     now = int(now or time.time())
     rows = db.execute(
         """
@@ -875,6 +987,7 @@ def update_due_missed_attributions(
         if row["baseline_ts"] is None:
             changes["baseline_ts"] = int(base_ts)
         pnl_values = []
+        path_points = []
         for name, offset in MISSED_HORIZONS.items():
             price_col = f"price_{name}"
             pnl_col = f"pnl_{name}"
@@ -900,6 +1013,22 @@ def update_due_missed_attributions(
                 changes[pnl_col] = pnl
                 pnl_values.append(pnl)
 
+        if historical_path_fetcher:
+            path_end_ts = min(int(now), int(base_ts) + MISSED_TRADABLE_MAX_PEAK_SEC)
+            if path_end_ts >= int(base_ts):
+                try:
+                    path_samples = historical_path_fetcher(token_ca, int(base_ts), int(path_end_ts))
+                except Exception as exc:
+                    log.debug("[MISSED_ATTRIBUTION] path fetch failed token=%s err=%s", token_ca, exc)
+                    path_samples = None
+                path_points = _missed_path_points(
+                    path_samples,
+                    baseline_price=baseline_price,
+                    base_ts=base_ts,
+                )
+                for point in path_points:
+                    pnl_values.append(float(point["pnl"]))
+
         for name in MISSED_HORIZONS:
             if changes.get(f"pnl_{name}") is not None:
                 continue
@@ -915,7 +1044,10 @@ def update_due_missed_attributions(
             if row["min_pnl_recorded"] is None or abs(float(row["min_pnl_recorded"]) - min_pnl) > 1e-12:
                 changes["min_pnl_recorded"] = min_pnl
 
-        points = _missed_horizon_points(row, changes)
+        points = sorted(
+            [*_missed_horizon_points(row, changes), *path_points],
+            key=lambda point: (point["offset"], point.get("rank", 1)),
+        )
         _apply_tradability_changes(
             row,
             changes,
