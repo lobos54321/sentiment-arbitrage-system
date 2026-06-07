@@ -55,6 +55,14 @@ import {
 import {
   buildRawSignalOutcomeReport,
 } from '../analytics/raw-signal-outcomes.js';
+import {
+  aggregateSwapsToRawPriceBars,
+  buildRawSignalObservations,
+  ensureRawPathObserverSchema,
+  mergePreferredPathRows,
+  normalizeRawPathBar,
+  summarizeRawPathDiagnostics,
+} from '../analytics/raw-path-observer.js';
 
 dotenv.config();
 
@@ -1794,6 +1802,11 @@ function getRawSignalOutcomesDbPath() {
   return isAbsolute(rawDbPath) ? rawDbPath : join(projectRoot, rawDbPath);
 }
 
+function getKlineCacheDbPath() {
+  const raw = process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || './data/kline_cache.db';
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
 function openRawSignalOutcomesDb({ readonly = false } = {}) {
   const rawDbPath = getRawSignalOutcomesDbPath();
   if (!readonly) {
@@ -1805,6 +1818,7 @@ function openRawSignalOutcomesDb({ readonly = false } = {}) {
 }
 
 function ensureRawSignalOutcomesSchema(db) {
+  ensureRawPathObserverSchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS raw_signal_outcomes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1828,14 +1842,24 @@ function ensureRawSignalOutcomesSchema(db) {
       baseline_pool_address TEXT,
       baseline_price_unit TEXT,
       baseline_confidence TEXT,
+      source_kind TEXT,
+      source_family TEXT,
       path_provider TEXT,
       path_pool_address TEXT,
       path_price_unit TEXT,
+      path_source_kind TEXT,
+      path_source_family TEXT,
       same_source_path INTEGER DEFAULT 0,
       kline_covered INTEGER DEFAULT 0,
       coverage_reason TEXT,
       pool_found INTEGER DEFAULT 0,
       provider TEXT,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER DEFAULT 0,
+      early_15m_expected_minutes INTEGER DEFAULT 15,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER DEFAULT 0,
       peak_5m_pct REAL,
       peak_15m_pct REAL,
       peak_60m_pct REAL,
@@ -1873,6 +1897,20 @@ function ensureRawSignalOutcomesSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_raw_signal_outcomes_token
       ON raw_signal_outcomes(token_ca, signal_ts);
   `);
+  for (const stmt of [
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN source_kind TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN source_family TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN path_source_kind TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN path_source_family TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN first_bar_ts INTEGER`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN first_bar_lag_sec INTEGER`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_bar_count INTEGER DEFAULT 0`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_expected_minutes INTEGER DEFAULT 15`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_bar_coverage_pct REAL`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_complete INTEGER DEFAULT 0`,
+  ]) {
+    try { db.exec(stmt); } catch {}
+  }
 }
 
 function upsertRawSignalOutcomes(db, outcomes) {
@@ -1883,8 +1921,11 @@ function upsertRawSignalOutcomes(db, outcomes) {
       observation_status, right_censored, matured_at_ts, horizon_sec,
       baseline_ts, baseline_lag_sec, baseline_price, baseline_source, baseline_provider,
       baseline_pool_address, baseline_price_unit, baseline_confidence,
-      path_provider, path_pool_address, path_price_unit, same_source_path,
+      source_kind, source_family,
+      path_provider, path_pool_address, path_price_unit, path_source_kind, path_source_family, same_source_path,
       kline_covered, coverage_reason, pool_found, provider,
+      first_bar_ts, first_bar_lag_sec,
+      early_15m_bar_count, early_15m_expected_minutes, early_15m_bar_coverage_pct, early_15m_complete,
       peak_5m_pct, peak_15m_pct, peak_60m_pct, peak_120m_pct,
       max_wick_peak_pct, max_sustained_peak_pct,
       time_to_wick_peak_sec, time_to_sustained_peak_sec,
@@ -1898,8 +1939,11 @@ function upsertRawSignalOutcomes(db, outcomes) {
       @observation_status, @right_censored, @matured_at_ts, @horizon_sec,
       @baseline_ts, @baseline_lag_sec, @baseline_price, @baseline_source, @baseline_provider,
       @baseline_pool_address, @baseline_price_unit, @baseline_confidence,
-      @path_provider, @path_pool_address, @path_price_unit, @same_source_path,
+      @source_kind, @source_family,
+      @path_provider, @path_pool_address, @path_price_unit, @path_source_kind, @path_source_family, @same_source_path,
       @kline_covered, @coverage_reason, @pool_found, @provider,
+      @first_bar_ts, @first_bar_lag_sec,
+      @early_15m_bar_count, @early_15m_expected_minutes, @early_15m_bar_coverage_pct, @early_15m_complete,
       @peak_5m_pct, @peak_15m_pct, @peak_60m_pct, @peak_120m_pct,
       @max_wick_peak_pct, @max_sustained_peak_pct,
       @time_to_wick_peak_sec, @time_to_sustained_peak_sec,
@@ -1927,14 +1971,24 @@ function upsertRawSignalOutcomes(db, outcomes) {
       baseline_pool_address = excluded.baseline_pool_address,
       baseline_price_unit = excluded.baseline_price_unit,
       baseline_confidence = excluded.baseline_confidence,
+      source_kind = excluded.source_kind,
+      source_family = excluded.source_family,
       path_provider = excluded.path_provider,
       path_pool_address = excluded.path_pool_address,
       path_price_unit = excluded.path_price_unit,
+      path_source_kind = excluded.path_source_kind,
+      path_source_family = excluded.path_source_family,
       same_source_path = excluded.same_source_path,
       kline_covered = excluded.kline_covered,
       coverage_reason = excluded.coverage_reason,
       pool_found = excluded.pool_found,
       provider = excluded.provider,
+      first_bar_ts = excluded.first_bar_ts,
+      first_bar_lag_sec = excluded.first_bar_lag_sec,
+      early_15m_bar_count = excluded.early_15m_bar_count,
+      early_15m_expected_minutes = excluded.early_15m_expected_minutes,
+      early_15m_bar_coverage_pct = excluded.early_15m_bar_coverage_pct,
+      early_15m_complete = excluded.early_15m_complete,
       peak_5m_pct = excluded.peak_5m_pct,
       peak_15m_pct = excluded.peak_15m_pct,
       peak_60m_pct = excluded.peak_60m_pct,
@@ -2002,14 +2056,24 @@ function serializeRawSignalOutcomeForDb(row) {
     baseline_pool_address: textOrNull(row.baseline_pool_address),
     baseline_price_unit: textOrNull(row.baseline_price_unit),
     baseline_confidence: textOrNull(row.baseline_confidence),
+    source_kind: textOrNull(row.source_kind),
+    source_family: textOrNull(row.source_family),
     path_provider: textOrNull(row.path_provider),
     path_pool_address: textOrNull(row.path_pool_address),
     path_price_unit: textOrNull(row.path_price_unit),
+    path_source_kind: textOrNull(row.path_source_kind),
+    path_source_family: textOrNull(row.path_source_family),
     same_source_path: boolInt(row.same_source_path),
     kline_covered: boolInt(row.kline_covered),
     coverage_reason: textOrNull(row.coverage_reason),
     pool_found: boolInt(row.pool_found),
     provider: textOrNull(row.provider),
+    first_bar_ts: row.first_bar_ts ?? null,
+    first_bar_lag_sec: row.first_bar_lag_sec ?? null,
+    early_15m_bar_count: row.early_15m_bar_count ?? null,
+    early_15m_expected_minutes: row.early_15m_expected_minutes ?? null,
+    early_15m_bar_coverage_pct: row.early_15m_bar_coverage_pct ?? null,
+    early_15m_complete: boolInt(row.early_15m_complete),
     peak_5m_pct: row.peak_5m_pct ?? null,
     peak_15m_pct: row.peak_15m_pct ?? null,
     peak_60m_pct: row.peak_60m_pct ?? null,
@@ -2039,6 +2103,304 @@ function serializeRawSignalOutcomeForDb(row) {
     payload_json: JSON.stringify(row),
     updated_at: Math.floor(Date.now() / 1000),
   };
+}
+
+function upsertRawPriceBars(db, bars) {
+  if (!db || !Array.isArray(bars) || bars.length === 0) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO raw_price_bars_1m (
+      token_ca, pool_address, timestamp, open, high, low, close, volume,
+      provider, source_kind, source_family, price_unit,
+      trade_count, first_trade_ts, last_trade_ts, fetched_at, payload_json, updated_at
+    ) VALUES (
+      @token_ca, @pool_address, @timestamp, @open, @high, @low, @close, @volume,
+      @provider, @source_kind, @source_family, @price_unit,
+      @trade_count, @first_trade_ts, @last_trade_ts, @fetched_at, @payload_json, @updated_at
+    )
+    ON CONFLICT(token_ca, pool_address, timestamp, provider, source_kind, price_unit) DO UPDATE SET
+      open = excluded.open,
+      high = excluded.high,
+      low = excluded.low,
+      close = excluded.close,
+      volume = excluded.volume,
+      source_family = excluded.source_family,
+      trade_count = excluded.trade_count,
+      first_trade_ts = excluded.first_trade_ts,
+      last_trade_ts = excluded.last_trade_ts,
+      fetched_at = excluded.fetched_at,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `);
+  const now = Math.floor(Date.now() / 1000);
+  const tx = db.transaction((rows) => {
+    for (const row of rows) {
+      const normalized = normalizeRawPathBar(row);
+      if (!normalized.token_ca || !normalized.pool_address || normalized.timestamp == null) continue;
+      if (normalized.open == null || normalized.high == null || normalized.low == null || normalized.close == null) continue;
+      stmt.run({
+        ...normalized,
+        volume: normalized.volume ?? 0,
+        source_family: normalized.source_family || null,
+        price_unit: normalized.price_unit || 'native',
+        trade_count: normalized.trade_count ?? null,
+        first_trade_ts: normalized.first_trade_ts ?? null,
+        last_trade_ts: normalized.last_trade_ts ?? null,
+        fetched_at: normalized.fetched_at ?? now,
+        payload_json: normalized.payload_json || null,
+        updated_at: now,
+      });
+    }
+  });
+  tx(bars);
+  return bars.length;
+}
+
+function upsertRawSignalObservations(db, observations) {
+  if (!db || !Array.isArray(observations) || observations.length === 0) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO raw_signal_observations (
+      signal_id, token_ca, symbol, signal_ts, horizon_sec, status, right_censored, matured_at_ts,
+      source_kind, provider, pool_address, path_row_count, first_bar_ts, first_bar_lag_sec,
+      early_15m_bar_count, early_15m_expected_minutes, early_15m_bar_coverage_pct, early_15m_complete,
+      coverage_reason, payload_json, updated_at
+    ) VALUES (
+      @signal_id, @token_ca, @symbol, @signal_ts, @horizon_sec, @status, @right_censored, @matured_at_ts,
+      @source_kind, @provider, @pool_address, @path_row_count, @first_bar_ts, @first_bar_lag_sec,
+      @early_15m_bar_count, @early_15m_expected_minutes, @early_15m_bar_coverage_pct, @early_15m_complete,
+      @coverage_reason, @payload_json, @updated_at
+    )
+    ON CONFLICT(signal_id, token_ca, signal_ts) DO UPDATE SET
+      symbol = excluded.symbol,
+      horizon_sec = excluded.horizon_sec,
+      status = excluded.status,
+      right_censored = excluded.right_censored,
+      matured_at_ts = excluded.matured_at_ts,
+      source_kind = excluded.source_kind,
+      provider = excluded.provider,
+      pool_address = excluded.pool_address,
+      path_row_count = excluded.path_row_count,
+      first_bar_ts = excluded.first_bar_ts,
+      first_bar_lag_sec = excluded.first_bar_lag_sec,
+      early_15m_bar_count = excluded.early_15m_bar_count,
+      early_15m_expected_minutes = excluded.early_15m_expected_minutes,
+      early_15m_bar_coverage_pct = excluded.early_15m_bar_coverage_pct,
+      early_15m_complete = excluded.early_15m_complete,
+      coverage_reason = excluded.coverage_reason,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `);
+  const textOrNull = (value) => value == null ? null : String(value);
+  const boolInt = (value) => value ? 1 : 0;
+  const tx = db.transaction((rows) => {
+    for (const row of rows) {
+      if (!row.token_ca || row.signal_ts == null) continue;
+      stmt.run({
+        signal_id: textOrNull(row.signal_id || `${row.token_ca}:${row.signal_ts}`),
+        token_ca: textOrNull(row.token_ca),
+        symbol: textOrNull(row.symbol),
+        signal_ts: row.signal_ts,
+        horizon_sec: row.horizon_sec ?? null,
+        status: textOrNull(row.status),
+        right_censored: boolInt(row.right_censored),
+        matured_at_ts: row.matured_at_ts ?? null,
+        source_kind: textOrNull(row.source_kind),
+        provider: textOrNull(row.provider),
+        pool_address: textOrNull(row.pool_address),
+        path_row_count: row.path_row_count ?? 0,
+        first_bar_ts: row.first_bar_ts ?? null,
+        first_bar_lag_sec: row.first_bar_lag_sec ?? null,
+        early_15m_bar_count: row.early_15m_bar_count ?? 0,
+        early_15m_expected_minutes: row.early_15m_expected_minutes ?? 15,
+        early_15m_bar_coverage_pct: row.early_15m_bar_coverage_pct ?? null,
+        early_15m_complete: boolInt(row.early_15m_complete),
+        coverage_reason: textOrNull(row.coverage_reason),
+        payload_json: JSON.stringify(row),
+        updated_at: Math.floor(Date.now() / 1000),
+      });
+    }
+  });
+  tx(observations);
+  return observations.length;
+}
+
+function tokenChunks(tokens, chunkSize = 250) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i += chunkSize) {
+    out.push(tokens.slice(i, i + chunkSize));
+  }
+  return out;
+}
+
+function dedupePathRows(rows = []) {
+  const byKey = new Map();
+  for (const row of rows.map((item) => normalizeRawPathBar(item))) {
+    if (!row.token_ca || row.timestamp == null || row.high == null || row.low == null || row.close == null) continue;
+    const key = [
+      row.token_ca,
+      row.pool_address || '',
+      row.timestamp,
+      row.provider || '',
+      row.source_kind || '',
+      row.price_unit || '',
+    ].join('|');
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, row);
+      continue;
+    }
+    existing.open = existing.open ?? row.open;
+    existing.high = Math.max(Number(existing.high || 0), Number(row.high || 0));
+    existing.low = Math.min(Number(existing.low || row.low || 0), Number(row.low || existing.low || 0));
+    existing.close = row.close ?? existing.close;
+    existing.volume = Number(existing.volume || 0) + Number(row.volume || 0);
+    existing.trade_count = Number(existing.trade_count || 0) + Number(row.trade_count || 0) || null;
+    existing.first_trade_ts = existing.first_trade_ts == null ? row.first_trade_ts : Math.min(existing.first_trade_ts, row.first_trade_ts ?? existing.first_trade_ts);
+    existing.last_trade_ts = existing.last_trade_ts == null ? row.last_trade_ts : Math.max(existing.last_trade_ts, row.last_trade_ts ?? existing.last_trade_ts);
+  }
+  return [...byKey.values()].sort((a, b) => (
+    String(a.token_ca).localeCompare(String(b.token_ca))
+    || Number(a.timestamp) - Number(b.timestamp)
+    || String(a.provider).localeCompare(String(b.provider))
+  ));
+}
+
+function readRawPriceBarsFromDb(db, tokens, startTs, endTs) {
+  if (!db || !Array.isArray(tokens) || !tokens.length) return [];
+  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+  if (!tables.has('raw_price_bars_1m')) return [];
+  const rows = [];
+  for (const chunk of tokenChunks(tokens)) {
+    const placeholders = chunk.map(() => '?').join(',');
+    rows.push(...db.prepare(`
+      SELECT
+        token_ca, pool_address, timestamp, open, high, low, close, volume,
+        provider, source_kind, source_family, price_unit,
+        trade_count, first_trade_ts, last_trade_ts, fetched_at, payload_json
+      FROM raw_price_bars_1m
+      WHERE timestamp >= ?
+        AND timestamp <= ?
+        AND token_ca IN (${placeholders})
+      ORDER BY token_ca ASC, timestamp ASC
+    `).all(startTs, endTs, ...chunk));
+  }
+  return rows;
+}
+
+function normalizeKlineCacheProvider(provider) {
+  const text = String(provider || '').toLowerCase();
+  if (text.includes('helius')) return { provider: 'helius_amm_pool', source_kind: 'amm_pool', source_family: 'onchain_swap' };
+  if (text.includes('gmgn')) return { provider: 'gmgn', source_kind: 'indexed_ohlcv', source_family: 'third_party_kline' };
+  if (text.includes('dex')) return { provider: 'dexscreener', source_kind: 'indexed_ohlcv', source_family: 'third_party_kline' };
+  if (text.includes('gecko')) return { provider: 'geckoterminal', source_kind: 'indexed_ohlcv', source_family: 'third_party_kline' };
+  return { provider: provider || 'kline_cache', source_kind: 'indexed_ohlcv', source_family: 'third_party_kline' };
+}
+
+function readKlineCachePathRows(tokens, startTs, endTs) {
+  const klineDbPath = getKlineCacheDbPath();
+  const diagnostics = {
+    available: false,
+    path: klineDbPath,
+    rows: 0,
+    helius_trade_rows: 0,
+    aggregated_raw_rows: 0,
+    error: null,
+  };
+  if (!fs.existsSync(klineDbPath) || !tokens.length) {
+    diagnostics.error = !tokens.length ? 'no_tokens' : 'kline_cache_db_missing';
+    return { rows: [], aggregatedRawRows: [], diagnostics };
+  }
+  let klineDb;
+  try {
+    klineDb = openDashboardSqlite(klineDbPath, { readonly: true, fileMustExist: true });
+    const tables = new Set(klineDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+    diagnostics.available = true;
+    const rows = [];
+    const tradeRows = [];
+    if (tables.has('kline_1m')) {
+      const cols = getTableColumns(klineDb, 'kline_1m');
+      if (cols.has('token_ca') && cols.has('timestamp') && cols.has('high') && cols.has('low') && cols.has('close')) {
+        for (const chunk of tokenChunks(tokens)) {
+          const placeholders = chunk.map(() => '?').join(',');
+          const fetched = klineDb.prepare(`
+            SELECT
+              token_ca,
+              ${cols.has('pool_address') ? 'pool_address' : "'' AS pool_address"},
+              timestamp,
+              ${cols.has('open') ? 'open' : 'close AS open'},
+              high,
+              low,
+              close,
+              ${cols.has('volume') ? 'volume' : '0 AS volume'},
+              ${cols.has('provider') ? 'provider' : "'kline_cache' AS provider"},
+              ${cols.has('fetched_at') ? 'fetched_at' : 'NULL AS fetched_at'}
+            FROM kline_1m
+            WHERE timestamp >= ?
+              AND timestamp <= ?
+              AND token_ca IN (${placeholders})
+            ORDER BY token_ca ASC, timestamp ASC
+          `).all(startTs, endTs, ...chunk);
+          rows.push(...fetched.map((row) => {
+            const source = normalizeKlineCacheProvider(row.provider);
+            return {
+              ...row,
+              provider: source.provider,
+              source_kind: source.source_kind,
+              source_family: source.source_family,
+              price_unit: 'native',
+            };
+          }));
+        }
+      }
+    }
+    if (tables.has('helius_trades')) {
+      const cols = getTableColumns(klineDb, 'helius_trades');
+      if (cols.has('token_ca') && cols.has('block_time') && cols.has('price')) {
+        for (const chunk of tokenChunks(tokens)) {
+          const placeholders = chunk.map(() => '?').join(',');
+          tradeRows.push(...klineDb.prepare(`
+            SELECT
+              ${cols.has('signature') ? 'signature' : 'NULL AS signature'},
+              ${cols.has('slot') ? 'slot' : 'NULL AS slot'},
+              block_time,
+              token_ca,
+              ${cols.has('pool_address') ? 'pool_address' : "'' AS pool_address"},
+              price,
+              ${cols.has('base_amount') ? 'base_amount' : 'NULL AS base_amount'},
+              ${cols.has('quote_amount') ? 'quote_amount' : 'NULL AS quote_amount'},
+              ${cols.has('volume') ? 'volume' : '0 AS volume'},
+              ${cols.has('side') ? 'side' : 'NULL AS side'},
+              ${cols.has('source') ? 'source' : "'helius' AS source"}
+            FROM helius_trades
+            WHERE block_time >= ?
+              AND block_time <= ?
+              AND token_ca IN (${placeholders})
+            ORDER BY token_ca ASC, block_time ASC
+          `).all(startTs, endTs, ...chunk));
+        }
+      }
+    }
+    const aggregatedRawRows = aggregateSwapsToRawPriceBars(tradeRows.map((row) => {
+      const sourceText = String(row.source || '').toLowerCase();
+      const poolText = String(row.pool_address || '').trim();
+      const pumpFunNoPool = !poolText && String(row.token_ca || '').toLowerCase().endsWith('pump');
+      const bondingCurve = sourceText.includes('bonding') || pumpFunNoPool;
+      return {
+        ...row,
+        source_kind: bondingCurve ? 'bonding_curve' : 'amm_pool',
+        provider: bondingCurve ? 'helius_bonding_curve' : 'helius_amm_pool',
+        pool_address: poolText || (bondingCurve ? `bonding_curve:${row.token_ca}` : ''),
+      };
+    }), { price_unit: 'native' });
+    diagnostics.rows = rows.length;
+    diagnostics.helius_trade_rows = tradeRows.length;
+    diagnostics.aggregated_raw_rows = aggregatedRawRows.length;
+    return { rows, aggregatedRawRows, diagnostics };
+  } catch (error) {
+    diagnostics.error = error?.message || String(error);
+    return { rows: [], aggregatedRawRows: [], diagnostics };
+  } finally {
+    try { if (klineDb) klineDb.close(); } catch {}
+  }
 }
 
 function buildRawDogDiscoverySnapshot({
@@ -2095,6 +2457,33 @@ function buildRawDogDiscoverySnapshot({
     ORDER BY ${timestampExpr} DESC, ${signalCols.has('id') ? 'id' : timestampExpr} DESC
     LIMIT @limit
   `).all(sinceTs ? { since: sinceTs, sinceMs: sinceTs * 1000, limit } : { limit });
+  const uniqueSignalTokens = [...new Set(signalRows.map((row) => String(row.token_ca || '').trim()).filter(Boolean))];
+  const pathSinceTs = sinceTs || Math.max(0, nowTs - horizonSec - 6 * 3600);
+  const pathUntilTs = nowTs;
+
+  let rawDbForPath = null;
+  let durableRawPathRows = [];
+  let rawPathDbError = null;
+  try {
+    const rawDbPath = getRawSignalOutcomesDbPath();
+    if (persist || fs.existsSync(rawDbPath)) {
+      rawDbForPath = openRawSignalOutcomesDb({ readonly: !persist && fs.existsSync(rawDbPath) });
+      durableRawPathRows = readRawPriceBarsFromDb(rawDbForPath, uniqueSignalTokens, pathSinceTs, pathUntilTs);
+    }
+  } catch (error) {
+    rawPathDbError = error?.message || String(error);
+  }
+
+  const klineCachePath = readKlineCachePathRows(uniqueSignalTokens, pathSinceTs, pathUntilTs);
+  const cachePathRows = dedupePathRows([...(klineCachePath.rows || []), ...(klineCachePath.aggregatedRawRows || [])]);
+  let rawBarsPersisted = 0;
+  if (persist && rawDbForPath && klineCachePath.aggregatedRawRows?.length) {
+    try {
+      rawBarsPersisted = upsertRawPriceBars(rawDbForPath, klineCachePath.aggregatedRawRows);
+    } catch (error) {
+      rawPathDbError = error?.message || String(error);
+    }
+  }
 
   let klineRows = [];
   const klineDiagnostics = {
@@ -2115,11 +2504,10 @@ function buildRawDogDiscoverySnapshot({
     const klineCols = getTableColumns(signalDb, 'kline_1m');
     const required = ['token_ca', 'timestamp', 'high', 'low', 'close'];
     if (required.every((name) => klineCols.has(name))) {
-      const uniqueSignalTokens = [...new Set(signalRows.map((row) => String(row.token_ca || '').trim()).filter(Boolean))];
       klineDiagnostics.available = true;
       klineDiagnostics.unique_signal_tokens = uniqueSignalTokens.length;
-      const klineSinceTs = sinceTs || Math.max(0, nowTs - horizonSec - 6 * 3600);
-      const klineUntilTs = nowTs;
+      const klineSinceTs = pathSinceTs;
+      const klineUntilTs = pathUntilTs;
       klineDiagnostics.coverage_window.since_ts = klineSinceTs;
       klineDiagnostics.coverage_window.until_ts = klineUntilTs;
       const chunkSize = 250;
@@ -2207,9 +2595,31 @@ function buildRawDogDiscoverySnapshot({
     try { if (paperDb) paperDb.close(); } catch {}
   }
 
+  const rawPathRows = dedupePathRows([...durableRawPathRows, ...cachePathRows]);
+  const preferredPath = mergePreferredPathRows({
+    signals: signalRows,
+    rawPathRows,
+    klineRows,
+  });
+  const rawSignalObservations = buildRawSignalObservations({
+    signals: signalRows,
+    pathRows: preferredPath.rows,
+    nowTs,
+    horizonSec,
+    earlyWindowSec: 900,
+  });
+  const rawPathDiagnostics = summarizeRawPathDiagnostics({
+    signals: signalRows,
+    rawPathRows,
+    klineRows,
+    preferredRows: preferredPath.rows,
+    observations: rawSignalObservations,
+    decisions: preferredPath.decisions,
+  });
+
   const report = buildRawSignalOutcomeReport({
     signals: signalRows,
-    klineRows,
+    klineRows: preferredPath.rows,
     paperTrades,
     nowTs,
     horizonSec,
@@ -2218,18 +2628,18 @@ function buildRawDogDiscoverySnapshot({
   });
 
   let persistedRows = 0;
+  let persistedObservationRows = 0;
   let rawDbError = null;
   if (persist) {
-    let rawDb;
     try {
-      rawDb = openRawSignalOutcomesDb();
-      persistedRows = upsertRawSignalOutcomes(rawDb, report.outcomes || []);
+      if (!rawDbForPath) rawDbForPath = openRawSignalOutcomesDb();
+      persistedRows = upsertRawSignalOutcomes(rawDbForPath, report.outcomes || []);
+      persistedObservationRows = upsertRawSignalObservations(rawDbForPath, rawSignalObservations);
     } catch (error) {
       rawDbError = error?.message || String(error);
-    } finally {
-      try { if (rawDb) rawDb.close(); } catch {}
     }
   }
+  try { if (rawDbForPath) rawDbForPath.close(); } catch {}
 
   return {
     available: true,
@@ -2251,9 +2661,25 @@ function buildRawDogDiscoverySnapshot({
         rows: signalRows.length,
       },
       kline: klineDiagnostics,
+      raw_path: {
+        ...rawPathDiagnostics,
+        durable_raw_rows: durableRawPathRows.length,
+        cache_rows: klineCachePath.rows?.length || 0,
+        cache_aggregated_raw_rows: klineCachePath.aggregatedRawRows?.length || 0,
+        raw_bars_persisted: rawBarsPersisted,
+        raw_db_error: rawPathDbError,
+        kline_cache: klineCachePath.diagnostics,
+        path_window: {
+          since_ts: pathSinceTs,
+          until_ts: pathUntilTs,
+          horizon_sec: horizonSec,
+          early_window_sec: 900,
+        },
+      },
       paper: paperDiagnostics,
       raw_db: {
         persisted_rows: persistedRows,
+        persisted_observation_rows: persistedObservationRows,
         error: rawDbError,
       },
     },
