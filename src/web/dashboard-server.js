@@ -52,6 +52,9 @@ import {
   buildSampleGovernance,
   buildShadowTrailAudit,
 } from './paper-learning-audit-utils.js';
+import {
+  buildRawSignalOutcomeReport,
+} from '../analytics/raw-signal-outcomes.js';
 
 dotenv.config();
 
@@ -1784,6 +1787,609 @@ function getDb() {
 function getPaperDbPath() {
   const paperDbPath = process.env.PAPER_DB || './data/paper_trades.db';
   return isAbsolute(paperDbPath) ? paperDbPath : join(projectRoot, paperDbPath);
+}
+
+function getRawSignalOutcomesDbPath() {
+  const rawDbPath = process.env.RAW_SIGNAL_OUTCOMES_DB || './data/raw_signal_outcomes.db';
+  return isAbsolute(rawDbPath) ? rawDbPath : join(projectRoot, rawDbPath);
+}
+
+function openRawSignalOutcomesDb({ readonly = false } = {}) {
+  const rawDbPath = getRawSignalOutcomesDbPath();
+  if (!readonly) {
+    fs.mkdirSync(dirname(rawDbPath), { recursive: true });
+  }
+  const db = openDashboardSqlite(rawDbPath, readonly ? { readonly: true, fileMustExist: true } : undefined);
+  if (!readonly) ensureRawSignalOutcomesSchema(db);
+  return db;
+}
+
+function ensureRawSignalOutcomesSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS raw_signal_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      signal_id TEXT,
+      token_ca TEXT NOT NULL,
+      symbol TEXT,
+      signal_ts INTEGER,
+      signal_type TEXT,
+      route TEXT,
+      hard_gate_status TEXT,
+      source TEXT,
+      observation_status TEXT,
+      right_censored INTEGER DEFAULT 0,
+      matured_at_ts INTEGER,
+      horizon_sec INTEGER,
+      baseline_ts INTEGER,
+      baseline_lag_sec REAL,
+      baseline_price REAL,
+      baseline_source TEXT,
+      baseline_provider TEXT,
+      baseline_pool_address TEXT,
+      baseline_price_unit TEXT,
+      baseline_confidence TEXT,
+      path_provider TEXT,
+      path_pool_address TEXT,
+      path_price_unit TEXT,
+      same_source_path INTEGER DEFAULT 0,
+      kline_covered INTEGER DEFAULT 0,
+      coverage_reason TEXT,
+      pool_found INTEGER DEFAULT 0,
+      provider TEXT,
+      peak_5m_pct REAL,
+      peak_15m_pct REAL,
+      peak_60m_pct REAL,
+      peak_120m_pct REAL,
+      max_wick_peak_pct REAL,
+      max_sustained_peak_pct REAL,
+      time_to_wick_peak_sec INTEGER,
+      time_to_sustained_peak_sec INTEGER,
+      raw_wick_tier TEXT,
+      raw_sustained_tier TEXT,
+      raw_primary_tier TEXT,
+      sustained_evaluable INTEGER DEFAULT 0,
+      sustained_reason TEXT,
+      outlier_flag INTEGER DEFAULT 0,
+      outlier_reason TEXT,
+      did_enter INTEGER DEFAULT 0,
+      paper_trade_id TEXT,
+      canonical_trade_id TEXT,
+      entered_before_peak INTEGER DEFAULT 0,
+      held_to_silver INTEGER DEFAULT 0,
+      held_to_gold INTEGER DEFAULT 0,
+      raw_dog_entered INTEGER DEFAULT 0,
+      raw_dog_realized INTEGER DEFAULT 0,
+      sold_before_silver INTEGER DEFAULT 0,
+      sold_before_gold INTEGER DEFAULT 0,
+      exit_reason TEXT,
+      payload_json TEXT,
+      created_at INTEGER DEFAULT (strftime('%s', 'now')),
+      updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_signal_outcomes_signal
+      ON raw_signal_outcomes(signal_id, token_ca, signal_ts);
+    CREATE INDEX IF NOT EXISTS idx_raw_signal_outcomes_window
+      ON raw_signal_outcomes(signal_ts, observation_status, raw_primary_tier);
+    CREATE INDEX IF NOT EXISTS idx_raw_signal_outcomes_token
+      ON raw_signal_outcomes(token_ca, signal_ts);
+  `);
+}
+
+function upsertRawSignalOutcomes(db, outcomes) {
+  if (!db || !Array.isArray(outcomes) || outcomes.length === 0) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO raw_signal_outcomes (
+      signal_id, token_ca, symbol, signal_ts, signal_type, route, hard_gate_status, source,
+      observation_status, right_censored, matured_at_ts, horizon_sec,
+      baseline_ts, baseline_lag_sec, baseline_price, baseline_source, baseline_provider,
+      baseline_pool_address, baseline_price_unit, baseline_confidence,
+      path_provider, path_pool_address, path_price_unit, same_source_path,
+      kline_covered, coverage_reason, pool_found, provider,
+      peak_5m_pct, peak_15m_pct, peak_60m_pct, peak_120m_pct,
+      max_wick_peak_pct, max_sustained_peak_pct,
+      time_to_wick_peak_sec, time_to_sustained_peak_sec,
+      raw_wick_tier, raw_sustained_tier, raw_primary_tier,
+      sustained_evaluable, sustained_reason,
+      outlier_flag, outlier_reason, did_enter, paper_trade_id, canonical_trade_id,
+      entered_before_peak, held_to_silver, held_to_gold, raw_dog_entered, raw_dog_realized,
+      sold_before_silver, sold_before_gold, exit_reason, payload_json, updated_at
+    ) VALUES (
+      @signal_id, @token_ca, @symbol, @signal_ts, @signal_type, @route, @hard_gate_status, @source,
+      @observation_status, @right_censored, @matured_at_ts, @horizon_sec,
+      @baseline_ts, @baseline_lag_sec, @baseline_price, @baseline_source, @baseline_provider,
+      @baseline_pool_address, @baseline_price_unit, @baseline_confidence,
+      @path_provider, @path_pool_address, @path_price_unit, @same_source_path,
+      @kline_covered, @coverage_reason, @pool_found, @provider,
+      @peak_5m_pct, @peak_15m_pct, @peak_60m_pct, @peak_120m_pct,
+      @max_wick_peak_pct, @max_sustained_peak_pct,
+      @time_to_wick_peak_sec, @time_to_sustained_peak_sec,
+      @raw_wick_tier, @raw_sustained_tier, @raw_primary_tier,
+      @sustained_evaluable, @sustained_reason,
+      @outlier_flag, @outlier_reason, @did_enter, @paper_trade_id, @canonical_trade_id,
+      @entered_before_peak, @held_to_silver, @held_to_gold, @raw_dog_entered, @raw_dog_realized,
+      @sold_before_silver, @sold_before_gold, @exit_reason, @payload_json, @updated_at
+    )
+    ON CONFLICT(signal_id, token_ca, signal_ts) DO UPDATE SET
+      symbol = excluded.symbol,
+      signal_type = excluded.signal_type,
+      route = excluded.route,
+      hard_gate_status = excluded.hard_gate_status,
+      source = excluded.source,
+      observation_status = excluded.observation_status,
+      right_censored = excluded.right_censored,
+      matured_at_ts = excluded.matured_at_ts,
+      horizon_sec = excluded.horizon_sec,
+      baseline_ts = excluded.baseline_ts,
+      baseline_lag_sec = excluded.baseline_lag_sec,
+      baseline_price = excluded.baseline_price,
+      baseline_source = excluded.baseline_source,
+      baseline_provider = excluded.baseline_provider,
+      baseline_pool_address = excluded.baseline_pool_address,
+      baseline_price_unit = excluded.baseline_price_unit,
+      baseline_confidence = excluded.baseline_confidence,
+      path_provider = excluded.path_provider,
+      path_pool_address = excluded.path_pool_address,
+      path_price_unit = excluded.path_price_unit,
+      same_source_path = excluded.same_source_path,
+      kline_covered = excluded.kline_covered,
+      coverage_reason = excluded.coverage_reason,
+      pool_found = excluded.pool_found,
+      provider = excluded.provider,
+      peak_5m_pct = excluded.peak_5m_pct,
+      peak_15m_pct = excluded.peak_15m_pct,
+      peak_60m_pct = excluded.peak_60m_pct,
+      peak_120m_pct = excluded.peak_120m_pct,
+      max_wick_peak_pct = excluded.max_wick_peak_pct,
+      max_sustained_peak_pct = excluded.max_sustained_peak_pct,
+      time_to_wick_peak_sec = excluded.time_to_wick_peak_sec,
+      time_to_sustained_peak_sec = excluded.time_to_sustained_peak_sec,
+      raw_wick_tier = excluded.raw_wick_tier,
+      raw_sustained_tier = excluded.raw_sustained_tier,
+      raw_primary_tier = excluded.raw_primary_tier,
+      sustained_evaluable = excluded.sustained_evaluable,
+      sustained_reason = excluded.sustained_reason,
+      outlier_flag = excluded.outlier_flag,
+      outlier_reason = excluded.outlier_reason,
+      did_enter = excluded.did_enter,
+      paper_trade_id = excluded.paper_trade_id,
+      canonical_trade_id = excluded.canonical_trade_id,
+      entered_before_peak = excluded.entered_before_peak,
+      held_to_silver = excluded.held_to_silver,
+      held_to_gold = excluded.held_to_gold,
+      raw_dog_entered = excluded.raw_dog_entered,
+      raw_dog_realized = excluded.raw_dog_realized,
+      sold_before_silver = excluded.sold_before_silver,
+      sold_before_gold = excluded.sold_before_gold,
+      exit_reason = excluded.exit_reason,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `);
+  const tx = db.transaction((rows) => {
+    for (const row of rows) {
+      stmt.run(serializeRawSignalOutcomeForDb(row));
+    }
+  });
+  tx(outcomes);
+  return outcomes.length;
+}
+
+function serializeRawSignalOutcomeForDb(row) {
+  const boolInt = (value) => value ? 1 : 0;
+  const textOrNull = (value) => value == null ? null : String(value);
+  const signalId = row.signal_id ?? (
+    row.token_ca != null && row.signal_ts != null
+      ? `${row.token_ca}:${row.signal_ts}`
+      : null
+  );
+  return {
+    signal_id: textOrNull(signalId),
+    token_ca: textOrNull(row.token_ca),
+    symbol: textOrNull(row.symbol),
+    signal_ts: row.signal_ts ?? null,
+    signal_type: textOrNull(row.signal_type),
+    route: textOrNull(row.route),
+    hard_gate_status: textOrNull(row.hard_gate_status),
+    source: textOrNull(row.source),
+    observation_status: textOrNull(row.observation_status),
+    right_censored: boolInt(row.right_censored),
+    matured_at_ts: row.matured_at_ts ?? null,
+    horizon_sec: row.horizon_sec ?? null,
+    baseline_ts: row.baseline_ts ?? null,
+    baseline_lag_sec: row.baseline_lag_sec ?? null,
+    baseline_price: row.baseline_price ?? null,
+    baseline_source: textOrNull(row.baseline_source),
+    baseline_provider: textOrNull(row.baseline_provider),
+    baseline_pool_address: textOrNull(row.baseline_pool_address),
+    baseline_price_unit: textOrNull(row.baseline_price_unit),
+    baseline_confidence: textOrNull(row.baseline_confidence),
+    path_provider: textOrNull(row.path_provider),
+    path_pool_address: textOrNull(row.path_pool_address),
+    path_price_unit: textOrNull(row.path_price_unit),
+    same_source_path: boolInt(row.same_source_path),
+    kline_covered: boolInt(row.kline_covered),
+    coverage_reason: textOrNull(row.coverage_reason),
+    pool_found: boolInt(row.pool_found),
+    provider: textOrNull(row.provider),
+    peak_5m_pct: row.peak_5m_pct ?? null,
+    peak_15m_pct: row.peak_15m_pct ?? null,
+    peak_60m_pct: row.peak_60m_pct ?? null,
+    peak_120m_pct: row.peak_120m_pct ?? null,
+    max_wick_peak_pct: row.max_wick_peak_pct ?? null,
+    max_sustained_peak_pct: row.max_sustained_peak_pct ?? null,
+    time_to_wick_peak_sec: row.time_to_wick_peak_sec ?? null,
+    time_to_sustained_peak_sec: row.time_to_sustained_peak_sec ?? null,
+    raw_wick_tier: textOrNull(row.raw_wick_tier),
+    raw_sustained_tier: textOrNull(row.raw_sustained_tier),
+    raw_primary_tier: textOrNull(row.raw_primary_tier),
+    sustained_evaluable: boolInt(row.sustained_evaluable),
+    sustained_reason: textOrNull(row.sustained_reason),
+    outlier_flag: boolInt(row.outlier_flag),
+    outlier_reason: textOrNull(row.outlier_reason),
+    did_enter: boolInt(row.did_enter),
+    paper_trade_id: textOrNull(row.paper_trade_id),
+    canonical_trade_id: textOrNull(row.canonical_trade_id),
+    entered_before_peak: boolInt(row.entered_before_peak),
+    held_to_silver: boolInt(row.held_to_silver),
+    held_to_gold: boolInt(row.held_to_gold),
+    raw_dog_entered: boolInt(row.raw_dog_entered),
+    raw_dog_realized: boolInt(row.raw_dog_realized),
+    sold_before_silver: boolInt(row.sold_before_silver),
+    sold_before_gold: boolInt(row.sold_before_gold),
+    exit_reason: textOrNull(row.exit_reason),
+    payload_json: JSON.stringify(row),
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function buildRawDogDiscoverySnapshot({
+  signalDb,
+  paperDbPath = getPaperDbPath(),
+  sinceTs = null,
+  limit = 5000,
+  nowTs = Math.floor(Date.now() / 1000),
+  horizonSec = 7200,
+  baselineMaxLagSec = 300,
+  coverageTargetPct = 80,
+  persist = true,
+} = {}) {
+  if (!signalDb) {
+    return {
+      available: false,
+      error: 'sentiment database unavailable',
+      report: null,
+      persisted_rows: 0,
+    };
+  }
+  const signalTables = new Set(
+    signalDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+  );
+  if (!signalTables.has('premium_signals')) {
+    return {
+      available: false,
+      error: 'premium_signals table not found',
+      report: null,
+      persisted_rows: 0,
+    };
+  }
+  const signalCols = getTableColumns(signalDb, 'premium_signals');
+  const timestampExpr = signalCols.has('timestamp')
+    ? "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END"
+    : "0";
+  const signalWhere = sinceTs && signalCols.has('timestamp')
+    ? `WHERE ((timestamp > 1000000000000 AND timestamp >= @sinceMs) OR (timestamp <= 1000000000000 AND timestamp >= @since))`
+    : (sinceTs ? `WHERE ${timestampExpr} >= @since` : '');
+  const signalRows = signalDb.prepare(`
+    SELECT
+      ${signalCols.has('id') ? 'id' : 'NULL AS id'},
+      ${signalCols.has('symbol') ? 'symbol' : 'NULL AS symbol'},
+      token_ca,
+      ${signalCols.has('timestamp') ? 'timestamp' : 'NULL AS timestamp'},
+      ${timestampExpr} AS timestamp_sec,
+      ${signalCols.has('created_at') ? 'created_at' : 'NULL AS created_at'},
+      ${signalCols.has('signal_type') ? 'signal_type' : 'NULL AS signal_type'},
+      ${signalCols.has('hard_gate_status') ? 'hard_gate_status' : 'NULL AS hard_gate_status'},
+      ${signalCols.has('gate_result') ? 'gate_result' : 'NULL AS gate_result'},
+      ${signalCols.has('ai_action') ? 'ai_action' : 'NULL AS ai_action'}
+    FROM premium_signals
+    ${signalWhere}
+    ORDER BY ${timestampExpr} DESC, ${signalCols.has('id') ? 'id' : timestampExpr} DESC
+    LIMIT @limit
+  `).all(sinceTs ? { since: sinceTs, sinceMs: sinceTs * 1000, limit } : { limit });
+
+  let klineRows = [];
+  const klineDiagnostics = {
+    available: false,
+    table: 'kline_1m',
+    rows: 0,
+    unique_signal_tokens: 0,
+    queried_tokens: 0,
+    query_chunks: 0,
+    coverage_window: {
+      since_ts: sinceTs,
+      until_ts: nowTs,
+      horizon_sec: horizonSec,
+      baseline_max_lag_sec: baselineMaxLagSec,
+    },
+  };
+  if (signalTables.has('kline_1m')) {
+    const klineCols = getTableColumns(signalDb, 'kline_1m');
+    const required = ['token_ca', 'timestamp', 'high', 'low', 'close'];
+    if (required.every((name) => klineCols.has(name))) {
+      const uniqueSignalTokens = [...new Set(signalRows.map((row) => String(row.token_ca || '').trim()).filter(Boolean))];
+      klineDiagnostics.available = true;
+      klineDiagnostics.unique_signal_tokens = uniqueSignalTokens.length;
+      const klineSinceTs = sinceTs || Math.max(0, nowTs - horizonSec - 6 * 3600);
+      const klineUntilTs = nowTs;
+      klineDiagnostics.coverage_window.since_ts = klineSinceTs;
+      klineDiagnostics.coverage_window.until_ts = klineUntilTs;
+      const chunkSize = 250;
+      for (let i = 0; i < uniqueSignalTokens.length; i += chunkSize) {
+        const chunk = uniqueSignalTokens.slice(i, i + chunkSize);
+        if (!chunk.length) continue;
+        const placeholders = chunk.map(() => '?').join(',');
+        const rows = signalDb.prepare(`
+          SELECT
+            token_ca,
+            timestamp,
+            ${klineCols.has('pool_address') ? 'pool_address' : 'NULL AS pool_address'},
+            ${klineCols.has('open') ? 'open' : 'NULL AS open'},
+            high,
+            low,
+            close,
+            ${klineCols.has('volume') ? 'volume' : 'NULL AS volume'},
+            ${klineCols.has('source') ? 'source' : 'NULL AS source'},
+            ${klineCols.has('provider') ? 'provider' : 'NULL AS provider'},
+            ${klineCols.has('price_unit') ? 'price_unit' : 'NULL AS price_unit'}
+          FROM kline_1m
+          WHERE timestamp >= ?
+            AND timestamp <= ?
+            AND token_ca IN (${placeholders})
+          ORDER BY token_ca ASC, timestamp ASC
+        `).all(klineSinceTs, klineUntilTs, ...chunk);
+        klineRows.push(...rows);
+        klineDiagnostics.query_chunks += 1;
+      }
+      klineDiagnostics.queried_tokens = uniqueSignalTokens.length;
+      klineDiagnostics.rows = klineRows.length;
+    } else {
+      klineDiagnostics.note = 'kline_1m missing required token_ca/timestamp/high/low/close columns';
+    }
+  } else {
+    klineDiagnostics.note = 'kline_1m table missing';
+  }
+
+  let paperTrades = [];
+  const paperDiagnostics = {
+    available: false,
+    path: paperDbPath,
+    rows: 0,
+  };
+  let paperDb;
+  try {
+    if (paperDbPath && fs.existsSync(paperDbPath)) {
+      paperDb = openDashboardSqlite(paperDbPath, { readonly: true });
+      const paperTables = new Set(
+        paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name)
+      );
+      if (paperTables.has('paper_trades')) {
+        const tradeCols = getTableColumns(paperDb, 'paper_trades');
+        const trustedPeakExpr = trustedTradePeakSqlExpr(tradeCols);
+        const tradeWhere = sinceTs
+          ? 'WHERE COALESCE(entry_ts, exit_ts, 0) >= @since OR COALESCE(exit_ts, 0) >= @since'
+          : '';
+        paperTrades = paperDb.prepare(`
+          SELECT
+            ${tradeCols.has('id') ? 'id' : 'NULL AS id'},
+            token_ca,
+            ${tradeCols.has('symbol') ? 'symbol' : 'NULL AS symbol'},
+            ${tradeCols.has('entry_ts') ? 'entry_ts' : 'NULL AS entry_ts'},
+            ${tradeCols.has('exit_ts') ? 'exit_ts' : 'NULL AS exit_ts'},
+            ${tradeCols.has('exit_reason') ? 'exit_reason' : 'NULL AS exit_reason'},
+            ${tradeCols.has('pnl_pct') ? 'pnl_pct' : 'NULL AS pnl_pct'},
+            ${trustedPeakExpr} AS peak_pnl,
+            ${tradeCols.has('position_size_sol') ? 'position_size_sol' : 'NULL AS position_size_sol'},
+            ${tradeCols.has('signal_route') ? 'signal_route' : 'NULL AS signal_route'},
+            ${tradeCols.has('entry_mode') ? 'entry_mode' : 'NULL AS entry_mode'}
+          FROM paper_trades
+          ${tradeWhere}
+          ORDER BY COALESCE(entry_ts, exit_ts, 0) DESC, id DESC
+          LIMIT @limit
+        `).all(sinceTs ? { since: sinceTs, limit } : { limit });
+        paperDiagnostics.available = true;
+        paperDiagnostics.rows = paperTrades.length;
+      } else {
+        paperDiagnostics.note = 'paper_trades table missing';
+      }
+    } else {
+      paperDiagnostics.note = 'paper DB path missing';
+    }
+  } finally {
+    try { if (paperDb) paperDb.close(); } catch {}
+  }
+
+  const report = buildRawSignalOutcomeReport({
+    signals: signalRows,
+    klineRows,
+    paperTrades,
+    nowTs,
+    horizonSec,
+    baselineMaxLagSec,
+    coverageTargetPct,
+  });
+
+  let persistedRows = 0;
+  let rawDbError = null;
+  if (persist) {
+    let rawDb;
+    try {
+      rawDb = openRawSignalOutcomesDb();
+      persistedRows = upsertRawSignalOutcomes(rawDb, report.outcomes || []);
+    } catch (error) {
+      rawDbError = error?.message || String(error);
+    } finally {
+      try { if (rawDb) rawDb.close(); } catch {}
+    }
+  }
+
+  return {
+    available: true,
+    generated_at: report.generated_at,
+    raw_db_path: getRawSignalOutcomesDbPath(),
+    sentiment_db_path: resolvedDbPath,
+    paper_db_path: paperDbPath,
+    filters: {
+      since_ts: sinceTs,
+      since_iso: sinceTs ? new Date(sinceTs * 1000).toISOString() : null,
+      limit,
+      now_ts: nowTs,
+      horizon_sec: horizonSec,
+      baseline_max_lag_sec: baselineMaxLagSec,
+      coverage_target_pct: coverageTargetPct,
+    },
+    diagnostics: {
+      signals: {
+        rows: signalRows.length,
+      },
+      kline: klineDiagnostics,
+      paper: paperDiagnostics,
+      raw_db: {
+        persisted_rows: persistedRows,
+        error: rawDbError,
+      },
+    },
+    report,
+  };
+}
+
+function rawOutcomeEligibleSql() {
+  return `
+    observation_status = 'matured'
+    AND COALESCE(kline_covered, 0) = 1
+    AND baseline_confidence IN ('high', 'medium')
+    AND COALESCE(same_source_path, 0) = 1
+    AND COALESCE(outlier_flag, 0) = 0
+    AND COALESCE(sustained_evaluable, 0) = 1
+  `;
+}
+
+function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
+  const rawDbPath = getRawSignalOutcomesDbPath();
+  const sinceTs = Math.floor(Date.now() / 1000) - Math.max(1, Number(hours) || 24) * 3600;
+  if (!fs.existsSync(rawDbPath)) {
+    return {
+      available: false,
+      db_path: rawDbPath,
+      since_ts: sinceTs,
+      note: 'raw_signal_outcomes durable DB missing; call /api/paper/raw-dog-discovery to build it',
+    };
+  }
+  let db;
+  try {
+    db = openRawSignalOutcomesDb({ readonly: true });
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+    if (!tables.has('raw_signal_outcomes')) {
+      return {
+        available: false,
+        db_path: rawDbPath,
+        since_ts: sinceTs,
+        note: 'raw_signal_outcomes table missing',
+      };
+    }
+    const eligibleSql = rawOutcomeEligibleSql();
+    const summary = db.prepare(`
+      SELECT
+        COUNT(*) AS total_signals,
+        SUM(CASE WHEN observation_status = 'matured' THEN 1 ELSE 0 END) AS matured_signals,
+        SUM(CASE WHEN COALESCE(right_censored, 0) = 1 THEN 1 ELSE 0 END) AS right_censored_open,
+        SUM(CASE WHEN ${eligibleSql} THEN 1 ELSE 0 END) AS raw_denominator_matured_only,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_sustained_gold_silver_unique,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'gold' THEN 1 ELSE 0 END) AS raw_sustained_gold_unique,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'silver' THEN 1 ELSE 0 END) AS raw_sustained_silver_unique,
+        SUM(CASE WHEN raw_wick_tier IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_wick_gold_silver_unique,
+        SUM(CASE WHEN raw_wick_tier IN ('gold', 'silver') AND raw_primary_tier NOT IN ('gold', 'silver') THEN 1 ELSE 0 END) AS raw_wick_only_gold_silver_unique,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(raw_dog_entered, 0) = 1 THEN 1 ELSE 0 END) AS raw_gold_silver_entered,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(raw_dog_realized, 0) = 1 THEN 1 ELSE 0 END) AS raw_gold_silver_realized,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier IN ('gold', 'silver') AND COALESCE(sold_before_silver, 0) = 1 THEN 1 ELSE 0 END) AS sold_before_silver,
+        SUM(CASE WHEN ${eligibleSql} AND raw_primary_tier = 'gold' AND COALESCE(sold_before_gold, 0) = 1 THEN 1 ELSE 0 END) AS sold_before_gold
+      FROM raw_signal_outcomes
+      WHERE signal_ts >= @since
+    `).get({ since: sinceTs }) || {};
+    const matured = Number(summary.matured_signals || 0);
+    const denominator = Number(summary.raw_denominator_matured_only || 0);
+    const rawDogs = Number(summary.raw_sustained_gold_silver_unique || 0);
+    const entered = Number(summary.raw_gold_silver_entered || 0);
+    const realized = Number(summary.raw_gold_silver_realized || 0);
+    const coveragePct = matured > 0 ? roundNumber((denominator / matured) * 100.0, 2) : null;
+    let denominatorStatus = 'undefined';
+    if (coveragePct != null && coveragePct < coverageTargetPct) denominatorStatus = 'evidence_unavailable';
+    else if (rawDogs > 0) denominatorStatus = 'evaluable';
+    const byReason = db.prepare(`
+      SELECT coverage_reason, COUNT(*) AS n
+      FROM raw_signal_outcomes
+      WHERE signal_ts >= @since
+      GROUP BY coverage_reason
+      ORDER BY n DESC
+    `).all({ since: sinceTs });
+    const topRawDogs = db.prepare(`
+      SELECT
+        signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
+        max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+        baseline_confidence, coverage_reason, did_enter, held_to_silver,
+        held_to_gold, raw_dog_entered, raw_dog_realized, exit_reason
+      FROM raw_signal_outcomes
+      WHERE signal_ts >= @since
+        AND ${eligibleSql}
+        AND raw_primary_tier IN ('gold', 'silver')
+      ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC
+      LIMIT @limit
+    `).all({ since: sinceTs, limit });
+    const missedRawDogs = topRawDogs.filter((row) => !row.raw_dog_realized);
+    return {
+      available: true,
+      schema_version: 'raw_signal_outcomes_rolling_summary.v1',
+      db_path: rawDbPath,
+      since_ts: sinceTs,
+      since_iso: new Date(sinceTs * 1000).toISOString(),
+      coverage_target_pct: coverageTargetPct,
+      summary: {
+        total_signals: Number(summary.total_signals || 0),
+        matured_signals: matured,
+        right_censored_open: Number(summary.right_censored_open || 0),
+        raw_denominator_matured_only: denominator,
+        raw_kline_coverage_pct: coveragePct,
+        raw_sustained_gold_unique: Number(summary.raw_sustained_gold_unique || 0),
+        raw_sustained_silver_unique: Number(summary.raw_sustained_silver_unique || 0),
+        raw_sustained_gold_silver_unique: rawDogs,
+        raw_wick_gold_silver_unique: Number(summary.raw_wick_gold_silver_unique || 0),
+        raw_wick_only_gold_silver_unique: Number(summary.raw_wick_only_gold_silver_unique || 0),
+        raw_gold_silver_entered: entered,
+        raw_gold_silver_realized: realized,
+        raw_dog_entered_rate: rawDogs ? roundNumber(entered / rawDogs, 4) : null,
+        raw_dog_realized_rate: rawDogs ? roundNumber(realized / rawDogs, 4) : null,
+        sold_before_silver: Number(summary.sold_before_silver || 0),
+        sold_before_gold: Number(summary.sold_before_gold || 0),
+        denominator_status: denominatorStatus,
+      },
+      coverage: {
+        by_reason: byReason,
+      },
+      top_raw_dogs: topRawDogs,
+      missed_raw_dogs: missedRawDogs.slice(0, limit),
+      notes: {
+        capture_definition: 'raw_dog_entered is separate from raw_dog_realized; the goal capture metric must use raw_dog_realized.',
+        source: 'durable raw_signal_outcomes DB, not paper_trades.db; this survives paper DB quarantine/reset.',
+      },
+    };
+  } catch (error) {
+    return {
+      available: false,
+      db_path: rawDbPath,
+      since_ts: sinceTs,
+      error: error?.message || String(error),
+    };
+  } finally {
+    try { if (db) db.close(); } catch {}
+  }
 }
 
 function fileInfo(label, filePath) {
@@ -8983,6 +9589,52 @@ const server = http.createServer(async (req, res) => {
       try { if (signalDb) signalDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/raw-dog-discovery') {
+    if (!checkAuth(req, url, res)) return;
+    let signalDb;
+    try {
+      signalDb = getDb();
+      const sinceTs = reportSinceTs(url, '6h');
+      const limit = boundedIntParam(url, 'limit', 5000, 1, 20000);
+      const nowTs = parseUnixishTime(url.searchParams.get('now_ts')) || Math.floor(Date.now() / 1000);
+      const horizonSec = boundedIntParam(url, 'horizon_sec', 7200, 300, 24 * 3600);
+      const baselineMaxLagSec = boundedIntParam(url, 'baseline_max_lag_sec', 300, 0, 3600);
+      const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
+      const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
+      const snapshot = buildRawDogDiscoverySnapshot({
+        signalDb,
+        sinceTs,
+        limit,
+        nowTs,
+        horizonSec,
+        baselineMaxLagSec,
+        coverageTargetPct,
+        persist,
+      });
+      res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
+      res.end(JSON.stringify({
+        schema_version: 'raw_dog_discovery_api.v1',
+        ...snapshot,
+        summary: snapshot.report?.summary || null,
+        coverage: snapshot.report?.coverage || null,
+        top_raw_dogs: snapshot.report?.top_raw_dogs || [],
+        missed_raw_dogs: snapshot.report?.missed_raw_dogs || [],
+        coverage_gap_tokens: snapshot.report?.coverage_gap_tokens || [],
+        pending_outcomes: snapshot.report?.pending_outcomes || [],
+        notes: {
+          capture_definition: 'raw_dog_entered means a paper trade touched the raw sustained dog before peak; raw_dog_realized means the trade held to silver/gold peak. Entered alone is not capture.',
+          censoring: 'Signals whose full horizon has not matured are right_censored_open and excluded from denominators.',
+          denominator: 'Only high/medium baseline confidence, same-source path, non-outlier, sustained-evaluable outcomes enter the main raw dog denominator.',
+          zero_denominator: '0/0 rates are null/undefined, never interpreted as 0%.',
+        },
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({ error: e.message }, null, 2));
+    } finally {
+      try { if (signalDb) signalDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/premium-signal-outcome-audit') {
     if (!checkAuth(req, url, res)) return;
     let signalDb;
@@ -9005,6 +9657,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const rawKlineHorizonSec = boundedIntParam(url, 'raw_kline_horizon_sec', 3600, 300, 24 * 3600);
+      const rawDiscoveryHorizonSec = boundedIntParam(url, 'raw_discovery_horizon_sec', 7200, 300, 24 * 3600);
       const rawKlineBaselineMaxLagSec = boundedIntParam(url, 'raw_kline_baseline_max_lag_sec', 300, 0, 3600);
       const signalCols = getTableColumns(signalDb, 'premium_signals');
       const timestampExpr = signalCols.has('timestamp')
@@ -9264,9 +9917,25 @@ const server = http.createServer(async (req, res) => {
         },
         sinceTs,
       });
+      const rawDiscovery = buildRawSignalOutcomeReport({
+        signals: signalRows,
+        paperTrades,
+        klineRows,
+        nowTs: Math.floor(Date.now() / 1000),
+        horizonSec: rawDiscoveryHorizonSec,
+        baselineMaxLagSec: rawKlineBaselineMaxLagSec,
+      });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         ...audit,
+        raw_discovery: {
+          summary: rawDiscovery.summary,
+          coverage: rawDiscovery.coverage,
+          top_raw_dogs: rawDiscovery.top_raw_dogs,
+          missed_raw_dogs: rawDiscovery.missed_raw_dogs,
+          coverage_gap_tokens: rawDiscovery.coverage_gap_tokens,
+          pending_outcomes: rawDiscovery.pending_outcomes,
+        },
         db_path: paperDbPath,
         premium_signal_query_limit: limit,
         kline_diagnostics: klineDiagnostics,
@@ -9274,6 +9943,7 @@ const server = http.createServer(async (req, res) => {
           audit_goal: 'Compare upstream premium signal raw kline and market-cap outcomes with paper trade coverage.',
           missed_recovery_difference: 'missed-recovery-summary only covers paper_missed_signal_attribution; this endpoint starts from premium_signals and therefore exposes coverage gaps.',
           raw_kline_difference: 'raw_kline_* metrics measure discovery from signal to 1m kline path high; quote-clean metrics still measure executable capture separately.',
+          raw_discovery_difference: 'raw_discovery uses a matured-only, sustained-only denominator; entered != captured unless held_to_silver/gold is true.',
         },
       }, null, 2));
     } catch (e) {
@@ -12697,6 +13367,11 @@ const server = http.createServer(async (req, res) => {
     const materializedHours = nearestLivePaperReviewHours(requestedHours);
     const liveSnapshot = readLivePaperReview(materializedHours);
     const paperDbHealth = readPaperDbRuntimeHealth();
+    const rawDiscovery = readRawSignalOutcomeRollingSummary({
+      hours: requestedHours,
+      coverageTargetPct: boundedIntParam(url, 'raw_coverage_target_pct', 80, 0, 100),
+      limit: boundedIntParam(url, 'raw_limit', 50, 1, 200),
+    });
     const status = buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, {
       requestedHours,
       materializedHours,
@@ -12711,6 +13386,15 @@ const server = http.createServer(async (req, res) => {
       dogPeakRatio: Number(url.searchParams.get('dog_peak') || 0.50),
       winPeakRatio: Number(url.searchParams.get('win_peak') || 0.30),
     });
+    status.raw_discovery = rawDiscovery;
+    status.metrics = {
+      ...status.metrics,
+      raw_discovery_denominator_status: rawDiscovery.summary?.denominator_status || null,
+      raw_kline_coverage_pct: rawDiscovery.summary?.raw_kline_coverage_pct ?? null,
+      raw_sustained_gold_silver_unique: rawDiscovery.summary?.raw_sustained_gold_silver_unique ?? null,
+      raw_dog_entered_rate: rawDiscovery.summary?.raw_dog_entered_rate ?? null,
+      raw_dog_realized_rate: rawDiscovery.summary?.raw_dog_realized_rate ?? null,
+    };
     res.writeHead(status.available && !status.shadow_pending ? 200 : 202, apiJsonHeaders());
     res.end(JSON.stringify(status, null, 2));
     return;
