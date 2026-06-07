@@ -101,6 +101,51 @@ test('premium signal audit counts pass-to-max dogs outside missed attribution', 
   assert.equal(audit.unclassified_tokens.length, 0);
 });
 
+test('premium signal audit counts raw kline dogs even when market-cap stream and missed attribution are silent', () => {
+  const audit = buildPremiumSignalOutcomeAudit({
+    signals: [
+      {
+        id: 1,
+        token_ca: 'RAW',
+        symbol: 'RAWDOG',
+        timestamp: 1000,
+        signal_type: 'ATH',
+        market_cap: 10_000,
+        hard_gate_status: 'RISK_BLOCKED',
+      },
+      {
+        id: 2,
+        token_ca: 'FLAT',
+        symbol: 'FLAT',
+        timestamp: 1000,
+        signal_type: 'ATH',
+        market_cap: 10_000,
+        hard_gate_status: 'PASS',
+      },
+    ],
+    paperTrades: [],
+    missedAttributions: [],
+    klineRows: [
+      { token_ca: 'RAW', timestamp: 1000, open: 1.0, high: 1.05, low: 0.98, close: 1.0, source: 'test' },
+      { token_ca: 'RAW', timestamp: 1060, open: 1.0, high: 2.2, low: 0.95, close: 2.0, source: 'test' },
+      { token_ca: 'FLAT', timestamp: 1000, open: 1.0, high: 1.1, low: 0.98, close: 1.0, source: 'test' },
+    ],
+    sinceTs: 1000,
+    generatedAt: '2026-05-13T00:00:00.000Z',
+  });
+
+  assert.equal(audit.summary.stream_dog_unique, 0);
+  assert.equal(audit.summary.raw_kline_covered_unique, 2);
+  assert.equal(audit.summary.raw_kline_coverage_pct, 100);
+  assert.equal(audit.summary.raw_kline_stream_tiers.gold, 1);
+  assert.equal(audit.summary.raw_kline_gold_silver_unique, 1);
+  assert.equal(audit.summary.raw_kline_gold_silver_with_paper_trade_unique, 0);
+  assert.equal(audit.summary.raw_kline_gold_silver_without_paper_trade_unique, 1);
+  assert.equal(audit.summary.raw_kline_gold_silver_capture_pct, 0);
+  assert.equal(audit.uncovered_raw_kline_gold_silver[0].token_ca, 'RAW');
+  assert.equal(audit.uncovered_raw_kline_gold_silver[0].raw_kline_peak_pct, 120);
+});
+
 test('premium signal audit reads cohort from paper trade monitor state', () => {
   const audit = buildPremiumSignalOutcomeAudit({
     signals: [

@@ -66,6 +66,135 @@ function compactTypeCounts(rows) {
   return counts;
 }
 
+function normalizeKlineTimestampSec(row) {
+  const raw = row.timestamp_sec ?? row.timestamp ?? row.ts ?? row.sample_ts;
+  const n = numeric(raw);
+  if (n == null) return null;
+  return n > 1_000_000_000_000 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+function normalizeKlineRow(row) {
+  const ts = normalizeKlineTimestampSec(row);
+  return {
+    token_ca: row.token_ca || null,
+    timestamp: ts,
+    open: positiveNumeric(row.open),
+    high: positiveNumeric(row.high),
+    low: positiveNumeric(row.low),
+    close: positiveNumeric(row.close),
+    source: row.source || null,
+  };
+}
+
+function klinePathForAnchor(klineRows, anchorTs, {
+  horizonSec = 3600,
+  baselineMaxLagSec = 300,
+  anchorLabel = 'stream',
+} = {}) {
+  const startTs = numeric(anchorTs);
+  if (startTs == null) {
+    return {
+      anchor: anchorLabel,
+      covered: false,
+      coverage_reason: 'anchor_ts_missing',
+    };
+  }
+  if (!Array.isArray(klineRows) || klineRows.length === 0) {
+    return {
+      anchor: anchorLabel,
+      anchor_ts: startTs,
+      anchor_iso: isoFromSec(startTs),
+      covered: false,
+      coverage_reason: 'no_kline_for_token',
+    };
+  }
+  const rows = klineRows
+    .map(normalizeKlineRow)
+    .filter((row) => row.timestamp != null && row.high != null && row.low != null && row.close != null)
+    .sort((a, b) => a.timestamp - b.timestamp);
+  const baseline = rows.find((row) => (
+    row.timestamp >= startTs
+    && row.timestamp <= startTs + baselineMaxLagSec
+    && row.close != null
+    && row.close > 0
+  ));
+  if (!baseline) {
+    const firstAfter = rows.find((row) => row.timestamp >= startTs);
+    return {
+      anchor: anchorLabel,
+      anchor_ts: startTs,
+      anchor_iso: isoFromSec(startTs),
+      covered: false,
+      coverage_reason: firstAfter ? 'baseline_kline_after_max_lag' : 'no_kline_after_anchor',
+      first_kline_ts: firstAfter?.timestamp ?? null,
+      first_kline_iso: isoFromSec(firstAfter?.timestamp),
+      first_kline_lag_sec: firstAfter?.timestamp != null ? Math.max(0, firstAfter.timestamp - startTs) : null,
+    };
+  }
+  const pathEndTs = startTs + horizonSec;
+  const path = rows.filter((row) => row.timestamp >= baseline.timestamp && row.timestamp <= pathEndTs);
+  if (!path.length) {
+    return {
+      anchor: anchorLabel,
+      anchor_ts: startTs,
+      anchor_iso: isoFromSec(startTs),
+      covered: false,
+      coverage_reason: 'no_kline_in_horizon',
+      baseline_ts: baseline.timestamp,
+      baseline_iso: isoFromSec(baseline.timestamp),
+    };
+  }
+  let maxHigh = null;
+  let peakTs = null;
+  for (const row of path) {
+    if (row.high != null && (maxHigh == null || row.high > maxHigh)) {
+      maxHigh = row.high;
+      peakTs = row.timestamp;
+    }
+  }
+  if (maxHigh == null || baseline.close == null || baseline.close <= 0) {
+    return {
+      anchor: anchorLabel,
+      anchor_ts: startTs,
+      anchor_iso: isoFromSec(startTs),
+      covered: false,
+      coverage_reason: 'invalid_kline_prices',
+      baseline_ts: baseline.timestamp,
+      baseline_iso: isoFromSec(baseline.timestamp),
+      sample_count: path.length,
+    };
+  }
+  const peakPct = ((maxHigh / baseline.close) - 1) * 100.0;
+  const beforePeak = peakTs == null ? path : path.filter((row) => row.timestamp <= peakTs);
+  const minLow = beforePeak.reduce((best, row) => (
+    row.low != null && (best == null || row.low < best) ? row.low : best
+  ), null);
+  const maePct = minLow != null ? ((minLow / baseline.close) - 1) * 100.0 : null;
+  return {
+    anchor: anchorLabel,
+    anchor_ts: startTs,
+    anchor_iso: isoFromSec(startTs),
+    horizon_sec: horizonSec,
+    baseline_max_lag_sec: baselineMaxLagSec,
+    covered: true,
+    coverage_reason: 'covered',
+    baseline_ts: baseline.timestamp,
+    baseline_iso: isoFromSec(baseline.timestamp),
+    baseline_lag_sec: Math.max(0, baseline.timestamp - startTs),
+    baseline_price: baseline.close,
+    max_high: maxHigh,
+    peak_ts: peakTs,
+    peak_iso: isoFromSec(peakTs),
+    time_to_peak_sec: peakTs == null ? null : Math.max(0, peakTs - startTs),
+    sample_count: path.length,
+    peak_pct: roundNumber(peakPct, 2),
+    peak_ratio: roundNumber(peakPct / 100.0, 6),
+    peak_tier: tierForPct(peakPct),
+    mae_before_peak_pct: maePct == null ? null : roundNumber(maePct, 2),
+    source: baseline.source || null,
+  };
+}
+
 const LOTTO_OBSERVE_UPSTREAM_STATUSES = [
   'LOTTO_OBSERVE_LOW_MC_VOL',
   'NOT_ATH_PREBUY_KLINE_BLOCK',
@@ -279,7 +408,7 @@ function mergeMissedAttribution(existing, row) {
   return current;
 }
 
-function tokenOutcome(rows, paperTradesByToken, missedByToken) {
+function tokenOutcome(rows, paperTradesByToken, missedByToken, klineRowsByToken, klineOptions = {}) {
   const sorted = [...rows].sort((a, b) => {
     const aTs = normalizeTimestampSec(a) || 0;
     const bTs = normalizeTimestampSec(b) || 0;
@@ -304,6 +433,19 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
   const tokenCa = sorted[0]?.token_ca || null;
   const paperTrades = tokenCa ? (paperTradesByToken.get(tokenCa) || []) : [];
   const missed = tokenCa ? missedByToken.get(tokenCa) : null;
+  const klineRows = tokenCa ? (klineRowsByToken.get(tokenCa) || []) : [];
+  const streamKlinePath = klinePathForAnchor(klineRows, first.ts, {
+    ...klineOptions,
+    anchorLabel: 'first_signal',
+  });
+  const passKlinePath = firstPass ? klinePathForAnchor(klineRows, firstPass.ts, {
+    ...klineOptions,
+    anchorLabel: 'first_pass',
+  }) : {
+    anchor: 'first_pass',
+    covered: false,
+    coverage_reason: 'no_hard_gate_pass_anchor',
+  };
   const missedDetail = missed?.detail || null;
   const serializedPaperTrades = paperTrades.map(serializeTrade);
   const firstTradeCohort = serializedPaperTrades.find((trade) => trade.source_resonance_cohort)?.source_resonance_cohort || null;
@@ -325,6 +467,10 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
     max_market_cap: max?.marketCap ?? null,
     stream_to_max_pct: roundNumber(streamPnlPct, 2),
     stream_tier: tierForPct(streamPnlPct),
+    raw_kline_peak_pct: streamKlinePath.peak_pct ?? null,
+    raw_kline_peak_ratio: streamKlinePath.peak_ratio ?? null,
+    raw_kline_tier: streamKlinePath.peak_tier || 'unknown',
+    raw_kline_path: streamKlinePath,
     hard_gate_pass: Boolean(firstPass),
     first_pass_signal_id: firstPass?.row?.id ?? null,
     first_pass_ts: firstPass?.ts ?? null,
@@ -336,6 +482,10 @@ function tokenOutcome(rows, paperTradesByToken, missedByToken) {
     max_after_pass_market_cap: maxAfterPass?.marketCap ?? null,
     pass_to_max_pct: roundNumber(passToMaxPct, 2),
     pass_to_max_tier: tierForPct(passToMaxPct),
+    raw_kline_pass_peak_pct: passKlinePath.peak_pct ?? null,
+    raw_kline_pass_peak_ratio: passKlinePath.peak_ratio ?? null,
+    raw_kline_pass_tier: passKlinePath.peak_tier || 'unknown',
+    raw_kline_pass_path: passKlinePath,
     paper_trade_count: paperTrades.length,
     paper_trades: serializedPaperTrades,
     missed_attribution_count: missed?.n || 0,
@@ -383,9 +533,10 @@ function buildCohortScoreboard(tokens) {
     if (item.hard_gate_pass) group.hard_gate_pass_unique += 1;
     if (item.paper_trade_count > 0) group.paper_filled_unique += 1;
     if (item.missed_attribution_count > 0 || item.coverage_gap) group.missed_unique += 1;
-    if (item.pass_to_max_tier === 'gold') group.gold += 1;
-    if (item.pass_to_max_tier === 'silver') group.silver += 1;
-    if (item.pass_to_max_tier === 'bronze') group.bronze += 1;
+    const cohortTier = item.raw_kline_tier !== 'unknown' ? item.raw_kline_tier : item.pass_to_max_tier;
+    if (cohortTier === 'gold') group.gold += 1;
+    if (cohortTier === 'silver') group.silver += 1;
+    if (cohortTier === 'bronze') group.bronze += 1;
     if (
       item.quote_clean === true
       && ['gold', 'silver', 'bronze'].includes(item.pass_to_max_tier)
@@ -446,6 +597,8 @@ export function buildPremiumSignalOutcomeAudit({
   signals = [],
   paperTrades = [],
   missedAttributions = [],
+  klineRows = [],
+  klineOptions = {},
   sinceTs = null,
   generatedAt = new Date().toISOString(),
 } = {}) {
@@ -465,6 +618,14 @@ export function buildPremiumSignalOutcomeAudit({
     missedByToken.set(row.token_ca, mergeMissedAttribution(missedByToken.get(row.token_ca), row));
   }
 
+  const klineRowsByToken = new Map();
+  for (const row of klineRows) {
+    const tokenCa = String(row.token_ca || '').trim();
+    if (!tokenCa) continue;
+    if (!klineRowsByToken.has(tokenCa)) klineRowsByToken.set(tokenCa, []);
+    klineRowsByToken.get(tokenCa).push(row);
+  }
+
   const signalGroups = new Map();
   for (const row of signals) {
     const tokenCa = String(row.token_ca || '').trim();
@@ -474,14 +635,29 @@ export function buildPremiumSignalOutcomeAudit({
   }
 
   const tokens = Array.from(signalGroups.values())
-    .map((rows) => tokenOutcome(rows, paperTradesByToken, missedByToken));
+    .map((rows) => tokenOutcome(rows, paperTradesByToken, missedByToken, klineRowsByToken, {
+      horizonSec: Math.max(60, Number(klineOptions.horizonSec || 3600)),
+      baselineMaxLagSec: Math.max(0, Number(klineOptions.baselineMaxLagSec || 300)),
+    }));
   const passTokens = tokens.filter((item) => item.hard_gate_pass);
   const passDogTokens = passTokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.pass_to_max_tier));
   const streamDogTokens = tokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.stream_tier));
+  const rawKlineCoveredTokens = tokens.filter((item) => item.raw_kline_path?.covered);
+  const rawKlineStreamDogTokens = tokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.raw_kline_tier));
+  const rawKlineGoldSilverTokens = tokens.filter((item) => ['gold', 'silver'].includes(item.raw_kline_tier));
+  const rawKlineCapturedGoldSilverTokens = rawKlineGoldSilverTokens.filter((item) => item.paper_trade_count > 0);
+  const rawKlineMissedGoldSilverTokens = rawKlineGoldSilverTokens.filter((item) => item.paper_trade_count <= 0);
+  const rawKlinePassDogTokens = passTokens.filter((item) => ['gold', 'silver', 'bronze'].includes(item.raw_kline_pass_tier));
+  const rawKlinePassGoldSilverTokens = passTokens.filter((item) => ['gold', 'silver'].includes(item.raw_kline_pass_tier));
+  const rawKlinePassCapturedGoldSilverTokens = rawKlinePassGoldSilverTokens.filter((item) => item.paper_trade_count > 0);
   const streamTierCounts = emptyTierCounts();
   const passTierCounts = emptyTierCounts();
+  const rawKlineStreamTierCounts = emptyTierCounts();
+  const rawKlinePassTierCounts = emptyTierCounts();
   for (const item of tokens) incrementTier(streamTierCounts, item.stream_tier);
   for (const item of passTokens) incrementTier(passTierCounts, item.pass_to_max_tier);
+  for (const item of tokens) incrementTier(rawKlineStreamTierCounts, item.raw_kline_tier);
+  for (const item of passTokens) incrementTier(rawKlinePassTierCounts, item.raw_kline_pass_tier);
 
   const topPassMovers = [...passTokens]
     .sort((a, b) => Number(b.pass_to_max_pct ?? -Infinity) - Number(a.pass_to_max_pct ?? -Infinity));
@@ -493,6 +669,13 @@ export function buildPremiumSignalOutcomeAudit({
   const uncoveredStreamDogs = streamDogTokens
     .filter((item) => item.paper_trade_count <= 0)
     .sort((a, b) => Number(b.stream_to_max_pct ?? -Infinity) - Number(a.stream_to_max_pct ?? -Infinity));
+  const topRawKlineStreamMovers = [...tokens]
+    .sort((a, b) => Number(b.raw_kline_peak_pct ?? -Infinity) - Number(a.raw_kline_peak_pct ?? -Infinity));
+  const uncoveredRawKlineStreamDogs = rawKlineStreamDogTokens
+    .filter((item) => item.paper_trade_count <= 0)
+    .sort((a, b) => Number(b.raw_kline_peak_pct ?? -Infinity) - Number(a.raw_kline_peak_pct ?? -Infinity));
+  const uncoveredRawKlineGoldSilver = rawKlineMissedGoldSilverTokens
+    .sort((a, b) => Number(b.raw_kline_peak_pct ?? -Infinity) - Number(a.raw_kline_peak_pct ?? -Infinity));
   const coveragePct = (covered, total) => total > 0 ? roundNumber((covered / total) * 100, 2) : null;
   const coverageCounts = {
     paper_trade: 0,
@@ -530,8 +713,10 @@ export function buildPremiumSignalOutcomeAudit({
     filters: {
       since_ts: sinceTs,
       since_iso: sinceTs ? new Date(Number(sinceTs) * 1000).toISOString() : null,
-      tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50% observed market-cap increase',
-      outcome_source: 'premium_signals market_cap snapshots; this can undercount tokens with no later premium snapshot',
+      tier_definition: 'gold>=100%, silver=50-100%, bronze=25-50%; raw_kline uses 1m kline high after the first premium signal',
+      outcome_source: 'raw_kline_path is primary discovery evidence when kline coverage exists; market_cap snapshots remain a secondary stream-only proxy',
+      raw_kline_horizon_sec: Math.max(60, Number(klineOptions.horizonSec || 3600)),
+      raw_kline_baseline_max_lag_sec: Math.max(0, Number(klineOptions.baselineMaxLagSec || 300)),
     },
     summary: {
       premium_signal_rows: signals.length,
@@ -540,6 +725,30 @@ export function buildPremiumSignalOutcomeAudit({
       hard_gate_pass_unique: passTokens.length,
       stream_to_max_tiers: streamTierCounts,
       pass_to_max_tiers: passTierCounts,
+      raw_kline_stream_tiers: rawKlineStreamTierCounts,
+      raw_kline_pass_tiers: rawKlinePassTierCounts,
+      raw_kline_covered_unique: rawKlineCoveredTokens.length,
+      raw_kline_coverage_pct: coveragePct(rawKlineCoveredTokens.length, tokens.length),
+      raw_kline_stream_dog_unique: rawKlineStreamDogTokens.length,
+      raw_kline_stream_dog_with_paper_trade_unique: rawKlineStreamDogTokens.filter((item) => item.paper_trade_count > 0).length,
+      raw_kline_stream_dog_without_paper_trade_unique: uncoveredRawKlineStreamDogs.length,
+      raw_kline_stream_dog_capture_pct: coveragePct(
+        rawKlineStreamDogTokens.filter((item) => item.paper_trade_count > 0).length,
+        rawKlineStreamDogTokens.length
+      ),
+      raw_kline_gold_silver_unique: rawKlineGoldSilverTokens.length,
+      raw_kline_gold_silver_with_paper_trade_unique: rawKlineCapturedGoldSilverTokens.length,
+      raw_kline_gold_silver_without_paper_trade_unique: rawKlineMissedGoldSilverTokens.length,
+      raw_kline_gold_silver_capture_pct: coveragePct(
+        rawKlineCapturedGoldSilverTokens.length,
+        rawKlineGoldSilverTokens.length
+      ),
+      raw_kline_pass_gold_silver_unique: rawKlinePassGoldSilverTokens.length,
+      raw_kline_pass_gold_silver_with_paper_trade_unique: rawKlinePassCapturedGoldSilverTokens.length,
+      raw_kline_pass_gold_silver_capture_pct: coveragePct(
+        rawKlinePassCapturedGoldSilverTokens.length,
+        rawKlinePassGoldSilverTokens.length
+      ),
       stream_dog_unique: streamDogTokens.length,
       stream_dog_with_paper_trade_unique: streamDogTokens.filter((item) => item.paper_trade_count > 0).length,
       stream_dog_without_paper_trade_unique: uncoveredStreamDogs.length,
@@ -564,6 +773,9 @@ export function buildPremiumSignalOutcomeAudit({
     top_pass_movers: topPassMovers.slice(0, 30),
     uncovered_pass_dogs: uncoveredPassDogs.slice(0, 30),
     uncovered_stream_dogs: uncoveredStreamDogs.slice(0, 30),
+    top_raw_kline_stream_movers: topRawKlineStreamMovers.slice(0, 30),
+    uncovered_raw_kline_stream_dogs: uncoveredRawKlineStreamDogs.slice(0, 30),
+    uncovered_raw_kline_gold_silver: uncoveredRawKlineGoldSilver.slice(0, 30),
     coverage_gap_tokens: coverageGaps.slice(0, 30),
     unclassified_tokens: unclassified.slice(0, 30),
     top_stream_movers: topStreamMovers.slice(0, 30),

@@ -9004,6 +9004,8 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'premium_signals table not found' }));
         return;
       }
+      const rawKlineHorizonSec = boundedIntParam(url, 'raw_kline_horizon_sec', 3600, 300, 24 * 3600);
+      const rawKlineBaselineMaxLagSec = boundedIntParam(url, 'raw_kline_baseline_max_lag_sec', 300, 0, 3600);
       const signalCols = getTableColumns(signalDb, 'premium_signals');
       const timestampExpr = signalCols.has('timestamp')
         ? "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END"
@@ -9031,6 +9033,62 @@ const server = http.createServer(async (req, res) => {
         ORDER BY ${timestampExpr} DESC, id DESC
         LIMIT @limit
       `).all(sinceTs ? { since: sinceTs, sinceMs: sinceTs * 1000, limit } : { limit });
+      let klineRows = [];
+      const klineDiagnostics = {
+        available: false,
+        table: 'kline_1m',
+        rows: 0,
+        unique_signal_tokens: 0,
+        queried_tokens: 0,
+        query_chunks: 0,
+        coverage_window: {
+          since_ts: sinceTs,
+          until_ts: Math.floor(Date.now() / 1000) + rawKlineHorizonSec,
+          horizon_sec: rawKlineHorizonSec,
+          baseline_max_lag_sec: rawKlineBaselineMaxLagSec,
+        },
+      };
+      if (signalTables.has('kline_1m')) {
+        const klineCols = getTableColumns(signalDb, 'kline_1m');
+        if (klineCols.has('token_ca') && klineCols.has('timestamp') && klineCols.has('high') && klineCols.has('low') && klineCols.has('close')) {
+          const uniqueSignalTokens = [...new Set(signalRows.map((row) => String(row.token_ca || '').trim()).filter(Boolean))];
+          klineDiagnostics.available = true;
+          klineDiagnostics.unique_signal_tokens = uniqueSignalTokens.length;
+          const klineSinceTs = sinceTs || Math.floor(Date.now() / 1000) - 6 * 3600;
+          const klineUntilTs = Math.floor(Date.now() / 1000) + rawKlineHorizonSec;
+          klineDiagnostics.coverage_window.since_ts = klineSinceTs;
+          klineDiagnostics.coverage_window.until_ts = klineUntilTs;
+          const chunkSize = 250;
+          for (let i = 0; i < uniqueSignalTokens.length; i += chunkSize) {
+            const chunk = uniqueSignalTokens.slice(i, i + chunkSize);
+            if (!chunk.length) continue;
+            const placeholders = chunk.map(() => '?').join(',');
+            const rows = signalDb.prepare(`
+              SELECT
+                token_ca,
+                timestamp,
+                open,
+                high,
+                low,
+                close,
+                ${klineCols.has('source') ? 'source' : 'NULL AS source'}
+              FROM kline_1m
+              WHERE timestamp >= ?
+                AND timestamp <= ?
+                AND token_ca IN (${placeholders})
+              ORDER BY token_ca ASC, timestamp ASC
+            `).all(klineSinceTs, klineUntilTs, ...chunk);
+            klineRows.push(...rows);
+            klineDiagnostics.query_chunks += 1;
+          }
+          klineDiagnostics.queried_tokens = uniqueSignalTokens.length;
+          klineDiagnostics.rows = klineRows.length;
+        } else {
+          klineDiagnostics.note = 'kline_1m missing required token_ca/timestamp/high/low/close columns';
+        }
+      } else {
+        klineDiagnostics.note = 'kline_1m table missing';
+      }
 
       const paperDbPath = getPaperDbPath();
       let paperTrades = [];
@@ -9199,6 +9257,11 @@ const server = http.createServer(async (req, res) => {
         signals: signalRows,
         paperTrades,
         missedAttributions,
+        klineRows,
+        klineOptions: {
+          horizonSec: rawKlineHorizonSec,
+          baselineMaxLagSec: rawKlineBaselineMaxLagSec,
+        },
         sinceTs,
       });
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -9206,9 +9269,11 @@ const server = http.createServer(async (req, res) => {
         ...audit,
         db_path: paperDbPath,
         premium_signal_query_limit: limit,
+        kline_diagnostics: klineDiagnostics,
         notes: {
-          audit_goal: 'Compare upstream premium signal market-cap outcomes with paper trade coverage.',
+          audit_goal: 'Compare upstream premium signal raw kline and market-cap outcomes with paper trade coverage.',
           missed_recovery_difference: 'missed-recovery-summary only covers paper_missed_signal_attribution; this endpoint starts from premium_signals and therefore exposes coverage gaps.',
+          raw_kline_difference: 'raw_kline_* metrics measure discovery from signal to 1m kline path high; quote-clean metrics still measure executable capture separately.',
         },
       }, null, 2));
     } catch (e) {
