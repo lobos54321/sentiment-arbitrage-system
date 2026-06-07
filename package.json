@@ -11,6 +11,7 @@
     "premium:shadow": "SHADOW_MODE=true node --import ./src/runtime/v27-paper-mode-preload.js src/health-bootstrap.js --premium",
     "shadow": "node src/index.js --shadow-mode",
     "dev": "nodemon src/index.js",
+    "raw:path:observer": "node scripts/run-raw-path-observer.js",
     "test": "jest",
     "db:init": "node scripts/init-db.js",
     "db:migrate": "node scripts/migrate-db.js",
