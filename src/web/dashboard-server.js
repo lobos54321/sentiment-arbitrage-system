@@ -2365,10 +2365,11 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
     `).get({ since: sinceTs }) || {};
     const matured = Number(summary.matured_signals || 0);
     const denominator = Number(summary.raw_denominator_matured_only || 0);
+    const denominatorEvents = Number(summary.raw_denominator_event_rows || 0);
     const rawDogs = Number(summary.raw_sustained_gold_silver_unique || 0);
     const entered = Number(summary.raw_gold_silver_entered || 0);
     const realized = Number(summary.raw_gold_silver_realized || 0);
-    const coveragePct = matured > 0 ? roundNumber((denominator / matured) * 100.0, 2) : null;
+    const coveragePct = matured > 0 ? roundNumber((denominatorEvents / matured) * 100.0, 2) : null;
     let denominatorStatus = 'undefined';
     if (coveragePct != null && coveragePct < coverageTargetPct) denominatorStatus = 'evidence_unavailable';
     else if (rawDogs > 0) denominatorStatus = 'evaluable';
@@ -2380,15 +2381,30 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
       ORDER BY n DESC
     `).all({ since: sinceTs });
     const topRawDogs = db.prepare(`
+      WITH ranked AS (
+        SELECT
+          signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
+          max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+          baseline_confidence, coverage_reason, did_enter, held_to_silver,
+          held_to_gold, raw_dog_entered, raw_dog_realized, exit_reason,
+          ROW_NUMBER() OVER (
+            PARTITION BY token_ca
+            ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC, signal_ts DESC, signal_id DESC
+          ) AS rn
+        FROM raw_signal_outcomes
+        WHERE signal_ts >= @since
+          AND ${eligibleSql}
+          AND raw_primary_tier IN ('gold', 'silver')
+          AND token_ca IS NOT NULL
+          AND token_ca != ''
+      )
       SELECT
         signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
         max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
         baseline_confidence, coverage_reason, did_enter, held_to_silver,
         held_to_gold, raw_dog_entered, raw_dog_realized, exit_reason
-      FROM raw_signal_outcomes
-      WHERE signal_ts >= @since
-        AND ${eligibleSql}
-        AND raw_primary_tier IN ('gold', 'silver')
+      FROM ranked
+      WHERE rn = 1
       ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC
       LIMIT @limit
     `).all({ since: sinceTs, limit });
@@ -2405,7 +2421,7 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
         matured_signals: matured,
         right_censored_open: Number(summary.right_censored_open || 0),
         raw_denominator_matured_only: denominator,
-        raw_denominator_event_rows: Number(summary.raw_denominator_event_rows || 0),
+        raw_denominator_event_rows: denominatorEvents,
         raw_kline_coverage_pct: coveragePct,
         raw_sustained_gold_unique: Number(summary.raw_sustained_gold_unique || 0),
         raw_sustained_silver_unique: Number(summary.raw_sustained_silver_unique || 0),
