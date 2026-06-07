@@ -27,6 +27,7 @@ const kline = (timestamp, close, overrides = {}) => ({
   volume: overrides.volume ?? 100,
   pool_address: overrides.pool_address ?? 'pool-1',
   source: overrides.source ?? 'kline-test',
+  source_kind: overrides.source_kind,
   price_unit: overrides.price_unit ?? 'native',
 });
 
@@ -83,6 +84,87 @@ test('baseline and path must stay on the same source and unit', () => {
   assert.equal(outcome.same_source_path, false);
   assert.equal(outcome.coverage_reason, 'cross_source_path');
   assert.equal(outcome.raw_primary_tier, 'not_evaluable');
+});
+
+test('bonding-curve raw path can enter the main denominator when source is consistent', () => {
+  const report = buildRawSignalOutcomeReport({
+    nowTs: 10_000,
+    horizonSec: 7200,
+    signals: [signal({ token_ca: 'EARLYpump' })],
+    klineRows: [
+      kline(1000, 1.0, {
+        token_ca: 'EARLYpump',
+        pool_address: 'bonding_curve:EARLYpump',
+        source: 'helius_bonding_curve',
+        source_kind: 'bonding_curve',
+      }),
+      kline(1060, 1.7, {
+        token_ca: 'EARLYpump',
+        pool_address: 'bonding_curve:EARLYpump',
+        source: 'helius_bonding_curve',
+        source_kind: 'bonding_curve',
+        high: 1.75,
+        volume: 500,
+      }),
+      kline(1120, 1.65, {
+        token_ca: 'EARLYpump',
+        pool_address: 'bonding_curve:EARLYpump',
+        source: 'helius_bonding_curve',
+        source_kind: 'bonding_curve',
+        high: 1.7,
+        volume: 450,
+      }),
+    ],
+  });
+
+  assert.equal(report.summary.raw_denominator_matured_only, 1);
+  assert.equal(report.summary.raw_sustained_gold_silver_unique, 1);
+  assert.equal(report.outcomes[0].path_source_kind, 'bonding_curve');
+  assert.equal(report.outcomes[0].same_source_path, true);
+});
+
+test('baseline/path rejects bonding-curve to AMM cross-source mixing', () => {
+  const outcome = computeOutcomeForSignal(signal({ token_ca: 'MIXEDpump' }), {
+    nowTs: 10_000,
+    horizonSec: 7200,
+    klineRows: [
+      kline(1000, 1.0, {
+        token_ca: 'MIXEDpump',
+        pool_address: 'bonding_curve:MIXEDpump',
+        source: 'helius_bonding_curve',
+        source_kind: 'bonding_curve',
+      }),
+      kline(1060, 2.0, {
+        token_ca: 'MIXEDpump',
+        pool_address: 'amm-pool-1',
+        source: 'helius_amm_pool',
+        source_kind: 'amm_pool',
+        high: 2.1,
+      }),
+    ],
+  });
+
+  assert.equal(outcome.same_source_path, false);
+  assert.equal(outcome.coverage_reason, 'cross_source_path');
+  assert.equal(outcome.raw_primary_tier, 'not_evaluable');
+});
+
+test('early 15m completeness flags late raw paths even when 120m path exists', () => {
+  const outcome = computeOutcomeForSignal(signal(), {
+    nowTs: 10_000,
+    horizonSec: 7200,
+    klineRows: [
+      kline(1600, 1.0),
+      kline(1660, 1.7, { high: 1.75, close: 1.7, volume: 500 }),
+      kline(1720, 1.65, { high: 1.7, close: 1.65, volume: 450 }),
+    ],
+    baselineMaxLagSec: 900,
+  });
+
+  assert.equal(outcome.baseline_lag_sec, 600);
+  assert.equal(outcome.early_15m_complete, false);
+  assert.equal(outcome.early_15m_bar_count, 3);
+  assert.equal(outcome.early_15m_expected_minutes, 15);
 });
 
 test('wick-only gold is visible but not counted as sustained raw dog', () => {

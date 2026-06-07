@@ -112,16 +112,24 @@ function normalizeSignal(row) {
 
 function normalizeKline(row) {
   const ts = normalizeTimestampSec(row.timestamp_sec ?? row.timestamp ?? row.ts ?? row.sample_ts);
+  const provider = row.provider || row.source || 'kline_1m';
+  const poolAddress = row.pool_address || row.pool || null;
+  const sourceKind = row.source_kind
+    || (String(poolAddress || '').toLowerCase().startsWith('bonding_curve:') ? 'bonding_curve' : null)
+    || (String(provider || '').toLowerCase().includes('bonding') ? 'bonding_curve' : null)
+    || (String(provider || '').toLowerCase().includes('helius') ? 'amm_pool' : 'indexed_ohlcv');
   return {
     token_ca: row.token_ca || null,
-    pool_address: row.pool_address || row.pool || null,
+    pool_address: poolAddress,
     timestamp: ts,
     open: positiveNumeric(row.open),
     high: positiveNumeric(row.high),
     low: positiveNumeric(row.low),
     close: positiveNumeric(row.close),
     volume: numeric(row.volume),
-    provider: row.provider || row.source || 'kline_1m',
+    provider,
+    source_kind: sourceKind,
+    source_family: row.source_family || (sourceKind === 'indexed_ohlcv' ? 'third_party_kline' : 'onchain_swap'),
     price_unit: row.price_unit || 'native',
   };
 }
@@ -141,6 +149,7 @@ function normalizeTrade(row) {
 function sourceCompatible(baseline, pathRows) {
   const pool = baseline?.pool_address || null;
   const provider = baseline?.provider || null;
+  const sourceKind = baseline?.source_kind || null;
   const unit = baseline?.price_unit || null;
   for (const row of pathRows || []) {
     if (pool && row.pool_address && row.pool_address !== pool) {
@@ -149,11 +158,46 @@ function sourceCompatible(baseline, pathRows) {
     if (provider && row.provider && row.provider !== provider) {
       return { same_source_path: false, reason: 'cross_source_path' };
     }
+    if (sourceKind && row.source_kind && row.source_kind !== sourceKind) {
+      return { same_source_path: false, reason: 'cross_source_path' };
+    }
     if (unit && row.price_unit && row.price_unit !== unit) {
       return { same_source_path: false, reason: 'price_unit_mismatch' };
     }
   }
   return { same_source_path: true, reason: 'covered' };
+}
+
+function earlyWindowMetrics(pathRows, signalTs, earlyWindowSec = 900) {
+  if (signalTs == null) {
+    return {
+      early_15m_bar_count: 0,
+      early_15m_expected_minutes: Math.ceil(earlyWindowSec / 60),
+      early_15m_bar_coverage_pct: null,
+      early_15m_complete: false,
+      first_bar_ts: null,
+      first_bar_lag_sec: null,
+    };
+  }
+  const expected = Math.ceil(earlyWindowSec / 60);
+  const rows = (pathRows || []).filter((row) => (
+    row.timestamp != null
+    && row.timestamp >= signalTs
+    && row.timestamp < signalTs + earlyWindowSec
+  ));
+  const minuteSet = new Set(rows.map((row) => Math.floor(Number(row.timestamp) / 60)));
+  const firstAfter = (pathRows || [])
+    .filter((row) => row.timestamp != null && row.timestamp >= signalTs)
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp))[0] || null;
+  const coveragePct = expected ? (minuteSet.size / expected) * 100.0 : null;
+  return {
+    early_15m_bar_count: minuteSet.size,
+    early_15m_expected_minutes: expected,
+    early_15m_bar_coverage_pct: coveragePct == null ? null : roundNumber(coveragePct, 2),
+    early_15m_complete: coveragePct != null && coveragePct >= 80,
+    first_bar_ts: firstAfter?.timestamp ?? null,
+    first_bar_lag_sec: firstAfter?.timestamp != null ? Math.max(0, firstAfter.timestamp - signalTs) : null,
+  };
 }
 
 function windowPeakPct(pathRows, baselinePrice, signalTs, horizonSec) {
@@ -254,6 +298,14 @@ function computeOutcomeForSignal(signalRow, {
     pool_found: false,
     baseline_confidence: 'not_evaluable',
     same_source_path: false,
+    source_kind: null,
+    source_family: null,
+    early_15m_bar_count: 0,
+    early_15m_expected_minutes: 15,
+    early_15m_bar_coverage_pct: null,
+    early_15m_complete: false,
+    first_bar_ts: null,
+    first_bar_lag_sec: null,
     raw_wick_tier: 'unknown',
     raw_sustained_tier: 'unknown',
     raw_primary_tier: 'not_evaluable',
@@ -306,6 +358,7 @@ function computeOutcomeForSignal(signalRow, {
     };
   }
   const pathRows = rows.filter((row) => row.timestamp >= baseline.timestamp && row.timestamp <= signal.signal_ts + horizonSec);
+  const early = earlyWindowMetrics(pathRows, signal.signal_ts, 900);
   const lagSec = Math.max(0, baseline.timestamp - signal.signal_ts);
   const confidence = baselineConfidence(lagSec);
   const compatibility = sourceCompatible(baseline, pathRows);
@@ -319,6 +372,7 @@ function computeOutcomeForSignal(signalRow, {
       baseline_lag_sec: lagSec,
       baseline_confidence: confidence,
       baseline_price: baseline.close,
+      ...early,
     };
   }
 
@@ -361,6 +415,8 @@ function computeOutcomeForSignal(signalRow, {
     coverage_reason: outlier ? 'outlier_price' : compatibility.reason,
     pool_found: Boolean(baseline.pool_address),
     provider: baseline.provider,
+    source_kind: baseline.source_kind,
+    source_family: baseline.source_family,
     baseline_ts: baseline.timestamp,
     baseline_iso: isoFromSec(baseline.timestamp),
     baseline_lag_sec: lagSec,
@@ -373,7 +429,10 @@ function computeOutcomeForSignal(signalRow, {
     path_provider: baseline.provider,
     path_pool_address: baseline.pool_address,
     path_price_unit: baseline.price_unit,
+    path_source_kind: baseline.source_kind,
+    path_source_family: baseline.source_family,
     same_source_path: compatibility.same_source_path,
+    ...early,
     max_wick_peak_pct: wickPeakPct == null ? null : roundNumber(wickPeakPct, 2),
     max_sustained_peak_pct: sustained.pct,
     time_to_wick_peak_sec: peakTs == null ? null : Math.max(0, peakTs - signal.signal_ts),
@@ -445,6 +504,11 @@ function buildRawSignalOutcomeReport({
     && !(row.raw_primary_tier === 'gold' || row.raw_primary_tier === 'silver')
   ));
   const coveragePct = matured.length ? (eligible.length / matured.length) * 100.0 : null;
+  const earlyMatured = matured.filter((row) => row.early_15m_bar_coverage_pct != null);
+  const earlyComplete = matured.filter((row) => row.early_15m_complete);
+  const earlyAvgPct = earlyMatured.length
+    ? earlyMatured.reduce((sum, row) => sum + Number(row.early_15m_bar_coverage_pct || 0), 0) / earlyMatured.length
+    : null;
   const rawEnteredRate = rawDogUniqueRows.length ? entered.length / rawDogUniqueRows.length : null;
   const rawRealizedRate = rawDogUniqueRows.length ? realized.length / rawDogUniqueRows.length : null;
   let denominatorStatus = 'undefined';
@@ -461,6 +525,9 @@ function buildRawSignalOutcomeReport({
       raw_denominator_matured_only: uniqueTokenCount(eligible),
       raw_denominator_event_rows: eligible.length,
       raw_kline_coverage_pct: coveragePct == null ? null : roundNumber(coveragePct, 2),
+      early_15m_complete_event_rows: earlyComplete.length,
+      early_15m_complete_pct: matured.length ? roundNumber((earlyComplete.length / matured.length) * 100.0, 2) : null,
+      early_15m_bar_coverage_avg_pct: earlyAvgPct == null ? null : roundNumber(earlyAvgPct, 2),
       raw_sustained_gold_unique: rawGoldUniqueRows.length,
       raw_sustained_silver_unique: rawSilverUniqueRows.length,
       raw_sustained_gold_silver_unique: rawDogUniqueRows.length,
@@ -481,6 +548,7 @@ function buildRawSignalOutcomeReport({
       sustained_evaluable_breakdown: countBy(outcomes, (row) => row.sustained_evaluable ? 'evaluable' : 'not_evaluable'),
       by_signal_type: countBy(outcomes, (row) => row.signal_type),
       by_hard_gate_status: countBy(outcomes, (row) => row.hard_gate_status),
+      by_path_source_kind: countBy(outcomes, (row) => row.path_source_kind || row.source_kind || 'none'),
     },
     top_raw_dogs: rawDogUniqueRows
       .sort((a, b) => Number(b.max_sustained_peak_pct || 0) - Number(a.max_sustained_peak_pct || 0))
@@ -502,5 +570,6 @@ export {
   baselineConfidence,
   buildRawSignalOutcomeReport,
   computeOutcomeForSignal,
+  earlyWindowMetrics,
   tierForPct,
 };
