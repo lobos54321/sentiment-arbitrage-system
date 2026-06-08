@@ -53,6 +53,9 @@ import {
   buildShadowTrailAudit,
 } from './paper-learning-audit-utils.js';
 import {
+  buildRawDogDecisionFunnel,
+} from '../analytics/raw-dog-decision-funnel.js';
+import {
   buildRawSignalOutcomeReport,
 } from '../analytics/raw-signal-outcomes.js';
 import {
@@ -2239,6 +2242,212 @@ function tokenChunks(tokens, chunkSize = 250) {
   return out;
 }
 
+function optionalSqlColumn(cols, name, fallback = 'NULL') {
+  return cols.has(name) ? name : `${fallback} AS ${name}`;
+}
+
+function optionalSqlExpr(cols, name, fallback = 'NULL') {
+  return cols.has(name) ? name : fallback;
+}
+
+function attachSharedBlockCause(row = {}) {
+  const classification = classifyAClassBlockCause(row);
+  return {
+    ...row,
+    block_cause: row.block_cause || classification.category || 'UNKNOWN',
+    recoverability: row.recoverability || classification.recoverability || null,
+    classification_reason: row.classification_reason || classification.classification_reason || classification.reason || null,
+    would_enter_a_class: row.would_enter_a_class ?? (classification.would_enter_a_class ? 1 : 0),
+    did_enter: row.did_enter ?? (classification.did_enter ? 1 : 0),
+  };
+}
+
+function rawDogDecisionQueryWindow(rawDogs = [], fallbackSinceTs = null, fallbackUntilTs = null) {
+  const windows = (rawDogs || []).map((row) => {
+    const signalTs = Number(row.signal_ts);
+    if (!Number.isFinite(signalTs)) return null;
+    const peakSec = Number(row.time_to_sustained_peak_sec);
+    const endOffset = Number.isFinite(peakSec) && peakSec > 0 ? Math.max(60, Math.min(900, peakSec)) : 900;
+    return {
+      start_ts: Math.floor(signalTs - 60),
+      end_ts: Math.floor(signalTs + endOffset),
+    };
+  }).filter(Boolean);
+  const minStart = windows.length ? Math.min(...windows.map((row) => row.start_ts)) : null;
+  const maxEnd = windows.length ? Math.max(...windows.map((row) => row.end_ts)) : null;
+  return {
+    since_ts: minStart ?? fallbackSinceTs,
+    until_ts: maxEnd ?? fallbackUntilTs,
+  };
+}
+
+function readRawDogDecisionRecordsFromPaperDb({
+  paperDbPath = getPaperDbPath(),
+  rawDogs = [],
+  sinceTs = null,
+  untilTs = null,
+  timeoutMs = 1500,
+} = {}) {
+  const tokens = [...new Set((rawDogs || []).map((row) => String(row.token_ca || '').trim()).filter(Boolean))];
+  const diagnostics = {
+    available: false,
+    path: paperDbPath,
+    raw_dogs: Array.isArray(rawDogs) ? rawDogs.length : 0,
+    tokens: tokens.length,
+    records: 0,
+    source_issues: [],
+    since_ts: null,
+    until_ts: null,
+  };
+  if (!tokens.length) {
+    diagnostics.source_issues.push('no_raw_dogs');
+    return { records: [], diagnostics };
+  }
+  if (!paperDbPath || !fs.existsSync(paperDbPath)) {
+    diagnostics.source_issues.push('paper_db_missing');
+    return { records: [], diagnostics };
+  }
+  const queryWindow = rawDogDecisionQueryWindow(rawDogs, sinceTs, untilTs);
+  const startTs = Number.isFinite(Number(queryWindow.since_ts)) ? Number(queryWindow.since_ts) : null;
+  const endTs = Number.isFinite(Number(queryWindow.until_ts)) ? Number(queryWindow.until_ts) : Math.floor(Date.now() / 1000);
+  diagnostics.since_ts = startTs;
+  diagnostics.until_ts = endTs;
+  let paperDb;
+  const rows = [];
+  try {
+    paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: timeoutMs });
+    const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+    const runTokenQuery = (sqlForChunk) => {
+      for (const chunk of tokenChunks(tokens)) {
+        const placeholders = chunk.map(() => '?').join(',');
+        rows.push(...sqlForChunk(placeholders).all(startTs, endTs, ...chunk));
+      }
+    };
+
+    if (tableNames.has('a_class_decision_events')) {
+      const cols = getTableColumns(paperDb, 'a_class_decision_events');
+      runTokenQuery((placeholders) => paperDb.prepare(`
+        SELECT
+          id,
+          'a_class_decision_events' AS source_kind,
+          event_ts,
+          token_ca,
+          ${optionalSqlColumn(cols, 'symbol')},
+          ${optionalSqlColumn(cols, 'lifecycle_id')},
+          ${optionalSqlColumn(cols, 'route_bucket')},
+          ${optionalSqlColumn(cols, 'source_table')},
+          ${optionalSqlColumn(cols, 'source_component')},
+          ${optionalSqlColumn(cols, 'source_reason')},
+          ${optionalSqlColumn(cols, 'action', "'BLOCK'")},
+          ${optionalSqlColumn(cols, 'would_action')},
+          ${optionalSqlColumn(cols, 'reason')},
+          ${optionalSqlColumn(cols, 'hard_blockers_json', "'[]'")},
+          ${optionalSqlColumn(cols, 'risk_json')},
+          ${optionalSqlColumn(cols, 'candidate_json')},
+          ${optionalSqlColumn(cols, 'expected_rr')},
+          ${optionalSqlColumn(cols, 'score')},
+          ${optionalSqlColumn(cols, 'grade')},
+          ${optionalSqlColumn(cols, 'block_cause')},
+          ${optionalSqlColumn(cols, 'recoverability')},
+          ${optionalSqlColumn(cols, 'classification_reason')},
+          ${optionalSqlColumn(cols, 'blocker_classifications_json')},
+          ${optionalSqlColumn(cols, 'quote_available')},
+          ${optionalSqlColumn(cols, 'quote_executable')},
+          ${optionalSqlColumn(cols, 'quote_clean')},
+          ${optionalSqlColumn(cols, 'route_available')},
+          ${optionalSqlColumn(cols, 'quote_source')},
+          ${optionalSqlColumn(cols, 'data_confidence')},
+          ${optionalSqlColumn(cols, 'provider_reason')},
+          ${optionalSqlColumn(cols, 'evidence_status')},
+          ${optionalSqlColumn(cols, 'quote_failure_reason')},
+          ${optionalSqlColumn(cols, 'route_failure_reason')},
+          ${optionalSqlColumn(cols, 'liquidity_usd')},
+          ${optionalSqlColumn(cols, 'spread_pct')},
+          NULL AS would_enter_a_class,
+          NULL AS did_enter,
+          ${optionalSqlExpr(cols, 'provider_hydrate_outcome', 'NULL')} AS provider_hydrate_outcome,
+          ${optionalSqlExpr(cols, 'provider_hydrate_outcome', 'NULL')} AS hydrate_outcome
+        FROM a_class_decision_events
+        WHERE event_ts >= ?
+          AND event_ts <= ?
+          AND token_ca IN (${placeholders})
+        ORDER BY event_ts ASC, id ASC
+      `));
+    } else {
+      diagnostics.source_issues.push('a_class_decision_events_missing');
+    }
+
+    if (tableNames.has('opportunity_events')) {
+      const cols = getTableColumns(paperDb, 'opportunity_events');
+      runTokenQuery((placeholders) => paperDb.prepare(`
+        SELECT
+          id,
+          'opportunity_events' AS source_kind,
+          event_ts,
+          token_ca,
+          ${optionalSqlColumn(cols, 'symbol')},
+          ${optionalSqlColumn(cols, 'lifecycle_id')},
+          ${optionalSqlColumn(cols, 'route_bucket')},
+          ${optionalSqlExpr(cols, 'source_type', 'NULL')} AS source_table,
+          ${optionalSqlColumn(cols, 'source_component')},
+          ${optionalSqlColumn(cols, 'source_reason')},
+          CASE
+            WHEN COALESCE(${optionalSqlExpr(cols, 'did_enter', '0')}, 0) = 1 THEN 'ENTER'
+            WHEN COALESCE(${optionalSqlExpr(cols, 'would_enter_a_class', '0')}, 0) = 1 THEN 'WOULD_ENTER'
+            ELSE 'BLOCK'
+          END AS action,
+          NULL AS would_action,
+          ${optionalSqlExpr(cols, 'quote_failure_reason', 'NULL')} AS reason,
+          ${optionalSqlColumn(cols, 'hard_blockers_json', "'[]'")},
+          NULL AS risk_json,
+          ${optionalSqlExpr(cols, 'raw_payload_json', 'NULL')} AS candidate_json,
+          ${optionalSqlColumn(cols, 'expected_rr')},
+          ${optionalSqlExpr(cols, 'matrix_score', 'NULL')} AS score,
+          NULL AS grade,
+          ${optionalSqlColumn(cols, 'block_cause')},
+          ${optionalSqlColumn(cols, 'recoverability')},
+          ${optionalSqlColumn(cols, 'classification_reason')},
+          ${optionalSqlColumn(cols, 'blocker_classifications_json')},
+          ${optionalSqlColumn(cols, 'quote_available')},
+          ${optionalSqlColumn(cols, 'quote_executable')},
+          ${optionalSqlColumn(cols, 'quote_clean')},
+          ${optionalSqlColumn(cols, 'route_available')},
+          ${optionalSqlColumn(cols, 'quote_source')},
+          ${optionalSqlColumn(cols, 'data_confidence')},
+          ${optionalSqlColumn(cols, 'provider_reason')},
+          ${optionalSqlColumn(cols, 'evidence_status')},
+          ${optionalSqlColumn(cols, 'quote_failure_reason')},
+          ${optionalSqlColumn(cols, 'route_failure_reason')},
+          ${optionalSqlColumn(cols, 'liquidity_usd')},
+          ${optionalSqlColumn(cols, 'spread_pct')},
+          ${optionalSqlColumn(cols, 'would_enter_a_class', '0')},
+          ${optionalSqlColumn(cols, 'did_enter', '0')},
+          ${optionalSqlExpr(cols, 'hydrate_outcome', 'NULL')} AS provider_hydrate_outcome,
+          ${optionalSqlExpr(cols, 'hydrate_outcome', 'NULL')} AS hydrate_outcome
+        FROM opportunity_events
+        WHERE event_ts >= ?
+          AND event_ts <= ?
+          AND token_ca IN (${placeholders})
+        ORDER BY event_ts ASC, id ASC
+      `));
+    } else {
+      diagnostics.source_issues.push('opportunity_events_missing');
+    }
+
+    const normalizedRows = rows
+      .map(attachSharedBlockCause)
+      .sort((a, b) => Number(a.event_ts || 0) - Number(b.event_ts || 0) || Number(a.id || 0) - Number(b.id || 0));
+    diagnostics.available = true;
+    diagnostics.records = normalizedRows.length;
+    return { records: normalizedRows, diagnostics };
+  } catch (error) {
+    diagnostics.source_issues.push(error?.message || String(error));
+    return { records: [], diagnostics };
+  } finally {
+    try { if (paperDb) paperDb.close(); } catch {}
+  }
+}
+
 function dedupePathRows(rows = []) {
   const byKey = new Map();
   for (const row of rows.map((item) => normalizeRawPathBar(item))) {
@@ -2456,6 +2665,8 @@ function buildRawDogDiscoverySnapshot({
       ${signalCols.has('timestamp') ? 'timestamp' : 'NULL AS timestamp'},
       ${timestampExpr} AS timestamp_sec,
       ${signalCols.has('created_at') ? 'created_at' : 'NULL AS created_at'},
+      ${signalCols.has('lifecycle_id') ? 'lifecycle_id' : 'NULL AS lifecycle_id'},
+      ${signalCols.has('downstream_lifecycle_id') ? 'downstream_lifecycle_id' : 'NULL AS downstream_lifecycle_id'},
       ${signalCols.has('signal_type') ? 'signal_type' : 'NULL AS signal_type'},
       ${signalCols.has('hard_gate_status') ? 'hard_gate_status' : 'NULL AS hard_gate_status'},
       ${signalCols.has('gate_result') ? 'gate_result' : 'NULL AS gate_result'},
@@ -2634,6 +2845,21 @@ function buildRawDogDiscoverySnapshot({
     baselineMaxLagSec,
     coverageTargetPct,
   });
+  const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
+    paperDbPath,
+    rawDogs: report.top_raw_dogs || [],
+    sinceTs: pathSinceTs,
+    untilTs: nowTs,
+  });
+  const decisionFunnel = buildRawDogDecisionFunnel({
+    rawDogs: report.top_raw_dogs || [],
+    decisionRecords: decisionEvidence.records,
+  });
+  report.decision_funnel = decisionFunnel;
+  report.summary = {
+    ...report.summary,
+    decision_funnel: decisionFunnel.summary,
+  };
 
   let persistedRows = 0;
   let persistedObservationRows = 0;
@@ -2685,6 +2911,7 @@ function buildRawDogDiscoverySnapshot({
         },
       },
       paper: paperDiagnostics,
+      decision_evidence: decisionEvidence.diagnostics,
       raw_db: {
         persisted_rows: persistedRows,
         persisted_observation_rows: persistedObservationRows,
@@ -2843,6 +3070,16 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
       LIMIT @limit
     `).all({ since: sinceTs, limit });
     const missedRawDogs = topRawDogs.filter((row) => !row.raw_dog_realized);
+    const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
+      paperDbPath: getPaperDbPath(),
+      rawDogs: topRawDogs,
+      sinceTs,
+      untilTs: Math.floor(Date.now() / 1000),
+    });
+    const decisionFunnel = buildRawDogDecisionFunnel({
+      rawDogs: topRawDogs,
+      decisionRecords: decisionEvidence.records,
+    });
     return {
       available: true,
       schema_version: 'raw_signal_outcomes_rolling_summary.v1',
@@ -2872,10 +3109,13 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
         sold_before_silver: Number(summary.sold_before_silver || 0),
         sold_before_gold: Number(summary.sold_before_gold || 0),
         denominator_status: denominatorStatus,
+        decision_funnel: decisionFunnel.summary,
       },
       coverage: {
         by_reason: byReason,
       },
+      decision_funnel: decisionFunnel,
+      decision_evidence: decisionEvidence.diagnostics,
       top_raw_dogs: topRawDogs,
       missed_raw_dogs: missedRawDogs.slice(0, limit),
       notes: {
@@ -10319,6 +10559,7 @@ const server = http.createServer(async (req, res) => {
         schema_version: 'raw_dog_discovery_api.v1',
         ...snapshot,
         summary: snapshot.report?.summary || null,
+        decision_funnel: snapshot.report?.decision_funnel || null,
         coverage: snapshot.report?.coverage || null,
         top_raw_dogs: snapshot.report?.top_raw_dogs || [],
         missed_raw_dogs: snapshot.report?.missed_raw_dogs || [],
@@ -14095,6 +14336,9 @@ const server = http.createServer(async (req, res) => {
       raw_sustained_gold_silver_unique: rawDiscovery.summary?.raw_sustained_gold_silver_unique ?? null,
       raw_dog_entered_rate: rawDiscovery.summary?.raw_dog_entered_rate ?? null,
       raw_dog_realized_rate: rawDiscovery.summary?.raw_dog_realized_rate ?? null,
+      raw_dog_no_decision_record: rawDiscovery.summary?.decision_funnel?.no_decision_record ?? null,
+      raw_dog_has_decision_record: rawDiscovery.summary?.decision_funnel?.has_decision_record ?? null,
+      raw_dog_quote_clean: rawDiscovery.summary?.decision_funnel?.quote_clean ?? null,
     };
     res.writeHead(status.available && !status.shadow_pending ? 200 : 202, apiJsonHeaders());
     res.end(JSON.stringify(status, null, 2));

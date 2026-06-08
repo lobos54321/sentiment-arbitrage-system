@@ -103,6 +103,7 @@ function normalizeSignal(row) {
     token_ca: row.token_ca || null,
     symbol: row.symbol || null,
     signal_ts: signalTs,
+    lifecycle_id: row.lifecycle_id ?? row.downstream_lifecycle_id ?? null,
     signal_type: row.signal_type || row.route || null,
     route: row.route || row.signal_type || null,
     hard_gate_status: row.hard_gate_status || null,

@@ -70,6 +70,22 @@ test('right-censored signals are pending and excluded from denominators', () => 
   assert.equal(report.outcomes[0].coverage_reason, 'right_censored_open');
 });
 
+test('normalizes downstream lifecycle id onto raw outcomes for decision joins', () => {
+  const report = buildRawSignalOutcomeReport({
+    nowTs: 10_000,
+    horizonSec: 7200,
+    signals: [signal({ downstream_lifecycle_id: 'life-raw-dog-1' })],
+    klineRows: [
+      kline(1000, 1.0),
+      kline(1060, 1.75, { high: 1.8, close: 1.75, volume: 500 }),
+      kline(1120, 1.65, { high: 1.75, close: 1.65, volume: 450 }),
+    ],
+  });
+
+  assert.equal(report.outcomes[0].lifecycle_id, 'life-raw-dog-1');
+  assert.equal(report.top_raw_dogs[0].lifecycle_id, 'life-raw-dog-1');
+});
+
 test('baseline and path must stay on the same source and unit', () => {
   const outcome = computeOutcomeForSignal(signal(), {
     nowTs: 10_000,
