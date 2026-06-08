@@ -358,6 +358,7 @@ function startIndexRuntimeChild() {
       EMBEDDED_DASHBOARD_ENABLED: 'false',
       HEALTH_BOOTSTRAP_CHILD: '1',
       INDEX_RUNTIME_SUPERVISOR_ENABLED: 'false',
+      SOURCE_SHADOW_WORKERS_ENABLED: process.env.SOURCE_SHADOW_WORKERS_ENABLED || 'false',
       DASHBOARD_RUNTIME_LOG_DIR: process.env.DASHBOARD_RUNTIME_LOG_DIR || (process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
