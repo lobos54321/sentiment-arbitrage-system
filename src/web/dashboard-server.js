@@ -2848,7 +2848,7 @@ function buildRawDogDiscoverySnapshot({
   const rawDogRowsForFunnel = attachEntryVolumeFeaturesFromRawDb(rawDbForPath, report.top_raw_dogs || []);
   const comparisonRowsForFunnel = readRawDecisionComparisonRowsFromRawDb(rawDbForPath, {
     sinceTs: pathSinceTs,
-    limit: envInt('RAW_DOG_DECISION_COMPARISON_LIMIT', 40, 0, 100),
+    limit: 300,
   });
   report.top_raw_dogs = rawDogRowsForFunnel;
   report.missed_raw_dogs = rawDogRowsForFunnel.filter((row) => !row.raw_dog_realized).slice(0, 50);
@@ -3170,7 +3170,7 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
     const missedRawDogs = topRawDogs.filter((row) => !row.raw_dog_realized);
     const comparisonRows = readRawDecisionComparisonRowsFromRawDb(db, {
       sinceTs,
-      limit: envInt('RAW_DOG_DECISION_COMPARISON_LIMIT', 40, 0, 100),
+      limit: Math.max(200, limit * 4),
     });
     const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
       paperDbPath: getPaperDbPath(),
