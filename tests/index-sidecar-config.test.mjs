@@ -5,6 +5,9 @@ import { test } from 'node:test';
 test('startup supervises v27 read model refresh worker', () => {
   const source = fs.readFileSync('src/index.js', 'utf8');
 
+  assert.match(source, /function startPaperReviewSnapshotSidecar/);
+  assert.match(source, /review snapshot worker remains managed separately/);
+  assert.match(source, /\.\.\.alwaysOnWorkers/);
   assert.match(source, /V27_EVENT_LOG_RECOVERY_PREFLIGHT_ENABLED/);
   assert.match(source, /scripts', 'v27_event_log_recover\.py'/);
   assert.match(source, /--quarantine-invalid/);

@@ -39,6 +39,7 @@ import {
   missedRecoverySummaryFromLiveSnapshot,
   readPaperDbRuntimeHealth,
   readPaperFastLaneHealth,
+  readPaperReviewSnapshotHealth,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   LOG_REDACTION_PATTERN_SET,
@@ -832,7 +833,10 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
     },
   }));
 
-  const health = readPaperFastLaneHealth({ healthPath });
+  const health = readPaperFastLaneHealth({
+    healthPath,
+    nowMs: Date.parse('2026-05-28T23:05:00Z'),
+  });
 
   assert.equal(health.available, true);
   assert.equal(health.status, 'ok');
@@ -841,6 +845,65 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
   assert.equal(health.missed_rescue.scan_count, 3);
   assert.equal(health.missed_rescue.last_result.processed, 12);
   assert.equal(health.missed_rescue.last_error, null);
+});
+
+test('paper fast lane health fails loud when heartbeat is stale', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-fast-lane-health-stale-'));
+  const healthPath = join(dir, 'paper-fast-lane-health.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    schema_version: 'v2.7.0.paper_fast_lane_health.v1',
+    updated_at: '2026-05-28T23:00:00Z',
+    paper_db_exists: true,
+    worker_state: 'scanned',
+    missed_rescue: {
+      last_scan_at: '2026-05-28T23:00:00Z',
+      scan_count: 3,
+      error_count: 0,
+      last_result: {},
+      last_error: null,
+    },
+  }));
+
+  const health = readPaperFastLaneHealth({
+    healthPath,
+    nowMs: Date.parse('2026-05-29T00:01:00Z'),
+    maxAgeMinutes: 30,
+  });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'paper_fast_lane_health_stale_or_undated');
+  assert.equal(health.fresh, false);
+  assert.equal(health.age_minutes, 61);
+  assert.equal(health.max_age_minutes, 30);
+});
+
+test('paper review snapshot health fails loud when materialized snapshot is stale', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-review-health-stale-'));
+  const liveDir = join(dir, 'review-artifacts', 'live');
+  fs.mkdirSync(liveDir, { recursive: true });
+  fs.writeFileSync(join(liveDir, 'paper_review_24h.json'), JSON.stringify({
+    snapshot_id: 'paper_live_24h_stale',
+    generated_at: '2026-06-04T00:00:00.000Z',
+  }));
+
+  const previous = process.env.PAPER_REVIEW_LIVE_DIR;
+  process.env.PAPER_REVIEW_LIVE_DIR = liveDir;
+  try {
+    const health = readPaperReviewSnapshotHealth({
+      requestedHours: 24,
+      nowMs: Date.parse('2026-06-04T01:00:00.000Z'),
+      maxAgeMinutes: 30,
+    });
+
+    assert.equal(health.available, true);
+    assert.equal(health.status, 'paper_review_snapshot_stale_or_undated');
+    assert.equal(health.fresh, false);
+    assert.equal(health.age_minutes, 60);
+    assert.equal(health.snapshot_id, 'paper_live_24h_stale');
+  } finally {
+    if (previous === undefined) delete process.env.PAPER_REVIEW_LIVE_DIR;
+    else process.env.PAPER_REVIEW_LIVE_DIR = previous;
+  }
 });
 
 test('not ATH reclaim funnel summarizes Markov green through queue and trade outcomes', () => {
@@ -1841,6 +1904,68 @@ test('rolling 24h goal status is calculated from materialized snapshot', () => {
   assert.equal(status.mode_actions[0].mode, 'A_CLASS_FASTLANE');
   assert.equal(status.mode_actions[0].status, 'SHADOW');
   assert.equal(status.mode_actions[0].recommended_action, 'prepare_0_001_tiny_paper_after_observability_green');
+});
+
+test('rolling 24h goal marks stale materialized snapshots unavailable', () => {
+  const status = buildRolling24hGoalStatusFromLiveSnapshot({
+    snapshot_id: 'paper_live_24h_goal_stale',
+    generated_at: '2026-06-04T00:00:00.000Z',
+    window: { since_ts: 1000 },
+    trades: {
+      totals: {
+        total: 24,
+        closed: 20,
+        wins: 12,
+        min_pnl: -0.12,
+        deployed_sol: 0.05,
+        est_pnl_sol: 0.11,
+      },
+    },
+    dog_catch_goal: {
+      available: true,
+      trades: {
+        closed: 20,
+        captured_gold_silver_unique: 6,
+        deployed_sol: 0.05,
+        realized_pnl_sol: 0.11,
+        realized_roi: 2.2,
+      },
+      missed: { clean_gold_silver_unique: 4 },
+      goal: {
+        eligible_gold_silver_unique: 10,
+        captured_gold_silver_unique: 6,
+        clean_gold_silver_capture_rate: 0.6,
+        pass: true,
+        blockers: [],
+      },
+    },
+    a_class_p0_discovery: {
+      available: true,
+      quote_clean_gold_silver_seen_count: 10,
+      quote_clean_gold_silver_would_enter_count: 6,
+      outlier_trimmed_would_rr: 3.0,
+      would_enter_no_route_rate: 0,
+      would_enter_trapped_rate: 0,
+      unknown_data_rate: 0,
+      missed_blockers: [],
+      discovery_exit: { advisory: 'PROMOTE_TINY_CANARY' },
+    },
+  }, {
+    generatedAt: '2026-06-04T01:00:00.000Z',
+    nowMs: Date.parse('2026-06-04T01:00:00.000Z'),
+    requestedHours: 24,
+    materializedHours: 24,
+    maxSnapshotAgeMinutes: 30,
+    minClosedTrades: 20,
+    minGoldSilverCandidates: 5,
+  });
+
+  assert.equal(status.pass, false);
+  assert.equal(status.available, false);
+  assert.equal(status.status, 'evidence_unavailable');
+  assert.equal(status.materialized_snapshot_fresh, false);
+  assert.equal(status.snapshot_age_minutes, 60);
+  assert.match(status.evidence_blockers.join(','), /materialized_review_snapshot_stale_or_undated/);
 });
 
 test('rolling 24h goal fails loud when live paper db is unavailable', () => {

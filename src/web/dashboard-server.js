@@ -2999,6 +2999,14 @@ export function readSignalSourceFreshnessHealth(options = {}) {
 
 export function readPaperFastLaneHealth(options = {}) {
   const healthPath = options.healthPath || paperFastLaneHealthPath(options.env || process.env);
+  const maxAgeMinutes = Math.max(
+    1,
+    Math.min(
+      1440,
+      Number.parseInt(String(options.maxAgeMinutes ?? process.env.PAPER_FAST_LANE_HEALTH_MAX_AGE_MINUTES ?? '30'), 10) || 30
+    )
+  );
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
   try {
     if (!fs.existsSync(healthPath)) {
       return {
@@ -3008,12 +3016,22 @@ export function readPaperFastLaneHealth(options = {}) {
       };
     }
     const payload = JSON.parse(fs.readFileSync(healthPath, 'utf8'));
+    const heartbeatAt = payload?.updated_at || payload?.missed_rescue?.last_scan_at || null;
+    const ageMinutes = heartbeatAt ? snapshotAgeMinutes({ generated_at: heartbeatAt }, nowMs) : null;
+    const stale = ageMinutes == null || ageMinutes > maxAgeMinutes;
+    const hasScanError = Boolean(payload?.missed_rescue?.last_error);
     return {
       available: true,
       path: healthPath,
-      status: payload?.missed_rescue?.last_error ? 'paper_fast_lane_scan_error' : 'ok',
+      status: hasScanError
+        ? 'paper_fast_lane_scan_error'
+        : (stale ? 'paper_fast_lane_health_stale_or_undated' : 'ok'),
       schema_version: payload?.schema_version || null,
       updated_at: payload?.updated_at || null,
+      heartbeat_at: heartbeatAt,
+      age_minutes: ageMinutes,
+      max_age_minutes: maxAgeMinutes,
+      fresh: !stale,
       paper_db_exists: payload?.paper_db_exists ?? null,
       worker_state: payload?.worker_state || null,
       missed_rescue: {
@@ -4653,6 +4671,58 @@ function snapshotAgeMinutes(snapshot, nowMs = Date.now()) {
   return roundNumber(Math.max(0, nowMs - generatedMs) / 60000, 1);
 }
 
+export function readPaperReviewSnapshotHealth(options = {}) {
+  const requestedHours = Math.max(1, Math.min(24, Number.parseInt(String(options.hours ?? options.requestedHours ?? 24), 10) || 24));
+  const materializedHours = options.materializedHours == null
+    ? nearestLivePaperReviewHours(requestedHours)
+    : Math.max(1, Math.min(24, Number.parseInt(String(options.materializedHours), 10) || requestedHours));
+  const maxAgeMinutes = Math.max(
+    1,
+    Math.min(
+      1440,
+      Number.parseInt(String(options.maxAgeMinutes ?? process.env.PAPER_REVIEW_SNAPSHOT_MAX_AGE_MINUTES ?? '30'), 10) || 30
+    )
+  );
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+  const path = livePaperReviewPath(materializedHours);
+  if (!fs.existsSync(path)) {
+    return {
+      available: false,
+      status: 'paper_review_snapshot_missing',
+      path,
+      requested_hours: requestedHours,
+      materialized_hours: materializedHours,
+      max_age_minutes: maxAgeMinutes,
+    };
+  }
+  const snapshot = readLivePaperReview(materializedHours);
+  if (!snapshot || snapshot.error) {
+    return {
+      available: false,
+      status: 'paper_review_snapshot_invalid',
+      path,
+      requested_hours: requestedHours,
+      materialized_hours: materializedHours,
+      max_age_minutes: maxAgeMinutes,
+      error: snapshot?.error || 'paper_review_snapshot_unreadable',
+    };
+  }
+  const ageMinutes = snapshotAgeMinutes(snapshot, nowMs);
+  const fresh = Boolean(ageMinutes != null && ageMinutes <= maxAgeMinutes);
+  return {
+    available: true,
+    status: fresh ? 'ok' : 'paper_review_snapshot_stale_or_undated',
+    path,
+    requested_hours: requestedHours,
+    materialized_hours: materializedHours,
+    generated_at: snapshot.generated_at || null,
+    snapshot_id: snapshot.snapshot_id || null,
+    age_minutes: ageMinutes,
+    max_age_minutes: maxAgeMinutes,
+    fresh,
+  };
+}
+
 function v27ReadModelDir(options = {}) {
   const root = options.projectRoot || projectRoot;
   const raw = options.readModelDir || process.env.V27_READ_MODEL_DIR || join(root, 'data', 'v27_read_models');
@@ -6268,7 +6338,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     goal: 'rolling_24h_convexity_capture',
     materialized: true,
     live_query: false,
-    available: snapshotAvailable && !shadowPending && livePaperDbUsable,
+    available: snapshotAvailable && snapshotFresh && !shadowPending && livePaperDbUsable,
     shadow_pending: shadowPending,
     pass,
     status,
@@ -6279,6 +6349,7 @@ export function buildRolling24hGoalStatusFromLiveSnapshot(liveSnapshot, options 
     materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
     materialized_generated_at: liveSnapshot?.generated_at || null,
     materialized_path: livePaperReviewPath(materializedHours),
+    materialized_snapshot_fresh: snapshotFresh,
     snapshot_age_minutes: snapshotAge,
     max_snapshot_age_minutes: maxSnapshotAgeMinutes,
     live_paper_db_health: paperDbHealth,
@@ -8804,10 +8875,18 @@ const server = http.createServer(async (req, res) => {
       : [];
     const paperFastLaneHealth = readPaperFastLaneHealth();
     const paperDbHealth = readPaperDbRuntimeHealth();
+    const paperReviewSnapshotHealth = readPaperReviewSnapshotHealth();
     const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
+    const degraded = Boolean(
+      global.__startupError
+      || !paperDbHealthIsUsable(paperDbHealth)
+      || paperFastLaneHealth.status !== 'ok'
+      || paperReviewSnapshotHealth.status !== 'ok'
+      || signalSourceFreshnessHealth.fail_closed
+    );
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: global.__startupError || !paperDbHealthIsUsable(paperDbHealth) ? 'degraded' : 'ok',
+      status: degraded ? 'degraded' : 'ok',
       message: 'Sentiment Arbitrage API Running',
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
@@ -8824,6 +8903,7 @@ const server = http.createServer(async (req, res) => {
         workers: shadowSidecars,
       },
       paper_fast_lane_health: paperFastLaneHealth,
+      paper_review_snapshot_health: paperReviewSnapshotHealth,
       paper_db_health: paperDbHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
