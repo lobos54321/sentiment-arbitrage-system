@@ -92,32 +92,115 @@ function envFlag(name, defaultValue = true) {
   return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
 }
 
-function runVolumePreflightOnce() {
-  if (!envFlag('NODE_STARTUP_PREFLIGHT_ENABLED', true)) return;
-  const dataDir = process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
+function runtimeDataDir() {
+  return process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
+}
+
+function runtimePaperDbPath() {
+  return process.env.PAPER_DB || join(runtimeDataDir(), 'paper_trades.db');
+}
+
+function runtimePaperDbMarkerPath(path = runtimePaperDbPath()) {
+  return `${path}.integrity_error`;
+}
+
+function paperDbIntegrityMarkerPresent(path = runtimePaperDbPath()) {
+  try {
+    return fs.existsSync(runtimePaperDbMarkerPath(path));
+  } catch {
+    return false;
+  }
+}
+
+function appendRuntimeMaintenanceLog(message) {
+  try {
+    const dataDir = runtimeDataDir();
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.appendFileSync(join(dataDir, 'maintenance.log'), `${message}\n`);
+  } catch {}
+}
+
+function runVolumePreflightOnce(options = {}) {
+  if (!options.force && !envFlag('NODE_STARTUP_PREFLIGHT_ENABLED', true)) return;
+  const dataDir = runtimeDataDir();
   const script = join(process.cwd(), 'scripts', 'zeabur_preflight_cleanup.py');
   if (!fs.existsSync(script)) return;
+  const {
+    reason = 'startup',
+    logPrefix = 'node-preflight',
+    env: envOverrides = {},
+    timeoutMs = Number(process.env.NODE_STARTUP_PREFLIGHT_TIMEOUT_MS || 45000),
+  } = options;
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     const logPath = join(dataDir, 'preflight.log');
-    fs.appendFileSync(logPath, `[node-preflight] ${new Date().toISOString()} starting ${script}\n`);
+    fs.appendFileSync(logPath, `[${logPrefix}] ${new Date().toISOString()} reason=${reason} starting ${script}\n`);
     const result = spawnSync('python3', [script], {
       cwd: process.cwd(),
       env: {
         ...process.env,
         ZEABUR_DATA_DIR: dataDir,
         PYTHONUNBUFFERED: '1',
+        ...envOverrides,
       },
       encoding: 'utf8',
-      timeout: Number(process.env.NODE_STARTUP_PREFLIGHT_TIMEOUT_MS || 45000),
+      timeout: timeoutMs,
       maxBuffer: 1024 * 1024,
     });
     if (result.stdout) fs.appendFileSync(logPath, result.stdout);
     if (result.stderr) fs.appendFileSync(logPath, result.stderr);
-    fs.appendFileSync(logPath, `[node-preflight] ${new Date().toISOString()} exit status=${result.status} signal=${result.signal || ''} error=${result.error?.message || ''}\n`);
+    fs.appendFileSync(logPath, `[${logPrefix}] ${new Date().toISOString()} reason=${reason} exit status=${result.status} signal=${result.signal || ''} error=${result.error?.message || ''}\n`);
   } catch (error) {
-    console.error('[node-preflight] failed:', error?.message || error);
+    console.error(`[${logPrefix}] failed:`, error?.message || error);
   }
+}
+
+function runMarkerAwarePreflight(reason, options = {}) {
+  runVolumePreflightOnce({
+    force: true,
+    reason,
+    logPrefix: options.logPrefix || 'node-marker-preflight',
+    timeoutMs: Number(process.env.NODE_MARKER_PREFLIGHT_TIMEOUT_MS || process.env.NODE_STARTUP_PREFLIGHT_TIMEOUT_MS || 45000),
+    env: {
+      ZEABUR_PREFLIGHT_DB_CHECK_ENABLED: 'true',
+      ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED: options.backup === true ? 'true' : 'false',
+      ...options.env,
+    },
+  });
+}
+
+let runtimeMaintenanceStarted = false;
+
+function startRuntimeMaintenanceLoop() {
+  if (runtimeMaintenanceStarted || !envFlag('NODE_RUNTIME_MAINTENANCE_ENABLED', true)) return;
+  runtimeMaintenanceStarted = true;
+  const intervalMs = Math.max(
+    30000,
+    Number(process.env.ZEABUR_MAINTENANCE_INTERVAL_SEC || process.env.NODE_RUNTIME_MAINTENANCE_INTERVAL_SEC || 300) * 1000 || 300000,
+  );
+  appendRuntimeMaintenanceLog(`[node-maintenance] ${new Date().toISOString()} starting interval_ms=${intervalMs}`);
+  const sweep = (reason) => {
+    const markerPresent = paperDbIntegrityMarkerPresent();
+    appendRuntimeMaintenanceLog(`[node-maintenance] ${new Date().toISOString()} reason=${reason} marker_present=${markerPresent}`);
+    if (markerPresent) {
+      runMarkerAwarePreflight(`maintenance_${reason}`, {
+        logPrefix: 'node-maintenance-preflight',
+        backup: false,
+      });
+      return;
+    }
+    runVolumePreflightOnce({
+      reason: `maintenance_${reason}`,
+      logPrefix: 'node-maintenance-preflight',
+      timeoutMs: Number(process.env.NODE_MAINTENANCE_PREFLIGHT_TIMEOUT_MS || 30000),
+      env: {
+        ZEABUR_PREFLIGHT_DB_CHECK_ENABLED: process.env.ZEABUR_RUNTIME_DB_CHECK_ENABLED || 'false',
+        ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED: 'false',
+      },
+    });
+  };
+  setTimeout(() => sweep('initial'), 5000).unref();
+  setInterval(() => sweep('interval'), intervalMs).unref();
 }
 
 function runPaperDbRetentionPreflightOnce() {
@@ -350,6 +433,7 @@ function stopIndexRuntimeSupervisor(signal) {
 function startIndexRuntimeSupervisor() {
   process.env.DASHBOARD_RUNTIME_ROLE ||= 'index_dashboard_supervisor';
   startDashboardOnce();
+  startRuntimeMaintenanceLoop();
   updateIndexRuntimeStatus();
   process.on('SIGTERM', () => stopIndexRuntimeSupervisor('SIGTERM'));
   process.on('SIGINT', () => stopIndexRuntimeSupervisor('SIGINT'));
@@ -369,12 +453,34 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
     last_exit_code: null,
     last_exit_signal: null,
     restart_count: 0,
+    marker_guard_count: 0,
+    last_marker_guard_at: null,
   };
   fs.mkdirSync(dirname(logPath), { recursive: true });
   const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
   const launch = () => {
     if (stopped) return;
+    const sidecarPaperDb = env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath();
+    if (envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(sidecarPaperDb)) {
+      status.running = false;
+      status.pid = null;
+      status.marker_guard_count += 1;
+      status.last_marker_guard_at = new Date().toISOString();
+      logStream.write(`[node-supervisor] ${status.last_marker_guard_at} ${name} paper DB integrity marker present; running quarantine preflight before start\n`);
+      runMarkerAwarePreflight(`${name}_start_guard`, {
+        logPrefix: 'node-sidecar-preflight',
+        backup: false,
+        env: {
+          PAPER_DB: sidecarPaperDb,
+        },
+      });
+      if (paperDbIntegrityMarkerPresent(sidecarPaperDb)) {
+        logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} paper DB marker still present after preflight; retrying in 15000ms\n`);
+        setTimeout(launch, 15000);
+        return;
+      }
+    }
     logStream.write(`[node-supervisor] ${new Date().toISOString()} starting ${name}: python3 ${args.join(' ')}\n`);
     status.started_at = new Date().toISOString();
     status.last_exit_at = null;
@@ -401,6 +507,15 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
       status.last_exit_signal = signal;
       logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} exited code=${code} signal=${signal}\n`);
       if (!stopped) {
+        if (envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath())) {
+          runMarkerAwarePreflight(`${name}_exit_guard`, {
+            logPrefix: 'node-sidecar-preflight',
+            backup: false,
+            env: {
+              PAPER_DB: env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath(),
+            },
+          });
+        }
         status.restart_count += 1;
         setTimeout(launch, 15000);
       }
