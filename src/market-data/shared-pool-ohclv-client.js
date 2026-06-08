@@ -299,16 +299,27 @@ export class SharedPoolOhlcvClient {
       return options.legacyFetcher({ tokenCa, signalTsSec, poolAddress, bars, startTs, endTs });
     }
 
-    const backfillResult = await this.backfillWindow({
-      tokenCa,
-      signalTsSec,
-      startTs: windowStart,
-      endTs: windowEnd,
-      minBars,
-      poolAddress
-    });
-    if ((backfillResult.bars?.length || 0) >= minBars) {
-      return backfillResult;
+    let backfillResult = {
+      provider: null,
+      poolAddress,
+      bars: [],
+      error: options.skipBackfill ? 'backfill_skipped' : null,
+      reason: null,
+      rateLimited: false,
+      cacheHit: false,
+    };
+    if (!options.skipBackfill) {
+      backfillResult = await this.backfillWindow({
+        tokenCa,
+        signalTsSec,
+        startTs: windowStart,
+        endTs: windowEnd,
+        minBars,
+        poolAddress
+      });
+      if ((backfillResult.bars?.length || 0) >= minBars) {
+        return backfillResult;
+      }
     }
 
     const resolvedPool = poolAddress || backfillResult.poolAddress || (await this.resolvePool(tokenCa)).poolAddress;

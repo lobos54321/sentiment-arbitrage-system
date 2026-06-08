@@ -10,6 +10,8 @@ import {
   normalizeRawPathBar,
 } from '../src/analytics/raw-path-observer.js';
 import {
+  barsToRawPathRows,
+  fetchIndexedRawRows,
   getProviderBackoff,
   isProviderRateLimitError,
   rankSignalsForBackfill,
@@ -214,6 +216,56 @@ test('raw path observer records provider backoff for Helius rate limits', () => 
   assert.equal(later.active, false);
   assert.equal(later.cooldown_seconds_remaining, 0);
   rawDb.close();
+});
+
+test('indexed fallback converts OHLCV into raw rows without requiring Helius backfill', async () => {
+  let seenParams = null;
+  let seenOptions = null;
+  const result = await fetchIndexedRawRows({
+    async fetchOhlcvWindow(params, options) {
+      seenParams = params;
+      seenOptions = options;
+      return {
+        provider: 'geckoterminal',
+        poolAddress: 'PoolIndexed111',
+        priceUnit: 'native',
+        bars: [
+          { timestamp: 1000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 },
+          { timestamp: 1060, open: 1.1, high: 1.4, low: 1.0, close: 1.3, volume: 12 },
+        ],
+      };
+    },
+  }, {
+    tokenCa: 'DOG',
+    signalTsSec: 1000,
+    endTs: 1120,
+  });
+
+  assert.equal(seenParams.tokenCa, 'DOG');
+  assert.equal(seenOptions.skipBackfill, true);
+  assert.equal(result.rawRows.length, 2);
+  assert.equal(result.rawRows[0].provider, 'geckoterminal');
+  assert.equal(result.rawRows[0].source_kind, 'indexed_ohlcv');
+  assert.equal(result.rawRows[0].source_family, 'third_party_kline');
+  assert.equal(result.rawRows[0].pool_address, 'PoolIndexed111');
+});
+
+test('indexed OHLCV rows keep a synthetic same-source stream when no AMM pool exists', () => {
+  const rows = barsToRawPathRows({
+    tokenCa: 'DOG',
+    provider: 'gmgn',
+    priceUnit: 'USD_PER_TOKEN',
+    bars: [
+      { timestamp: 1000, open: 1, high: 2, low: 0.8, close: 1.5, volume: 100 },
+    ],
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].pool_address, 'indexed_ohlcv:gmgn:DOG');
+  assert.equal(rows[0].provider, 'gmgn');
+  assert.equal(rows[0].source_kind, 'indexed_ohlcv');
+  assert.equal(rows[0].source_family, 'third_party_kline');
+  assert.equal(rows[0].price_unit, 'usd_per_token');
 });
 
 test('raw signal observations distinguish right-censored and early-window incomplete paths', () => {

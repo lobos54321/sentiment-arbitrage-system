@@ -12,6 +12,7 @@ import {
   normalizeRawPathBar,
 } from '../src/analytics/raw-path-observer.js';
 import { MarketDataBackfillService } from '../src/market-data/market-data-backfill-service.js';
+import { SharedPoolOhlcvClient } from '../src/market-data/shared-pool-ohclv-client.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,6 +26,12 @@ function envInt(name, defaultValue, minValue, maxValue) {
   const raw = Number.parseInt(String(process.env[name] ?? defaultValue), 10);
   const value = Number.isFinite(raw) ? raw : defaultValue;
   return Math.max(minValue, Math.min(maxValue, value));
+}
+
+function envBool(name, defaultValue = false) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return defaultValue;
+  return !['0', 'false', 'no', 'off'].includes(String(raw).trim().toLowerCase());
 }
 
 function resolvePath(raw) {
@@ -301,26 +308,76 @@ function upsertRawPriceBars(db, bars) {
   return written;
 }
 
-function barsToRawPathRows({ tokenCa, poolAddress, provider, bars }) {
+function normalizePriceUnit(value) {
+  const text = String(value || '').trim();
+  if (!text) return 'native';
+  return text.toLowerCase();
+}
+
+function syntheticIndexedPoolAddress(tokenCa, provider) {
+  const source = String(provider || 'indexed_ohlcv').trim().toLowerCase().replace(/[^a-z0-9_:-]+/g, '_');
+  return `indexed_ohlcv:${source || 'unknown'}:${tokenCa}`;
+}
+
+function barsToRawPathRows({ tokenCa, poolAddress, provider, priceUnit = 'native', bars, allowSyntheticIndexedPool = true }) {
   return (bars || []).map((bar) => {
     const rowProvider = String(bar.provider || provider || '').toLowerCase();
-    const sourceKind = rowProvider.includes('helius') ? 'amm_pool' : 'indexed_ohlcv';
+    const sourceKind = bar.source_kind || (rowProvider.includes('helius') ? 'amm_pool' : 'indexed_ohlcv');
+    const resolvedProvider = sourceKind === 'amm_pool'
+      ? 'helius_amm_pool'
+      : (bar.provider || provider || 'indexed_ohlcv');
+    const resolvedPoolAddress = bar.pool_address
+      || poolAddress
+      || (sourceKind === 'indexed_ohlcv' && allowSyntheticIndexedPool ? syntheticIndexedPoolAddress(tokenCa, resolvedProvider) : '');
     return {
       token_ca: tokenCa,
-      pool_address: bar.pool_address || poolAddress || '',
+      pool_address: resolvedPoolAddress,
       timestamp: bar.timestamp,
       open: bar.open,
       high: bar.high,
       low: bar.low,
       close: bar.close,
       volume: bar.volume || 0,
-      provider: sourceKind === 'amm_pool' ? 'helius_amm_pool' : (bar.provider || provider || 'indexed_ohlcv'),
+      provider: resolvedProvider,
       source_kind: sourceKind,
-      source_family: sourceKind === 'amm_pool' ? 'onchain_swap' : 'third_party_kline',
-      price_unit: 'native',
+      source_family: sourceKind === 'indexed_ohlcv' ? 'third_party_kline' : 'onchain_swap',
+      price_unit: normalizePriceUnit(bar.price_unit || priceUnit),
       fetched_at: nowSec(),
     };
   });
+}
+
+async function fetchIndexedRawRows(indexedOhlcvClient, { tokenCa, signalTsSec, endTs }) {
+  const windowMinutes = Math.max(1, Math.ceil((endTs - signalTsSec) / 60) + 1);
+  const bars = Math.max(20, Math.min(200, windowMinutes));
+  const windows = [...new Set([
+    endTs,
+    Math.min(endTs, signalTsSec + 900),
+    Math.min(endTs, signalTsSec + 3600),
+  ].filter((value) => Number.isFinite(value) && value > signalTsSec))];
+  const result = await indexedOhlcvClient.fetchOhlcvWindow({
+    tokenCa,
+    signalTsSec,
+    startTs: signalTsSec,
+    endTs,
+    bars,
+  }, {
+    minBars: 1,
+    skipBackfill: true,
+    windows,
+    limit: bars,
+  });
+  const rawRows = barsToRawPathRows({
+    tokenCa,
+    poolAddress: result.poolAddress || null,
+    provider: result.provider || result.fallbackProvider || 'indexed_ohlcv',
+    priceUnit: result.priceUnit || 'native',
+    bars: result.bars || [],
+  });
+  return {
+    ...result,
+    rawRows,
+  };
 }
 
 function looksLikePumpFunMint(tokenCa) {
@@ -385,7 +442,8 @@ async function backfillBondingCurveWindow(service, { tokenCa, signalTsSec, endTs
 }
 
 async function main() {
-  if (!process.env.HELIUS_API_KEY && !process.env.HELIUS_RPC_URL) {
+  const indexedFirstEnabled = envBool('RAW_PATH_OBSERVER_INDEXED_FIRST', true);
+  if (!indexedFirstEnabled && !process.env.HELIUS_API_KEY && !process.env.HELIUS_RPC_URL) {
     throw new Error('HELIUS_API_KEY or HELIUS_RPC_URL is required for raw path backfill');
   }
 
@@ -401,6 +459,11 @@ async function main() {
   ensureRawPathObserverSchema(rawDb);
   ensureObserverStateSchema(rawDb);
   const service = new MarketDataBackfillService(autonomyConfig);
+  const indexedOhlcvClient = new SharedPoolOhlcvClient(autonomyConfig, {
+    repository: service.repository,
+    poolResolver: service.poolResolver,
+    backfillService: service,
+  });
 
   const summary = {
     schema_version: 'raw_path_observer_backfill.v1',
@@ -415,6 +478,10 @@ async function main() {
     loaded_signals: 0,
     selection_strategy: 'missing_raw_path_first',
     selection_priority_breakdown: {},
+    indexed_fallback_enabled: indexedFirstEnabled,
+    indexed_fallback_attempts: 0,
+    indexed_fallback_success: 0,
+    indexed_fallback_errors: 0,
     provider_backoff: getProviderBackoff(rawDb, 'helius', now),
     skipped_provider_backoff: 0,
     provider_rate_limited: 0,
@@ -426,7 +493,7 @@ async function main() {
     no_pool: 0,
     errors: 0,
     results: [],
-    note: 'Observe-only raw path backfill. AMM pools use PoolResolver/Helius history; pump.fun pre-graduation mints fall back to mint-address Helius enhanced transactions and are written as source_kind=bonding_curve.',
+    note: 'Observe-only raw path backfill. Indexed OHLCV (Gecko/GMGN/cache) is tried before scarce Helius history; pump.fun pre-graduation mints still use Helius enhanced transactions when available and are written as source_kind=bonding_curve.',
   };
 
   try {
@@ -451,7 +518,35 @@ async function main() {
       const signalTsSec = Number(signal.signal_ts_sec);
       const endTs = Math.min(now, signalTsSec + horizonSec);
       if (!tokenCa || !Number.isFinite(signalTsSec) || endTs <= signalTsSec) continue;
-      if (heliusBackoff.active && signalNeedsProviderBackfill(signal)) {
+      let indexedResult = null;
+      let rawRows = [];
+      if (indexedFirstEnabled && signalNeedsProviderBackfill(signal)) {
+        summary.indexed_fallback_attempts += 1;
+        try {
+          indexedResult = await fetchIndexedRawRows(indexedOhlcvClient, {
+            tokenCa,
+            signalTsSec,
+            endTs,
+          });
+          rawRows = indexedResult.rawRows || [];
+          if (rawRows.length) {
+            summary.indexed_fallback_success += 1;
+          } else if (indexedResult.error) {
+            summary.indexed_fallback_errors += 1;
+          }
+        } catch (error) {
+          summary.indexed_fallback_errors += 1;
+          indexedResult = {
+            provider: null,
+            poolAddress: null,
+            bars: [],
+            rawRows: [],
+            error: String(error?.message || error || 'indexed_fallback_failed').slice(0, 300),
+            rateLimited: isProviderRateLimitError(error),
+          };
+        }
+      }
+      if (!rawRows.length && heliusBackoff.active && signalNeedsProviderBackfill(signal)) {
         summary.skipped_provider_backoff += 1;
         summary.results.push({
           token_ca: tokenCa,
@@ -465,25 +560,50 @@ async function main() {
           raw_path_existing_bars: signal.raw_path_existing_bars,
           legacy_kline_existing_bars: signal.legacy_kline_existing_bars,
           cache_existing_bars: signal.cache_existing_bars,
+          indexed_fallback: indexedResult ? {
+            provider: indexedResult.provider || null,
+            pool_address: indexedResult.poolAddress || null,
+            bars: indexedResult.bars?.length || 0,
+            raw_rows: indexedResult.rawRows?.length || 0,
+            price_unit: indexedResult.priceUnit || null,
+            rate_limited: Boolean(indexedResult.rateLimited),
+            fallback_provider: indexedResult.fallbackProvider || null,
+            fallback_error: indexedResult.fallbackError || null,
+            error: indexedResult.error || null,
+          } : null,
           skipped: 'provider_backoff',
           provider_backoff: heliusBackoff,
           error: heliusBackoff.last_error,
         });
         continue;
       }
-      const result = await service.backfillWindow({
-        tokenCa,
-        signalTsSec,
-        startTs: signalTsSec,
-        endTs,
-        minBars: 1,
-      });
-      let rawRows = barsToRawPathRows({
-        tokenCa,
-        poolAddress: result.poolAddress || null,
-        provider: result.provider || result.poolProvider || null,
-        bars: result.bars || [],
-      });
+      let result = {
+        provider: indexedResult?.provider || null,
+        poolProvider: null,
+        poolAddress: indexedResult?.poolAddress || null,
+        bars: indexedResult?.bars || [],
+        barsWritten: 0,
+        cacheHit: Boolean(indexedResult?.cacheHit),
+        error: indexedResult?.error || null,
+        signaturesFetched: 0,
+        transactionsFetched: 0,
+        tradesInserted: 0,
+      };
+      if (!rawRows.length) {
+        result = await service.backfillWindow({
+          tokenCa,
+          signalTsSec,
+          startTs: signalTsSec,
+          endTs,
+          minBars: 1,
+        });
+        rawRows = barsToRawPathRows({
+          tokenCa,
+          poolAddress: result.poolAddress || null,
+          provider: result.provider || result.poolProvider || null,
+          bars: result.bars || [],
+        });
+      }
       let bondingResult = null;
       if (!rawRows.length && looksLikePumpFunMint(tokenCa) && (!result.poolAddress || result.error === 'no_pool')) {
         bondingResult = await backfillBondingCurveWindow(service, {
@@ -523,6 +643,17 @@ async function main() {
         raw_path_existing_bars: signal.raw_path_existing_bars,
         legacy_kline_existing_bars: signal.legacy_kline_existing_bars,
         cache_existing_bars: signal.cache_existing_bars,
+        indexed_fallback: indexedResult ? {
+          provider: indexedResult.provider || null,
+          pool_address: indexedResult.poolAddress || null,
+          bars: indexedResult.bars?.length || 0,
+          raw_rows: indexedResult.rawRows?.length || 0,
+          price_unit: indexedResult.priceUnit || null,
+          rate_limited: Boolean(indexedResult.rateLimited),
+          fallback_provider: indexedResult.fallbackProvider || null,
+          fallback_error: indexedResult.fallbackError || null,
+          error: indexedResult.error || null,
+        } : null,
         provider: result.provider || null,
         pool_provider: result.poolProvider || null,
         pool_address: result.poolAddress || null,
@@ -548,6 +679,7 @@ async function main() {
     summary.completed_at = new Date().toISOString();
     console.log(JSON.stringify(summary, null, 2));
   } finally {
+    try { await indexedOhlcvClient.close(); } catch {}
     try { service.close(); } catch {}
     try { signalDb.close(); } catch {}
     try { rawDb.close(); } catch {}
@@ -562,8 +694,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 }
 
 export {
+  barsToRawPathRows,
   countBarsInSqlite,
   countRepositoryBars,
+  fetchIndexedRawRows,
   getProviderBackoff,
   isProviderRateLimitError,
   rankSignalsForBackfill,
