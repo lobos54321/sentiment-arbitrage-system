@@ -9,6 +9,12 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /review snapshot worker remains managed separately/);
   assert.match(source, /\.\.\.alwaysOnWorkers/);
   assert.match(source, /INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED/);
+  assert.match(source, /function startRawPathObserverSupervisor/);
+  assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);
+  assert.match(source, /RAW_PATH_OBSERVER_INTERVAL_SEC/);
+  assert.match(source, /scripts\/run-raw-path-observer\.js/);
+  assert.match(source, /global\.__rawPathObserverWorkerStatus/);
+  assert.match(source, /startRawPathObserverSupervisor\(\)/);
   assert.match(source, /V27_EVENT_LOG_RECOVERY_PREFLIGHT_ENABLED/);
   assert.match(source, /scripts', 'v27_event_log_recover\.py'/);
   assert.match(source, /--quarantine-invalid/);

@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from scripts.a_class_expected_rr import build_a_class_p0_discovery
@@ -43,9 +44,19 @@ CLEAN_DOG_RECLAIM_BRANCHES = {
 
 def connect(path):
     require_unmarked_paper_db(path, component="paper_review_snapshot_worker")
-    db = sqlite3.connect(path, timeout=float(os.environ.get("PAPER_REVIEW_SQLITE_TIMEOUT_SEC", "30")))
+    db_path = Path(path).resolve()
+    uri = f"file:{quote(str(db_path), safe='/')}?mode=ro"
+    db = sqlite3.connect(
+        uri,
+        timeout=float(os.environ.get("PAPER_REVIEW_SQLITE_TIMEOUT_SEC", "30")),
+        uri=True,
+    )
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout = 30000")
+    try:
+        db.execute("PRAGMA query_only = ON")
+    except sqlite3.OperationalError:
+        pass
     try:
         db.execute("PRAGMA mmap_size = 0")
     except sqlite3.OperationalError:

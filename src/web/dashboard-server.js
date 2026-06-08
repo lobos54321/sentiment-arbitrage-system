@@ -9351,6 +9351,7 @@ const server = http.createServer(async (req, res) => {
       paper_review_snapshot_health: paperReviewSnapshotHealth,
       paper_db_health: paperDbHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
+      raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
     }));
     return;

@@ -286,6 +286,9 @@ function startDashboardOnce() {
 
 let indexRuntimeChild = null;
 let indexRuntimeSupervisorStopping = false;
+let rawPathObserverChild = null;
+let rawPathObserverTimer = null;
+let rawPathObserverStopping = false;
 
 function indexRuntimeLogPath() {
   return process.env.NODE_RUNTIME_LOG_PATH || join(
@@ -301,6 +304,18 @@ function appendIndexRuntimeOutput(chunk, stream = process.stdout) {
   } catch {}
   try {
     const logPath = indexRuntimeLogPath();
+    fs.mkdirSync(dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, text);
+  } catch {}
+}
+
+function appendRawPathObserverOutput(chunk, stream = process.stdout) {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+  try {
+    stream.write(text);
+  } catch {}
+  try {
+    const logPath = rawPathObserverLogPath();
     fs.mkdirSync(dirname(logPath), { recursive: true });
     fs.appendFileSync(logPath, text);
   } catch {}
@@ -326,6 +341,175 @@ function indexRuntimeArgs() {
     'src/index.js',
     ...process.argv.slice(2),
   ];
+}
+
+function rawPathObserverLogPath() {
+  return process.env.RAW_PATH_OBSERVER_LOG || join(
+    process.env.DASHBOARD_RUNTIME_LOG_DIR || runtimeDataDir(),
+    'raw-path-observer.log',
+  );
+}
+
+function rawPathObserverIntervalMs() {
+  const raw = Number(process.env.RAW_PATH_OBSERVER_INTERVAL_SEC || 300);
+  const value = Number.isFinite(raw) ? raw : 300;
+  return Math.max(30, Math.min(3600, value)) * 1000;
+}
+
+function rawPathObserverEnabled() {
+  const hasProvider = Boolean(process.env.HELIUS_API_KEY || process.env.HELIUS_RPC_URL);
+  return envFlag('RAW_PATH_OBSERVER_ENABLED', hasProvider);
+}
+
+function updateRawPathObserverStatus(patch = {}) {
+  global.__rawPathObserverWorkerStatus = {
+    schema_version: 'raw_path_observer_worker.v1',
+    enabled: rawPathObserverEnabled(),
+    observe_only: true,
+    running: Boolean(rawPathObserverChild && rawPathObserverChild.exitCode == null && rawPathObserverChild.signalCode == null),
+    pid: rawPathObserverChild?.pid || null,
+    interval_sec: Math.floor(rawPathObserverIntervalMs() / 1000),
+    log_path: rawPathObserverLogPath(),
+    updated_at: new Date().toISOString(),
+    ...(global.__rawPathObserverWorkerStatus || {}),
+    ...patch,
+  };
+}
+
+function startRawPathObserverSupervisor() {
+  updateRawPathObserverStatus();
+  if (!rawPathObserverEnabled()) {
+    updateRawPathObserverStatus({
+      enabled: false,
+      last_error: 'disabled_or_helius_not_configured',
+    });
+    return;
+  }
+  if (rawPathObserverTimer || rawPathObserverChild) return;
+
+  const scheduleNext = (delayMs = rawPathObserverIntervalMs()) => {
+    if (rawPathObserverStopping) return;
+    const nextRunAt = new Date(Date.now() + delayMs).toISOString();
+    updateRawPathObserverStatus({
+      next_run_at: nextRunAt,
+      running: false,
+      pid: null,
+    });
+    rawPathObserverTimer = setTimeout(runOnce, delayMs);
+    if (typeof rawPathObserverTimer.unref === 'function') rawPathObserverTimer.unref();
+  };
+
+  const runOnce = () => {
+    rawPathObserverTimer = null;
+    if (rawPathObserverStopping) return;
+    if (rawPathObserverChild && rawPathObserverChild.exitCode == null && rawPathObserverChild.signalCode == null) {
+      scheduleNext();
+      return;
+    }
+    const args = [
+      ...process.execArgv,
+      'scripts/run-raw-path-observer.js',
+    ];
+    const startedAt = new Date().toISOString();
+    let stdoutBuffer = '';
+    let childSettled = false;
+    updateRawPathObserverStatus({
+      running: false,
+      last_start_attempt_at: startedAt,
+      command: `${process.execPath} ${args.join(' ')}`,
+      next_run_at: null,
+    });
+    appendRawPathObserverOutput(`[raw-path-observer-supervisor] ${startedAt} starting: ${args.join(' ')}\n`);
+    rawPathObserverChild = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        RAW_SIGNAL_OUTCOMES_DB: process.env.RAW_SIGNAL_OUTCOMES_DB || join(runtimeDataDir(), 'raw_signal_outcomes.db'),
+        DB_PATH: process.env.DB_PATH || process.env.SENTIMENT_DB || join(runtimeDataDir(), 'sentiment_arb.db'),
+        SENTIMENT_DB: process.env.SENTIMENT_DB || process.env.DB_PATH || join(runtimeDataDir(), 'sentiment_arb.db'),
+        RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN: process.env.RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN || '25',
+        RAW_PATH_OBSERVER_LOOKBACK_HOURS: process.env.RAW_PATH_OBSERVER_LOOKBACK_HOURS || '24',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    updateRawPathObserverStatus({
+      enabled: true,
+      running: true,
+      pid: rawPathObserverChild.pid || null,
+      started_at: startedAt,
+      last_error: null,
+      run_count: Number(global.__rawPathObserverWorkerStatus?.run_count || 0) + 1,
+    });
+    rawPathObserverChild.stdout.on('data', (chunk) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+      stdoutBuffer += text;
+      if (stdoutBuffer.length > 2_000_000) stdoutBuffer = stdoutBuffer.slice(-2_000_000);
+      appendRawPathObserverOutput(text, process.stdout);
+    });
+    rawPathObserverChild.stderr.on('data', (chunk) => appendRawPathObserverOutput(chunk, process.stderr));
+    rawPathObserverChild.on('error', (error) => {
+      if (childSettled) return;
+      childSettled = true;
+      const message = error?.message || String(error);
+      updateRawPathObserverStatus({
+        running: false,
+        pid: null,
+        last_error: message,
+        last_exit_at: new Date().toISOString(),
+        error_count: Number(global.__rawPathObserverWorkerStatus?.error_count || 0) + 1,
+      });
+      appendRawPathObserverOutput(`[raw-path-observer-supervisor] spawn error: ${message}\n`, process.stderr);
+      rawPathObserverChild = null;
+      scheduleNext();
+    });
+    rawPathObserverChild.on('exit', (code, signal) => {
+      if (childSettled) return;
+      childSettled = true;
+      const exitedAt = new Date().toISOString();
+      let lastSummary = null;
+      const jsonStart = stdoutBuffer.indexOf('{');
+      if (jsonStart >= 0) {
+        try {
+          lastSummary = JSON.parse(stdoutBuffer.slice(jsonStart));
+        } catch {}
+      }
+      updateRawPathObserverStatus({
+        running: false,
+        pid: null,
+        last_exit_at: exitedAt,
+        last_exit_code: code,
+        last_exit_signal: signal || null,
+        last_completed_at: code === 0 ? exitedAt : global.__rawPathObserverWorkerStatus?.last_completed_at || null,
+        last_summary: lastSummary,
+        last_error: code === 0 ? null : `raw_path_observer_exit_${code ?? signal ?? 'unknown'}`,
+        error_count: code === 0
+          ? Number(global.__rawPathObserverWorkerStatus?.error_count || 0)
+          : Number(global.__rawPathObserverWorkerStatus?.error_count || 0) + 1,
+      });
+      appendRawPathObserverOutput(`[raw-path-observer-supervisor] ${exitedAt} exited code=${code} signal=${signal || ''}; next run in ${Math.floor(rawPathObserverIntervalMs() / 1000)}s\n`);
+      rawPathObserverChild = null;
+      scheduleNext();
+    });
+  };
+
+  runOnce();
+}
+
+function stopRawPathObserverSupervisor(signal) {
+  rawPathObserverStopping = true;
+  updateRawPathObserverStatus({
+    shutdown_signal: signal,
+    shutdown_at: new Date().toISOString(),
+  });
+  if (rawPathObserverTimer) {
+    clearTimeout(rawPathObserverTimer);
+    rawPathObserverTimer = null;
+  }
+  if (rawPathObserverChild && rawPathObserverChild.exitCode == null && rawPathObserverChild.signalCode == null) {
+    try {
+      rawPathObserverChild.kill('SIGTERM');
+    } catch {}
+  }
 }
 
 function updateIndexRuntimeStatus(patch = {}) {
@@ -421,6 +605,7 @@ function startIndexRuntimeChild() {
 
 function stopIndexRuntimeSupervisor(signal) {
   indexRuntimeSupervisorStopping = true;
+  stopRawPathObserverSupervisor(signal);
   updateIndexRuntimeStatus({
     shutdown_signal: signal,
     shutdown_at: new Date().toISOString(),
@@ -437,6 +622,7 @@ function startIndexRuntimeSupervisor() {
   process.env.DASHBOARD_RUNTIME_ROLE ||= 'index_dashboard_supervisor';
   startDashboardOnce();
   startRuntimeMaintenanceLoop();
+  startRawPathObserverSupervisor();
   updateIndexRuntimeStatus();
   process.on('SIGTERM', () => stopIndexRuntimeSupervisor('SIGTERM'));
   process.on('SIGINT', () => stopIndexRuntimeSupervisor('SIGINT'));
