@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import Database from 'better-sqlite3';
 
 import {
   aggregateSwapsToRawPriceBars,
@@ -8,6 +9,9 @@ import {
   normalizeBondingCurveTransaction,
   normalizeRawPathBar,
 } from '../src/analytics/raw-path-observer.js';
+import {
+  rankSignalsForBackfill,
+} from '../scripts/run-raw-path-observer.js';
 
 const signal = (overrides = {}) => ({
   id: overrides.id ?? 1,
@@ -139,6 +143,55 @@ test('raw path preference keeps one stream per token and prefers raw over legacy
   assert.equal(preferred.rows[0].provider, 'helius_amm_pool');
   assert.equal(preferred.rows[0].pool_address, 'amm-1');
   assert.equal(preferred.decisions.DOG.source, 'raw_price_bars_1m');
+});
+
+test('raw path observer prioritizes signals with no existing path over cache-covered latest tokens', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER
+    )
+  `);
+  const service = {
+    getBars(tokenCa) {
+      if (tokenCa === 'CACHE_COVERED') {
+        return [
+          { token_ca: tokenCa, timestamp: 1000 },
+          { token_ca: tokenCa, timestamp: 1060 },
+        ];
+      }
+      return [];
+    },
+  };
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'CACHE_COVERED', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'MISSING_PATH', signal_ts: 1000 }),
+  ], {
+    signalDb,
+    rawDb,
+    service,
+    now: 10_000,
+    horizonSec: 7200,
+  });
+
+  assert.equal(ranked[0].token_ca, 'MISSING_PATH');
+  assert.equal(ranked[0].raw_path_selection_reason, 'no_raw_legacy_or_cache_path');
+  assert.equal(ranked[1].token_ca, 'CACHE_COVERED');
+  assert.equal(ranked[1].raw_path_selection_reason, 'cache_or_legacy_only_no_raw_path');
+  signalDb.close();
+  rawDb.close();
 });
 
 test('raw signal observations distinguish right-censored and early-window incomplete paths', () => {

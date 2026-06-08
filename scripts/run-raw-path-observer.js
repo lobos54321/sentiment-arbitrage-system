@@ -41,6 +41,10 @@ function getTableColumns(database, tableName) {
   return new Set(database.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => row.name));
 }
 
+function tableExists(database, tableName) {
+  return database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(tableName) != null;
+}
+
 function normalizeSignalTs(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
@@ -85,6 +89,99 @@ function selectUniqueSignals(signals, limit) {
     }
   }
   return [...byToken.values()].slice(0, limit);
+}
+
+function countBarsInSqlite(database, tableName, tokenCa, startTs, endTs) {
+  if (!database || !tokenCa || !Number.isFinite(startTs) || !Number.isFinite(endTs)) {
+    return { count: 0, baseline_count: 0, available: false };
+  }
+  if (!tableExists(database, tableName)) {
+    return { count: 0, baseline_count: 0, available: false };
+  }
+  const cols = getTableColumns(database, tableName);
+  if (!cols.has('token_ca')) {
+    return { count: 0, baseline_count: 0, available: false };
+  }
+  const timestampColumn = ['timestamp', 'timestamp_sec', 'ts', 'sample_ts'].find((name) => cols.has(name));
+  if (!timestampColumn) {
+    return { count: 0, baseline_count: 0, available: false };
+  }
+  const baselineEndTs = startTs + 300;
+  const row = database.prepare(`
+    SELECT
+      COUNT(*) AS count,
+      SUM(CASE WHEN ${timestampColumn} >= @startTs AND ${timestampColumn} <= @baselineEndTs THEN 1 ELSE 0 END) AS baseline_count
+    FROM ${tableName}
+    WHERE token_ca = @tokenCa
+      AND ${timestampColumn} >= @startTs
+      AND ${timestampColumn} <= @endTs
+  `).get({ tokenCa, startTs, endTs, baselineEndTs });
+  return {
+    count: Number(row?.count || 0),
+    baseline_count: Number(row?.baseline_count || 0),
+    available: true,
+  };
+}
+
+function countRepositoryBars(service, tokenCa, startTs, endTs) {
+  try {
+    const rows = service?.getBars?.(tokenCa, startTs, endTs) || [];
+    return {
+      count: rows.length,
+      baseline_count: rows.filter((row) => Number(row.timestamp) >= startTs && Number(row.timestamp) <= startTs + 300).length,
+      available: true,
+    };
+  } catch {
+    return { count: 0, baseline_count: 0, available: false };
+  }
+}
+
+function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizonSec }) {
+  return (signals || []).map((signal) => {
+    const signalTsSec = Number(signal.signal_ts_sec ?? normalizeSignalTs(signal.timestamp_sec ?? signal.timestamp));
+    const endTs = Math.min(now, signalTsSec + horizonSec);
+    const tokenCa = String(signal.token_ca || '').trim();
+    const raw = countBarsInSqlite(rawDb, 'raw_price_bars_1m', tokenCa, signalTsSec, endTs);
+    const legacy = countBarsInSqlite(signalDb, 'kline_1m', tokenCa, signalTsSec, endTs);
+    const cache = countRepositoryBars(service, tokenCa, signalTsSec, endTs);
+    const pathCount = raw.count + legacy.count + cache.count;
+    const baselineCount = raw.baseline_count + legacy.baseline_count + cache.baseline_count;
+    const matured = Number.isFinite(signalTsSec) && now >= signalTsSec + horizonSec;
+    let priority = 90;
+    let priorityReason = 'already_path_covered';
+    if (!pathCount) {
+      priority = matured ? 0 : 2;
+      priorityReason = 'no_raw_legacy_or_cache_path';
+    } else if (!baselineCount) {
+      priority = matured ? 1 : 3;
+      priorityReason = 'path_exists_but_baseline_missing';
+    } else if (!raw.count && !cache.count) {
+      priority = matured ? 4 : 6;
+      priorityReason = 'legacy_signal_kline_only';
+    } else if (!raw.count) {
+      priority = matured ? 5 : 7;
+      priorityReason = 'cache_or_legacy_only_no_raw_path';
+    } else if (raw.count < 10) {
+      priority = matured ? 8 : 10;
+      priorityReason = 'raw_path_sparse';
+    }
+    return {
+      ...signal,
+      signal_ts_sec: signalTsSec,
+      raw_path_selection_priority: priority,
+      raw_path_selection_reason: priorityReason,
+      raw_path_existing_bars: raw.count,
+      legacy_kline_existing_bars: legacy.count,
+      cache_existing_bars: cache.count,
+      existing_path_bars: pathCount,
+      existing_baseline_bars: baselineCount,
+      matured_for_raw_path: matured,
+    };
+  }).sort((a, b) => (
+    Number(a.raw_path_selection_priority) - Number(b.raw_path_selection_priority)
+    || (b.matured_for_raw_path ? 1 : 0) - (a.matured_for_raw_path ? 1 : 0)
+    || Number(a.signal_ts_sec || 0) - Number(b.signal_ts_sec || 0)
+  ));
 }
 
 function rawDbPath() {
@@ -255,6 +352,8 @@ async function main() {
     max_signals_per_run: maxSignalsPerRun,
     horizon_sec: horizonSec,
     loaded_signals: 0,
+    selection_strategy: 'missing_raw_path_first',
+    selection_priority_breakdown: {},
     processed: 0,
     bars_written_to_kline_cache: 0,
     bars_written_to_raw_db: 0,
@@ -269,7 +368,19 @@ async function main() {
   try {
     const signals = loadPremiumSignals(signalDb, { lookbackHours, limit: signalLimit });
     summary.loaded_signals = signals.length;
-    const selected = selectUniqueSignals(signals, maxSignalsPerRun);
+    const rankedSignals = rankSignalsForBackfill(selectUniqueSignals(signals, signalLimit), {
+      signalDb,
+      rawDb,
+      service,
+      now,
+      horizonSec,
+    });
+    summary.selection_priority_breakdown = rankedSignals.reduce((out, row) => {
+      const key = row.raw_path_selection_reason || 'unknown';
+      out[key] = (out[key] || 0) + 1;
+      return out;
+    }, {});
+    const selected = rankedSignals.slice(0, maxSignalsPerRun);
     for (const signal of selected) {
       const tokenCa = String(signal.token_ca || '').trim();
       const signalTsSec = Number(signal.signal_ts_sec);
@@ -312,6 +423,13 @@ async function main() {
         symbol: signal.symbol || null,
         signal_ts_sec: signalTsSec,
         end_ts: endTs,
+        selection_priority: signal.raw_path_selection_priority,
+        selection_reason: signal.raw_path_selection_reason,
+        existing_path_bars: signal.existing_path_bars,
+        existing_baseline_bars: signal.existing_baseline_bars,
+        raw_path_existing_bars: signal.raw_path_existing_bars,
+        legacy_kline_existing_bars: signal.legacy_kline_existing_bars,
+        cache_existing_bars: signal.cache_existing_bars,
         provider: result.provider || null,
         pool_provider: result.poolProvider || null,
         pool_address: result.poolAddress || null,
@@ -343,7 +461,16 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exit(1);
+  });
+}
+
+export {
+  countBarsInSqlite,
+  countRepositoryBars,
+  rankSignalsForBackfill,
+  selectUniqueSignals,
+};
