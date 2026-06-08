@@ -19,6 +19,13 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("ZEABUR_DATA_DIR", "/app/data"))
 MAX_LOG_BYTES = int(float(os.environ.get("ZEABUR_LOG_TRIM_MAX_MB", "256")) * 1024 * 1024)
 KEEP_LOG_BYTES = int(float(os.environ.get("ZEABUR_LOG_TRIM_KEEP_MB", "64")) * 1024 * 1024)
+JSONL_TRIM_ENABLED = os.environ.get("ZEABUR_JSONL_TRIM_ENABLED", "true").lower() != "false"
+GMGN_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_GMGN_JSONL_TRIM_MAX_MB", "256")) * 1024 * 1024)
+GMGN_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_GMGN_JSONL_TRIM_KEEP_MB", "64")) * 1024 * 1024)
+PAPER_EVIDENCE_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_TRIM_MAX_MB", "256")) * 1024 * 1024)
+PAPER_EVIDENCE_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_TRIM_KEEP_MB", "128")) * 1024 * 1024)
+V27_EVENT_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_V27_EVENT_JSONL_TRIM_MAX_MB", "512")) * 1024 * 1024)
+V27_EVENT_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_V27_EVENT_JSONL_TRIM_KEEP_MB", "128")) * 1024 * 1024)
 DELETE_LARGE_TMP = os.environ.get("ZEABUR_DELETE_LARGE_TMP", "false").lower() == "true"
 TMP_DELETE_BYTES = int(float(os.environ.get("ZEABUR_TMP_DELETE_MIN_MB", "256")) * 1024 * 1024)
 DISK_WARN_FREE_BYTES = int(float(os.environ.get("ZEABUR_DISK_WARN_FREE_MB", "256")) * 1024 * 1024)
@@ -95,6 +102,58 @@ def trim_file(path: Path, *, max_bytes: int = MAX_LOG_BYTES, keep_bytes: int = K
                 pass
     except Exception as exc:
         log(f"WARN trim failed for {path}: {exc}")
+
+
+def trim_jsonl_tail(path: Path, *, max_bytes: int, keep_bytes: int) -> None:
+    try:
+        if not JSONL_TRIM_ENABLED or not path.exists() or not path.is_file():
+            return
+        size = path.stat().st_size
+        if size <= max_bytes:
+            return
+        tmp = path.with_suffix(path.suffix + ".trim")
+        try:
+            with path.open("rb") as src:
+                src.seek(max(0, size - keep_bytes))
+                data = src.read()
+            first_newline = data.find(b"\n")
+            if first_newline >= 0:
+                data = data[first_newline + 1 :]
+            if data and not data.endswith(b"\n"):
+                data += b"\n"
+            with tmp.open("wb") as dst:
+                dst.write(data)
+            os.replace(tmp, path)
+            log(f"trimmed jsonl {path} {size // (1024 * 1024)}MB -> {path.stat().st_size // (1024 * 1024)}MB")
+        except Exception as exc:
+            log(f"WARN jsonl trim-copy failed for {path}: {exc}; leaving original intact")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception as exc:
+        log(f"WARN jsonl trim failed for {path}: {exc}")
+
+
+def trim_runtime_jsonl_files() -> None:
+    trim_jsonl_tail(
+        DATA_DIR / "gmgn_candidates.jsonl",
+        max_bytes=GMGN_JSONL_MAX_BYTES,
+        keep_bytes=GMGN_JSONL_KEEP_BYTES,
+    )
+    trim_jsonl_tail(
+        DATA_DIR / "v27_event_log" / "events.jsonl",
+        max_bytes=V27_EVENT_JSONL_MAX_BYTES,
+        keep_bytes=V27_EVENT_JSONL_KEEP_BYTES,
+    )
+    evidence_dir = DATA_DIR / "paper_evidence_log"
+    if evidence_dir.exists():
+        for path in evidence_dir.glob("*.jsonl"):
+            trim_jsonl_tail(
+                path,
+                max_bytes=PAPER_EVIDENCE_JSONL_MAX_BYTES,
+                keep_bytes=PAPER_EVIDENCE_JSONL_KEEP_BYTES,
+            )
 
 
 def remove_large_temp_files() -> None:
@@ -286,6 +345,7 @@ def main() -> int:
     disk_report("before")
     for name in LOG_NAMES:
         trim_file(DATA_DIR / name)
+    trim_runtime_jsonl_files()
     remove_large_temp_files()
     if DB_CHECK_ENABLED:
         for name in DB_NAMES:

@@ -127,3 +127,21 @@ def test_main_can_skip_db_checkpoint_for_partial_process_restart(tmp_path, monke
     assert preflight.main() == 0
     assert paper_db.exists()
     assert not (data_dir / "recovery").exists()
+
+
+def test_jsonl_trim_keeps_tail_on_line_boundary(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    path = data_dir / "gmgn_candidates.jsonl"
+    rows = [json.dumps({"row": i}) for i in range(20)]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(preflight, "JSONL_TRIM_ENABLED", True)
+
+    preflight.trim_jsonl_tail(path, max_bytes=64, keep_bytes=48)
+
+    trimmed_rows = path.read_text(encoding="utf-8").splitlines()
+    assert trimmed_rows
+    assert trimmed_rows[-1] == json.dumps({"row": 19})
+    assert all(row.startswith("{") for row in trimmed_rows)
+    assert path.stat().st_size < len("\n".join(rows).encode("utf-8"))
