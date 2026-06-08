@@ -85,7 +85,7 @@ def trim_file(path: Path, *, max_bytes: int = MAX_LOG_BYTES, keep_bytes: int = K
         size = path.stat().st_size
         if size <= max_bytes:
             return
-        tmp = path.with_suffix(path.suffix + ".trim")
+        tmp = path.with_suffix(path.suffix + f".trim.{os.getpid()}")
         try:
             with path.open("rb") as src:
                 src.seek(max(0, size - keep_bytes))
@@ -111,7 +111,7 @@ def trim_jsonl_tail(path: Path, *, max_bytes: int, keep_bytes: int) -> None:
         size = path.stat().st_size
         if size <= max_bytes:
             return
-        tmp = path.with_suffix(path.suffix + ".trim")
+        tmp = path.with_suffix(path.suffix + f".trim.{os.getpid()}")
         try:
             with path.open("rb") as src:
                 src.seek(max(0, size - keep_bytes))
@@ -162,7 +162,7 @@ def remove_large_temp_files() -> None:
         return
     if not DATA_DIR.exists():
         return
-    for pattern in ("*.tmp", "*.download", "*.partial", "*.trim"):
+    for pattern in ("*.tmp", "*.download", "*.partial", "*.trim", "*.trim.*"):
         for path in DATA_DIR.rglob(pattern):
             try:
                 if path.is_file() and path.stat().st_size >= TMP_DELETE_BYTES:
