@@ -116,6 +116,14 @@ export function buildV27ManualEvidenceApiResponse(responseSchemaVersion, result 
   return payload;
 }
 
+function envFlagValue(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return Boolean(defaultValue);
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) return false;
+  return Boolean(defaultValue);
+}
+
 /**
  * 验证敏感 API 的访问令牌
  * 需要设置环境变量 DASHBOARD_TOKEN，否则敏感端点被禁用
@@ -2998,7 +3006,16 @@ export function readSignalSourceFreshnessHealth(options = {}) {
 }
 
 export function readPaperFastLaneHealth(options = {}) {
-  const healthPath = options.healthPath || paperFastLaneHealthPath(options.env || process.env);
+  const env = options.env || process.env;
+  const healthPath = options.healthPath || paperFastLaneHealthPath(env);
+  const sourceShadowWorkersEnabled = envFlagValue(
+    env.INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED ?? env.SOURCE_SHADOW_WORKERS_ENABLED,
+    true
+  );
+  const paperFastLaneEnabled = envFlagValue(env.PAPER_FAST_LANE_ENABLED, true);
+  const required = options.required === undefined
+    ? envFlagValue(env.PAPER_FAST_LANE_HEALTH_REQUIRED, sourceShadowWorkersEnabled && paperFastLaneEnabled)
+    : Boolean(options.required);
   const maxAgeMinutes = Math.max(
     1,
     Math.min(
@@ -3013,6 +3030,7 @@ export function readPaperFastLaneHealth(options = {}) {
         available: false,
         path: healthPath,
         status: 'paper_fast_lane_health_missing',
+        required,
       };
     }
     const payload = JSON.parse(fs.readFileSync(healthPath, 'utf8'));
@@ -3026,6 +3044,7 @@ export function readPaperFastLaneHealth(options = {}) {
       status: hasScanError
         ? 'paper_fast_lane_scan_error'
         : (stale ? 'paper_fast_lane_health_stale_or_undated' : 'ok'),
+      required,
       schema_version: payload?.schema_version || null,
       updated_at: payload?.updated_at || null,
       heartbeat_at: heartbeatAt,
@@ -8880,7 +8899,7 @@ const server = http.createServer(async (req, res) => {
     const degraded = Boolean(
       global.__startupError
       || !paperDbHealthIsUsable(paperDbHealth)
-      || paperFastLaneHealth.status !== 'ok'
+      || (paperFastLaneHealth.required && paperFastLaneHealth.status !== 'ok')
       || paperReviewSnapshotHealth.status !== 'ok'
       || signalSourceFreshnessHealth.fail_closed
     );

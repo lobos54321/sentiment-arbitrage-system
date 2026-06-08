@@ -344,6 +344,8 @@ function updateIndexRuntimeStatus(patch = {}) {
 function startIndexRuntimeChild() {
   if (indexRuntimeSupervisorStopping) return;
   const args = indexRuntimeArgs();
+  const childSourceShadowWorkersEnabled = process.env.SOURCE_SHADOW_WORKERS_ENABLED || 'false';
+  process.env.INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED = childSourceShadowWorkersEnabled;
   updateIndexRuntimeStatus({
     running: false,
     last_start_attempt_at: new Date().toISOString(),
@@ -358,7 +360,7 @@ function startIndexRuntimeChild() {
       EMBEDDED_DASHBOARD_ENABLED: 'false',
       HEALTH_BOOTSTRAP_CHILD: '1',
       INDEX_RUNTIME_SUPERVISOR_ENABLED: 'false',
-      SOURCE_SHADOW_WORKERS_ENABLED: process.env.SOURCE_SHADOW_WORKERS_ENABLED || 'false',
+      SOURCE_SHADOW_WORKERS_ENABLED: childSourceShadowWorkersEnabled,
       DASHBOARD_RUNTIME_LOG_DIR: process.env.DASHBOARD_RUNTIME_LOG_DIR || (process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -840,6 +840,7 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
 
   assert.equal(health.available, true);
   assert.equal(health.status, 'ok');
+  assert.equal(health.required, true);
   assert.equal(health.paper_db_exists, true);
   assert.equal(health.worker_state, 'scanned');
   assert.equal(health.missed_rescue.scan_count, 3);
@@ -872,9 +873,42 @@ test('paper fast lane health fails loud when heartbeat is stale', () => {
 
   assert.equal(health.available, true);
   assert.equal(health.status, 'paper_fast_lane_health_stale_or_undated');
+  assert.equal(health.required, true);
   assert.equal(health.fresh, false);
   assert.equal(health.age_minutes, 61);
   assert.equal(health.max_age_minutes, 30);
+});
+
+test('paper fast lane stale heartbeat can be non-required when source sidecars are disabled', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'paper-fast-lane-health-nonrequired-'));
+  const healthPath = join(dir, 'paper-fast-lane-health.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    schema_version: 'v2.7.0.paper_fast_lane_health.v1',
+    updated_at: '2026-05-28T23:00:00Z',
+    paper_db_exists: true,
+    worker_state: 'scanned',
+    missed_rescue: {
+      last_scan_at: '2026-05-28T23:00:00Z',
+      scan_count: 3,
+      error_count: 0,
+      last_result: {},
+      last_error: null,
+    },
+  }));
+
+  const health = readPaperFastLaneHealth({
+    healthPath,
+    nowMs: Date.parse('2026-05-29T00:01:00Z'),
+    maxAgeMinutes: 30,
+    env: {
+      INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED: 'false',
+    },
+  });
+
+  assert.equal(health.available, true);
+  assert.equal(health.status, 'paper_fast_lane_health_stale_or_undated');
+  assert.equal(health.required, false);
+  assert.equal(health.fresh, false);
 });
 
 test('paper review snapshot health fails loud when materialized snapshot is stale', () => {
