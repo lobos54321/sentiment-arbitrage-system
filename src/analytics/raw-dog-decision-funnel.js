@@ -32,6 +32,23 @@ function increment(map, key, amount = 1) {
   map[key] = Number(map[key] || 0) + amount;
 }
 
+function parseJsonValue(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function parseList(value) {
+  const parsed = parseJsonValue(value, value);
+  if (Array.isArray(parsed)) return parsed.map((item) => String(item || '').trim()).filter(Boolean);
+  if (parsed == null || parsed === '') return [];
+  return [String(parsed).trim()].filter(Boolean);
+}
+
 function isoFromSec(sec) {
   const n = numeric(sec);
   return n == null ? null : new Date(n * 1000).toISOString();
@@ -50,6 +67,10 @@ function normalizeRawDog(row = {}) {
     max_sustained_peak_pct: numeric(row.max_sustained_peak_pct),
     max_wick_peak_pct: numeric(row.max_wick_peak_pct),
     time_to_sustained_peak_sec: numeric(row.time_to_sustained_peak_sec),
+    entry_bar_volume: numeric(row.entry_bar_volume),
+    early_5m_volume: numeric(row.early_5m_volume),
+    early_15m_volume: numeric(row.early_15m_volume),
+    early_15m_volume_bar_count: numeric(row.early_15m_volume_bar_count),
     held_to_silver: boolish(row.held_to_silver),
     held_to_gold: boolish(row.held_to_gold),
     raw_dog_entered: boolish(row.raw_dog_entered),
@@ -90,11 +111,132 @@ function normalizeDecisionRecord(row = {}) {
     quote_failure_reason: row.quote_failure_reason || null,
     route_failure_reason: row.route_failure_reason || null,
     hard_blockers_json: row.hard_blockers_json || null,
+    source_component: row.source_component || null,
+    source_reason: row.source_reason || row.reason || null,
+    reason: row.reason || null,
     expected_rr: numeric(row.expected_rr),
     score: numeric(row.score),
     grade: row.grade || null,
     would_enter: wouldEnter,
     did_enter: didEnter,
+  };
+}
+
+function bandForScore(score) {
+  const n = numeric(score);
+  if (n == null) return 'score_unknown';
+  if (n < 70) return 'matrix_score_below_70';
+  if (n < 82) return 'matrix_score_70_81';
+  if (n < 92) return 'matrix_score_82_91';
+  return 'matrix_score_92_plus';
+}
+
+function bandForExpectedRr(expectedRr) {
+  const n = numeric(expectedRr);
+  if (n == null) return 'expected_rr_unknown';
+  if (n < 2) return 'expected_rr_below_2';
+  if (n < 3) return 'expected_rr_2_3';
+  if (n < 5) return 'expected_rr_3_5';
+  return 'expected_rr_5_plus';
+}
+
+function collectGateReasons(record = {}) {
+  const reasons = [];
+  for (const blocker of parseList(record.hard_blockers_json)) reasons.push(blocker);
+  if (record.source_component || record.source_reason) {
+    reasons.push([
+      record.source_component || 'unknown_component',
+      record.source_reason || record.reason || 'unknown_reason',
+    ].join(':'));
+  } else if (record.reason) {
+    reasons.push(`reason:${record.reason}`);
+  }
+  const scoreBand = bandForScore(record.score);
+  const rrBand = bandForExpectedRr(record.expected_rr);
+  if (scoreBand === 'matrix_score_below_70') reasons.push(scoreBand);
+  if (rrBand === 'expected_rr_below_2') reasons.push(rrBand);
+  if (!reasons.length) reasons.push('no_explicit_gate_reason');
+  return [...new Set(reasons.map((item) => String(item || '').trim()).filter(Boolean))];
+}
+
+function percentile(sortedValues, p) {
+  if (!sortedValues.length) return null;
+  const idx = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(sortedValues.length * p) - 1));
+  return sortedValues[idx];
+}
+
+function summarizeNumeric(rows, field) {
+  const values = (rows || [])
+    .map((row) => numeric(row[field]))
+    .filter((value) => value != null)
+    .sort((a, b) => a - b);
+  if (!values.length) {
+    return {
+      n: (rows || []).length,
+      observed_n: 0,
+      min: null,
+      median: null,
+      p75: null,
+      max: null,
+    };
+  }
+  return {
+    n: (rows || []).length,
+    observed_n: values.length,
+    min: values[0],
+    median: percentile(values, 0.5),
+    p75: percentile(values, 0.75),
+    max: values[values.length - 1],
+  };
+}
+
+function volumeFeatureSummary(rows = []) {
+  const entry = summarizeNumeric(rows, 'entry_bar_volume');
+  const early15 = summarizeNumeric(rows, 'early_15m_volume');
+  const q5Threshold = 15934;
+  return {
+    count: rows.length,
+    entry_bar_volume: entry,
+    early_15m_volume: early15,
+    entry_bar_volume_q5_threshold: q5Threshold,
+    entry_bar_volume_q5_or_above_n: rows.filter((row) => {
+      const volume = numeric(row.entry_bar_volume);
+      return volume != null && volume >= q5Threshold;
+    }).length,
+  };
+}
+
+function summarizeQuoteCleanNoWouldEnter(dogs = [], comparisonDogs = []) {
+  const rejectedDogs = dogs.filter((dog) => dog.terminal_bucket === 'quote_clean_no_would_enter');
+  const rejectedDuds = comparisonDogs.filter((dog) => dog.terminal_bucket === 'quote_clean_no_would_enter');
+  const gateReasonCounts = {};
+  const scoreBands = {};
+  const expectedRrBands = {};
+  const sourceReasonCounts = {};
+  for (const dog of rejectedDogs) {
+    const record = dog.best_decision_record || {};
+    for (const reason of collectGateReasons(record)) increment(gateReasonCounts, reason);
+    increment(scoreBands, bandForScore(record.score));
+    increment(expectedRrBands, bandForExpectedRr(record.expected_rr));
+    if (record.source_component || record.source_reason || record.reason) {
+      increment(sourceReasonCounts, [
+        record.source_component || 'unknown_component',
+        record.source_reason || record.reason || 'unknown_reason',
+      ].join(':'));
+    }
+  }
+  return {
+    raw_dogs_n: rejectedDogs.length,
+    comparison_duds_n: rejectedDuds.length,
+    gate_reason_counts: gateReasonCounts,
+    score_bands: scoreBands,
+    expected_rr_bands: expectedRrBands,
+    source_reason_counts: sourceReasonCounts,
+    ex_ante_volume: {
+      raw_dogs_quote_clean_no_would_enter: volumeFeatureSummary(rejectedDogs),
+      comparison_duds_quote_clean_no_would_enter: volumeFeatureSummary(rejectedDuds),
+      interpretation_guardrail: 'Compare raw dogs against quote-clean/no-would-enter duds before changing gates.',
+    },
   };
 }
 
@@ -201,6 +343,7 @@ function classifyMatchedDog(match) {
 
 function buildRawDogDecisionFunnel({
   rawDogs = [],
+  comparisonRows = [],
   decisionRecords = [],
   decisionWindowSec = 900,
   preSignalGraceSec = 60,
@@ -210,6 +353,11 @@ function buildRawDogDecisionFunnel({
     preSignalGraceSec,
   }));
   const dogs = matches.map(classifyMatchedDog);
+  const comparisonMatches = (comparisonRows || []).map((rawDog) => matchDecisionRecords(rawDog, decisionRecords, {
+    decisionWindowSec,
+    preSignalGraceSec,
+  }));
+  const comparisonDogs = comparisonMatches.map(classifyMatchedDog);
   const terminalBuckets = {};
   const blockCause = { INFRA: 0, MARKET: 0, POLICY: 0, UNKNOWN: 0 };
   for (const dog of dogs) {
@@ -236,6 +384,7 @@ function buildRawDogDecisionFunnel({
       held_to_silver_or_gold: held,
       block_cause: blockCause,
       terminal_buckets: terminalBuckets,
+      quote_clean_no_would_enter_analysis: summarizeQuoteCleanNoWouldEnter(dogs, comparisonDogs),
     },
     config: {
       decision_window_sec: decisionWindowSec,

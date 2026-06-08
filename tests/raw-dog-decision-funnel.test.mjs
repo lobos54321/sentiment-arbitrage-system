@@ -98,3 +98,62 @@ test('separates quote-clean, would-enter, entered, and held buckets', () => {
   assert.equal(funnel.summary.terminal_buckets.would_enter_not_entered, 1);
   assert.equal(funnel.summary.terminal_buckets.quote_clean_no_would_enter, 1);
 });
+
+test('summarizes quote-clean no-would-enter gate reasons and ex-ante volume against duds', () => {
+  const dogs = [
+    rawDog({
+      token_ca: 'DOG_HIGH_VOL',
+      lifecycle_id: 'life-high',
+      entry_bar_volume: 20_000,
+      early_15m_volume: 80_000,
+    }),
+  ];
+  const duds = [
+    rawDog({
+      token_ca: 'DUD_LOW_VOL',
+      lifecycle_id: 'life-dud',
+      raw_primary_tier: 'sub25',
+      max_sustained_peak_pct: 10,
+      entry_bar_volume: 1_000,
+      early_15m_volume: 4_000,
+    }),
+  ];
+  const records = [
+    decision({
+      token_ca: 'DOG_HIGH_VOL',
+      lifecycle_id: 'life-high',
+      quote_clean: 1,
+      action: 'BLOCK',
+      hard_blockers_json: JSON.stringify(['expected_rr_below_2']),
+      expected_rr: 1.4,
+      score: 76,
+      source_component: 'matrix',
+      source_reason: 'rr_guard',
+    }),
+    decision({
+      token_ca: 'DUD_LOW_VOL',
+      lifecycle_id: 'life-dud',
+      quote_clean: 1,
+      action: 'BLOCK',
+      hard_blockers_json: JSON.stringify(['expected_rr_below_2']),
+      expected_rr: 1.2,
+      score: 65,
+      source_component: 'matrix',
+      source_reason: 'rr_guard',
+    }),
+  ];
+
+  const funnel = buildRawDogDecisionFunnel({
+    rawDogs: dogs,
+    comparisonRows: duds,
+    decisionRecords: records,
+  });
+  const analysis = funnel.summary.quote_clean_no_would_enter_analysis;
+
+  assert.equal(analysis.raw_dogs_n, 1);
+  assert.equal(analysis.comparison_duds_n, 1);
+  assert.equal(analysis.gate_reason_counts.expected_rr_below_2, 1);
+  assert.equal(analysis.source_reason_counts['matrix:rr_guard'], 1);
+  assert.equal(analysis.ex_ante_volume.raw_dogs_quote_clean_no_would_enter.entry_bar_volume_q5_or_above_n, 1);
+  assert.equal(analysis.ex_ante_volume.comparison_duds_quote_clean_no_would_enter.entry_bar_volume_q5_or_above_n, 0);
+});

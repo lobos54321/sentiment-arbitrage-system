@@ -2845,14 +2845,22 @@ function buildRawDogDiscoverySnapshot({
     baselineMaxLagSec,
     coverageTargetPct,
   });
+  const rawDogRowsForFunnel = attachEntryVolumeFeaturesFromRawDb(rawDbForPath, report.top_raw_dogs || []);
+  const comparisonRowsForFunnel = readRawDecisionComparisonRowsFromRawDb(rawDbForPath, {
+    sinceTs: pathSinceTs,
+    limit: 300,
+  });
+  report.top_raw_dogs = rawDogRowsForFunnel;
+  report.missed_raw_dogs = rawDogRowsForFunnel.filter((row) => !row.raw_dog_realized).slice(0, 50);
   const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
     paperDbPath,
-    rawDogs: report.top_raw_dogs || [],
+    rawDogs: [...rawDogRowsForFunnel, ...comparisonRowsForFunnel],
     sinceTs: pathSinceTs,
     untilTs: nowTs,
   });
   const decisionFunnel = buildRawDogDecisionFunnel({
-    rawDogs: report.top_raw_dogs || [],
+    rawDogs: rawDogRowsForFunnel,
+    comparisonRows: comparisonRowsForFunnel,
     decisionRecords: decisionEvidence.records,
   });
   report.decision_funnel = decisionFunnel;
@@ -2912,6 +2920,11 @@ function buildRawDogDiscoverySnapshot({
       },
       paper: paperDiagnostics,
       decision_evidence: decisionEvidence.diagnostics,
+      decision_comparison: {
+        schema_version: 'raw_decision_comparison.v1',
+        comparison_rows: comparisonRowsForFunnel.length,
+        source: 'eligible non-gold/silver raw outcomes from the same raw DB window',
+      },
       raw_db: {
         persisted_rows: persistedRows,
         persisted_observation_rows: persistedObservationRows,
@@ -2931,6 +2944,90 @@ function rawOutcomeEligibleSql() {
     AND COALESCE(outlier_flag, 0) = 0
     AND COALESCE(sustained_evaluable, 0) = 1
   `;
+}
+
+function attachEntryVolumeFeaturesFromRawDb(db, rows = []) {
+  if (!db || !Array.isArray(rows) || rows.length === 0) return rows || [];
+  try {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+    if (!tables.has('raw_price_bars_1m')) return rows;
+    const firstBarStmt = db.prepare(`
+      SELECT timestamp, volume
+      FROM raw_price_bars_1m
+      WHERE token_ca = ?
+        AND timestamp >= ?
+        AND timestamp <= ?
+      ORDER BY timestamp ASC
+      LIMIT 1
+    `);
+    const earlyVolumeStmt = db.prepare(`
+      SELECT
+        SUM(CASE WHEN timestamp < ? + 300 THEN COALESCE(volume, 0) ELSE 0 END) AS early_5m_volume,
+        SUM(COALESCE(volume, 0)) AS early_15m_volume,
+        COUNT(*) AS early_15m_volume_bar_count
+      FROM raw_price_bars_1m
+      WHERE token_ca = ?
+        AND timestamp >= ?
+        AND timestamp < ? + 900
+    `);
+    return rows.map((row) => {
+      const token = String(row.token_ca || '').trim();
+      const signalTs = Number(row.signal_ts);
+      if (!token || !Number.isFinite(signalTs)) return row;
+      const first = firstBarStmt.get(token, signalTs, signalTs + 900) || {};
+      const early = earlyVolumeStmt.get(signalTs, token, signalTs, signalTs) || {};
+      return {
+        ...row,
+        entry_bar_ts: first.timestamp ?? null,
+        entry_bar_volume: first.volume ?? null,
+        early_5m_volume: early.early_5m_volume ?? null,
+        early_15m_volume: early.early_15m_volume ?? null,
+        early_15m_volume_bar_count: early.early_15m_volume_bar_count ?? null,
+      };
+    });
+  } catch {
+    return rows;
+  }
+}
+
+function readRawDecisionComparisonRowsFromRawDb(db, { sinceTs = null, limit = 200 } = {}) {
+  if (!db) return [];
+  try {
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+    if (!tables.has('raw_signal_outcomes')) return [];
+    const eligibleSql = rawOutcomeEligibleSql();
+    const rows = db.prepare(`
+      WITH ranked AS (
+        SELECT
+          signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
+          max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+          baseline_confidence, coverage_reason, did_enter, held_to_silver,
+          held_to_gold, raw_dog_entered, raw_dog_realized, exit_reason,
+          ROW_NUMBER() OVER (
+            PARTITION BY token_ca
+            ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC, signal_ts DESC, signal_id DESC
+          ) AS rn
+        FROM raw_signal_outcomes
+        WHERE signal_ts >= @since
+          AND ${eligibleSql}
+          AND COALESCE(raw_primary_tier, '') NOT IN ('gold', 'silver')
+          AND token_ca IS NOT NULL
+          AND token_ca != ''
+      )
+      SELECT
+        signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
+        max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+        baseline_confidence, coverage_reason, did_enter, held_to_silver,
+        held_to_gold, raw_dog_entered, raw_dog_realized, exit_reason
+      FROM ranked
+      WHERE rn = 1
+      ORDER BY signal_ts DESC
+      LIMIT @limit
+    `).all({ since: sinceTs || 0, limit });
+    return attachEntryVolumeFeaturesFromRawDb(db, rows);
+  } catch {
+    return [];
+  }
 }
 
 function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
@@ -3041,7 +3138,7 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
       GROUP BY coverage_reason
       ORDER BY n DESC
     `).all({ since: sinceTs });
-    const topRawDogs = db.prepare(`
+    let topRawDogs = db.prepare(`
       WITH ranked AS (
         SELECT
           signal_id, symbol, token_ca, signal_ts, raw_primary_tier,
@@ -3069,15 +3166,21 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
       ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC
       LIMIT @limit
     `).all({ since: sinceTs, limit });
+    topRawDogs = attachEntryVolumeFeaturesFromRawDb(db, topRawDogs);
     const missedRawDogs = topRawDogs.filter((row) => !row.raw_dog_realized);
+    const comparisonRows = readRawDecisionComparisonRowsFromRawDb(db, {
+      sinceTs,
+      limit: Math.max(200, limit * 4),
+    });
     const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
       paperDbPath: getPaperDbPath(),
-      rawDogs: topRawDogs,
+      rawDogs: [...topRawDogs, ...comparisonRows],
       sinceTs,
       untilTs: Math.floor(Date.now() / 1000),
     });
     const decisionFunnel = buildRawDogDecisionFunnel({
       rawDogs: topRawDogs,
+      comparisonRows,
       decisionRecords: decisionEvidence.records,
     });
     return {
@@ -3116,6 +3219,11 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
       },
       decision_funnel: decisionFunnel,
       decision_evidence: decisionEvidence.diagnostics,
+      decision_comparison: {
+        schema_version: 'raw_decision_comparison.v1',
+        comparison_rows: comparisonRows.length,
+        source: 'eligible non-gold/silver raw outcomes from the same rolling window',
+      },
       top_raw_dogs: topRawDogs,
       missed_raw_dogs: missedRawDogs.slice(0, limit),
       notes: {
