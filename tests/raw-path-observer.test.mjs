@@ -10,7 +10,10 @@ import {
   normalizeRawPathBar,
 } from '../src/analytics/raw-path-observer.js';
 import {
+  getProviderBackoff,
+  isProviderRateLimitError,
   rankSignalsForBackfill,
+  setProviderBackoff,
 } from '../scripts/run-raw-path-observer.js';
 
 const signal = (overrides = {}) => ({
@@ -191,6 +194,25 @@ test('raw path observer prioritizes signals with no existing path over cache-cov
   assert.equal(ranked[1].token_ca, 'CACHE_COVERED');
   assert.equal(ranked[1].raw_path_selection_reason, 'cache_or_legacy_only_no_raw_path');
   signalDb.close();
+  rawDb.close();
+});
+
+test('raw path observer records provider backoff for Helius rate limits', () => {
+  const rawDb = new Database(':memory:');
+  assert.equal(isProviderRateLimitError('HTTP 429: {"message":"max usage reached"}'), true);
+  assert.equal(isProviderRateLimitError('no_pool'), false);
+
+  const state = setProviderBackoff(rawDb, 'helius', 'HTTP 429: max usage reached', {
+    nowTs: 1000,
+    cooldownSec: 120,
+  });
+  assert.equal(state.active, true);
+  assert.equal(state.cooldown_until, 1120);
+  assert.equal(state.cooldown_seconds_remaining, 120);
+
+  const later = getProviderBackoff(rawDb, 'helius', 1121);
+  assert.equal(later.active, false);
+  assert.equal(later.cooldown_seconds_remaining, 0);
   rawDb.close();
 });
 

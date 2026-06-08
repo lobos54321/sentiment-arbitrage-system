@@ -188,6 +188,66 @@ function rawDbPath() {
   return resolvePath(process.env.RAW_SIGNAL_OUTCOMES_DB || './data/raw_signal_outcomes.db');
 }
 
+function isProviderRateLimitError(error) {
+  const text = String(error || '').toLowerCase();
+  return text.includes('429') || text.includes('max usage reached') || text.includes('rate limit');
+}
+
+function ensureObserverStateSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS raw_path_observer_provider_state (
+      provider TEXT PRIMARY KEY,
+      cooldown_until INTEGER,
+      last_error TEXT,
+      updated_at INTEGER
+    )
+  `);
+}
+
+function getProviderBackoff(db, provider, nowTs = nowSec()) {
+  ensureObserverStateSchema(db);
+  const row = db.prepare(`
+    SELECT provider, cooldown_until, last_error, updated_at
+    FROM raw_path_observer_provider_state
+    WHERE provider = ?
+  `).get(provider);
+  const cooldownUntil = Number(row?.cooldown_until || 0);
+  return {
+    provider,
+    active: cooldownUntil > nowTs,
+    cooldown_until: cooldownUntil || null,
+    cooldown_seconds_remaining: cooldownUntil > nowTs ? cooldownUntil - nowTs : 0,
+    last_error: row?.last_error || null,
+    updated_at: row?.updated_at || null,
+  };
+}
+
+function setProviderBackoff(db, provider, error, { nowTs = nowSec(), cooldownSec = 900 } = {}) {
+  ensureObserverStateSchema(db);
+  const cooldownUntil = nowTs + Math.max(60, Math.min(3600, Number(cooldownSec) || 900));
+  db.prepare(`
+    INSERT INTO raw_path_observer_provider_state (
+      provider, cooldown_until, last_error, updated_at
+    ) VALUES (
+      @provider, @cooldown_until, @last_error, @updated_at
+    )
+    ON CONFLICT(provider) DO UPDATE SET
+      cooldown_until = excluded.cooldown_until,
+      last_error = excluded.last_error,
+      updated_at = excluded.updated_at
+  `).run({
+    provider,
+    cooldown_until: cooldownUntil,
+    last_error: String(error || '').slice(0, 500),
+    updated_at: nowTs,
+  });
+  return getProviderBackoff(db, provider, nowTs);
+}
+
+function signalNeedsProviderBackfill(signal) {
+  return Number(signal.existing_path_bars || 0) <= 0 || Number(signal.existing_baseline_bars || 0) <= 0;
+}
+
 function upsertRawPriceBars(db, bars) {
   if (!bars?.length) return 0;
   ensureRawPathObserverSchema(db);
@@ -339,6 +399,7 @@ async function main() {
   const signalDb = openSqlite(signalDbPath, { readonly: true, fileMustExist: true });
   const rawDb = openSqlite(rawDbPath());
   ensureRawPathObserverSchema(rawDb);
+  ensureObserverStateSchema(rawDb);
   const service = new MarketDataBackfillService(autonomyConfig);
 
   const summary = {
@@ -354,6 +415,9 @@ async function main() {
     loaded_signals: 0,
     selection_strategy: 'missing_raw_path_first',
     selection_priority_breakdown: {},
+    provider_backoff: getProviderBackoff(rawDb, 'helius', now),
+    skipped_provider_backoff: 0,
+    provider_rate_limited: 0,
     processed: 0,
     bars_written_to_kline_cache: 0,
     bars_written_to_raw_db: 0,
@@ -381,11 +445,32 @@ async function main() {
       return out;
     }, {});
     const selected = rankedSignals.slice(0, maxSignalsPerRun);
+    let heliusBackoff = getProviderBackoff(rawDb, 'helius', now);
     for (const signal of selected) {
       const tokenCa = String(signal.token_ca || '').trim();
       const signalTsSec = Number(signal.signal_ts_sec);
       const endTs = Math.min(now, signalTsSec + horizonSec);
       if (!tokenCa || !Number.isFinite(signalTsSec) || endTs <= signalTsSec) continue;
+      if (heliusBackoff.active && signalNeedsProviderBackfill(signal)) {
+        summary.skipped_provider_backoff += 1;
+        summary.results.push({
+          token_ca: tokenCa,
+          symbol: signal.symbol || null,
+          signal_ts_sec: signalTsSec,
+          end_ts: endTs,
+          selection_priority: signal.raw_path_selection_priority,
+          selection_reason: signal.raw_path_selection_reason,
+          existing_path_bars: signal.existing_path_bars,
+          existing_baseline_bars: signal.existing_baseline_bars,
+          raw_path_existing_bars: signal.raw_path_existing_bars,
+          legacy_kline_existing_bars: signal.legacy_kline_existing_bars,
+          cache_existing_bars: signal.cache_existing_bars,
+          skipped: 'provider_backoff',
+          provider_backoff: heliusBackoff,
+          error: heliusBackoff.last_error,
+        });
+        continue;
+      }
       const result = await service.backfillWindow({
         tokenCa,
         signalTsSec,
@@ -418,6 +503,14 @@ async function main() {
       if (result.poolAddress) summary.resolved_pools += 1;
       if (result.error === 'no_pool' && !rawRows.length) summary.no_pool += 1;
       if (result.error && result.error !== 'no_helius_bars' && result.error !== 'no_helius_trades' && result.error !== 'no_pool') summary.errors += 1;
+      if (isProviderRateLimitError(result.error)) {
+        summary.provider_rate_limited += 1;
+        heliusBackoff = setProviderBackoff(rawDb, 'helius', result.error, {
+          nowTs: nowSec(),
+          cooldownSec: envInt('RAW_PATH_OBSERVER_PROVIDER_BACKOFF_SEC', 900, 60, 3600),
+        });
+        summary.provider_backoff = heliusBackoff;
+      }
       summary.results.push({
         token_ca: tokenCa,
         symbol: signal.symbol || null,
@@ -471,6 +564,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 export {
   countBarsInSqlite,
   countRepositoryBars,
+  getProviderBackoff,
+  isProviderRateLimitError,
   rankSignalsForBackfill,
   selectUniqueSignals,
+  setProviderBackoff,
 };
