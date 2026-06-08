@@ -12,6 +12,8 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);
   assert.match(source, /RAW_PATH_OBSERVER_INTERVAL_SEC/);
+  assert.match(source, /RAW_PATH_OBSERVER_RUN_TIMEOUT_SEC/);
+  assert.match(source, /raw_path_observer_timeout_/);
   assert.match(source, /scripts\/run-raw-path-observer\.js/);
   assert.match(source, /global\.__rawPathObserverWorkerStatus/);
   assert.match(source, /startRawPathObserverSupervisor\(\)/);

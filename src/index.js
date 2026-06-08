@@ -356,6 +356,12 @@ function rawPathObserverIntervalMs() {
   return Math.max(30, Math.min(3600, value)) * 1000;
 }
 
+function rawPathObserverRunTimeoutMs() {
+  const raw = Number(process.env.RAW_PATH_OBSERVER_RUN_TIMEOUT_SEC || 180);
+  const value = Number.isFinite(raw) ? raw : 180;
+  return Math.max(30, Math.min(900, value)) * 1000;
+}
+
 function rawPathObserverEnabled() {
   const hasProvider = Boolean(process.env.HELIUS_API_KEY || process.env.HELIUS_RPC_URL);
   return envFlag('RAW_PATH_OBSERVER_ENABLED', hasProvider);
@@ -369,6 +375,7 @@ function updateRawPathObserverStatus(patch = {}) {
     running: Boolean(rawPathObserverChild && rawPathObserverChild.exitCode == null && rawPathObserverChild.signalCode == null),
     pid: rawPathObserverChild?.pid || null,
     interval_sec: Math.floor(rawPathObserverIntervalMs() / 1000),
+    run_timeout_sec: Math.floor(rawPathObserverRunTimeoutMs() / 1000),
     log_path: rawPathObserverLogPath(),
     updated_at: new Date().toISOString(),
     ...(global.__rawPathObserverWorkerStatus || {}),
@@ -413,6 +420,7 @@ function startRawPathObserverSupervisor() {
     const startedAt = new Date().toISOString();
     let stdoutBuffer = '';
     let childSettled = false;
+    let runTimeoutTimer = null;
     updateRawPathObserverStatus({
       running: false,
       last_start_attempt_at: startedAt,
@@ -432,6 +440,28 @@ function startRawPathObserverSupervisor() {
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    runTimeoutTimer = setTimeout(() => {
+      if (childSettled) return;
+      if (!rawPathObserverChild || rawPathObserverChild.exitCode != null || rawPathObserverChild.signalCode != null) return;
+      const timeoutSec = Math.floor(rawPathObserverRunTimeoutMs() / 1000);
+      updateRawPathObserverStatus({
+        last_timeout_at: new Date().toISOString(),
+        last_error: `raw_path_observer_timeout_${timeoutSec}s`,
+        timeout_count: Number(global.__rawPathObserverWorkerStatus?.timeout_count || 0) + 1,
+      });
+      appendRawPathObserverOutput(`[raw-path-observer-supervisor] timeout after ${timeoutSec}s; sending SIGTERM\n`, process.stderr);
+      try {
+        rawPathObserverChild.kill('SIGTERM');
+      } catch {}
+      setTimeout(() => {
+        if (childSettled) return;
+        if (rawPathObserverChild && rawPathObserverChild.exitCode == null && rawPathObserverChild.signalCode == null) {
+          appendRawPathObserverOutput('[raw-path-observer-supervisor] timeout child still running; sending SIGKILL\n', process.stderr);
+          try { rawPathObserverChild.kill('SIGKILL'); } catch {}
+        }
+      }, 5000).unref();
+    }, rawPathObserverRunTimeoutMs());
+    if (typeof runTimeoutTimer.unref === 'function') runTimeoutTimer.unref();
     updateRawPathObserverStatus({
       enabled: true,
       running: true,
@@ -450,6 +480,7 @@ function startRawPathObserverSupervisor() {
     rawPathObserverChild.on('error', (error) => {
       if (childSettled) return;
       childSettled = true;
+      if (runTimeoutTimer) clearTimeout(runTimeoutTimer);
       const message = error?.message || String(error);
       updateRawPathObserverStatus({
         running: false,
@@ -465,6 +496,7 @@ function startRawPathObserverSupervisor() {
     rawPathObserverChild.on('exit', (code, signal) => {
       if (childSettled) return;
       childSettled = true;
+      if (runTimeoutTimer) clearTimeout(runTimeoutTimer);
       const exitedAt = new Date().toISOString();
       let lastSummary = null;
       const jsonStart = stdoutBuffer.indexOf('{');
