@@ -1700,11 +1700,31 @@ function finishDashboardRequestMetric(metric, res, event = 'finish') {
   writeDashboardRequestMetricsSnapshot();
 }
 
+let dashboardShutdownStarted = false;
+function handleDashboardShutdownSignal(signalName) {
+  appendDashboardRuntimeEvent({ event_type: 'dashboard_process_signal', signal: signalName });
+  writeDashboardRequestMetricsSnapshot();
+  if (dashboardShutdownStarted) return;
+  dashboardShutdownStarted = true;
+  const forceExitMs = Math.max(1000, parseInt(process.env.DASHBOARD_SHUTDOWN_FORCE_EXIT_MS || '8000', 10) || 8000);
+  const timer = setTimeout(() => {
+    appendDashboardRuntimeEvent({ event_type: 'dashboard_process_force_exit', signal: signalName, after_ms: forceExitMs });
+    process.exit(0);
+  }, forceExitMs);
+  try { timer.unref?.(); } catch {}
+  try {
+    server.close(() => {
+      appendDashboardRuntimeEvent({ event_type: 'dashboard_process_graceful_exit', signal: signalName });
+      writeDashboardRequestMetricsSnapshot();
+      process.exit(0);
+    });
+  } catch {
+    process.exit(0);
+  }
+}
+
 for (const signalName of ['SIGTERM', 'SIGINT']) {
-  process.on(signalName, () => {
-    appendDashboardRuntimeEvent({ event_type: 'dashboard_process_signal', signal: signalName });
-    writeDashboardRequestMetricsSnapshot();
-  });
+  process.on(signalName, () => handleDashboardShutdownSignal(signalName));
 }
 
 process.on('uncaughtExceptionMonitor', (error, origin) => {
