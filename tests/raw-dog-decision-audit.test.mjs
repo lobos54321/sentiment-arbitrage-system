@@ -191,7 +191,11 @@ test('CLI writes a static audit report from readonly SQLite fixtures', () => {
     CREATE TABLE raw_price_bars_1m (
       token_ca TEXT,
       timestamp INTEGER,
-      volume REAL
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT,
+      source_family TEXT,
+      trade_count INTEGER
     );
   `);
   const insertRaw = rawDb.prepare(`
@@ -224,8 +228,16 @@ test('CLI writes a static audit report from readonly SQLite fixtures', () => {
     raw_primary_tier: 'none',
     max_sustained_peak_pct: 9,
   }));
-  rawDb.prepare('INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume) VALUES (?, ?, ?)').run('DOG', signalTs + 60, 30_000);
-  rawDb.prepare('INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume) VALUES (?, ?, ?)').run('DUD', signalTs + 60, 4_000);
+  rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (
+      token_ca, timestamp, volume, provider, source_kind, source_family, trade_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('DOG', signalTs + 60, 30_000, 'gmgn', 'indexed_ohlcv', 'indexed', 12);
+  rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (
+      token_ca, timestamp, volume, provider, source_kind, source_family, trade_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run('DUD', signalTs + 60, 4_000, 'geckoterminal', 'indexed_ohlcv', 'indexed', null);
   rawDb.close();
 
   const paperDb = new Database(paperDbPath);
@@ -312,5 +324,9 @@ test('CLI writes a static audit report from readonly SQLite fixtures', () => {
   assert.equal(report.quote_clean_no_would_enter_audit.comparison_duds_n, 1);
   assert.equal(report.quote_clean_no_would_enter_audit.dog_rows[0].matched_by, 'lifecycle_id');
   assert.equal(report.quote_clean_no_would_enter_audit.entry_volume.raw_dogs.entry_bar_volume.median, 30_000);
+  assert.equal(report.quote_clean_no_would_enter_audit.entry_volume.raw_dogs.status_counts.observed_positive, 1);
+  assert.equal(report.quote_clean_no_would_enter_audit.entry_volume.comparison_duds.entry_bar_volume.observed_n, 0);
+  assert.equal(report.quote_clean_no_would_enter_audit.entry_volume.comparison_duds.entry_bar_volume_raw.median, 4_000);
+  assert.equal(report.quote_clean_no_would_enter_audit.entry_volume.comparison_duds.status_counts.geckoterminal_volume_unreliable, 1);
   assert.ok(fs.existsSync(path.join(outDir, 'latest.md')));
 });

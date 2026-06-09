@@ -107,6 +107,9 @@ from entry_mode_registry import entry_mode_registry_entry, normalize_entry_mode
 from entry_mode_quality import evaluate_entry_mode_quality
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
+
+SHUTDOWN_REQUESTED = threading.Event()
+
 try:
     from telegram_lifecycle_markov import (
         build_lifecycle_forecast_snapshot as build_markov_lifecycle_forecast_snapshot,
@@ -17473,6 +17476,25 @@ def connect_paper_db(path):
     return db
 
 
+def close_paper_db_gracefully(db, *, context='shutdown'):
+    if db is None:
+        return
+    try:
+        db.commit()
+    except Exception as exc:
+        log.warning(f"[DB_SHUTDOWN] commit failed context={context}: {exc}")
+    try:
+        checkpoint = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        log.info(f"[DB_SHUTDOWN] wal_checkpoint PASSIVE context={context} result={tuple(checkpoint) if checkpoint else None}")
+    except Exception as exc:
+        log.warning(f"[DB_SHUTDOWN] wal_checkpoint failed context={context}: {exc}")
+    try:
+        db.close()
+        log.info(f"[DB_SHUTDOWN] closed paper DB context={context}")
+    except Exception as exc:
+        log.warning(f"[DB_SHUTDOWN] close failed context={context}: {exc}")
+
+
 def init_paper_db(db_path=None):
     """Create paper_trades table if not exists."""
     path = db_path or PAPER_DB
@@ -21584,7 +21606,7 @@ def run_monitor(db):
     global _active_holdings_count
     _active_holdings_count = lambda: len(positions)
 
-    while True:
+    while not SHUTDOWN_REQUESTED.is_set():
       try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
@@ -28058,24 +28080,26 @@ def run_monitor(db):
                     f"pool={pool_count} kline+dex_trend=cleared"
                 )
 
-        time.sleep(MAIN_LOOP_TICK_SEC)
+        SHUTDOWN_REQUESTED.wait(MAIN_LOOP_TICK_SEC)
       except KeyboardInterrupt:
         raise
       except Exception as loop_err:
         log.error(f"[MAIN_LOOP] Unhandled error in main loop iteration (recovering): {loop_err}", exc_info=True)
-        time.sleep(5)
+        SHUTDOWN_REQUESTED.wait(5)
+    try:
+        smart_entry_pool.shutdown(wait=False, cancel_futures=True)
+        log.info("[SHUTDOWN] SmartEntry thread pool shutdown requested")
+    except Exception as exc:
+        log.warning(f"[SHUTDOWN] SmartEntry thread pool shutdown failed: {exc}")
 
 
 # === Main ===
 
 def main():
     # Graceful shutdown
-    running = [True]
-
     def handle_signal(signum, frame):
-        log.info("Shutting down gracefully...")
-        running[0] = False
-        sys.exit(0)
+        log.info(f"Shutting down gracefully signal={signum}...")
+        SHUTDOWN_REQUESTED.set()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
@@ -28085,35 +28109,36 @@ def main():
     if '--dry-run' not in sys.argv and '--stats' not in sys.argv and '--daily' not in sys.argv:
         wait_for_local_signal_source()
 
-    if '--dry-run' in sys.argv:
-        dry_run(db)
-    elif '--stats' in sys.argv:
-        min_id = None
-        if '--stats-min-id' in sys.argv:
-            idx = sys.argv.index('--stats-min-id')
-            if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith('-'):
-                log.error("--stats-min-id requires an integer value")
-                sys.exit(2)
+    try:
+        if '--dry-run' in sys.argv:
+            dry_run(db)
+        elif '--stats' in sys.argv:
+            min_id = None
+            if '--stats-min-id' in sys.argv:
+                idx = sys.argv.index('--stats-min-id')
+                if idx + 1 >= len(sys.argv) or sys.argv[idx + 1].startswith('-'):
+                    log.error("--stats-min-id requires an integer value")
+                    sys.exit(2)
+                try:
+                    min_id = int(sys.argv[idx + 1])
+                except ValueError:
+                    log.error("--stats-min-id requires an integer value")
+                    sys.exit(2)
+            print_all_stats(db, min_id=min_id)
+        elif '--daily' in sys.argv:
+            date = None
+            idx = sys.argv.index('--daily')
+            if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith('-'):
+                date = sys.argv[idx + 1]
+            print_daily_report(db, date)
+        else:
             try:
-                min_id = int(sys.argv[idx + 1])
-            except ValueError:
-                log.error("--stats-min-id requires an integer value")
-                sys.exit(2)
-        print_all_stats(db, min_id=min_id)
-    elif '--daily' in sys.argv:
-        date = None
-        idx = sys.argv.index('--daily')
-        if idx + 1 < len(sys.argv) and not sys.argv[idx + 1].startswith('-'):
-            date = sys.argv[idx + 1]
-        print_daily_report(db, date)
-    else:
-        try:
-            run_monitor(db)
-        except Exception as e:
-            log.error(f"CRITICAL ERROR: Paper trade monitor crashed: {e}", exc_info=True)
-            sys.exit(1)
-
-    db.close()
+                run_monitor(db)
+            except Exception as e:
+                log.error(f"CRITICAL ERROR: Paper trade monitor crashed: {e}", exc_info=True)
+                sys.exit(1)
+    finally:
+        close_paper_db_gracefully(db)
 
 
 if __name__ == '__main__':

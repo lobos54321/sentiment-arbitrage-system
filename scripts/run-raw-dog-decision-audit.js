@@ -148,13 +148,18 @@ function attachEntryVolumeFeatures(rawDb, rows = []) {
     const sourceKind = first.source_kind || null;
     const sourceFamily = first.source_family || null;
     const tradeCount = first.trade_count ?? null;
+    const providerKey = String(provider || '').toLowerCase();
+    const sourceKindKey = String(sourceKind || '').toLowerCase();
+    const isGeckoterminalVolume = sourceKindKey === 'indexed_ohlcv' && providerKey.includes('gecko');
     const isIndexedZero = hasFirstBar
       && Number.isFinite(rawVolume)
       && rawVolume <= 0
-      && String(sourceKind || '').toLowerCase() === 'indexed_ohlcv';
-    const isReliablePositive = Number.isFinite(rawVolume) && rawVolume > 0;
+      && sourceKindKey === 'indexed_ohlcv';
+    const isReliablePositive = Number.isFinite(rawVolume) && rawVolume > 0 && !isGeckoterminalVolume;
     const volumeStatus = !hasFirstBar
       ? 'missing_bar'
+      : isGeckoterminalVolume
+        ? 'geckoterminal_volume_unreliable'
       : isReliablePositive
         ? 'observed_positive'
         : isIndexedZero

@@ -217,8 +217,8 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     V27_RUNTIME_MODE_GATE_ENABLED="${V27_RUNTIME_MODE_GATE_ENABLED:-true}" \
     V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE="${V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE:-ultra_tiny}" \
     PYTHONUNBUFFERED=1 \
-    python3 scripts/paper_trade_monitor.py 2>&1 | tee -a /app/data/paper-trader.log
-    EXIT_CODE=${PIPESTATUS[0]}
+    python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1
+    EXIT_CODE=$?
     set -e
     echo "[paper-trader] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), running preflight then restarting in 15s" | tee -a /app/data/paper-trader.log
     run_marker_aware_preflight "paper_trader_exit"
