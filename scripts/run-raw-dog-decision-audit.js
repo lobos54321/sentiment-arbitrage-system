@@ -77,6 +77,10 @@ function expr(cols, name, fallback = 'NULL') {
   return cols.has(name) ? name : fallback;
 }
 
+function selectColumn(cols, name, fallback = 'NULL') {
+  return cols.has(name) ? name : `${fallback} AS ${name}`;
+}
+
 function tokenChunks(tokens, chunkSize = 200) {
   const out = [];
   for (let i = 0; i < tokens.length; i += chunkSize) out.push(tokens.slice(i, i + chunkSize));
@@ -105,8 +109,15 @@ function rawLifecycleSql(cols) {
 
 function attachEntryVolumeFeatures(rawDb, rows = []) {
   if (!rows.length || !tableNames(rawDb).has('raw_price_bars_1m')) return rows;
+  const barCols = tableColumns(rawDb, 'raw_price_bars_1m');
   const firstBar = rawDb.prepare(`
-    SELECT timestamp, volume
+    SELECT
+      timestamp,
+      volume,
+      ${selectColumn(barCols, 'provider')},
+      ${selectColumn(barCols, 'source_kind')},
+      ${selectColumn(barCols, 'source_family')},
+      ${selectColumn(barCols, 'trade_count')}
     FROM raw_price_bars_1m
     WHERE token_ca = ?
       AND timestamp >= ?
@@ -116,9 +127,10 @@ function attachEntryVolumeFeatures(rawDb, rows = []) {
   `);
   const earlyVolume = rawDb.prepare(`
     SELECT
-      SUM(CASE WHEN timestamp < ? + 300 THEN COALESCE(volume, 0) ELSE 0 END) AS early_5m_volume,
-      SUM(COALESCE(volume, 0)) AS early_15m_volume,
-      COUNT(*) AS early_15m_volume_bar_count
+      SUM(CASE WHEN timestamp < ? + 300 AND COALESCE(volume, 0) > 0 THEN volume ELSE 0 END) AS early_5m_volume,
+      SUM(CASE WHEN COALESCE(volume, 0) > 0 THEN volume ELSE 0 END) AS early_15m_volume,
+      COUNT(*) AS early_15m_volume_bar_count,
+      SUM(CASE WHEN COALESCE(volume, 0) > 0 THEN 1 ELSE 0 END) AS early_15m_positive_volume_bar_count
     FROM raw_price_bars_1m
     WHERE token_ca = ?
       AND timestamp >= ?
@@ -130,13 +142,42 @@ function attachEntryVolumeFeatures(rawDb, rows = []) {
     if (!token || !Number.isFinite(signalTs)) return row;
     const first = firstBar.get(token, signalTs, signalTs + 900) || {};
     const early = earlyVolume.get(signalTs, token, signalTs, signalTs) || {};
+    const rawVolume = Number(first.volume);
+    const hasFirstBar = first.timestamp != null;
+    const provider = first.provider || null;
+    const sourceKind = first.source_kind || null;
+    const sourceFamily = first.source_family || null;
+    const tradeCount = first.trade_count ?? null;
+    const isIndexedZero = hasFirstBar
+      && Number.isFinite(rawVolume)
+      && rawVolume <= 0
+      && String(sourceKind || '').toLowerCase() === 'indexed_ohlcv';
+    const isReliablePositive = Number.isFinite(rawVolume) && rawVolume > 0;
+    const volumeStatus = !hasFirstBar
+      ? 'missing_bar'
+      : isReliablePositive
+        ? 'observed_positive'
+        : isIndexedZero
+          ? 'unavailable_indexed_zero_volume'
+          : 'observed_zero';
+    const comparableEntryVolume = isReliablePositive || volumeStatus === 'observed_zero'
+      ? rawVolume
+      : null;
+    const earlyPositiveBars = Number(early.early_15m_positive_volume_bar_count || 0);
     return {
       ...row,
       entry_bar_ts: first.timestamp ?? null,
-      entry_bar_volume: first.volume ?? null,
-      early_5m_volume: early.early_5m_volume ?? null,
-      early_15m_volume: early.early_15m_volume ?? null,
+      entry_bar_volume: comparableEntryVolume,
+      entry_bar_volume_raw: Number.isFinite(rawVolume) ? rawVolume : null,
+      entry_bar_volume_status: volumeStatus,
+      entry_bar_volume_provider: provider,
+      entry_bar_volume_source_kind: sourceKind,
+      entry_bar_volume_source_family: sourceFamily,
+      entry_bar_trade_count: tradeCount,
+      early_5m_volume: earlyPositiveBars > 0 ? early.early_5m_volume ?? null : null,
+      early_15m_volume: earlyPositiveBars > 0 ? early.early_15m_volume ?? null : null,
       early_15m_volume_bar_count: early.early_15m_volume_bar_count ?? null,
+      early_15m_positive_volume_bar_count: early.early_15m_positive_volume_bar_count ?? null,
     };
   });
 }

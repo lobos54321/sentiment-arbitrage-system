@@ -92,6 +92,10 @@ function envFlag(name, defaultValue = true) {
   return ['1', 'true', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
 }
 
+function paperDbWriteSidecarsEnabled() {
+  return envFlag('PAPER_DB_WRITE_SIDECARS_ENABLED', false);
+}
+
 function runtimeDataDir() {
   return process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
 }
@@ -561,6 +565,7 @@ function startIndexRuntimeChild() {
   if (indexRuntimeSupervisorStopping) return;
   const args = indexRuntimeArgs();
   const childSourceShadowWorkersEnabled = process.env.SOURCE_SHADOW_WORKERS_ENABLED || 'false';
+  const childPaperDbWriteSidecarsEnabled = process.env.PAPER_DB_WRITE_SIDECARS_ENABLED || 'false';
   process.env.INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED = childSourceShadowWorkersEnabled;
   updateIndexRuntimeStatus({
     running: false,
@@ -577,6 +582,7 @@ function startIndexRuntimeChild() {
       HEALTH_BOOTSTRAP_CHILD: '1',
       INDEX_RUNTIME_SUPERVISOR_ENABLED: 'false',
       SOURCE_SHADOW_WORKERS_ENABLED: childSourceShadowWorkersEnabled,
+      PAPER_DB_WRITE_SIDECARS_ENABLED: childPaperDbWriteSidecarsEnabled,
       DASHBOARD_RUNTIME_LOG_DIR: process.env.DASHBOARD_RUNTIME_LOG_DIR || (process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -823,8 +829,12 @@ function startShadowDataSidecars(config) {
   if (envFlag('PAPER_REVIEW_SNAPSHOT_WORKER_ENABLED', true)) {
     alwaysOnWorkers.push(startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }));
   }
-  if (!envFlag('SOURCE_SHADOW_WORKERS_ENABLED', true)) {
+  if (!envFlag('SOURCE_SHADOW_WORKERS_ENABLED', false)) {
     console.log('[ShadowWorkers] source/data workers disabled by SOURCE_SHADOW_WORKERS_ENABLED=false; review snapshot worker remains managed separately');
+    return alwaysOnWorkers;
+  }
+  if (!paperDbWriteSidecarsEnabled()) {
+    console.log('[ShadowWorkers] paper DB write sidecars disabled by PAPER_DB_WRITE_SIDECARS_ENABLED=false; review snapshot worker remains managed separately');
     return alwaysOnWorkers;
   }
 
@@ -868,7 +878,7 @@ function startShadowDataSidecars(config) {
       },
     }),
   ];
-  if (envFlag('PAPER_FAST_LANE_ENABLED', true)) {
+  if (envFlag('PAPER_FAST_LANE_ENABLED', false)) {
     workers.push(startPythonSidecar({
       name: 'paper-fast-lane',
       logPath: fastLaneLog,

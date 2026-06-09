@@ -9,6 +9,9 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /review snapshot worker remains managed separately/);
   assert.match(source, /\.\.\.alwaysOnWorkers/);
   assert.match(source, /INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED/);
+  assert.match(source, /PAPER_DB_WRITE_SIDECARS_ENABLED/);
+  assert.match(source, /paper DB write sidecars disabled/);
+  assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);
   assert.match(source, /RAW_PATH_OBSERVER_INTERVAL_SEC/);

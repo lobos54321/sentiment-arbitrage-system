@@ -3,6 +3,7 @@ import {
 } from './raw-dog-decision-funnel.js';
 
 function numeric(value) {
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -34,6 +35,12 @@ function parseList(value) {
 function increment(map, key, amount = 1) {
   const normalized = String(key || 'unknown');
   map[normalized] = Number(map[normalized] || 0) + amount;
+}
+
+function countBy(rows = [], field) {
+  const out = {};
+  for (const row of rows || []) increment(out, row?.[field] ?? 'unknown');
+  return out;
 }
 
 function percentile(sortedValues, p) {
@@ -141,6 +148,7 @@ function volumeSummary(rows = []) {
   const observed = rows.filter((row) => numeric(row.entry_bar_volume) != null);
   return {
     entry_bar_volume: summarizeNumeric(rows, 'entry_bar_volume'),
+    entry_bar_volume_raw: summarizeNumeric(rows, 'entry_bar_volume_raw'),
     early_5m_volume: summarizeNumeric(rows, 'early_5m_volume'),
     early_15m_volume: summarizeNumeric(rows, 'early_15m_volume'),
     entry_bar_volume_q5_threshold: q5Threshold,
@@ -149,6 +157,9 @@ function volumeSummary(rows = []) {
       return volume != null && volume >= q5Threshold;
     }).length,
     observed_rate: rows.length ? round(observed.length / rows.length, 4) : null,
+    status_counts: countBy(rows, 'entry_bar_volume_status'),
+    provider_counts: countBy(rows, 'entry_bar_volume_provider'),
+    source_kind_counts: countBy(rows, 'entry_bar_volume_source_kind'),
   };
 }
 
@@ -162,8 +173,13 @@ function compactDogRow(row = {}) {
     max_sustained_peak_pct: row.max_sustained_peak_pct,
     terminal_bucket: row.terminal_bucket,
     entry_bar_volume: row.entry_bar_volume ?? null,
+    entry_bar_volume_raw: row.entry_bar_volume_raw ?? null,
+    entry_bar_volume_status: row.entry_bar_volume_status ?? null,
+    entry_bar_volume_provider: row.entry_bar_volume_provider ?? null,
+    entry_bar_volume_source_kind: row.entry_bar_volume_source_kind ?? null,
     early_5m_volume: row.early_5m_volume ?? null,
     early_15m_volume: row.early_15m_volume ?? null,
+    early_15m_positive_volume_bar_count: row.early_15m_positive_volume_bar_count ?? null,
     matched_by: row.matched_by || null,
     decision_record_count: row.decision_record_count || 0,
     gate_reasons: collectGateReasons(row),

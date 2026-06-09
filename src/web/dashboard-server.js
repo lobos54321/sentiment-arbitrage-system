@@ -3676,9 +3676,10 @@ export function readPaperFastLaneHealth(options = {}) {
   const healthPath = options.healthPath || paperFastLaneHealthPath(env);
   const sourceShadowWorkersEnabled = envFlagValue(
     env.INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED ?? env.SOURCE_SHADOW_WORKERS_ENABLED,
-    true
+    false
   );
-  const paperFastLaneEnabled = envFlagValue(env.PAPER_FAST_LANE_ENABLED, true);
+  const paperDbWriteSidecarsEnabled = envFlagValue(env.PAPER_DB_WRITE_SIDECARS_ENABLED, false);
+  const paperFastLaneEnabled = paperDbWriteSidecarsEnabled && envFlagValue(env.PAPER_FAST_LANE_ENABLED, false);
   const required = options.required === undefined
     ? envFlagValue(env.PAPER_FAST_LANE_HEALTH_REQUIRED, sourceShadowWorkersEnabled && paperFastLaneEnabled)
     : Boolean(options.required);

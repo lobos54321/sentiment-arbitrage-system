@@ -26,6 +26,8 @@ export FINAL_ENTRY_CONTRACT_ENFORCE="${FINAL_ENTRY_CONTRACT_ENFORCE:-true}"
 # spawn the same paper DB sidecars again; duplicate supervisors can leave orphan
 # workers after SIGBUS and keep touching a marked/corrupt paper DB.
 export SOURCE_SHADOW_WORKERS_ENABLED="${SOURCE_SHADOW_WORKERS_ENABLED:-false}"
+export PAPER_DB_WRITE_SIDECARS_ENABLED="${PAPER_DB_WRITE_SIDECARS_ENABLED:-false}"
+export PAPER_FAST_LANE_ENABLED="${PAPER_FAST_LANE_ENABLED:-false}"
 
 PAPER_DB_PATH="${PAPER_DB_PATH:-/app/data/paper_trades.db}"
 PAPER_DB_INTEGRITY_MARKER="${PAPER_DB_PATH}.integrity_error"
@@ -225,56 +227,60 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
 ) &
 PAPER_PID=$!
 
-echo "[STARTUP] Starting GMGN external-alpha scout..."
-(
-  while true; do
-    echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/gmgn-scout.log
-    if paper_db_marked; then
-      echo "[gmgn-scout] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/gmgn-scout.log
-      run_marker_aware_preflight "gmgn_scout_start_guard"
+if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
+  echo "[STARTUP] Starting GMGN external-alpha scout..."
+  (
+    while true; do
+      echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/gmgn-scout.log
+      if paper_db_marked; then
+        echo "[gmgn-scout] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/gmgn-scout.log
+        run_marker_aware_preflight "gmgn_scout_start_guard"
+        sleep 15
+        continue
+      fi
+      PAPER_DB=/app/data/paper_trades.db \
+      EXTERNAL_ALPHA_DB=/app/data/paper_trades.db \
+      PYTHONUNBUFFERED=1 \
+      python3 scripts/gmgn_candidate_scout.py \
+        --loop \
+        --interval "${GMGN_SCOUT_INTERVAL_SEC:-60}" \
+        --limit "${GMGN_SCOUT_LIMIT:-50}" \
+        --state-db /app/data/paper_trades.db \
+        --out /app/data/gmgn_candidates.jsonl 2>&1 | tee -a /app/data/gmgn-scout.log
+      echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/gmgn-scout.log
       sleep 15
-      continue
-    fi
-    PAPER_DB=/app/data/paper_trades.db \
-    EXTERNAL_ALPHA_DB=/app/data/paper_trades.db \
-    PYTHONUNBUFFERED=1 \
-    python3 scripts/gmgn_candidate_scout.py \
-      --loop \
-      --interval "${GMGN_SCOUT_INTERVAL_SEC:-60}" \
-      --limit "${GMGN_SCOUT_LIMIT:-50}" \
-      --state-db /app/data/paper_trades.db \
-      --out /app/data/gmgn_candidates.jsonl 2>&1 | tee -a /app/data/gmgn-scout.log
-    echo "[gmgn-scout] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/gmgn-scout.log
-    sleep 15
-  done
-) &
-SCOUT_PID=$!
+    done
+  ) &
+  SCOUT_PID=$!
 
-echo "[STARTUP] Starting source-resonance shadow..."
-(
-  while true; do
-    echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/source-resonance.log
-    if paper_db_marked; then
-      echo "[source-resonance] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/source-resonance.log
-      run_marker_aware_preflight "source_resonance_start_guard"
+  echo "[STARTUP] Starting source-resonance shadow..."
+  (
+    while true; do
+      echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/source-resonance.log
+      if paper_db_marked; then
+        echo "[source-resonance] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/source-resonance.log
+        run_marker_aware_preflight "source_resonance_start_guard"
+        sleep 15
+        continue
+      fi
+      PAPER_DB=/app/data/paper_trades.db \
+      SENTIMENT_DB=/app/data/sentiment_arb.db \
+      PYTHONUNBUFFERED=1 \
+      python3 scripts/source_resonance_shadow.py \
+        --loop \
+        --interval "${SOURCE_RESONANCE_INTERVAL_SEC:-60}" \
+        --lookback-hours "${SOURCE_RESONANCE_LOOKBACK_HOURS:-24}" \
+        --limit "${SOURCE_RESONANCE_LIMIT:-500}" \
+        --paper-db /app/data/paper_trades.db \
+        --signal-db /app/data/sentiment_arb.db 2>&1 | tee -a /app/data/source-resonance.log
+      echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/source-resonance.log
       sleep 15
-      continue
-    fi
-    PAPER_DB=/app/data/paper_trades.db \
-    SENTIMENT_DB=/app/data/sentiment_arb.db \
-    PYTHONUNBUFFERED=1 \
-    python3 scripts/source_resonance_shadow.py \
-      --loop \
-      --interval "${SOURCE_RESONANCE_INTERVAL_SEC:-60}" \
-      --lookback-hours "${SOURCE_RESONANCE_LOOKBACK_HOURS:-24}" \
-      --limit "${SOURCE_RESONANCE_LIMIT:-500}" \
-      --paper-db /app/data/paper_trades.db \
-      --signal-db /app/data/sentiment_arb.db 2>&1 | tee -a /app/data/source-resonance.log
-    echo "[source-resonance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/source-resonance.log
-    sleep 15
-  done
-) &
-RESONANCE_PID=$!
+    done
+  ) &
+  RESONANCE_PID=$!
+else
+  echo "[STARTUP] Paper DB write sidecars disabled (PAPER_DB_WRITE_SIDECARS_ENABLED=$PAPER_DB_WRITE_SIDECARS_ENABLED SOURCE_SHADOW_WORKERS_ENABLED=$SOURCE_SHADOW_WORKERS_ENABLED); skipping GMGN scout and source-resonance shadow."
+fi
 
 echo "[STARTUP] Starting social-signal-service..."
 (

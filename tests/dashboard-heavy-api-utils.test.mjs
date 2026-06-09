@@ -836,6 +836,11 @@ test('paper fast lane health exposes public-safe missed rescue heartbeat', () =>
   const health = readPaperFastLaneHealth({
     healthPath,
     nowMs: Date.parse('2026-05-28T23:05:00Z'),
+    env: {
+      SOURCE_SHADOW_WORKERS_ENABLED: 'true',
+      PAPER_DB_WRITE_SIDECARS_ENABLED: 'true',
+      PAPER_FAST_LANE_ENABLED: 'true',
+    },
   });
 
   assert.equal(health.available, true);
@@ -869,6 +874,11 @@ test('paper fast lane health fails loud when heartbeat is stale', () => {
     healthPath,
     nowMs: Date.parse('2026-05-29T00:01:00Z'),
     maxAgeMinutes: 30,
+    env: {
+      SOURCE_SHADOW_WORKERS_ENABLED: 'true',
+      PAPER_DB_WRITE_SIDECARS_ENABLED: 'true',
+      PAPER_FAST_LANE_ENABLED: 'true',
+    },
   });
 
   assert.equal(health.available, true);

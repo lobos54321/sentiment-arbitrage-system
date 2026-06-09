@@ -111,6 +111,49 @@ test('audits only same-bucket duds against quote-clean no-would-enter raw dogs',
   assert.equal(report.interpretation.do_not_change_strategy, true);
 });
 
+test('reports indexed zero volume as unavailable evidence instead of comparable zero', () => {
+  const dog = {
+    ...rawRow({
+    token_ca: 'DOG_ZERO',
+    lifecycle_id: 'life-dog-zero',
+    entry_bar_volume_raw: 0,
+    entry_bar_volume_status: 'unavailable_indexed_zero_volume',
+    entry_bar_volume_provider: 'geckoterminal',
+    entry_bar_volume_source_kind: 'indexed_ohlcv',
+    }),
+    entry_bar_volume: null,
+  };
+  const dud = {
+    ...rawRow({
+    token_ca: 'DUD_ZERO',
+    lifecycle_id: 'life-dud-zero',
+    raw_primary_tier: 'none',
+    max_sustained_peak_pct: 8,
+    entry_bar_volume_raw: 0,
+    entry_bar_volume_status: 'unavailable_indexed_zero_volume',
+    entry_bar_volume_provider: 'geckoterminal',
+    entry_bar_volume_source_kind: 'indexed_ohlcv',
+    }),
+    entry_bar_volume: null,
+  };
+  const report = buildRawDogDecisionAudit({
+    rawDogs: [dog],
+    dudCandidates: [dud],
+    decisionRecords: [
+      decision({ token_ca: 'DOG_ZERO', lifecycle_id: 'life-dog-zero' }),
+      decision({ token_ca: 'DUD_ZERO', lifecycle_id: 'life-dud-zero' }),
+    ],
+  });
+
+  const dogVolume = report.quote_clean_no_would_enter_audit.entry_volume.raw_dogs;
+  const dudVolume = report.quote_clean_no_would_enter_audit.entry_volume.comparison_duds;
+  assert.equal(dogVolume.entry_bar_volume.observed_n, 0);
+  assert.equal(dogVolume.entry_bar_volume_raw.observed_n, 1);
+  assert.equal(dogVolume.status_counts.unavailable_indexed_zero_volume, 1);
+  assert.equal(dogVolume.provider_counts.geckoterminal, 1);
+  assert.equal(dudVolume.entry_bar_volume.observed_n, 0);
+});
+
 test('CLI writes a static audit report from readonly SQLite fixtures', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'raw-dog-audit-'));
   const rawDbPath = path.join(tmp, 'raw_signal_outcomes.db');

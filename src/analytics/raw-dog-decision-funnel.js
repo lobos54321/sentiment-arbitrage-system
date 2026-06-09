@@ -1,4 +1,5 @@
 function numeric(value) {
+  if (value == null || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -52,9 +53,16 @@ function normalizeRawDog(row = {}) {
     time_to_sustained_peak_sec: numeric(row.time_to_sustained_peak_sec),
     entry_bar_ts: numeric(row.entry_bar_ts),
     entry_bar_volume: numeric(row.entry_bar_volume),
+    entry_bar_volume_raw: numeric(row.entry_bar_volume_raw),
+    entry_bar_volume_status: row.entry_bar_volume_status || null,
+    entry_bar_volume_provider: row.entry_bar_volume_provider || null,
+    entry_bar_volume_source_kind: row.entry_bar_volume_source_kind || null,
+    entry_bar_volume_source_family: row.entry_bar_volume_source_family || null,
+    entry_bar_trade_count: numeric(row.entry_bar_trade_count),
     early_5m_volume: numeric(row.early_5m_volume),
     early_15m_volume: numeric(row.early_15m_volume),
     early_15m_volume_bar_count: numeric(row.early_15m_volume_bar_count),
+    early_15m_positive_volume_bar_count: numeric(row.early_15m_positive_volume_bar_count),
     held_to_silver: boolish(row.held_to_silver),
     held_to_gold: boolish(row.held_to_gold),
     raw_dog_entered: boolish(row.raw_dog_entered),
