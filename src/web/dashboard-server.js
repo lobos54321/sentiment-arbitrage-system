@@ -1536,6 +1536,8 @@ const originalConsoleWarn = console.warn;
 // 日志文件路径
 const logsDir = process.env.DASHBOARD_RUNTIME_LOG_DIR || join(projectRoot, 'logs');
 const runtimeLogPath = join(logsDir, 'runtime.log');
+const dashboardRequestMetricsPath = process.env.DASHBOARD_REQUEST_METRICS_PATH || join(logsDir, 'dashboard-request-metrics.json');
+const dashboardRuntimeEventsPath = process.env.DASHBOARD_RUNTIME_EVENTS_PATH || join(logsDir, 'dashboard-runtime-events.jsonl');
 const DASHBOARD_AUDIT_SCHEMA_VERSION = 'v2.7.0.audit_log_integrity.v1';
 const DASHBOARD_AUDIT_GENESIS_HASH = 'GENESIS';
 export const LOG_REDACTION_PATTERN_SET = 'v2.7.0.secret_pattern_set.dashboard_runtime.v1';
@@ -1546,6 +1548,164 @@ try {
     fs.mkdirSync(logsDir, { recursive: true });
   }
 } catch (e) { /* ignore */ }
+
+const DASHBOARD_REQUEST_METRICS_LIMIT = Math.max(
+  20,
+  Math.min(parseInt(process.env.DASHBOARD_REQUEST_METRICS_LIMIT || '120', 10) || 120, 500)
+);
+const DASHBOARD_SLOW_REQUEST_MS = Math.max(
+  100,
+  parseInt(process.env.DASHBOARD_SLOW_REQUEST_MS || '1000', 10) || 1000
+);
+const dashboardRequestMetrics = {
+  schema_version: 'dashboard_request_metrics.v1',
+  started_at: new Date().toISOString(),
+  recent: [],
+  slow: [],
+  active: new Map(),
+};
+
+function memoryUsageMb() {
+  const usage = process.memoryUsage();
+  return {
+    rss_mb: Math.round((usage.rss / 1024 / 1024) * 100) / 100,
+    heap_used_mb: Math.round((usage.heapUsed / 1024 / 1024) * 100) / 100,
+    heap_total_mb: Math.round((usage.heapTotal / 1024 / 1024) * 100) / 100,
+    external_mb: Math.round((usage.external / 1024 / 1024) * 100) / 100,
+  };
+}
+
+function sanitizeRequestParams(url) {
+  const output = {};
+  const secretKeys = new Set(['token', 'auth', 'authorization', 'key', 'api_key', 'dashboard_token']);
+  for (const [key, value] of url.searchParams.entries()) {
+    const normalized = String(key || '').toLowerCase();
+    if (secretKeys.has(normalized) || normalized.includes('token') || normalized.includes('secret') || normalized.includes('key')) {
+      output[key] = '[redacted]';
+      continue;
+    }
+    if (String(value).length <= 80) output[key] = value;
+  }
+  return output;
+}
+
+function requestMetricsSnapshot() {
+  return {
+    schema_version: dashboardRequestMetrics.schema_version,
+    generated_at: new Date().toISOString(),
+    pid: process.pid,
+    uptime_seconds: Math.floor(process.uptime()),
+    memory: memoryUsageMb(),
+    active: Array.from(dashboardRequestMetrics.active.values()),
+    recent: dashboardRequestMetrics.recent.slice(-DASHBOARD_REQUEST_METRICS_LIMIT),
+    slow: dashboardRequestMetrics.slow.slice(-DASHBOARD_REQUEST_METRICS_LIMIT),
+    config: {
+      slow_request_ms: DASHBOARD_SLOW_REQUEST_MS,
+      limit: DASHBOARD_REQUEST_METRICS_LIMIT,
+    },
+  };
+}
+
+function writeDashboardRequestMetricsSnapshot() {
+  try {
+    fs.writeFileSync(dashboardRequestMetricsPath, JSON.stringify(requestMetricsSnapshot(), null, 2));
+  } catch {}
+}
+
+function appendDashboardRuntimeEvent(event) {
+  try {
+    fs.appendFileSync(dashboardRuntimeEventsPath, `${JSON.stringify({
+      schema_version: 'dashboard_runtime_event.v1',
+      ts: new Date().toISOString(),
+      pid: process.pid,
+      uptime_seconds: Math.floor(process.uptime()),
+      memory: memoryUsageMb(),
+      active_requests: Array.from(dashboardRequestMetrics.active.values()),
+      ...event,
+    })}\n`);
+  } catch {}
+}
+
+function beginDashboardRequestMetric(req, url) {
+  const metric = {
+    id: randomUUID(),
+    method: req.method || 'GET',
+    path: url.pathname,
+    params: sanitizeRequestParams(url),
+    started_at: new Date().toISOString(),
+    started_ms: Date.now(),
+    memory_start: memoryUsageMb(),
+  };
+  dashboardRequestMetrics.active.set(metric.id, {
+    id: metric.id,
+    method: metric.method,
+    path: metric.path,
+    params: metric.params,
+    started_at: metric.started_at,
+    age_ms: 0,
+    memory_start: metric.memory_start,
+  });
+  if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/logs')) {
+    writeDashboardRequestMetricsSnapshot();
+  }
+  return metric;
+}
+
+function finishDashboardRequestMetric(metric, res, event = 'finish') {
+  if (!metric || metric.finished) return;
+  metric.finished = true;
+  const endedMs = Date.now();
+  const durationMs = endedMs - metric.started_ms;
+  const memoryEnd = memoryUsageMb();
+  const row = {
+    id: metric.id,
+    method: metric.method,
+    path: metric.path,
+    params: metric.params,
+    status_code: res.statusCode,
+    event,
+    started_at: metric.started_at,
+    ended_at: new Date(endedMs).toISOString(),
+    duration_ms: durationMs,
+    memory_start: metric.memory_start,
+    memory_end: memoryEnd,
+    rss_delta_mb: Math.round((memoryEnd.rss_mb - metric.memory_start.rss_mb) * 100) / 100,
+  };
+  dashboardRequestMetrics.active.delete(metric.id);
+  dashboardRequestMetrics.recent.push(row);
+  if (dashboardRequestMetrics.recent.length > DASHBOARD_REQUEST_METRICS_LIMIT) dashboardRequestMetrics.recent.shift();
+  if (durationMs >= DASHBOARD_SLOW_REQUEST_MS || row.status_code >= 500 || event !== 'finish') {
+    dashboardRequestMetrics.slow.push(row);
+    if (dashboardRequestMetrics.slow.length > DASHBOARD_REQUEST_METRICS_LIMIT) dashboardRequestMetrics.slow.shift();
+    appendDashboardRuntimeEvent({ event_type: 'dashboard_request_observation', request: row });
+  }
+  writeDashboardRequestMetricsSnapshot();
+}
+
+for (const signalName of ['SIGTERM', 'SIGINT']) {
+  process.on(signalName, () => {
+    appendDashboardRuntimeEvent({ event_type: 'dashboard_process_signal', signal: signalName });
+    writeDashboardRequestMetricsSnapshot();
+  });
+}
+
+process.on('uncaughtException', (error) => {
+  appendDashboardRuntimeEvent({
+    event_type: 'dashboard_uncaught_exception',
+    error: error?.message || String(error),
+    stack: error?.stack || null,
+  });
+  writeDashboardRequestMetricsSnapshot();
+});
+
+process.on('unhandledRejection', (reason) => {
+  appendDashboardRuntimeEvent({
+    event_type: 'dashboard_unhandled_rejection',
+    error: reason?.message || String(reason),
+    stack: reason?.stack || null,
+  });
+  writeDashboardRequestMetricsSnapshot();
+});
 
 export function redactLogMessage(input) {
   let text = String(input ?? '');
@@ -9550,6 +9710,11 @@ function getRejectedSignalsData(windowDays = 7) {
  */
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  const requestMetric = beginDashboardRequestMetric(req, url);
+  res.once('finish', () => finishDashboardRequestMetric(requestMetric, res, 'finish'));
+  res.once('close', () => {
+    if (!requestMetric.finished) finishDashboardRequestMetric(requestMetric, res, 'close');
+  });
 
   if (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/ping') {
     const shadowSidecars = Array.isArray(global.__shadowDataSidecars)
@@ -9594,7 +9759,20 @@ const server = http.createServer(async (req, res) => {
       signal_source_freshness_health: signalSourceFreshnessHealth,
       raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
+      dashboard_request_metrics: {
+        active_count: dashboardRequestMetrics.active.size,
+        recent_count: dashboardRequestMetrics.recent.length,
+        slow_count: dashboardRequestMetrics.slow.length,
+        last_slow: dashboardRequestMetrics.slow[dashboardRequestMetrics.slow.length - 1] || null,
+        path: dashboardRequestMetricsPath,
+        events_path: dashboardRuntimeEventsPath,
+      },
     }));
+    return;
+  } else if (url.pathname === '/api/runtime/request-metrics') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify(requestMetricsSnapshot(), null, 2));
     return;
   } else if (url.pathname === '/dashboard') {
     res.writeHead(302, { 'Location': '/premium' });
