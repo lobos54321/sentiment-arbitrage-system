@@ -1606,6 +1606,24 @@ function requestMetricsSnapshot() {
   };
 }
 
+function readDashboardRuntimeEvents(limit = 80) {
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 80, 500));
+  try {
+    if (!fs.existsSync(dashboardRuntimeEventsPath)) return [];
+    const text = fs.readFileSync(dashboardRuntimeEventsPath, 'utf8');
+    const lines = text.split(/\r?\n/).filter(Boolean).slice(-boundedLimit);
+    return lines.map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { raw: line, parse_error: true };
+      }
+    });
+  } catch (error) {
+    return [{ error: error?.message || String(error), read_failed: true }];
+  }
+}
+
 function writeDashboardRequestMetricsSnapshot() {
   try {
     fs.writeFileSync(dashboardRequestMetricsPath, JSON.stringify(requestMetricsSnapshot(), null, 2));
@@ -1689,9 +1707,10 @@ for (const signalName of ['SIGTERM', 'SIGINT']) {
   });
 }
 
-process.on('uncaughtException', (error) => {
+process.on('uncaughtExceptionMonitor', (error, origin) => {
   appendDashboardRuntimeEvent({
-    event_type: 'dashboard_uncaught_exception',
+    event_type: 'dashboard_uncaught_exception_monitor',
+    origin: origin || null,
     error: error?.message || String(error),
     stack: error?.stack || null,
   });
@@ -9773,6 +9792,17 @@ const server = http.createServer(async (req, res) => {
     if (!checkAuth(req, url, res)) return;
     res.writeHead(200, apiJsonHeaders());
     res.end(JSON.stringify(requestMetricsSnapshot(), null, 2));
+    return;
+  } else if (url.pathname === '/api/runtime/events') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify({
+      schema_version: 'dashboard_runtime_events_api.v1',
+      generated_at: new Date().toISOString(),
+      path: dashboardRuntimeEventsPath,
+      events: readDashboardRuntimeEvents(boundedIntParam(url, 'limit', 80, 1, 500)),
+      request_metrics: requestMetricsSnapshot(),
+    }, null, 2));
     return;
   } else if (url.pathname === '/dashboard') {
     res.writeHead(302, { 'Location': '/premium' });
