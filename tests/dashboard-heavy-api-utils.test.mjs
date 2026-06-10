@@ -27,7 +27,10 @@ import {
   buildLottoQuoteGapAuditSummary,
   buildLottoQuoteGapWinnerJoinReport,
   latestActionableFastLaneQueueByToken,
+  buildRawDogDiscoveryApiPayloadFromRollingSummary,
+  readRawDogDiscoveryApiSnapshot,
   resolveIncidentArtifactPath,
+  writeRawDogDiscoveryApiSnapshot,
   buildClosedLoopProbeSummary,
   buildClosedLoopMissedDogSummary,
   appendDashboardAuditEvent,
@@ -1636,6 +1639,54 @@ test('boundedIntParam clamps oversized live query parameters', () => {
 
   assert.equal(boundedIntParam(url, 'event_limit', 3000, 100, 8000), 8000);
   assert.equal(boundedIntParam(url, 'limit', 50, 1, 120), 120);
+});
+
+test('raw dog discovery static API snapshot is atomic and window-scoped', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'raw-dog-api-snapshot-'));
+  const snapshotPath = join(dir, 'raw-dog-discovery-summary.json');
+  const payload = buildRawDogDiscoveryApiPayloadFromRollingSummary({
+    available: true,
+    since_ts: 1_780_000_000,
+    summary: {
+      total_signals: 3,
+      raw_sustained_gold_silver_unique: 2,
+    },
+    decision_funnel: {
+      summary: {
+        quote_clean_no_would_enter: 1,
+      },
+    },
+    top_raw_dogs: [
+      { token_ca: 'A', max_sustained_peak_pct: 120 },
+      { token_ca: 'B', max_sustained_peak_pct: 80 },
+    ],
+    missed_raw_dogs: [
+      { token_ca: 'A' },
+      { token_ca: 'B' },
+    ],
+  }, {
+    hours: 24,
+    limit: 2,
+    coverageTargetPct: 80,
+    source: 'unit_worker_snapshot',
+    snapshotPath,
+  });
+
+  const written = writeRawDogDiscoveryApiSnapshot(payload, { snapshotPath });
+  assert.equal(written.path, snapshotPath);
+  assert.equal(fs.existsSync(snapshotPath), true);
+
+  const read = readRawDogDiscoveryApiSnapshot({ snapshotPath, hours: 24, limit: 1 });
+  assert.equal(read.available, true);
+  assert.equal(read.source, 'unit_worker_snapshot');
+  assert.equal(read.summary.total_signals, 3);
+  assert.equal(read.top_raw_dogs.length, 1);
+  assert.equal(read.top_raw_dogs[0].token_ca, 'A');
+  assert.equal(read.missed_raw_dogs.length, 1);
+
+  const mismatch = readRawDogDiscoveryApiSnapshot({ snapshotPath, hours: 6, limit: 1 });
+  assert.equal(mismatch.available, false);
+  assert.equal(mismatch.error_code, 'raw_dog_discovery_snapshot_window_mismatch');
 });
 
 test('boundedWindowedSinceTs clamps hours for live heavy endpoints', () => {

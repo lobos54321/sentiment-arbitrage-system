@@ -5,7 +5,10 @@ import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 
 import {
+  buildRawDogDiscoveryApiPayloadFromRollingSummary,
   buildRawDogDiscoverySnapshot,
+  readRawSignalOutcomeRollingSummary,
+  writeRawDogDiscoveryApiSnapshot,
 } from '../src/web/dashboard-server.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -54,6 +57,18 @@ function main() {
       coverageTargetPct,
       persist: true,
     });
+    const apiSummary = readRawSignalOutcomeRollingSummary({
+      hours: windowHours,
+      limit: Math.min(limit, 500),
+      coverageTargetPct,
+    });
+    const apiPayload = buildRawDogDiscoveryApiPayloadFromRollingSummary(apiSummary, {
+      hours: windowHours,
+      limit: Math.min(limit, 500),
+      coverageTargetPct,
+      source: 'raw_dog_discovery_worker_snapshot',
+    });
+    const materializedSnapshot = writeRawDogDiscoveryApiSnapshot(apiPayload);
     const summary = snapshot.report?.summary || null;
     const out = {
       schema_version: 'raw_dog_discovery_observer_run.v1',
@@ -63,6 +78,12 @@ function main() {
       raw_db_path: snapshot.raw_db_path,
       filters: snapshot.filters,
       summary,
+      materialized_snapshot: {
+        path: materializedSnapshot.path,
+        bytes: materializedSnapshot.bytes,
+        available: Boolean(materializedSnapshot.payload?.available),
+        source: materializedSnapshot.payload?.source || null,
+      },
       diagnostics: {
         signals: snapshot.diagnostics?.signals || null,
         raw_path: {

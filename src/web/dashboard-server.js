@@ -2012,6 +2012,13 @@ function getRawSignalOutcomesDbPath() {
   return isAbsolute(rawDbPath) ? rawDbPath : join(projectRoot, rawDbPath);
 }
 
+export function getRawDogDiscoveryApiSnapshotPath(options = {}) {
+  const raw = options.snapshotPath
+    || process.env.RAW_DOG_DISCOVERY_API_SNAPSHOT_PATH
+    || join(dirname(getRawSignalOutcomesDbPath()), 'raw-dog-discovery-summary.json');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
 function getKlineCacheDbPath() {
   const raw = process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || './data/kline_cache.db';
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
@@ -3331,6 +3338,130 @@ export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, cov
     };
   } finally {
     try { if (db) db.close(); } catch {}
+  }
+}
+
+export function buildRawDogDiscoveryApiPayloadFromRollingSummary(snapshot = {}, options = {}) {
+  const limit = Math.max(1, Math.min(Number(options.limit) || 50, 500));
+  const requestedHours = Math.max(1, Math.min(Number(options.hours) || 24, 168));
+  const topRawDogs = Array.isArray(snapshot.top_raw_dogs) ? snapshot.top_raw_dogs.slice(0, limit) : [];
+  const missedRawDogs = Array.isArray(snapshot.missed_raw_dogs) ? snapshot.missed_raw_dogs.slice(0, limit) : [];
+  return {
+    schema_version: 'raw_dog_discovery_api.v1',
+    generated_at: snapshot.generated_at || options.generatedAt || new Date().toISOString(),
+    materialized: true,
+    live_query: false,
+    source: options.source || 'raw_dog_discovery_static_snapshot',
+    requested_hours: requestedHours,
+    coverage_target_pct: snapshot.coverage_target_pct ?? Number(options.coverageTargetPct ?? 80),
+    snapshot_path: options.snapshotPath || null,
+    snapshot_written_at: options.snapshotWrittenAt || null,
+    available: Boolean(snapshot.available),
+    db_path: snapshot.db_path || null,
+    since_ts: snapshot.since_ts ?? null,
+    since_iso: snapshot.since_iso || (snapshot.since_ts ? new Date(Number(snapshot.since_ts) * 1000).toISOString() : null),
+    summary: snapshot.summary || null,
+    decision_funnel: snapshot.decision_funnel || snapshot.summary?.decision_funnel || null,
+    decision_evidence: snapshot.decision_evidence || null,
+    coverage: snapshot.coverage || null,
+    top_raw_dogs: topRawDogs,
+    missed_raw_dogs: missedRawDogs,
+    coverage_gap_tokens: [],
+    pending_outcomes: [],
+    error: snapshot.error || null,
+    note: snapshot.note || null,
+    notes: {
+      ...(snapshot.notes || {}),
+      live_query: 'Default is a static worker snapshot. Pass live=1 for a bounded live rebuild (max 2h / 1000 rows).',
+      snapshot: 'Served from the isolated raw dog discovery worker output; no request-time raw/paper DB aggregation.',
+    },
+  };
+}
+
+export function writeRawDogDiscoveryApiSnapshot(payload = {}, options = {}) {
+  const snapshotPath = getRawDogDiscoveryApiSnapshotPath(options);
+  fs.mkdirSync(dirname(snapshotPath), { recursive: true });
+  const tmpPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`;
+  const output = {
+    ...payload,
+    snapshot_path: snapshotPath,
+    snapshot_written_at: payload.snapshot_written_at || new Date().toISOString(),
+  };
+  fs.writeFileSync(tmpPath, `${JSON.stringify(output, null, 2)}\n`);
+  fs.renameSync(tmpPath, snapshotPath);
+  return { path: snapshotPath, bytes: fs.statSync(snapshotPath).size, payload: output };
+}
+
+export function readRawDogDiscoveryApiSnapshot(options = {}) {
+  const requestedHours = Math.max(1, Math.min(Number(options.hours) || 24, 168));
+  const coverageTargetPct = Number(options.coverageTargetPct ?? 80);
+  const limit = Math.max(1, Math.min(Number(options.limit) || 50, 500));
+  const snapshotPath = getRawDogDiscoveryApiSnapshotPath(options);
+  const base = {
+    schema_version: 'raw_dog_discovery_api.v1',
+    materialized: true,
+    live_query: false,
+    source: 'raw_dog_discovery_static_snapshot',
+    requested_hours: requestedHours,
+    coverage_target_pct: coverageTargetPct,
+    snapshot_path: snapshotPath,
+    summary: null,
+    decision_funnel: null,
+    coverage: null,
+    top_raw_dogs: [],
+    missed_raw_dogs: [],
+    coverage_gap_tokens: [],
+    pending_outcomes: [],
+  };
+  try {
+    if (!fs.existsSync(snapshotPath)) {
+      return {
+        ...base,
+        available: false,
+        error_code: 'raw_dog_discovery_snapshot_missing',
+        note: 'raw dog discovery static snapshot missing; wait for the isolated worker or pass live=1 for a bounded live rebuild.',
+      };
+    }
+    const stat = fs.statSync(snapshotPath);
+    const payload = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+    const payloadHours = Number(payload.requested_hours || requestedHours);
+    if (Number.isFinite(payloadHours) && payloadHours !== requestedHours) {
+      return {
+        ...base,
+        available: false,
+        error_code: 'raw_dog_discovery_snapshot_window_mismatch',
+        snapshot_written_at: payload.snapshot_written_at || null,
+        generated_at: payload.generated_at || null,
+        note: `static snapshot window is ${payloadHours}h, requested ${requestedHours}h`,
+      };
+    }
+    const ageSec = Math.max(0, Math.floor((Date.now() - stat.mtimeMs) / 1000));
+    const topRawDogs = Array.isArray(payload.top_raw_dogs) ? payload.top_raw_dogs.slice(0, limit) : [];
+    const missedRawDogs = Array.isArray(payload.missed_raw_dogs) ? payload.missed_raw_dogs.slice(0, limit) : [];
+    return {
+      ...base,
+      ...payload,
+      source: payload.source || 'raw_dog_discovery_static_snapshot',
+      requested_hours: requestedHours,
+      coverage_target_pct: payload.coverage_target_pct ?? coverageTargetPct,
+      snapshot_path: snapshotPath,
+      snapshot_age_sec: ageSec,
+      top_raw_dogs: topRawDogs,
+      missed_raw_dogs: missedRawDogs,
+      coverage_gap_tokens: [],
+      pending_outcomes: [],
+      notes: {
+        ...(payload.notes || {}),
+        live_query: 'Default is a static worker snapshot. Pass live=1 for a bounded live rebuild (max 2h / 1000 rows).',
+      },
+    };
+  } catch (error) {
+    return {
+      ...base,
+      available: false,
+      error_code: 'raw_dog_discovery_snapshot_read_failed',
+      error: error?.message || String(error),
+    };
   }
 }
 
@@ -10800,30 +10931,13 @@ const server = http.createServer(async (req, res) => {
           }, null, 2));
           return;
         }
-        const snapshot = readRawSignalOutcomeRollingSummary({
+        const snapshot = readRawDogDiscoveryApiSnapshot({
           hours: requestedHours,
           limit: materializedLimit,
           coverageTargetPct,
         });
         res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
-        res.end(JSON.stringify({
-          schema_version: 'raw_dog_discovery_api.v1',
-          materialized: true,
-          live_query: false,
-          source: 'durable_raw_signal_outcomes_rolling_summary',
-          ...snapshot,
-          summary: snapshot.summary || null,
-          decision_funnel: snapshot.decision_funnel || null,
-          coverage: snapshot.coverage || null,
-          top_raw_dogs: snapshot.top_raw_dogs || [],
-          missed_raw_dogs: snapshot.missed_raw_dogs || [],
-          coverage_gap_tokens: [],
-          pending_outcomes: [],
-          notes: {
-            ...(snapshot.notes || {}),
-            live_query: 'Default is materialized from durable raw_signal_outcomes.db. Pass live=1 for a bounded live rebuild (max 2h / 1000 rows).',
-          },
-        }, null, 2));
+        res.end(JSON.stringify(snapshot, null, 2));
         return;
       }
       const guard = livePaperQueryGuard(url, 'raw_dog_discovery_live', {
@@ -14612,7 +14726,7 @@ const server = http.createServer(async (req, res) => {
     const materializedHours = nearestLivePaperReviewHours(requestedHours);
     const liveSnapshot = readLivePaperReview(materializedHours);
     const paperDbHealth = readPaperDbRuntimeHealth();
-    const rawDiscovery = readRawSignalOutcomeRollingSummary({
+    const rawDiscovery = readRawDogDiscoveryApiSnapshot({
       hours: requestedHours,
       coverageTargetPct: boundedIntParam(url, 'raw_coverage_target_pct', 80, 0, 100),
       limit: boundedIntParam(url, 'raw_limit', 50, 1, 200),
