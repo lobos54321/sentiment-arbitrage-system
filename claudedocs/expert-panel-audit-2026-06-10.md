@@ -56,7 +56,54 @@
 1. volume=0 / liquidity_unknown / amm 轨道 0 触达,**全部是同一个结构性原因: 观测与决策窗口卡在 bonding-curve 阶段,AMM 证据当时不存在**——不是 gecko 故障,也大概率不是 hydrator 预算问题(修正执行 memo 的"INFRA 可修"倾向,待 provider_hydrate_outcome 导出定案);
 2. **final_entry_contract 的可成交定义(AMM liquidity/spread)结构性排除曲线期 → 对这批狗 capture≈0 是定义的必然,不是 gate 参数太严**。要 60% capture 就必须能在曲线期形成证据并交易(或显式接受只抓毕业后段+重定义目标);
 3. 早期 5-15m 逐bar volume 的真值只可能来自: **GMGN(原生覆盖 pump.fun 曲线)或 Helius 链上解码 pump.fun program**;gecko 曲线期有聚合量(token 级 vol24)但无逐bar量(522/522=0 实测);毕业后 pumpswap 池谁都行——**且 observer 毕业后没重选池(毕业后的 bar 也全 0 量)= 一个便宜的 wiring 修复点**;
-4. 剩余唯一决定性未知: GMGN 对这些 token 的**毕业前** 1m bars 是否带量 → GMGN_API_KEY 只在 Zeabur 环境,touch 测试必须在服务器 shell 跑。
+4. 2026-06-11 已更新: GMGN touch 已能在本地用 repo 外 key 文件跑通,不需要服务器 shell。源天花板假设被推翻,下一步不是再问"GMGN 有没有量",而是做阶段分层与决策时刻重锚。
+
+## 5.6 补充实测(2026-06-11,GMGN touch + stage-stratified audit)
+
+新增只读审计工具: `scripts/run-gmgn-stage-stratified-audit.js`(本地 commit `2f2dcc18`,未单独部署)。它把 GMGN touch 的 dog/dud 结果按 volume visibility stage 分层,并可输出 decision-ts token 文件。
+
+### A. GMGN 源可达性
+
+- signal-anchor touch: 64/64 dog、216/216 dud 均能从 GMGN 拿到带量历史。
+- decision-anchor touch: 41/41 dog、157/157 dud 均能从 GMGN 拿到带量历史。
+- 因此"GMGN 源覆盖不到这些狗"不成立。主问题从"源天花板"改为"阶段混杂、锚点、标签质量和曲线期特征"。
+
+### B. signal_ts 锚点的阶段混杂
+
+报告: `/tmp/gmgn-stage-stratified-audit.json`
+
+- dog first nonzero volume lag median = 1089s; dud median = -11s。
+- AUC(lag dog > dud) = 0.6786。
+- 全量 early_15m volume AUC = 0.3946,但 positive-only AUC = 0.7003。
+- 解释: 全量 AUC 反向是 Simpson 悖论/阶段混杂。大量 dog 在 signal_ts 后 15m 内仍处于无 GMGN 逐bar量的暗区,而大量 dud 在 signal_ts 时已出量/已毕业。
+- 在 `already_volume_visible_at_anchor` 子集内,early_15m volume AUC = 0.7556;dog median $94,529,dud median $18,664。
+- 在 `volume_visible_within_5m` 子集内,early_15m volume AUC = 0.8;样本小(dog=5,dud=5),只读方向。
+
+### C. decision_ts 锚点复测
+
+报告: `/tmp/gmgn-stage-stratified-decision-anchor.json`
+
+- decision matched cohort: 41 dog、157 dud。
+- dog first nonzero volume lag median = 1063s; dud median = -11s。
+- AUC(lag dog > dud) = 0.7039,比 signal_ts 更强。
+- 全量 early_15m volume AUC = 0.4104,positive-only AUC = 0.7451。
+- 在 `already_volume_visible_at_anchor` 子集内,early_15m volume AUC = 0.8375;dog median $60,986,dud median $10,349。
+- 结论: "狗更常在决策时仍处暗区/临毕业前"不是 signal_ts 假象;锚到 decision_ts 后仍成立且更强。
+
+### D. 标签质量债
+
+- 25/64 dog 的 sustained peak 发生在首个 GMGN 非零 volume bar 之前(`curve_phase_unconfirmed`)。
+- 这部分不是自动判假,因为 bonding curve 本身可交易;但当前没有逐笔成交确认,必须用 Helius/pump.fun 解码或 GMGN 历史曲线事件验证。
+- 后续 data pack 必须带 `peak_confirmation_tier ∈ {volume_confirmed, curve_phase_unconfirmed}`。
+
+### E. 修正后的高手问题
+
+不再问"GMGN 有没有数据"或"early volume 是否无效"。新的最小问题是:
+
+1. 在 decision_ts 当时,`volume_visibility_stage`/曲线进度/毕业邻近度是否是可用的事前特征?
+2. 在同 stage 内,early_5m/early_15m volume、buy pressure、unique buyers 是否能区分 dog/dud?
+3. 25/64 暗区峰能否被链上逐笔成交验真?
+4. bonding-curve 阶段如果允许交易,final_entry_contract 应如何定义 executable/liq/spread/risk?
 
 ## 6. 对 60/60/200 的诚实回答
 
