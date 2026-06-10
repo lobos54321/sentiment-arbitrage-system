@@ -10773,6 +10773,33 @@ const server = http.createServer(async (req, res) => {
         const requestedHours = parseWindowHoursParam(url.searchParams.get('window'))
           || boundedIntParam(url, 'hours', 24, 1, 168);
         const materializedLimit = boundedIntParam(url, 'limit', 50, 1, 500);
+        const workerStatus = global.__rawDogDiscoveryWorkerStatus || null;
+        if (workerStatus?.running) {
+          res.writeHead(202, apiJsonHeaders());
+          res.end(JSON.stringify({
+            schema_version: 'raw_dog_discovery_api.v1',
+            materialized: true,
+            live_query: false,
+            refresh_in_progress: true,
+            source: 'raw_dog_discovery_worker_status',
+            worker: {
+              running: true,
+              pid: workerStatus.pid || null,
+              started_at: workerStatus.started_at || null,
+              last_completed_at: workerStatus.last_completed_at || null,
+              next_run_at: workerStatus.next_run_at || null,
+            },
+            summary: workerStatus.last_summary?.summary || null,
+            diagnostics: {
+              worker_last_error: workerStatus.last_error || null,
+            },
+            notes: {
+              reason: 'raw dog discovery refresh is running in an isolated worker; API returns worker status instead of waiting on SQLite locks.',
+              retry: 'Retry after the worker completes, or inspect / root health raw_dog_discovery_worker.',
+            },
+          }, null, 2));
+          return;
+        }
         const snapshot = readRawSignalOutcomeRollingSummary({
           hours: requestedHours,
           limit: materializedLimit,
