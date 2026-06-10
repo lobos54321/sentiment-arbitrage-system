@@ -169,6 +169,88 @@ function sourceCompatible(baseline, pathRows) {
   return { same_source_path: true, reason: 'covered' };
 }
 
+function pathPriority(row = {}) {
+  const kind = String(row.source_kind || '').toLowerCase();
+  const provider = String(row.provider || '').toLowerCase();
+  if (kind === 'bonding_curve') return 0;
+  if (kind === 'amm_pool') return 1;
+  if (provider.includes('helius')) return 2;
+  if (provider.includes('gmgn')) return 3;
+  if (provider.includes('gecko')) return 4;
+  if (provider.includes('dex')) return 5;
+  return 10;
+}
+
+function streamKey(row = {}) {
+  return [
+    row.provider || '',
+    row.source_kind || '',
+    row.pool_address || '',
+    row.price_unit || '',
+  ].join('|');
+}
+
+function chooseAnchorCompatibleRows(rows = [], signalTs, {
+  baselineMaxLagSec = 300,
+  horizonSec = 7200,
+} = {}) {
+  if (signalTs == null || !rows.length) return rows;
+  const normalized = rows
+    .map(normalizeKline)
+    .filter((row) => row.timestamp != null && row.high != null && row.low != null && row.close != null)
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+  if (!normalized.length) return [];
+
+  const byStream = new Map();
+  for (const row of normalized) {
+    const key = streamKey(row);
+    if (!byStream.has(key)) byStream.set(key, []);
+    byStream.get(key).push(row);
+  }
+
+  const candidates = [...byStream.values()].map((streamRows) => {
+    const firstRow = streamRows[0] || {};
+    const baseline = streamRows.find((row) => (
+      row.timestamp >= signalTs
+      && row.timestamp <= signalTs + baselineMaxLagSec
+      && row.close != null
+      && row.close > 0
+    )) || null;
+    const firstAfter = streamRows.find((row) => row.timestamp >= signalTs) || null;
+    const horizonRows = streamRows.filter((row) => row.timestamp >= signalTs && row.timestamp <= signalTs + horizonSec);
+    const earlyRows = streamRows.filter((row) => row.timestamp >= signalTs && row.timestamp < signalTs + 900);
+    return {
+      rows: streamRows,
+      baseline,
+      firstAfter,
+      horizonRows,
+      earlyRows,
+      priority: pathPriority(firstRow),
+    };
+  });
+
+  const withBaseline = candidates.filter((candidate) => candidate.baseline);
+  if (withBaseline.length) {
+    return withBaseline.sort((a, b) => (
+      pathPriority(a.baseline) - pathPriority(b.baseline)
+      || Number(a.baseline.timestamp) - Number(b.baseline.timestamp)
+      || b.earlyRows.length - a.earlyRows.length
+      || b.horizonRows.length - a.horizonRows.length
+    ))[0].rows;
+  }
+
+  const withFuturePath = candidates.filter((candidate) => candidate.firstAfter);
+  if (withFuturePath.length) {
+    return withFuturePath.sort((a, b) => (
+      Number(a.firstAfter.timestamp) - Number(b.firstAfter.timestamp)
+      || a.priority - b.priority
+      || b.horizonRows.length - a.horizonRows.length
+    ))[0].rows;
+  }
+
+  return candidates.sort((a, b) => a.priority - b.priority || b.rows.length - a.rows.length)[0]?.rows || [];
+}
+
 function earlyWindowMetrics(pathRows, signalTs, earlyWindowSec = 900) {
   if (signalTs == null) {
     return {
@@ -476,8 +558,13 @@ function buildRawSignalOutcomeReport({
   const tradesByToken = groupByToken(paperTrades);
   const outcomes = signals.map((signal) => {
     const tokenCa = String(signal.token_ca || '').trim();
+    const signalTs = normalizeTimestampSec(signal.timestamp_sec ?? signal.signal_ts ?? signal.timestamp ?? signal.created_ts);
+    const anchorRows = chooseAnchorCompatibleRows(klineByToken.get(tokenCa) || [], signalTs, {
+      baselineMaxLagSec,
+      horizonSec,
+    });
     return computeOutcomeForSignal(signal, {
-      klineRows: klineByToken.get(tokenCa) || [],
+      klineRows: anchorRows,
       trades: tradesByToken.get(tokenCa) || [],
       nowTs,
       horizonSec,

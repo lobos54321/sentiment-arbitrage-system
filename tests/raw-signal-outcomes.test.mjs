@@ -165,6 +165,65 @@ test('baseline/path rejects bonding-curve to AMM cross-source mixing', () => {
   assert.equal(outcome.raw_primary_tier, 'not_evaluable');
 });
 
+test('report picks an anchor-compatible stream instead of a later higher-priority stream', () => {
+  const report = buildRawSignalOutcomeReport({
+    nowTs: 10_000,
+    horizonSec: 7200,
+    signals: [signal({ token_ca: 'LATEGMGNpump' })],
+    klineRows: [
+      kline(1000, 1.0, {
+        token_ca: 'LATEGMGNpump',
+        pool_address: 'gecko-virtual-pool',
+        source: 'geckoterminal',
+        source_kind: 'indexed_ohlcv',
+        volume: 0,
+      }),
+      kline(1060, 1.75, {
+        token_ca: 'LATEGMGNpump',
+        pool_address: 'gecko-virtual-pool',
+        source: 'geckoterminal',
+        source_kind: 'indexed_ohlcv',
+        high: 1.8,
+        close: 1.75,
+        volume: 0,
+      }),
+      kline(1120, 1.65, {
+        token_ca: 'LATEGMGNpump',
+        pool_address: 'gecko-virtual-pool',
+        source: 'geckoterminal',
+        source_kind: 'indexed_ohlcv',
+        high: 1.7,
+        close: 1.65,
+        volume: 0,
+      }),
+      kline(2200, 2.0, {
+        token_ca: 'LATEGMGNpump',
+        pool_address: 'gmgn-post-graduation',
+        source: 'gmgn',
+        source_kind: 'indexed_ohlcv',
+        high: 2.1,
+        close: 2.0,
+        volume: 1000,
+      }),
+      kline(2260, 2.1, {
+        token_ca: 'LATEGMGNpump',
+        pool_address: 'gmgn-post-graduation',
+        source: 'gmgn',
+        source_kind: 'indexed_ohlcv',
+        high: 2.2,
+        close: 2.1,
+        volume: 900,
+      }),
+    ],
+  });
+
+  assert.equal(report.summary.raw_denominator_matured_only, 1);
+  assert.equal(report.summary.raw_sustained_gold_silver_unique, 1);
+  assert.equal(report.outcomes[0].coverage_reason, 'covered');
+  assert.equal(report.outcomes[0].path_provider, 'geckoterminal');
+  assert.equal(report.outcomes[0].baseline_lag_sec, 0);
+});
+
 test('early 15m completeness flags late raw paths even when 120m path exists', () => {
   const outcome = computeOutcomeForSignal(signal(), {
     nowTs: 10_000,
