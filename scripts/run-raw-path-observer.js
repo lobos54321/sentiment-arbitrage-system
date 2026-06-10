@@ -177,9 +177,34 @@ function getRawSignalObservation(database, tokenCa, signalTs) {
   `).get({ tokenCa, signalTs }) || null;
 }
 
-function anchorBackfillPriority(observation) {
-  const reason = String(observation?.coverage_reason || '');
-  const status = String(observation?.status || '');
+function getRawSignalOutcome(database, tokenCa, signalTs) {
+  if (!database || !tokenCa || !Number.isFinite(signalTs) || !tableExists(database, 'raw_signal_outcomes')) {
+    return null;
+  }
+  return database.prepare(`
+    SELECT
+      coverage_reason,
+      observation_status,
+      kline_covered,
+      baseline_ts,
+      baseline_lag_sec,
+      first_bar_ts,
+      first_bar_lag_sec,
+      early_15m_bar_count,
+      early_15m_bar_coverage_pct,
+      early_15m_complete,
+      updated_at
+    FROM raw_signal_outcomes
+    WHERE token_ca = @tokenCa
+      AND signal_ts = @signalTs
+    ORDER BY COALESCE(updated_at, 0) DESC, COALESCE(id, 0) DESC
+    LIMIT 1
+  `).get({ tokenCa, signalTs }) || null;
+}
+
+function anchorBackfillPriority(row, { statusField = 'status', prefix = 'raw_observation' } = {}) {
+  const reason = String(row?.coverage_reason || '');
+  const status = String(row?.[statusField] || '');
   if (status && status !== 'matured') return null;
   const priorities = {
     no_kline_after_anchor: 0,
@@ -191,7 +216,7 @@ function anchorBackfillPriority(observation) {
   if (!Object.prototype.hasOwnProperty.call(priorities, reason)) return null;
   return {
     priority: priorities[reason],
-    reason: `raw_observation_${reason}`,
+    reason: `${prefix}_${reason}`,
   };
 }
 
@@ -203,6 +228,7 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
     const raw = countBarsInSqlite(rawDb, 'raw_price_bars_1m', tokenCa, signalTsSec, endTs);
     const legacy = countBarsInSqlite(signalDb, 'kline_1m', tokenCa, signalTsSec, endTs);
     const cache = countRepositoryBars(service, tokenCa, signalTsSec, endTs);
+    const outcome = getRawSignalOutcome(rawDb, tokenCa, signalTsSec);
     const observation = getRawSignalObservation(rawDb, tokenCa, signalTsSec);
     const pathCount = raw.count + legacy.count + cache.count;
     const baselineCount = raw.baseline_count + legacy.baseline_count + cache.baseline_count;
@@ -228,7 +254,15 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
       priority = matured ? 9 : 11;
       priorityReason = 'raw_path_zero_volume_needs_gmgn_enrichment';
     }
-    const anchorPriority = anchorBackfillPriority(observation);
+    const outcomeAnchorPriority = anchorBackfillPriority(outcome, {
+      statusField: 'observation_status',
+      prefix: 'raw_outcome',
+    });
+    const observationAnchorPriority = anchorBackfillPriority(observation, {
+      statusField: 'status',
+      prefix: 'raw_observation',
+    });
+    const anchorPriority = outcomeAnchorPriority || observationAnchorPriority;
     if (anchorPriority) {
       priority = anchorPriority.priority;
       priorityReason = anchorPriority.reason;
@@ -243,10 +277,15 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
       raw_path_gmgn_or_amm_bars: raw.gmgn_or_amm_count,
       raw_path_gecko_zero_volume_bars: raw.gecko_zero_volume_count,
       raw_path_needs_volume_enrichment: raw.count > 0 && raw.nonzero_volume_count <= 0 && raw.gecko_zero_volume_count > 0,
+      raw_path_outcome_coverage_reason: outcome?.coverage_reason || null,
+      raw_path_outcome_baseline_lag_sec: outcome?.baseline_lag_sec ?? null,
+      raw_path_outcome_first_bar_lag_sec: outcome?.first_bar_lag_sec ?? null,
+      raw_path_outcome_kline_covered: outcome?.kline_covered ?? null,
+      raw_path_outcome_needs_anchor_backfill: Boolean(outcomeAnchorPriority),
       raw_path_observation_coverage_reason: observation?.coverage_reason || null,
       raw_path_observation_first_bar_lag_sec: observation?.first_bar_lag_sec ?? null,
       raw_path_observation_path_row_count: observation?.path_row_count ?? null,
-      raw_path_observation_needs_anchor_backfill: Boolean(anchorPriority),
+      raw_path_observation_needs_anchor_backfill: Boolean(observationAnchorPriority),
       legacy_kline_existing_bars: legacy.count,
       cache_existing_bars: cache.count,
       existing_path_bars: pathCount,
@@ -324,6 +363,7 @@ function signalNeedsProviderBackfill(signal) {
   return Number(signal.existing_path_bars || 0) <= 0
     || Number(signal.existing_baseline_bars || 0) <= 0
     || Boolean(signal.raw_path_needs_volume_enrichment)
+    || Boolean(signal.raw_path_outcome_needs_anchor_backfill)
     || Boolean(signal.raw_path_observation_needs_anchor_backfill);
 }
 
@@ -646,6 +686,11 @@ async function main() {
           raw_path_gmgn_or_amm_bars: signal.raw_path_gmgn_or_amm_bars,
           raw_path_gecko_zero_volume_bars: signal.raw_path_gecko_zero_volume_bars,
           raw_path_needs_volume_enrichment: Boolean(signal.raw_path_needs_volume_enrichment),
+          raw_path_outcome_coverage_reason: signal.raw_path_outcome_coverage_reason || null,
+          raw_path_outcome_baseline_lag_sec: signal.raw_path_outcome_baseline_lag_sec ?? null,
+          raw_path_outcome_first_bar_lag_sec: signal.raw_path_outcome_first_bar_lag_sec ?? null,
+          raw_path_outcome_kline_covered: signal.raw_path_outcome_kline_covered ?? null,
+          raw_path_outcome_needs_anchor_backfill: Boolean(signal.raw_path_outcome_needs_anchor_backfill),
           raw_path_observation_coverage_reason: signal.raw_path_observation_coverage_reason || null,
           raw_path_observation_first_bar_lag_sec: signal.raw_path_observation_first_bar_lag_sec ?? null,
           raw_path_observation_path_row_count: signal.raw_path_observation_path_row_count ?? null,
@@ -738,6 +783,11 @@ async function main() {
         raw_path_gmgn_or_amm_bars: signal.raw_path_gmgn_or_amm_bars,
         raw_path_gecko_zero_volume_bars: signal.raw_path_gecko_zero_volume_bars,
         raw_path_needs_volume_enrichment: Boolean(signal.raw_path_needs_volume_enrichment),
+        raw_path_outcome_coverage_reason: signal.raw_path_outcome_coverage_reason || null,
+        raw_path_outcome_baseline_lag_sec: signal.raw_path_outcome_baseline_lag_sec ?? null,
+        raw_path_outcome_first_bar_lag_sec: signal.raw_path_outcome_first_bar_lag_sec ?? null,
+        raw_path_outcome_kline_covered: signal.raw_path_outcome_kline_covered ?? null,
+        raw_path_outcome_needs_anchor_backfill: Boolean(signal.raw_path_outcome_needs_anchor_backfill),
         raw_path_observation_coverage_reason: signal.raw_path_observation_coverage_reason || null,
         raw_path_observation_first_bar_lag_sec: signal.raw_path_observation_first_bar_lag_sec ?? null,
         raw_path_observation_path_row_count: signal.raw_path_observation_path_row_count ?? null,

@@ -282,6 +282,97 @@ test('raw path observer prioritizes anchor gaps recorded by raw signal observati
   rawDb.close();
 });
 
+test('raw path observer prioritizes denominator coverage failures from raw outcomes', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    );
+    CREATE TABLE raw_signal_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      observation_status TEXT,
+      coverage_reason TEXT,
+      kline_covered INTEGER,
+      baseline_ts INTEGER,
+      baseline_lag_sec REAL,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    );
+    CREATE TABLE raw_signal_observations (
+      signal_id TEXT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      status TEXT,
+      coverage_reason TEXT,
+      path_row_count INTEGER,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    )
+  `);
+  const insertBar = rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume, provider, source_kind)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  for (let idx = 0; idx < 12; idx += 1) {
+    insertBar.run('DOG', 1000 + idx * 60, 10, 'gmgn', 'indexed_ohlcv');
+    insertBar.run('OK', 1000 + idx * 60, 10, 'gmgn', 'indexed_ohlcv');
+  }
+  rawDb.prepare(`
+    INSERT INTO raw_signal_outcomes (
+      token_ca, signal_ts, observation_status, coverage_reason,
+      kline_covered, baseline_lag_sec, first_bar_lag_sec, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('DOG', 1000, 'matured', 'no_kline_after_anchor', 0, null, null, 3000);
+  rawDb.prepare(`
+    INSERT INTO raw_signal_observations (
+      signal_id, token_ca, signal_ts, status, coverage_reason,
+      path_row_count, first_bar_lag_sec, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('1', 'DOG', 1000, 'matured', 'raw_path_after_early_window', 12, 900, 2000);
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'DOG', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'OK', signal_ts: 1000 }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now: 10_000,
+    horizonSec: 7200,
+  });
+
+  assert.equal(ranked[0].token_ca, 'DOG');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_outcome_no_kline_after_anchor');
+  assert.equal(ranked[0].raw_path_outcome_needs_anchor_backfill, true);
+  assert.equal(ranked[0].raw_path_observation_needs_anchor_backfill, true);
+  signalDb.close();
+  rawDb.close();
+});
+
 test('raw path observer requeues Gecko zero-volume paths for GMGN volume enrichment', () => {
   const signalDb = new Database(':memory:');
   const rawDb = new Database(':memory:');
