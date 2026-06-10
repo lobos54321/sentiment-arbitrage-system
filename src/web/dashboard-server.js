@@ -3132,7 +3132,7 @@ function rawOutcomeEligibleSql() {
   `;
 }
 
-function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
+export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
   const rawDbPath = getRawSignalOutcomesDbPath();
   const sinceTs = Math.floor(Date.now() / 1000) - Math.max(1, Number(hours) || 24) * 3600;
   if (!fs.existsSync(rawDbPath)) {
@@ -3332,6 +3332,21 @@ function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTa
   } finally {
     try { if (db) db.close(); } catch {}
   }
+}
+
+function forceLiveQueryRequested(url) {
+  return ['1', 'true', 'yes'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+    || ['0', 'false', 'no'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+}
+
+function safeRawDogWindowHours(url, defaultHours = 24) {
+  const explicit = parseUnixishTime(url.searchParams.get('since') || url.searchParams.get('since_ts'));
+  if (explicit) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    return Math.max(1, Math.min(24 * 120, Math.ceil(Math.max(0, nowSec - explicit) / 3600) || defaultHours));
+  }
+  return parseWindowHoursParam(url.searchParams.get('window'))
+    ?? (Number.parseInt(url.searchParams.get('hours') || String(defaultHours), 10) || defaultHours);
 }
 
 function envBool(name, defaultValue = false) {
@@ -10322,6 +10337,7 @@ const server = http.createServer(async (req, res) => {
       },
       review_apis: {
         rolling_24h_goal: `${origin}/api/goal/rolling-24h?token=${tokenHint}`,
+        raw_dog_discovery: `${origin}/api/paper/raw-dog-discovery?token=${tokenHint}&window=24h&limit=200`,
         a_class_status: `${origin}/api/a-class/status?token=${tokenHint}&hours=24`,
         a_class_events: `${origin}/api/a-class/events?token=${tokenHint}&hours=24&limit=500`,
         a_class_block_causes: `${origin}/api/a-class/block-causes?token=${tokenHint}&hours=24&limit=100`,
@@ -10765,13 +10781,59 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/raw-dog-discovery') {
     if (!checkAuth(req, url, res)) return;
     try {
+      const forceLive = forceLiveQueryRequested(url);
+      const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
+      if (!forceLive) {
+        const hours = Math.max(1, Math.min(safeRawDogWindowHours(url, 24), 24 * 120));
+        const limit = boundedIntParam(url, 'limit', 200, 0, 500);
+        const rolling = readRawSignalOutcomeRollingSummary({
+          hours,
+          limit,
+          coverageTargetPct,
+        });
+        res.writeHead(rolling.available ? 200 : 202, apiJsonHeaders());
+        res.end(JSON.stringify({
+          schema_version: 'raw_dog_discovery_api.v1',
+          generated_at: new Date().toISOString(),
+          materialized: true,
+          live_query: false,
+          source: 'durable_raw_signal_outcomes_rolling_summary',
+          window_hours: hours,
+          ...rolling,
+          summary: rolling.summary || null,
+          decision_funnel: rolling.decision_funnel || null,
+          coverage: rolling.coverage || null,
+          top_raw_dogs: rolling.top_raw_dogs || [],
+          missed_raw_dogs: rolling.missed_raw_dogs || [],
+          coverage_gap_tokens: [],
+          pending_outcomes: [],
+          notes: {
+            capture_definition: 'raw_dog_entered means a paper trade touched the raw sustained dog before peak; raw_dog_realized means the trade held to silver/gold peak. Entered alone is not capture.',
+            censoring: 'Signals whose full horizon has not matured are right_censored_open and excluded from denominators.',
+            denominator: 'Only high/medium baseline confidence, same-source path, non-outlier, sustained-evaluable outcomes enter the main raw dog denominator.',
+            zero_denominator: '0/0 rates are null/undefined, never interpreted as 0%.',
+            live_safety: 'Default reads the durable raw_signal_outcomes DB so external review cannot trigger a live premium-signal/kline rebuild. Pass live=1 for a guarded short-window rebuild.',
+            ...(rolling.notes || {}),
+          },
+        }, null, 2));
+        return;
+      }
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 500,
+        maxLimit: 1000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
       const signalDb = getDb();
-      const sinceTs = reportSinceTs(url, '6h');
-      const limit = boundedIntParam(url, 'limit', 5000, 1, 20000);
+      const sinceTs = liveGuard.since_ts;
+      const limit = liveGuard.limit;
       const nowTs = parseUnixishTime(url.searchParams.get('now_ts')) || Math.floor(Date.now() / 1000);
       const horizonSec = boundedIntParam(url, 'horizon_sec', 7200, 300, 24 * 3600);
       const baselineMaxLagSec = boundedIntParam(url, 'baseline_max_lag_sec', 300, 0, 3600);
-      const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
       const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
       const snapshot = buildRawDogDiscoverySnapshot({
         signalDb,
@@ -10786,6 +10848,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         schema_version: 'raw_dog_discovery_api.v1',
+        materialized: false,
+        live_query: true,
+        requested_window_hours: safeRawDogWindowHours(url, 2),
+        window_hours: liveGuard.window_hours,
         ...snapshot,
         summary: snapshot.report?.summary || null,
         decision_funnel: snapshot.report?.decision_funnel || null,
@@ -15154,9 +15220,55 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     let paperDb;
+    let releasePaperReport;
     try {
-      const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
-      const recentLimit = boundedIntParam(url, 'limit', 50, 0, 500);
+      const requestedHours = boundedIntParam(url, 'hours', 6, 1, 168);
+      const forceLive = forceLiveQueryRequested(url);
+      if (!forceLive) {
+        const materializedHours = nearestLivePaperReviewHours(Math.min(requestedHours, 24));
+        const liveSnapshot = readLivePaperReview(materializedHours);
+        const aClassSection = liveSnapshot && !liveSnapshot.error ? (liveSnapshot.a_class || null) : null;
+        res.writeHead(202, apiJsonHeaders());
+        res.end(JSON.stringify({
+          generated_at: new Date().toISOString(),
+          db_path: paperDbPath,
+          available: false,
+          materialized: true,
+          live_query: false,
+          requested_window_hours: requestedHours,
+          materialized_window_hours: materializedHours,
+          materialized_snapshot_id: liveSnapshot?.snapshot_id || null,
+          materialized_generated_at: liveSnapshot?.generated_at || null,
+          reason: liveSnapshot?.error || (liveSnapshot ? 'a_class_block_cause_breakdown_not_materialized' : 'materialized_snapshot_not_ready'),
+          path: livePaperReviewPath(materializedHours),
+          a_class_summary: aClassSection ? {
+            available: aClassSection.available ?? false,
+            total: aClassSection.total ?? null,
+            would_enter: aClassSection.would_enter ?? null,
+            enter: aClassSection.enter ?? null,
+            action_summary: aClassSection.action_summary || [],
+            hydrate_summary: aClassSection.hydrate_summary || [],
+            hydrate_source_summary: aClassSection.hydrate_source_summary || [],
+            hard_blockers: aClassSection.hard_blockers || [],
+          } : null,
+          note: 'Default is materialized-only so external review cannot trigger a live A_CLASS block-cause DB scan. Pass live=1 for a guarded short-window scan.',
+        }, null, 2));
+        return;
+      }
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 2,
+        maxHours: 2,
+        defaultLimit: 50,
+        maxLimit: 100,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const sinceTs = liveGuard.since_ts;
+      const recentLimit = liveGuard.limit;
       const sourceFilter = String(url.searchParams.get('source') || 'all').trim().toLowerCase();
       paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -15290,15 +15402,20 @@ const server = http.createServer(async (req, res) => {
         ...breakdown,
         db_path: paperDbPath,
         available: rows.length > 0,
+        materialized: false,
+        live_query: true,
         source_issues: sourceIssues,
         source_filter: sourceFilter,
         since_ts: sinceTs,
         since_iso: sinceTs == null ? null : new Date(sinceTs * 1000).toISOString(),
+        window_hours: liveGuard.window_hours,
+        requested_limit: Number.parseInt(url.searchParams.get('limit') || String(recentLimit), 10) || recentLimit,
       }, null, 2));
     } catch (e) {
       res.writeHead(500, apiJsonHeaders());
       res.end(JSON.stringify({ error: e.message }));
     } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;

@@ -40,6 +40,7 @@ import {
   readPaperDbRuntimeHealth,
   readPaperFastLaneHealth,
   readPaperReviewSnapshotHealth,
+  readRawSignalOutcomeRollingSummary,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   LOG_REDACTION_PATTERN_SET,
@@ -1850,6 +1851,83 @@ test('dog catch goal can be served from materialized live snapshot section', () 
   assert.equal(progress.materialized_snapshot_id, 'paper_live_2h_test');
   assert.equal(progress.goal.eligible_gold_silver_unique, 3);
   assert.equal(progress.missed.by_blocker[0].reject_reason, 'tracking_ttl_expired');
+});
+
+test('raw dog rolling summary reads durable raw DB without live rebuild', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'rawdog-rolling-'));
+  const rawDbPath = join(dir, 'raw_signal_outcomes.db');
+  const oldRawDb = process.env.RAW_SIGNAL_OUTCOMES_DB;
+  const oldPaperDb = process.env.PAPER_DB;
+  process.env.RAW_SIGNAL_OUTCOMES_DB = rawDbPath;
+  process.env.PAPER_DB = join(dir, 'missing-paper.db');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const db = new Database(rawDbPath);
+  try {
+    db.exec(`
+      CREATE TABLE raw_signal_outcomes (
+        signal_id TEXT,
+        symbol TEXT,
+        token_ca TEXT,
+        signal_ts INTEGER,
+        observation_status TEXT,
+        right_censored INTEGER,
+        kline_covered INTEGER,
+        baseline_confidence TEXT,
+        same_source_path INTEGER,
+        outlier_flag INTEGER,
+        sustained_evaluable INTEGER,
+        raw_primary_tier TEXT,
+        raw_wick_tier TEXT,
+        raw_dog_entered INTEGER,
+        raw_dog_realized INTEGER,
+        sold_before_silver INTEGER,
+        sold_before_gold INTEGER,
+        max_sustained_peak_pct REAL,
+        max_wick_peak_pct REAL,
+        time_to_sustained_peak_sec INTEGER,
+        did_enter INTEGER,
+        held_to_silver INTEGER,
+        held_to_gold INTEGER,
+        exit_reason TEXT,
+        coverage_reason TEXT
+      );
+    `);
+    db.prepare(`
+      INSERT INTO raw_signal_outcomes (
+        signal_id, symbol, token_ca, signal_ts, observation_status, right_censored,
+        kline_covered, baseline_confidence, same_source_path, outlier_flag,
+        sustained_evaluable, raw_primary_tier, raw_wick_tier,
+        raw_dog_entered, raw_dog_realized, sold_before_silver, sold_before_gold,
+        max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+        did_enter, held_to_silver, held_to_gold, exit_reason, coverage_reason
+      ) VALUES (
+        'sig-1', 'DOG', 'token-dog', @signalTs, 'matured', 0,
+        1, 'high', 1, 0,
+        1, 'silver', 'silver',
+        0, 0, 0, 0,
+        0.72, 0.9, 420,
+        0, 0, 0, NULL, 'covered'
+      )
+    `).run({ signalTs: nowSec - 3600 });
+
+    const summary = readRawSignalOutcomeRollingSummary({ hours: 24, limit: 10, coverageTargetPct: 80 });
+    assert.equal(summary.available, true);
+    assert.equal(summary.schema_version, 'raw_signal_outcomes_rolling_summary.v1');
+    assert.equal(summary.summary.total_signals, 1);
+    assert.equal(summary.summary.matured_signals, 1);
+    assert.equal(summary.summary.raw_denominator_matured_only, 1);
+    assert.equal(summary.summary.raw_sustained_gold_silver_unique, 1);
+    assert.equal(summary.summary.denominator_status, 'evaluable');
+    assert.equal(summary.top_raw_dogs.length, 1);
+    assert.equal(summary.decision_funnel.summary.raw_sustained_dogs, 1);
+    assert.equal(summary.decision_funnel.summary.no_decision_record, 1);
+  } finally {
+    db.close();
+    if (oldRawDb === undefined) delete process.env.RAW_SIGNAL_OUTCOMES_DB;
+    else process.env.RAW_SIGNAL_OUTCOMES_DB = oldRawDb;
+    if (oldPaperDb === undefined) delete process.env.PAPER_DB;
+    else process.env.PAPER_DB = oldPaperDb;
+  }
 });
 
 test('rolling 24h goal status is calculated from materialized snapshot', () => {
