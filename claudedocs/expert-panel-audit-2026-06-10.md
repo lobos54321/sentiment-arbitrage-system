@@ -48,6 +48,16 @@
 
 不动 gate/matrix/RR/exit 参数;不基于 live 滚动窗口下策略结论(frozen pack 为审计基准);在入口黑盒(D)解决前不宣布"底座已稳";样本 n≈10-33 只读方向。
 
+## 5.5 补充实测(2026-06-10 当天,GeckoTerminal multi-token 探针,n=16/64 抽样)
+
+**狗 = pump.fun 临毕业币,实锤。** 64 只 sustained 金银狗中 53 只地址带 `pump` 后缀;16 只抽样对照"信号时间 vs 池子创建时间": **14/16 信号时刻无可用 AMM 池**(10 只在毕业前 5-77 分钟、3 只毕业瞬间 ±1m、2 只永在曲线),仅 1 只(letsbonk→raydium)信号前已有池。明细: `/private/tmp/sas-audit-download/dog_pool_probe_table.md`。
+
+含义(修正/确认前文):
+1. volume=0 / liquidity_unknown / amm 轨道 0 触达,**全部是同一个结构性原因: 观测与决策窗口卡在 bonding-curve 阶段,AMM 证据当时不存在**——不是 gecko 故障,也大概率不是 hydrator 预算问题(修正执行 memo 的"INFRA 可修"倾向,待 provider_hydrate_outcome 导出定案);
+2. **final_entry_contract 的可成交定义(AMM liquidity/spread)结构性排除曲线期 → 对这批狗 capture≈0 是定义的必然,不是 gate 参数太严**。要 60% capture 就必须能在曲线期形成证据并交易(或显式接受只抓毕业后段+重定义目标);
+3. 早期 5-15m 逐bar volume 的真值只可能来自: **GMGN(原生覆盖 pump.fun 曲线)或 Helius 链上解码 pump.fun program**;gecko 曲线期有聚合量(token 级 vol24)但无逐bar量(522/522=0 实测);毕业后 pumpswap 池谁都行——**且 observer 毕业后没重选池(毕业后的 bar 也全 0 量)= 一个便宜的 wiring 修复点**;
+4. 剩余唯一决定性未知: GMGN 对这些 token 的**毕业前** 1m bars 是否带量 → GMGN_API_KEY 只在 Zeabur 环境,touch 测试必须在服务器 shell 跑。
+
 ## 6. 对 60/60/200 的诚实回答
 
 - **capture 60%**: 三层相乘逻辑适用于它(每层 ~84%);当前不可观测;replay 暗示 exit 架构本身可能把上限压在远低于 60% 的位置 → 大概率要"上游修复 + exit 重设计"两步。
