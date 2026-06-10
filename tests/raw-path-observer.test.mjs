@@ -15,6 +15,7 @@ import {
   getProviderBackoff,
   isProviderRateLimitError,
   rankSignalsForBackfill,
+  selectUniqueSignals,
   setProviderBackoff,
 } from '../scripts/run-raw-path-observer.js';
 
@@ -195,6 +196,88 @@ test('raw path observer prioritizes signals with no existing path over cache-cov
   assert.equal(ranked[0].raw_path_selection_reason, 'no_raw_legacy_or_cache_path');
   assert.equal(ranked[1].token_ca, 'CACHE_COVERED');
   assert.equal(ranked[1].raw_path_selection_reason, 'cache_or_legacy_only_no_raw_path');
+  signalDb.close();
+  rawDb.close();
+});
+
+test('raw path observer keeps distinct signal anchors for the same token', () => {
+  const selected = selectUniqueSignals([
+    signal({ id: 1, token_ca: 'DOG', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'DOG', signal_ts: 5000 }),
+    signal({ id: 3, token_ca: 'DOG', signal_ts: 5000 }),
+  ], 10);
+
+  assert.equal(selected.length, 2);
+  assert.deepEqual(selected.map((row) => row.signal_ts_sec), [5000, 1000]);
+  assert.equal(selected[0].id, 3);
+});
+
+test('raw path observer prioritizes anchor gaps recorded by raw signal observations', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    );
+    CREATE TABLE raw_signal_observations (
+      signal_id TEXT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      status TEXT,
+      coverage_reason TEXT,
+      path_row_count INTEGER,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    )
+  `);
+  const insertBar = rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume, provider, source_kind)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  for (let idx = 0; idx < 12; idx += 1) {
+    insertBar.run('DOG', 1000 + idx * 60, 10, 'gmgn', 'indexed_ohlcv');
+    insertBar.run('OK', 1000 + idx * 60, 10, 'gmgn', 'indexed_ohlcv');
+  }
+  rawDb.prepare(`
+    INSERT INTO raw_signal_observations (
+      signal_id, token_ca, signal_ts, status, coverage_reason,
+      path_row_count, first_bar_lag_sec, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('1', 'DOG', 1000, 'matured', 'baseline_after_max_lag', 12, 1200, 2000);
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'DOG', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'OK', signal_ts: 1000 }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now: 10_000,
+    horizonSec: 7200,
+  });
+
+  assert.equal(ranked[0].token_ca, 'DOG');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_observation_baseline_after_max_lag');
+  assert.equal(ranked[0].raw_path_observation_needs_anchor_backfill, true);
+  assert.equal(ranked[1].token_ca, 'OK');
+  assert.equal(ranked[1].raw_path_selection_reason, 'already_path_covered');
   signalDb.close();
   rawDb.close();
 });
