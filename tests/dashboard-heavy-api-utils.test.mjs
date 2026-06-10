@@ -28,6 +28,7 @@ import {
   buildLottoQuoteGapWinnerJoinReport,
   latestActionableFastLaneQueueByToken,
   buildRawDogDiscoveryApiPayloadFromRollingSummary,
+  dashboardEntrypointInfo,
   readRawDogDiscoveryApiSnapshot,
   resolveIncidentArtifactPath,
   writeRawDogDiscoveryApiSnapshot,
@@ -78,6 +79,15 @@ test('apiJsonHeaders defaults JSON responses to no-store', () => {
     'Cache-Control': 'no-store',
   });
   assert.equal(apiJsonHeaders('max-age=60')['Cache-Control'], 'max-age=60');
+});
+
+test('dashboardEntrypointInfo exposes process entrypoint without dumping env', () => {
+  const info = dashboardEntrypointInfo();
+  assert.equal(info.schema_version, 'dashboard_entrypoint.v1');
+  assert.equal(info.entrypoint_file, process.argv[1] || null);
+  assert.equal(info.argv1, process.argv[1] || null);
+  assert.ok(Object.hasOwn(info, 'npm_lifecycle_event'));
+  assert.ok(!Object.hasOwn(info, 'env'));
 });
 
 test('buildV27ManualEvidenceApiResponse preserves legacy schema and rejected error shape', () => {

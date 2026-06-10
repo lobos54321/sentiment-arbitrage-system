@@ -7432,6 +7432,21 @@ function runtimeCommitFingerprint() {
   }
 }
 
+export function dashboardEntrypointInfo() {
+  const argv1 = process.argv?.[1] || null;
+  return {
+    schema_version: 'dashboard_entrypoint.v1',
+    argv0: process.argv?.[0] || null,
+    argv1,
+    entrypoint_file: argv1,
+    entrypoint_basename: argv1 ? basename(argv1) : null,
+    npm_lifecycle_event: process.env.npm_lifecycle_event || null,
+    runtime_role_env: process.env.DASHBOARD_RUNTIME_ROLE || null,
+    embedded_dashboard_enabled: process.env.EMBEDDED_DASHBOARD_ENABLED || null,
+    process_name: process.env.name || null,
+  };
+}
+
 function reviewPolicyFingerprint(registrySummary = null) {
   const envKeys = [
     'HARD_GATE_PASS_TINY_PROBE_ENABLED',
@@ -9912,6 +9927,7 @@ const server = http.createServer(async (req, res) => {
       timestamp: Date.now(),
       commit: runtimeCommitFingerprint(),
       runtime_role: process.env.DASHBOARD_RUNTIME_ROLE || (process.env.EMBEDDED_DASHBOARD_ENABLED === 'false' ? 'worker' : 'standalone_or_embedded_dashboard'),
+      entrypoint: dashboardEntrypointInfo(),
       pid: process.pid,
       port: PORT,
       uptime_seconds: Math.floor(process.uptime()),

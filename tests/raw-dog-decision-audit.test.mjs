@@ -82,6 +82,8 @@ test('audits only same-bucket duds against quote-clean no-would-enter raw dogs',
         token_ca: 'DOG',
         lifecycle_id: 'life-dog',
         hard_blockers_json: '["scout_quality_volume_low"]',
+        provider_hydrate_outcome: 'infra_fail',
+        provider_reason: 'liquidity_unknown',
       }),
       decision({ token_ca: 'DUD_A', lifecycle_id: 'life-dud-a' }),
       decision({
@@ -108,6 +110,10 @@ test('audits only same-bucket duds against quote-clean no-would-enter raw dogs',
   assert.equal(audit.raw_dog_gate_reasons.gate_reason_counts.scout_quality_volume_low, 1);
   assert.equal(audit.raw_dog_gate_reasons.gate_reason_counts['matrix:matrix_score_below_threshold'], 1);
   assert.equal(audit.raw_dog_gate_reasons.score_bands.matrix_score_below_70, 1);
+  assert.equal(audit.hydrate_outcome_counts.infra_fail, 1);
+  assert.equal(audit.dog_rows[0].provider_hydrate_outcome, 'infra_fail');
+  assert.equal(audit.dog_rows[0].provider_hydrate_reason, 'liquidity_unknown');
+  assert.equal(audit.dog_rows[0].best_decision_record.provider_hydrate_outcome, 'infra_fail');
   assert.equal(report.interpretation.do_not_change_strategy, true);
 });
 

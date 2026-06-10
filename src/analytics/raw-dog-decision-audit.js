@@ -39,7 +39,10 @@ function increment(map, key, amount = 1) {
 
 function countBy(rows = [], field) {
   const out = {};
-  for (const row of rows || []) increment(out, row?.[field] ?? 'unknown');
+  for (const row of rows || []) {
+    const value = typeof field === 'function' ? field(row) : row?.[field];
+    increment(out, value ?? 'unknown');
+  }
   return out;
 }
 
@@ -165,6 +168,8 @@ function volumeSummary(rows = []) {
 
 function compactDogRow(row = {}) {
   const record = bestRecord(row);
+  const hydrateOutcome = record.provider_hydrate_outcome || record.hydrate_outcome || null;
+  const hydrateReason = record.provider_reason || record.quote_failure_reason || record.route_failure_reason || null;
   return {
     token_ca: row.token_ca,
     symbol: row.symbol || null,
@@ -182,6 +187,8 @@ function compactDogRow(row = {}) {
     early_15m_positive_volume_bar_count: row.early_15m_positive_volume_bar_count ?? null,
     matched_by: row.matched_by || null,
     decision_record_count: row.decision_record_count || 0,
+    provider_hydrate_outcome: hydrateOutcome,
+    provider_hydrate_reason: hydrateReason,
     gate_reasons: collectGateReasons(row),
     best_decision_record: {
       source_kind: record.source_kind || null,
@@ -196,6 +203,11 @@ function compactDogRow(row = {}) {
       quote_clean: record.quote_clean ?? null,
       quote_executable: record.quote_executable ?? null,
       route_available: record.route_available ?? null,
+      provider_hydrate_outcome: hydrateOutcome,
+      provider_hydrate_reason: hydrateReason,
+      provider_reason: record.provider_reason || null,
+      quote_failure_reason: record.quote_failure_reason || null,
+      route_failure_reason: record.route_failure_reason || null,
     },
   };
 }
@@ -285,6 +297,10 @@ function buildRawDogDecisionAudit({
       comparison_duds_n: dudRows.length,
       raw_dog_gate_reasons: dogGate,
       dud_gate_reasons: dudGate,
+      hydrate_outcome_counts: countBy(dogRows, (row) => {
+        const record = bestRecord(row);
+        return record.provider_hydrate_outcome || record.hydrate_outcome || 'not_recorded';
+      }),
       entry_volume: {
         raw_dogs: volumeSummary(dogRows),
         comparison_duds: volumeSummary(dudRows),
