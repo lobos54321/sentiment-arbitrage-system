@@ -2819,7 +2819,7 @@ function readKlineCachePathRows(tokens, startTs, endTs) {
   }
 }
 
-function buildRawDogDiscoverySnapshot({
+export function buildRawDogDiscoverySnapshot({
   signalDb,
   paperDbPath = getPaperDbPath(),
   sinceTs = null,
@@ -3132,7 +3132,7 @@ function rawOutcomeEligibleSql() {
   `;
 }
 
-function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
+export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
   const rawDbPath = getRawSignalOutcomesDbPath();
   const sinceTs = Math.floor(Date.now() / 1000) - Math.max(1, Number(hours) || 24) * 3600;
   if (!fs.existsSync(rawDbPath)) {
@@ -3378,7 +3378,7 @@ function rawDogDiscoveryObserverStatus() {
 
 function startRawDogDiscoveryObserver() {
   if (rawDogDiscoveryObserverTimer) return rawDogDiscoveryObserverStatus();
-  if (!envBool('RAW_DOG_DISCOVERY_OBSERVER_ENABLED', true)) {
+  if (!envBool('RAW_DOG_DISCOVERY_OBSERVER_ENABLED', false)) {
     rawDogDiscoveryObserverState.enabled = false;
     rawDogDiscoveryObserverState.last_error = 'disabled_by_RAW_DOG_DISCOVERY_OBSERVER_ENABLED';
     return rawDogDiscoveryObserverStatus();
@@ -9797,6 +9797,7 @@ const server = http.createServer(async (req, res) => {
       paper_db_health: paperDbHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
       raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
+      raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || null,
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
       dashboard_request_metrics: {
         active_count: dashboardRequestMetrics.active.size,
@@ -10765,13 +10766,56 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/raw-dog-discovery') {
     if (!checkAuth(req, url, res)) return;
     try {
+      const liveRequested = ['1', 'true', 'yes', 'on'].includes(String(url.searchParams.get('live') || '').toLowerCase())
+        || ['0', 'false', 'no', 'off'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
+      const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
+      if (!liveRequested) {
+        const requestedHours = parseWindowHoursParam(url.searchParams.get('window'))
+          || boundedIntParam(url, 'hours', 24, 1, 168);
+        const materializedLimit = boundedIntParam(url, 'limit', 50, 1, 500);
+        const snapshot = readRawSignalOutcomeRollingSummary({
+          hours: requestedHours,
+          limit: materializedLimit,
+          coverageTargetPct,
+        });
+        res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
+        res.end(JSON.stringify({
+          schema_version: 'raw_dog_discovery_api.v1',
+          materialized: true,
+          live_query: false,
+          source: 'durable_raw_signal_outcomes_rolling_summary',
+          ...snapshot,
+          summary: snapshot.summary || null,
+          decision_funnel: snapshot.decision_funnel || null,
+          coverage: snapshot.coverage || null,
+          top_raw_dogs: snapshot.top_raw_dogs || [],
+          missed_raw_dogs: snapshot.missed_raw_dogs || [],
+          coverage_gap_tokens: [],
+          pending_outcomes: [],
+          notes: {
+            ...(snapshot.notes || {}),
+            live_query: 'Default is materialized from durable raw_signal_outcomes.db. Pass live=1 for a bounded live rebuild (max 2h / 1000 rows).',
+          },
+        }, null, 2));
+        return;
+      }
+      const guard = livePaperQueryGuard(url, 'raw_dog_discovery_live', {
+        defaultHours: 1,
+        maxHours: 2,
+        defaultLimit: 500,
+        maxLimit: 1000,
+      });
+      if (!guard.allowed) {
+        res.writeHead(400, apiJsonHeaders());
+        res.end(JSON.stringify(guard, null, 2));
+        return;
+      }
       const signalDb = getDb();
-      const sinceTs = reportSinceTs(url, '6h');
-      const limit = boundedIntParam(url, 'limit', 5000, 1, 20000);
+      const sinceTs = guard.since_ts;
+      const limit = guard.limit;
       const nowTs = parseUnixishTime(url.searchParams.get('now_ts')) || Math.floor(Date.now() / 1000);
       const horizonSec = boundedIntParam(url, 'horizon_sec', 7200, 300, 24 * 3600);
       const baselineMaxLagSec = boundedIntParam(url, 'baseline_max_lag_sec', 300, 0, 3600);
-      const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
       const persist = !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
       const snapshot = buildRawDogDiscoverySnapshot({
         signalDb,
@@ -10786,6 +10830,9 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         schema_version: 'raw_dog_discovery_api.v1',
+        materialized: false,
+        live_query: true,
+        live_guard: guard,
         ...snapshot,
         summary: snapshot.report?.summary || null,
         decision_funnel: snapshot.report?.decision_funnel || null,

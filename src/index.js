@@ -293,6 +293,9 @@ let indexRuntimeSupervisorStopping = false;
 let rawPathObserverChild = null;
 let rawPathObserverTimer = null;
 let rawPathObserverStopping = false;
+let rawDogDiscoveryChild = null;
+let rawDogDiscoveryTimer = null;
+let rawDogDiscoveryStopping = false;
 
 function indexRuntimeLogPath() {
   return process.env.NODE_RUNTIME_LOG_PATH || join(
@@ -320,6 +323,18 @@ function appendRawPathObserverOutput(chunk, stream = process.stdout) {
   } catch {}
   try {
     const logPath = rawPathObserverLogPath();
+    fs.mkdirSync(dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, text);
+  } catch {}
+}
+
+function appendRawDogDiscoveryOutput(chunk, stream = process.stdout) {
+  const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+  try {
+    stream.write(text);
+  } catch {}
+  try {
+    const logPath = rawDogDiscoveryLogPath();
     fs.mkdirSync(dirname(logPath), { recursive: true });
     fs.appendFileSync(logPath, text);
   } catch {}
@@ -369,6 +384,45 @@ function rawPathObserverRunTimeoutMs() {
 function rawPathObserverEnabled() {
   const hasProvider = Boolean(process.env.HELIUS_API_KEY || process.env.HELIUS_RPC_URL);
   return envFlag('RAW_PATH_OBSERVER_ENABLED', hasProvider);
+}
+
+function rawDogDiscoveryLogPath() {
+  return process.env.RAW_DOG_DISCOVERY_OBSERVER_LOG || join(
+    process.env.DASHBOARD_RUNTIME_LOG_DIR || runtimeDataDir(),
+    'raw-dog-discovery-observer.log',
+  );
+}
+
+function rawDogDiscoveryIntervalMs() {
+  const raw = Number(process.env.RAW_DOG_DISCOVERY_OBSERVER_INTERVAL_SEC || 300);
+  const value = Number.isFinite(raw) ? raw : 300;
+  return Math.max(60, Math.min(3600, value)) * 1000;
+}
+
+function rawDogDiscoveryRunTimeoutMs() {
+  const raw = Number(process.env.RAW_DOG_DISCOVERY_OBSERVER_RUN_TIMEOUT_SEC || 180);
+  const value = Number.isFinite(raw) ? raw : 180;
+  return Math.max(30, Math.min(900, value)) * 1000;
+}
+
+function rawDogDiscoveryWorkerEnabled() {
+  return envFlag('RAW_DOG_DISCOVERY_WORKER_ENABLED', true);
+}
+
+function updateRawDogDiscoveryStatus(patch = {}) {
+  global.__rawDogDiscoveryWorkerStatus = {
+    schema_version: 'raw_dog_discovery_worker.v1',
+    enabled: rawDogDiscoveryWorkerEnabled(),
+    observe_only: true,
+    running: Boolean(rawDogDiscoveryChild && rawDogDiscoveryChild.exitCode == null && rawDogDiscoveryChild.signalCode == null),
+    pid: rawDogDiscoveryChild?.pid || null,
+    interval_sec: Math.floor(rawDogDiscoveryIntervalMs() / 1000),
+    run_timeout_sec: Math.floor(rawDogDiscoveryRunTimeoutMs() / 1000),
+    log_path: rawDogDiscoveryLogPath(),
+    updated_at: new Date().toISOString(),
+    ...(global.__rawDogDiscoveryWorkerStatus || {}),
+    ...patch,
+  };
 }
 
 function updateRawPathObserverStatus(patch = {}) {
@@ -548,6 +602,162 @@ function stopRawPathObserverSupervisor(signal) {
   }
 }
 
+function startRawDogDiscoverySupervisor() {
+  updateRawDogDiscoveryStatus();
+  if (!rawDogDiscoveryWorkerEnabled()) {
+    updateRawDogDiscoveryStatus({
+      enabled: false,
+      last_error: 'disabled_by_RAW_DOG_DISCOVERY_WORKER_ENABLED',
+    });
+    return;
+  }
+  if (rawDogDiscoveryTimer || rawDogDiscoveryChild) return;
+
+  const scheduleNext = (delayMs = rawDogDiscoveryIntervalMs()) => {
+    if (rawDogDiscoveryStopping) return;
+    updateRawDogDiscoveryStatus({
+      next_run_at: new Date(Date.now() + delayMs).toISOString(),
+      running: false,
+      pid: null,
+    });
+    rawDogDiscoveryTimer = setTimeout(runOnce, delayMs);
+    if (typeof rawDogDiscoveryTimer.unref === 'function') rawDogDiscoveryTimer.unref();
+  };
+
+  const runOnce = () => {
+    rawDogDiscoveryTimer = null;
+    if (rawDogDiscoveryStopping) return;
+    if (rawDogDiscoveryChild && rawDogDiscoveryChild.exitCode == null && rawDogDiscoveryChild.signalCode == null) {
+      scheduleNext();
+      return;
+    }
+    const args = [
+      ...process.execArgv,
+      'scripts/run-raw-dog-discovery-observer.js',
+    ];
+    const startedAt = new Date().toISOString();
+    let stdoutBuffer = '';
+    let childSettled = false;
+    let runTimeoutTimer = null;
+    updateRawDogDiscoveryStatus({
+      running: false,
+      last_start_attempt_at: startedAt,
+      command: `${process.execPath} ${args.join(' ')}`,
+      next_run_at: null,
+    });
+    appendRawDogDiscoveryOutput(`[raw-dog-discovery-supervisor] ${startedAt} starting: ${args.join(' ')}\n`);
+    rawDogDiscoveryChild = spawn(process.execPath, args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        RAW_SIGNAL_OUTCOMES_DB: process.env.RAW_SIGNAL_OUTCOMES_DB || join(runtimeDataDir(), 'raw_signal_outcomes.db'),
+        DB_PATH: process.env.DB_PATH || process.env.SENTIMENT_DB || join(runtimeDataDir(), 'sentiment_arb.db'),
+        SENTIMENT_DB: process.env.SENTIMENT_DB || process.env.DB_PATH || join(runtimeDataDir(), 'sentiment_arb.db'),
+        PAPER_DB: process.env.PAPER_DB || join(runtimeDataDir(), 'paper_trades.db'),
+        KLINE_CACHE_DB: process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(runtimeDataDir(), 'kline_cache.db'),
+        RAW_DOG_DISCOVERY_OBSERVER_LIMIT: process.env.RAW_DOG_DISCOVERY_OBSERVER_LIMIT || '5000',
+        RAW_DOG_DISCOVERY_OBSERVER_WINDOW_HOURS: process.env.RAW_DOG_DISCOVERY_OBSERVER_WINDOW_HOURS || '24',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    runTimeoutTimer = setTimeout(() => {
+      if (childSettled) return;
+      if (!rawDogDiscoveryChild || rawDogDiscoveryChild.exitCode != null || rawDogDiscoveryChild.signalCode != null) return;
+      const timeoutSec = Math.floor(rawDogDiscoveryRunTimeoutMs() / 1000);
+      updateRawDogDiscoveryStatus({
+        last_timeout_at: new Date().toISOString(),
+        last_error: `raw_dog_discovery_timeout_${timeoutSec}s`,
+        timeout_count: Number(global.__rawDogDiscoveryWorkerStatus?.timeout_count || 0) + 1,
+      });
+      appendRawDogDiscoveryOutput(`[raw-dog-discovery-supervisor] timeout after ${timeoutSec}s; sending SIGTERM\n`, process.stderr);
+      try { rawDogDiscoveryChild.kill('SIGTERM'); } catch {}
+      setTimeout(() => {
+        if (childSettled) return;
+        if (rawDogDiscoveryChild && rawDogDiscoveryChild.exitCode == null && rawDogDiscoveryChild.signalCode == null) {
+          appendRawDogDiscoveryOutput('[raw-dog-discovery-supervisor] timeout child still running; sending SIGKILL\n', process.stderr);
+          try { rawDogDiscoveryChild.kill('SIGKILL'); } catch {}
+        }
+      }, 5000).unref();
+    }, rawDogDiscoveryRunTimeoutMs());
+    if (typeof runTimeoutTimer.unref === 'function') runTimeoutTimer.unref();
+    updateRawDogDiscoveryStatus({
+      enabled: true,
+      running: true,
+      pid: rawDogDiscoveryChild.pid || null,
+      started_at: startedAt,
+      last_error: null,
+      run_count: Number(global.__rawDogDiscoveryWorkerStatus?.run_count || 0) + 1,
+    });
+    rawDogDiscoveryChild.stdout.on('data', (chunk) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk || '');
+      stdoutBuffer += text;
+      if (stdoutBuffer.length > 2_000_000) stdoutBuffer = stdoutBuffer.slice(-2_000_000);
+      appendRawDogDiscoveryOutput(text, process.stdout);
+    });
+    rawDogDiscoveryChild.stderr.on('data', (chunk) => appendRawDogDiscoveryOutput(chunk, process.stderr));
+    rawDogDiscoveryChild.on('error', (error) => {
+      if (childSettled) return;
+      childSettled = true;
+      if (runTimeoutTimer) clearTimeout(runTimeoutTimer);
+      const message = error?.message || String(error);
+      updateRawDogDiscoveryStatus({
+        running: false,
+        pid: null,
+        last_error: message,
+        last_exit_at: new Date().toISOString(),
+        error_count: Number(global.__rawDogDiscoveryWorkerStatus?.error_count || 0) + 1,
+      });
+      appendRawDogDiscoveryOutput(`[raw-dog-discovery-supervisor] spawn error: ${message}\n`, process.stderr);
+      rawDogDiscoveryChild = null;
+      scheduleNext();
+    });
+    rawDogDiscoveryChild.on('exit', (code, signal) => {
+      if (childSettled) return;
+      childSettled = true;
+      if (runTimeoutTimer) clearTimeout(runTimeoutTimer);
+      const exitedAt = new Date().toISOString();
+      let lastSummary = null;
+      const jsonStart = stdoutBuffer.indexOf('{');
+      if (jsonStart >= 0) {
+        try { lastSummary = JSON.parse(stdoutBuffer.slice(jsonStart)); } catch {}
+      }
+      updateRawDogDiscoveryStatus({
+        running: false,
+        pid: null,
+        last_exit_at: exitedAt,
+        last_exit_code: code,
+        last_exit_signal: signal || null,
+        last_completed_at: code === 0 ? exitedAt : global.__rawDogDiscoveryWorkerStatus?.last_completed_at || null,
+        last_summary: lastSummary,
+        last_error: code === 0 ? null : `raw_dog_discovery_exit_${code ?? signal ?? 'unknown'}`,
+        error_count: code === 0
+          ? Number(global.__rawDogDiscoveryWorkerStatus?.error_count || 0)
+          : Number(global.__rawDogDiscoveryWorkerStatus?.error_count || 0) + 1,
+      });
+      appendRawDogDiscoveryOutput(`[raw-dog-discovery-supervisor] ${exitedAt} exited code=${code} signal=${signal || ''}; next run in ${Math.floor(rawDogDiscoveryIntervalMs() / 1000)}s\n`);
+      rawDogDiscoveryChild = null;
+      scheduleNext();
+    });
+  };
+
+  runOnce();
+}
+
+function stopRawDogDiscoverySupervisor(signal) {
+  rawDogDiscoveryStopping = true;
+  updateRawDogDiscoveryStatus({
+    shutdown_signal: signal,
+    shutdown_at: new Date().toISOString(),
+  });
+  if (rawDogDiscoveryTimer) {
+    clearTimeout(rawDogDiscoveryTimer);
+    rawDogDiscoveryTimer = null;
+  }
+  if (rawDogDiscoveryChild && rawDogDiscoveryChild.exitCode == null && rawDogDiscoveryChild.signalCode == null) {
+    try { rawDogDiscoveryChild.kill('SIGTERM'); } catch {}
+  }
+}
+
 function updateIndexRuntimeStatus(patch = {}) {
   global.__runtimeWorkerStatus = {
     schema_version: 'index_runtime_worker.v1',
@@ -644,6 +854,7 @@ function startIndexRuntimeChild() {
 function stopIndexRuntimeSupervisor(signal) {
   indexRuntimeSupervisorStopping = true;
   stopRawPathObserverSupervisor(signal);
+  stopRawDogDiscoverySupervisor(signal);
   updateIndexRuntimeStatus({
     shutdown_signal: signal,
     shutdown_at: new Date().toISOString(),
@@ -661,6 +872,7 @@ function startIndexRuntimeSupervisor() {
   startDashboardOnce();
   startRuntimeMaintenanceLoop();
   startRawPathObserverSupervisor();
+  startRawDogDiscoverySupervisor();
   updateIndexRuntimeStatus();
   process.on('SIGTERM', () => stopIndexRuntimeSupervisor('SIGTERM'));
   process.on('SIGINT', () => stopIndexRuntimeSupervisor('SIGINT'));
