@@ -148,7 +148,142 @@ test('raw path preference keeps one stream per token and prefers raw over legacy
   assert.equal(preferred.rows.length, 2);
   assert.equal(preferred.rows[0].provider, 'helius_amm_pool');
   assert.equal(preferred.rows[0].pool_address, 'amm-1');
-  assert.equal(preferred.decisions.DOG.source, 'raw_price_bars_1m');
+  assert.equal(preferred.decisions['DOG:1000'].source, 'raw_price_bars_1m');
+});
+
+test('raw path preference uses the stream compatible with each signal anchor', () => {
+  const rawPathRows = [
+    normalizeRawPathBar({
+      token_ca: 'DOGpump',
+      timestamp: 2200,
+      open: 2,
+      high: 2.1,
+      low: 1.9,
+      close: 2,
+      volume: 1000,
+      pool_address: 'gmgn-post-graduation',
+      provider: 'gmgn',
+      source_kind: 'indexed_ohlcv',
+    }),
+    normalizeRawPathBar({
+      token_ca: 'DOGpump',
+      timestamp: 2260,
+      open: 2,
+      high: 2.2,
+      low: 2,
+      close: 2.1,
+      volume: 900,
+      pool_address: 'gmgn-post-graduation',
+      provider: 'gmgn',
+      source_kind: 'indexed_ohlcv',
+    }),
+  ];
+  const legacyRows = [
+    {
+      token_ca: 'DOGpump',
+      timestamp: 1000,
+      open: 1,
+      high: 1,
+      low: 1,
+      close: 1,
+      volume: 0,
+      pool_address: 'gecko-virtual-pool',
+      provider: 'geckoterminal',
+      source_kind: 'indexed_ohlcv',
+    },
+    {
+      token_ca: 'DOGpump',
+      timestamp: 1060,
+      open: 1,
+      high: 1.8,
+      low: 1,
+      close: 1.7,
+      volume: 0,
+      pool_address: 'gecko-virtual-pool',
+      provider: 'geckoterminal',
+      source_kind: 'indexed_ohlcv',
+    },
+  ];
+
+  const preferred = mergePreferredPathRows({
+    signals: [signal({ token_ca: 'DOGpump', signal_ts: 1000 })],
+    rawPathRows,
+    klineRows: legacyRows,
+  });
+
+  assert.equal(preferred.rows.length, 2);
+  assert.equal(preferred.rows[0].provider, 'geckoterminal');
+  assert.equal(preferred.rows[0].pool_address, 'gecko-virtual-pool');
+  assert.equal(preferred.decisions['DOGpump:1000'].source, 'legacy_kline_1m');
+  assert.equal(preferred.decisions['DOGpump:1000'].provider, 'geckoterminal');
+});
+
+test('raw path preference can keep different streams for different anchors of the same token', () => {
+  const rawPathRows = [
+    normalizeRawPathBar({
+      token_ca: 'DOGpump',
+      timestamp: 2200,
+      open: 2,
+      high: 2.1,
+      low: 1.9,
+      close: 2,
+      volume: 1000,
+      pool_address: 'gmgn-post-graduation',
+      provider: 'gmgn',
+      source_kind: 'indexed_ohlcv',
+    }),
+    normalizeRawPathBar({
+      token_ca: 'DOGpump',
+      timestamp: 2260,
+      open: 2,
+      high: 2.2,
+      low: 2,
+      close: 2.1,
+      volume: 900,
+      pool_address: 'gmgn-post-graduation',
+      provider: 'gmgn',
+      source_kind: 'indexed_ohlcv',
+    }),
+  ];
+  const legacyRows = [
+    {
+      token_ca: 'DOGpump',
+      timestamp: 1000,
+      open: 1,
+      high: 1,
+      low: 1,
+      close: 1,
+      volume: 0,
+      pool_address: 'gecko-virtual-pool',
+      provider: 'geckoterminal',
+      source_kind: 'indexed_ohlcv',
+    },
+    {
+      token_ca: 'DOGpump',
+      timestamp: 1060,
+      open: 1,
+      high: 1.8,
+      low: 1,
+      close: 1.7,
+      volume: 0,
+      pool_address: 'gecko-virtual-pool',
+      provider: 'geckoterminal',
+      source_kind: 'indexed_ohlcv',
+    },
+  ];
+
+  const preferred = mergePreferredPathRows({
+    signals: [
+      signal({ id: 1, token_ca: 'DOGpump', signal_ts: 1000 }),
+      signal({ id: 2, token_ca: 'DOGpump', signal_ts: 2200 }),
+    ],
+    rawPathRows,
+    klineRows: legacyRows,
+  });
+
+  assert.equal(preferred.rows.length, 4);
+  assert.equal(preferred.decisions['DOGpump:1000'].provider, 'geckoterminal');
+  assert.equal(preferred.decisions['DOGpump:2200'].provider, 'gmgn');
 });
 
 test('raw path observer prioritizes signals with no existing path over cache-covered latest tokens', () => {

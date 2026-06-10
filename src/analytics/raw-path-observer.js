@@ -286,21 +286,162 @@ function choosePreferredRowsForToken(rawRows = [], klineRows = []) {
     .sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
 }
 
+function rowStreamKey(row = {}) {
+  return [
+    row.provider || '',
+    row.source_kind || '',
+    row.pool_address || '',
+    row.price_unit || '',
+  ].join('|');
+}
+
+function rowDedupeKey(row = {}) {
+  return [
+    row.token_ca || '',
+    row.pool_address || '',
+    row.timestamp ?? '',
+    row.provider || '',
+    row.source_kind || '',
+    row.price_unit || '',
+  ].join('|');
+}
+
+function signalAnchorTs(signal = {}) {
+  return normalizeTimestampSec(signal.timestamp_sec ?? signal.signal_ts ?? signal.timestamp ?? signal.created_ts);
+}
+
+function choosePreferredRowsForSignal(rawRows = [], klineRows = [], signalTs = null, {
+  baselineMaxLagSec = 300,
+  horizonSec = DEFAULT_HORIZON_SEC,
+} = {}) {
+  if (signalTs == null) return choosePreferredRowsForToken(rawRows, klineRows);
+  const candidates = [
+    ...rawRows.map((row) => ({ ...row, __path_source: 'raw_price_bars_1m' })),
+    ...klineRows.map((row) => ({ ...row, __path_source: 'legacy_kline_1m' })),
+  ];
+  if (!candidates.length) return [];
+
+  const byStream = new Map();
+  for (const row of candidates) {
+    const key = rowStreamKey(row);
+    if (!byStream.has(key)) byStream.set(key, []);
+    byStream.get(key).push(row);
+  }
+
+  const streams = [...byStream.values()].map((streamRows) => {
+    const rows = [...streamRows].sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+    const firstRow = rows[0] || {};
+    const baseline = rows.find((row) => (
+      Number(row.timestamp) >= signalTs
+      && Number(row.timestamp) <= signalTs + baselineMaxLagSec
+      && Number(row.close) > 0
+    )) || null;
+    const firstAfter = rows.find((row) => Number(row.timestamp) >= signalTs) || null;
+    const horizonRows = rows.filter((row) => (
+      Number(row.timestamp) >= signalTs
+      && Number(row.timestamp) <= signalTs + horizonSec
+    ));
+    const earlyRows = rows.filter((row) => (
+      Number(row.timestamp) >= signalTs
+      && Number(row.timestamp) < signalTs + DEFAULT_EARLY_WINDOW_SEC
+    ));
+    return {
+      rows,
+      baseline,
+      firstAfter,
+      horizonRows,
+      earlyRows,
+      priority: pathPriority(firstRow),
+      source: firstRow.__path_source || 'unknown',
+    };
+  });
+
+  const withBaseline = streams.filter((stream) => stream.baseline);
+  if (withBaseline.length) {
+    return withBaseline.sort((a, b) => (
+      pathPriority(a.baseline) - pathPriority(b.baseline)
+      || Number(a.baseline.timestamp) - Number(b.baseline.timestamp)
+      || b.earlyRows.length - a.earlyRows.length
+      || b.horizonRows.length - a.horizonRows.length
+      || String(a.source).localeCompare(String(b.source))
+    ))[0].rows;
+  }
+
+  const withFuturePath = streams.filter((stream) => stream.firstAfter);
+  if (withFuturePath.length) {
+    return withFuturePath.sort((a, b) => (
+      Number(a.firstAfter.timestamp) - Number(b.firstAfter.timestamp)
+      || a.priority - b.priority
+      || b.horizonRows.length - a.horizonRows.length
+      || String(a.source).localeCompare(String(b.source))
+    ))[0].rows;
+  }
+
+  return streams.sort((a, b) => (
+    a.priority - b.priority
+    || b.rows.length - a.rows.length
+    || String(a.source).localeCompare(String(b.source))
+  ))[0]?.rows || [];
+}
+
 function mergePreferredPathRows({ signals = [], rawPathRows = [], klineRows = [] } = {}) {
   const rawByToken = groupRowsByToken(rawPathRows);
   const klineByToken = groupRowsByToken(klineRows);
-  const tokens = new Set(signals.map((signal) => normalizeToken(signal.token_ca)).filter(Boolean));
+  const signalAnchors = (signals || [])
+    .map((signal) => ({
+      token: normalizeToken(signal.token_ca),
+      signal_ts: signalAnchorTs(signal),
+    }))
+    .filter((signal) => signal.token);
+  const tokens = new Set(signalAnchors.map((signal) => signal.token));
   if (!tokens.size) {
     for (const token of rawByToken.keys()) tokens.add(token);
     for (const token of klineByToken.keys()) tokens.add(token);
   }
   const rows = [];
   const decisions = {};
+  const seenRows = new Set();
+
+  if (signalAnchors.length) {
+    for (const signal of signalAnchors) {
+      const rawRows = rawByToken.get(signal.token) || [];
+      const legacyRows = klineByToken.get(signal.token) || [];
+      const chosen = choosePreferredRowsForSignal(rawRows, legacyRows, signal.signal_ts);
+      for (const row of chosen) {
+        const key = rowDedupeKey(row);
+        if (seenRows.has(key)) continue;
+        seenRows.add(key);
+        rows.push(row);
+      }
+      const decisionKey = signal.signal_ts == null ? signal.token : `${signal.token}:${signal.signal_ts}`;
+      decisions[decisionKey] = {
+        token_ca: signal.token,
+        signal_ts: signal.signal_ts ?? null,
+        source: chosen[0]?.__path_source || (rawRows.length ? 'raw_price_bars_1m' : (legacyRows.length ? 'legacy_kline_1m' : 'none')),
+        rows: chosen.length,
+        provider: chosen[0]?.provider || null,
+        source_kind: chosen[0]?.source_kind || null,
+        pool_address: chosen[0]?.pool_address || null,
+      };
+    }
+    rows.sort((a, b) => (
+      String(a.token_ca || '').localeCompare(String(b.token_ca || ''))
+      || Number(a.timestamp) - Number(b.timestamp)
+      || String(a.provider || '').localeCompare(String(b.provider || ''))
+    ));
+    return { rows, decisions };
+  }
+
   for (const token of tokens) {
     const rawRows = rawByToken.get(token) || [];
     const legacyRows = klineByToken.get(token) || [];
     const chosen = choosePreferredRowsForToken(rawRows, legacyRows);
-    rows.push(...chosen);
+    for (const row of chosen) {
+      const key = rowDedupeKey(row);
+      if (seenRows.has(key)) continue;
+      seenRows.add(key);
+      rows.push(row);
+    }
     decisions[token] = {
       token_ca: token,
       source: rawRows.length ? 'raw_price_bars_1m' : (legacyRows.length ? 'legacy_kline_1m' : 'none'),
