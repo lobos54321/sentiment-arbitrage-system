@@ -118,6 +118,9 @@ function countBarsInSqlite(database, tableName, tokenCa, startTs, endTs) {
     SELECT
       COUNT(*) AS count,
       SUM(CASE WHEN ${timestampColumn} >= @startTs AND ${timestampColumn} <= @baselineEndTs THEN 1 ELSE 0 END) AS baseline_count
+      ${cols.has('volume') ? ', SUM(CASE WHEN COALESCE(volume, 0) > 0 THEN 1 ELSE 0 END) AS nonzero_volume_count' : ', 0 AS nonzero_volume_count'}
+      ${cols.has('provider') || cols.has('source_kind') ? `, SUM(CASE WHEN ${cols.has('provider') ? "LOWER(COALESCE(provider, '')) = 'gmgn'" : '0'} ${cols.has('source_kind') ? "OR LOWER(COALESCE(source_kind, '')) = 'amm_pool'" : ''} THEN 1 ELSE 0 END) AS gmgn_or_amm_count` : ', 0 AS gmgn_or_amm_count'}
+      ${cols.has('provider') && cols.has('volume') ? ", SUM(CASE WHEN LOWER(COALESCE(provider, '')) = 'geckoterminal' AND COALESCE(volume, 0) <= 0 THEN 1 ELSE 0 END) AS gecko_zero_volume_count" : ', 0 AS gecko_zero_volume_count'}
     FROM ${tableName}
     WHERE token_ca = @tokenCa
       AND ${timestampColumn} >= @startTs
@@ -126,6 +129,9 @@ function countBarsInSqlite(database, tableName, tokenCa, startTs, endTs) {
   return {
     count: Number(row?.count || 0),
     baseline_count: Number(row?.baseline_count || 0),
+    nonzero_volume_count: Number(row?.nonzero_volume_count || 0),
+    gmgn_or_amm_count: Number(row?.gmgn_or_amm_count || 0),
+    gecko_zero_volume_count: Number(row?.gecko_zero_volume_count || 0),
     available: true,
   };
 }
@@ -171,6 +177,9 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
     } else if (raw.count < 10) {
       priority = matured ? 8 : 10;
       priorityReason = 'raw_path_sparse';
+    } else if (raw.count > 0 && raw.nonzero_volume_count <= 0 && raw.gecko_zero_volume_count > 0) {
+      priority = matured ? 9 : 11;
+      priorityReason = 'raw_path_zero_volume_needs_gmgn_enrichment';
     }
     return {
       ...signal,
@@ -178,6 +187,10 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
       raw_path_selection_priority: priority,
       raw_path_selection_reason: priorityReason,
       raw_path_existing_bars: raw.count,
+      raw_path_nonzero_volume_bars: raw.nonzero_volume_count,
+      raw_path_gmgn_or_amm_bars: raw.gmgn_or_amm_count,
+      raw_path_gecko_zero_volume_bars: raw.gecko_zero_volume_count,
+      raw_path_needs_volume_enrichment: raw.count > 0 && raw.nonzero_volume_count <= 0 && raw.gecko_zero_volume_count > 0,
       legacy_kline_existing_bars: legacy.count,
       cache_existing_bars: cache.count,
       existing_path_bars: pathCount,
@@ -252,7 +265,9 @@ function setProviderBackoff(db, provider, error, { nowTs = nowSec(), cooldownSec
 }
 
 function signalNeedsProviderBackfill(signal) {
-  return Number(signal.existing_path_bars || 0) <= 0 || Number(signal.existing_baseline_bars || 0) <= 0;
+  return Number(signal.existing_path_bars || 0) <= 0
+    || Number(signal.existing_baseline_bars || 0) <= 0
+    || Boolean(signal.raw_path_needs_volume_enrichment);
 }
 
 function upsertRawPriceBars(db, bars) {
@@ -347,7 +362,13 @@ function barsToRawPathRows({ tokenCa, poolAddress, provider, priceUnit = 'native
   });
 }
 
-async function fetchIndexedRawRows(indexedOhlcvClient, { tokenCa, signalTsSec, endTs }) {
+async function fetchIndexedRawRows(indexedOhlcvClient, {
+  tokenCa,
+  signalTsSec,
+  endTs,
+  preferGmgnKlineWithVolume = false,
+  minNonzeroVolumeBars = 1,
+}) {
   const windowMinutes = Math.max(1, Math.ceil((endTs - signalTsSec) / 60) + 1);
   const bars = Math.max(20, Math.min(200, windowMinutes));
   const windows = [...new Set([
@@ -364,6 +385,8 @@ async function fetchIndexedRawRows(indexedOhlcvClient, { tokenCa, signalTsSec, e
   }, {
     minBars: 1,
     skipBackfill: true,
+    preferGmgnKlineWithVolume,
+    minNonzeroVolumeBars,
     windows,
     limit: bars,
   });
@@ -452,6 +475,7 @@ async function main() {
   const signalLimit = envInt('RAW_PATH_OBSERVER_SIGNAL_LIMIT', 5000, 1, 50000);
   const maxSignalsPerRun = envInt('RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN', 25, 1, 500);
   const horizonSec = envInt('RAW_PATH_OBSERVER_HORIZON_SEC', 7200, 300, 24 * 3600);
+  const gmgnVolumePreferred = envBool('RAW_PATH_OBSERVER_GMGN_VOLUME_PREFERRED', true);
   const now = nowSec();
 
   const signalDb = openSqlite(signalDbPath, { readonly: true, fileMustExist: true });
@@ -479,6 +503,7 @@ async function main() {
     selection_strategy: 'missing_raw_path_first',
     selection_priority_breakdown: {},
     indexed_fallback_enabled: indexedFirstEnabled,
+    gmgn_volume_preferred: gmgnVolumePreferred,
     indexed_fallback_attempts: 0,
     indexed_fallback_success: 0,
     indexed_fallback_errors: 0,
@@ -527,6 +552,8 @@ async function main() {
             tokenCa,
             signalTsSec,
             endTs,
+            preferGmgnKlineWithVolume: gmgnVolumePreferred,
+            minNonzeroVolumeBars: 1,
           });
           rawRows = indexedResult.rawRows || [];
           if (rawRows.length) {
@@ -558,6 +585,10 @@ async function main() {
           existing_path_bars: signal.existing_path_bars,
           existing_baseline_bars: signal.existing_baseline_bars,
           raw_path_existing_bars: signal.raw_path_existing_bars,
+          raw_path_nonzero_volume_bars: signal.raw_path_nonzero_volume_bars,
+          raw_path_gmgn_or_amm_bars: signal.raw_path_gmgn_or_amm_bars,
+          raw_path_gecko_zero_volume_bars: signal.raw_path_gecko_zero_volume_bars,
+          raw_path_needs_volume_enrichment: Boolean(signal.raw_path_needs_volume_enrichment),
           legacy_kline_existing_bars: signal.legacy_kline_existing_bars,
           cache_existing_bars: signal.cache_existing_bars,
           indexed_fallback: indexedResult ? {
@@ -568,6 +599,7 @@ async function main() {
             price_unit: indexedResult.priceUnit || null,
             rate_limited: Boolean(indexedResult.rateLimited),
             fallback_provider: indexedResult.fallbackProvider || null,
+            fallback_reason: indexedResult.fallbackReason || null,
             fallback_error: indexedResult.fallbackError || null,
             error: indexedResult.error || null,
           } : null,

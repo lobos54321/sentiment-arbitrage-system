@@ -199,6 +199,58 @@ test('raw path observer prioritizes signals with no existing path over cache-cov
   rawDb.close();
 });
 
+test('raw path observer requeues Gecko zero-volume paths for GMGN volume enrichment', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    )
+  `);
+  const insert = rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume, provider, source_kind)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  for (let idx = 0; idx < 12; idx += 1) {
+    insert.run('ZERO_VOL', 1000 + idx * 60, 0, 'geckoterminal', 'indexed_ohlcv');
+    insert.run('GMGN_VOL', 1000 + idx * 60, 100 + idx, 'gmgn', 'indexed_ohlcv');
+  }
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'GMGN_VOL', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'ZERO_VOL', signal_ts: 1000 }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now: 10_000,
+    horizonSec: 7200,
+  });
+
+  assert.equal(ranked[0].token_ca, 'ZERO_VOL');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_path_zero_volume_needs_gmgn_enrichment');
+  assert.equal(ranked[0].raw_path_needs_volume_enrichment, true);
+  assert.equal(ranked[0].raw_path_gecko_zero_volume_bars, 12);
+  assert.equal(ranked[0].raw_path_nonzero_volume_bars, 0);
+  assert.equal(ranked[1].token_ca, 'GMGN_VOL');
+  assert.equal(ranked[1].raw_path_selection_reason, 'already_path_covered');
+  signalDb.close();
+  rawDb.close();
+});
+
 test('raw path observer records provider backoff for Helius rate limits', () => {
   const rawDb = new Database(':memory:');
   assert.equal(isProviderRateLimitError('HTTP 429: {"message":"max usage reached"}'), true);

@@ -49,6 +49,10 @@ function normalizeGmgnKlineBars(list = [], startTs = 0, endTs = Number.MAX_SAFE_
   ));
 }
 
+function countNonZeroVolumeBars(bars = []) {
+  return bars.reduce((count, bar) => count + (Number(bar?.volume || 0) > 0 ? 1 : 0), 0);
+}
+
 function resolveGmgnCliPath() {
   const localPath = path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'gmgn-cli.cmd' : 'gmgn-cli');
   if (fs.existsSync(localPath)) return localPath;
@@ -292,7 +296,12 @@ export class SharedPoolOhlcvClient {
 
     const cached = this.getCachedBars(tokenCa, windowStart, windowEnd, minBars);
     if (cached) {
-      return cached;
+      const cachedNonZeroVolumeBars = countNonZeroVolumeBars(cached.bars);
+      const cacheNeedsVolumeFallback = Boolean(options.preferGmgnKlineWithVolume)
+        && cachedNonZeroVolumeBars < (options.minNonzeroVolumeBars ?? 1);
+      if (!cacheNeedsVolumeFallback) {
+        return cached;
+      }
     }
 
     if (!this.sharedOhlcvEnabled && options.legacyFetcher) {
@@ -425,7 +434,13 @@ export class SharedPoolOhlcvClient {
         rateLimited
       }) || MARKET_DATA_REASON.UNKNOWN_DATA);
 
-      if (finalBars.length < minBars) {
+      const nonZeroVolumeBars = countNonZeroVolumeBars(finalBars);
+      const preferGmgnForVolume = Boolean(options.preferGmgnKlineWithVolume)
+        && finalProvider === 'geckoterminal'
+        && finalBars.length >= minBars
+        && nonZeroVolumeBars < (options.minNonzeroVolumeBars ?? 1);
+
+      if (finalBars.length < minBars || preferGmgnForVolume) {
         gmgnFallback = await this.fetchGmgnKlineWindow({
           tokenCa,
           startTs: windowStart,
@@ -440,7 +455,7 @@ export class SharedPoolOhlcvClient {
           finalProvider = 'gmgn';
           finalError = null;
           finalReason = null;
-        } else if (!finalError && gmgnFallback.error) {
+        } else if (!finalError && !preferGmgnForVolume && gmgnFallback.error) {
           finalError = gmgnFallback.error;
           finalReason = gmgnFallback.reason || MARKET_DATA_REASON.UNKNOWN_DATA;
         }
@@ -459,6 +474,7 @@ export class SharedPoolOhlcvClient {
         priceUnit: finalProvider === 'gmgn' ? 'USD_PER_TOKEN' : undefined,
         volumeUnit: finalProvider === 'gmgn' ? 'USD' : undefined,
         fallbackProvider: gmgnFallback ? 'gmgn' : null,
+        fallbackReason: gmgnFallback && preferGmgnForVolume ? 'gecko_zero_volume' : null,
         fallbackError: gmgnFallback && !(gmgnFallback.bars?.length >= minBars) ? gmgnFallback.error : null
       };
 
