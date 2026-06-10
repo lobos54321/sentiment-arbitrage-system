@@ -79,8 +79,14 @@ test('summarizes GMGN object kline volume and early 15m coverage', () => {
 
   assert.equal(summary.bars, 4);
   assert.equal(summary.nonzero_volume_bars, 2);
+  assert.equal(summary.early_5m_bars, 2);
+  assert.equal(summary.early_5m_nonzero_volume_bars, 1);
+  assert.equal(summary.early_5m_volume_usd_sum, 1200);
+  assert.equal(summary.early_5m_amount_sum, 1000000);
   assert.equal(summary.early_15m_bars, 2);
   assert.equal(summary.early_15m_nonzero_volume_bars, 1);
+  assert.equal(summary.early_15m_volume_usd_sum, 1200);
+  assert.equal(summary.early_15m_amount_sum, 1000000);
   assert.equal(summary.first_bar_lag_sec, -60);
   assert.equal(summary.first_nonzero_volume_lag_sec, 0);
   assert.equal(summary.volume_usd_sum, 1900);
@@ -95,6 +101,8 @@ test('summarizes GMGN array kline responses', () => {
 
   assert.equal(summary.bars, 2);
   assert.equal(summary.nonzero_volume_bars, 1);
+  assert.equal(summary.early_5m_volume_usd_sum, 50);
+  assert.equal(summary.early_15m_volume_usd_sum, 50);
   assert.equal(summary.amount_sum, 1000);
   assert.equal(summary.price_max, 2.5);
 });

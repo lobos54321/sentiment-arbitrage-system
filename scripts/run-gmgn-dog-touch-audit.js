@@ -162,16 +162,25 @@ export function summarizeGmgnRaw(raw, { signalTs, preSec = 60, postSec = 7200 } 
     .filter((bar) => bar.ts >= startTs && bar.ts <= endTs)
     .sort((a, b) => a.ts - b.ts);
   const early15End = Math.floor(Number(signalTs) + 900);
+  const early5End = Math.floor(Number(signalTs) + 300);
+  const early5 = bars.filter((bar) => bar.ts >= Number(signalTs) && bar.ts <= early5End);
   const early15 = bars.filter((bar) => bar.ts >= Number(signalTs) && bar.ts <= early15End);
   const nonzero = bars.filter((bar) => Number(bar.volume_usd || 0) > 0);
+  const early5Nonzero = early5.filter((bar) => Number(bar.volume_usd || 0) > 0);
   const earlyNonzero = early15.filter((bar) => Number(bar.volume_usd || 0) > 0);
   const first = bars[0] || null;
   const firstNonzero = nonzero[0] || null;
   return {
     bars: bars.length,
     nonzero_volume_bars: nonzero.length,
+    early_5m_bars: early5.length,
+    early_5m_nonzero_volume_bars: early5Nonzero.length,
+    early_5m_volume_usd_sum: Number(early5Nonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
+    early_5m_amount_sum: Number(early5.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
     early_15m_bars: early15.length,
     early_15m_nonzero_volume_bars: earlyNonzero.length,
+    early_15m_volume_usd_sum: Number(earlyNonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
+    early_15m_amount_sum: Number(early15.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
     volume_usd_sum: Number(nonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
     amount_sum: Number(bars.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
     first_bar_lag_sec: first ? first.ts - Number(signalTs) : null,
