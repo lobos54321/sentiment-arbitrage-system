@@ -108,10 +108,23 @@ function worklistLine(row) {
   return [row.token_ca, row.anchor_ts, row.cohort, row.chain_truth_need, row.visibility_stage].join('|');
 }
 
+function isBaselineRow(row = {}) {
+  return row.chain_truth_need === 'baseline_reconstruction';
+}
+
+function isNativePathRow(row = {}) {
+  return ['native_path_reconstruction', 'native_path_reconstruction_for_missing_peak'].includes(row.chain_truth_need);
+}
+
+function isPollutedPeakRow(row = {}) {
+  return row.chain_truth_need === 'polluted_peak_window_adjudication';
+}
+
 export function buildPeakRows(worklistRows = [], peakDelayByTokenSignal = new Map()) {
   const out = [];
   for (const row of worklistRows) {
     if (row.cohort !== 'quarantine') continue;
+    if (!isPollutedPeakRow(row)) continue;
     const delay = peakDelayByTokenSignal.get(`${row.token_ca}:${row.anchor_ts}`);
     if (delay == null) continue;
     out.push({
@@ -124,6 +137,24 @@ export function buildPeakRows(worklistRows = [], peakDelayByTokenSignal = new Ma
   return out.sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
 }
 
+export function splitTierRows(worklistRows = [], peakDelayByTokenSignal = new Map()) {
+  const baselineRows = worklistRows
+    .filter(isBaselineRow)
+    .sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
+  const nativePathRows = worklistRows
+    .filter(isNativePathRow)
+    .sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
+  const anchorRows = [...baselineRows, ...nativePathRows]
+    .sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
+  const peakRows = buildPeakRows(worklistRows, peakDelayByTokenSignal);
+  return {
+    baselineRows,
+    nativePathRows,
+    anchorRows,
+    peakRows,
+  };
+}
+
 async function main() {
   const args = parseArgs();
   if (args.help) {
@@ -133,17 +164,25 @@ async function main() {
   if (!args.worklist) throw new Error('Provide --worklist');
   const worklist = readWorklist(args.worklist);
   const Database = args.rawDb ? await loadDatabase() : null;
-  const peakRows = buildPeakRows(worklist, Database ? loadPeakDelayMap(Database, args.rawDb) : new Map());
+  const tiers = splitTierRows(worklist, Database ? loadPeakDelayMap(Database, args.rawDb) : new Map());
   fs.mkdirSync(args.outDir, { recursive: true });
   const anchorOut = path.join(args.outDir, 'tier1-anchor-worklist-v2.txt');
+  const baselineOut = path.join(args.outDir, 'tier1-baseline-worklist-v2.txt');
   const peakOut = path.join(args.outDir, 'tier1-peak-worklist-v2.txt');
-  fs.writeFileSync(anchorOut, `${worklist.map(worklistLine).join('\n')}${worklist.length ? '\n' : ''}`);
-  fs.writeFileSync(peakOut, `${peakRows.map(worklistLine).join('\n')}${peakRows.length ? '\n' : ''}`);
+  const nativePathOut = path.join(args.outDir, 'tier1-native-path-worklist-v2.txt');
+  fs.writeFileSync(anchorOut, `${tiers.anchorRows.map(worklistLine).join('\n')}${tiers.anchorRows.length ? '\n' : ''}`);
+  fs.writeFileSync(baselineOut, `${tiers.baselineRows.map(worklistLine).join('\n')}${tiers.baselineRows.length ? '\n' : ''}`);
+  fs.writeFileSync(peakOut, `${tiers.peakRows.map(worklistLine).join('\n')}${tiers.peakRows.length ? '\n' : ''}`);
+  fs.writeFileSync(nativePathOut, `${tiers.nativePathRows.map(worklistLine).join('\n')}${tiers.nativePathRows.length ? '\n' : ''}`);
   console.log(JSON.stringify({
     anchor_out: anchorOut,
+    baseline_out: baselineOut,
     peak_out: peakOut,
-    anchor_rows_n: worklist.length,
-    peak_rows_n: peakRows.length,
+    native_path_out: nativePathOut,
+    anchor_rows_n: tiers.anchorRows.length,
+    baseline_rows_n: tiers.baselineRows.length,
+    peak_rows_n: tiers.peakRows.length,
+    native_path_rows_n: tiers.nativePathRows.length,
   }, null, 2));
 }
 

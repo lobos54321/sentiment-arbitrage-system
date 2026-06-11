@@ -14,17 +14,21 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_ROOM_DIR="${DATA_ROOM_DIR:-}"
-MODE="${MODE:-smoke}" # smoke | anchor | peak | all
+MODE="${MODE:-smoke}" # smoke | baseline | anchor | peak | native-path | all
 DRY_RUN="${DRY_RUN:-0}"
 ALCHEMY_RPC_URL="${ALCHEMY_RPC_URL:-}"
 ALCHEMY_RPC_FILE="${ALCHEMY_RPC_FILE:-$HOME/.alchemy_rpc}"
 ANCHOR_WORKLIST="${ANCHOR_WORKLIST:-}"
+BASELINE_WORKLIST="${BASELINE_WORKLIST:-}"
 PEAK_WORKLIST="${PEAK_WORKLIST:-}"
+NATIVE_PATH_WORKLIST="${NATIVE_PATH_WORKLIST:-}"
 OUT_DIR="${OUT_DIR:-}"
 LIMIT="${LIMIT:-}"
 PAGE_SIZE="${PAGE_SIZE:-100}"
+SMOKE_PAGE_SIZE="${SMOKE_PAGE_SIZE:-25}"
 ANCHOR_MAX_PAGES="${ANCHOR_MAX_PAGES:-3}"
 PEAK_MAX_PAGES="${PEAK_MAX_PAGES:-5}"
+SMOKE_MAX_PAGES="${SMOKE_MAX_PAGES:-1}"
 RPC_TX_DELAY_MS="${RPC_TX_DELAY_MS:-100}"
 MAX_FEASIBLE_PRICE_SOL="${MAX_FEASIBLE_PRICE_SOL:-0}"
 SAS_NODE_MODULES_SOURCE="${SAS_NODE_MODULES_SOURCE:-/Users/boliu/sentiment-arbitrage-system/node_modules}"
@@ -44,10 +48,11 @@ Usage:
     bash scripts/run-chain-truth-tier1-from-data-room.sh
 
 Env:
-  MODE=smoke|anchor|peak|all
+  MODE=smoke|baseline|anchor|peak|native-path|all
   DRY_RUN=1 to validate worklists without RPC
   ALCHEMY_RPC_URL or ALCHEMY_RPC_FILE=~/.alchemy_rpc for real runs
   LIMIT=<n> optional cap
+  SMOKE_PAGE_SIZE=25 and SMOKE_MAX_PAGES=1 keep smoke runs bounded by default
   OUT_DIR defaults to $DATA_ROOM_DIR/chain-truth
 EOF
 }
@@ -154,7 +159,9 @@ if [[ -z "$DATA_ROOM_DIR" ]]; then
 fi
 
 ANCHOR_WORKLIST="${ANCHOR_WORKLIST:-$DATA_ROOM_DIR/worklists/tiers/tier1-anchor-worklist-v2.txt}"
+BASELINE_WORKLIST="${BASELINE_WORKLIST:-$DATA_ROOM_DIR/worklists/tiers/tier1-baseline-worklist-v2.txt}"
 PEAK_WORKLIST="${PEAK_WORKLIST:-$DATA_ROOM_DIR/worklists/tiers/tier1-peak-worklist-v2.txt}"
+NATIVE_PATH_WORKLIST="${NATIVE_PATH_WORKLIST:-$DATA_ROOM_DIR/worklists/tiers/tier1-native-path-worklist-v2.txt}"
 OUT_DIR="${OUT_DIR:-$DATA_ROOM_DIR/chain-truth}"
 mkdir -p "$OUT_DIR"
 ensure_node_modules
@@ -163,7 +170,11 @@ read_rpc_url
 case "$MODE" in
   smoke)
     LIMIT="${LIMIT:-2}"
-    run_pass anchor-smoke "$ANCHOR_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" "$LIMIT"
+    PAGE_SIZE="$SMOKE_PAGE_SIZE"
+    run_pass baseline-smoke "$BASELINE_WORKLIST" 90 90 "$SMOKE_MAX_PAGES" "$LIMIT"
+    ;;
+  baseline)
+    run_pass baseline "$BASELINE_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
     ;;
   anchor)
     run_pass anchor "$ANCHOR_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
@@ -171,8 +182,12 @@ case "$MODE" in
   peak)
     run_pass peak "$PEAK_WORKLIST" 180 180 "$PEAK_MAX_PAGES" ""
     ;;
+  native-path)
+    run_pass native-path "$NATIVE_PATH_WORKLIST" 0 7200 "$PEAK_MAX_PAGES" ""
+    ;;
   all)
-    run_pass anchor "$ANCHOR_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
+    run_pass baseline "$BASELINE_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
+    run_pass native-path "$NATIVE_PATH_WORKLIST" 0 7200 "$PEAK_MAX_PAGES" ""
     run_pass peak "$PEAK_WORKLIST" 180 180 "$PEAK_MAX_PAGES" ""
     ;;
   *)

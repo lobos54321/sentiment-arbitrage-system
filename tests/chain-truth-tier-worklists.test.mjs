@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildPeakRows } from '../scripts/build-chain-truth-tier-worklists.js';
+import {
+  buildPeakRows,
+  splitTierRows,
+} from '../scripts/build-chain-truth-tier-worklists.js';
 
 test('buildPeakRows anchors quarantine rows at sustained peak time', () => {
   const rows = buildPeakRows([
@@ -9,7 +12,7 @@ test('buildPeakRows anchors quarantine rows at sustained peak time', () => {
       token_ca: 'BAD',
       anchor_ts: 1000,
       cohort: 'quarantine',
-      chain_truth_need: 'label_quarantine_adjudication',
+      chain_truth_need: 'polluted_peak_window_adjudication',
       visibility_stage: 'unknown',
     },
     {
@@ -37,7 +40,7 @@ test('buildPeakRows ignores null peak delay instead of treating it as zero', () 
       token_ca: 'BAD',
       anchor_ts: 1000,
       cohort: 'quarantine',
-      chain_truth_need: 'label_quarantine_adjudication',
+      chain_truth_need: 'polluted_peak_window_adjudication',
       visibility_stage: 'unknown',
     },
   ], new Map());
@@ -45,3 +48,36 @@ test('buildPeakRows ignores null peak delay instead of treating it as zero', () 
   assert.equal(rows.length, 0);
 });
 
+test('splitTierRows separates baseline, polluted peak, and native path rows', () => {
+  const tiers = splitTierRows([
+    {
+      token_ca: 'BASE',
+      anchor_ts: 1000,
+      cohort: 'quarantine',
+      chain_truth_need: 'baseline_reconstruction',
+      visibility_stage: 'missing_baseline_price',
+    },
+    {
+      token_ca: 'BAD',
+      anchor_ts: 1100,
+      cohort: 'quarantine',
+      chain_truth_need: 'polluted_peak_window_adjudication',
+      visibility_stage: 'label_unit_corrupt',
+    },
+    {
+      token_ca: 'NATIVE',
+      anchor_ts: 1200,
+      cohort: 'quarantine',
+      chain_truth_need: 'native_path_reconstruction',
+      visibility_stage: 'no_native_bars',
+    },
+  ], new Map([
+    ['BAD:1100', 300],
+  ]));
+
+  assert.deepEqual(tiers.baselineRows.map((row) => row.token_ca), ['BASE']);
+  assert.deepEqual(tiers.nativePathRows.map((row) => row.token_ca), ['NATIVE']);
+  assert.deepEqual(tiers.anchorRows.map((row) => row.token_ca), ['BASE', 'NATIVE']);
+  assert.deepEqual(tiers.peakRows.map((row) => row.token_ca), ['BAD']);
+  assert.equal(tiers.peakRows[0].anchor_ts, 1400);
+});
