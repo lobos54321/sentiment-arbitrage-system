@@ -38,3 +38,14 @@ test('mergeWorklist includes quarantine-only tokens and prefers quarantine overl
   assert.equal(rows.some((row) => row.token_ca === 'ONLYQ'), true);
 });
 
+test('mergeWorklist preserves repeated token signals for signal-level adjudication', () => {
+  const rows = mergeWorklist({
+    quarantineRows: [
+      { token_ca: 'REPEAT', anchor_ts: 1000, cohort: 'quarantine', chain_truth_need: 'baseline_reconstruction', visibility_stage: 'missing_baseline_price' },
+      { token_ca: 'REPEAT', anchor_ts: 1100, cohort: 'quarantine', chain_truth_need: 'baseline_reconstruction', visibility_stage: 'missing_baseline_price' },
+    ],
+  });
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.anchor_ts), [1000, 1100]);
+});

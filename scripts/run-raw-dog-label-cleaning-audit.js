@@ -129,6 +129,7 @@ export function classifyLabelRow(row = {}, { threshold = 2 } = {}) {
   if (numeric(row.baseline_price) == null || numeric(row.baseline_price) <= 0) {
     label_status = 'quarantine';
     reason = 'missing_baseline_price';
+    chainTruthNeed = 'baseline_reconstruction';
   } else if (observedMultiple == null) {
     label_status = 'quarantine';
     reason = 'no_native_bars';

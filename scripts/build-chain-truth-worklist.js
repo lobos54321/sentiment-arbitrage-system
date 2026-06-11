@@ -73,15 +73,15 @@ function rankNeed(row = {}) {
 }
 
 export function mergeWorklist({ targetedRows = [], quarantineRows = [] } = {}) {
-  const byToken = new Map();
+  const byTokenSignal = new Map();
   for (const row of [...targetedRows, ...quarantineRows]) {
-    const key = row.token_ca;
-    const existing = byToken.get(key);
+    const key = `${row.token_ca}:${row.anchor_ts}`;
+    const existing = byTokenSignal.get(key);
     if (!existing || rankNeed(row) > rankNeed(existing)) {
-      byToken.set(key, row);
+      byTokenSignal.set(key, row);
     }
   }
-  return [...byToken.values()].sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
+  return [...byTokenSignal.values()].sort((a, b) => a.anchor_ts - b.anchor_ts || a.token_ca.localeCompare(b.token_ca));
 }
 
 function lineFor(row) {
@@ -116,4 +116,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   });
 }
-

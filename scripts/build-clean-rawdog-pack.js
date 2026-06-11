@@ -71,11 +71,12 @@ export function buildPack(labelAudit = {}) {
   const noBarsRows = quarantineRows.filter((row) => row.label_cleaning_reason === 'no_native_bars');
   const pollutedRows = quarantineRows.filter((row) => row.label_cleaning_reason === 'label_unit_corrupt');
   const missingPeakRepairedRows = cleanRows.filter((row) => row.label_cleaning_reason === 'missing_recorded_peak_repaired_from_native_bars');
-  const chainTruthRows = quarantineRows.filter((row) => ['label_unit_corrupt', 'no_native_bars'].includes(row.label_cleaning_reason));
+  const chainTruthRows = quarantineRows.filter((row) => ['label_unit_corrupt', 'no_native_bars', 'missing_baseline_price'].includes(row.label_cleaning_reason));
   const cleanDogs = dedupeByTokenSignal(cleanRows.filter(isGoldSilver));
   const cleanDuds = dedupeByTokenSignal(cleanRows.filter((row) => !isGoldSilver(row)));
   const quarantine = dedupeByTokenSignal(quarantineRows);
   const chainTruth = dedupeByTokenSignal(chainTruthRows);
+  const chainTruthTokenCount = new Set(chainTruth.map((row) => row.token_ca)).size;
   return {
     schema_version: 'clean_rawdog_pack.v1',
     generated_at: new Date().toISOString(),
@@ -90,6 +91,10 @@ export function buildPack(labelAudit = {}) {
       polluted_rows_n: pollutedRows.length,
       no_bars_rows_n: noBarsRows.length,
       missing_peak_repaired_rows_n: missingPeakRepairedRows.length,
+      chain_truth_signal_rows_n: chainTruth.length,
+      chain_truth_unique_tokens_n: chainTruthTokenCount,
+      // Backward-compatible alias for older ad hoc readers. Prefer the two
+      // explicit fields above because chain truth is signal-level.
       chain_truth_unique_n: chainTruth.length,
     },
     clean_dogs: cleanDogs,

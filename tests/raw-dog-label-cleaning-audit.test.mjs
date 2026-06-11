@@ -63,3 +63,18 @@ test('repairs missing recorded peak from native path instead of requiring chain 
   assert.equal(row.effective_tier, 'gold');
   assert.equal(row.chain_truth_need, 'none');
 });
+
+test('routes missing baseline labels to chain-truth baseline reconstruction', () => {
+  const row = classifyLabelRow({
+    token_ca: 'MISSINGBASE',
+    signal_ts: 1,
+    tier: 'unknown',
+    baseline_price: null,
+    max_sustained_peak_pct: 0.6,
+    observed_max_price: 2.2,
+  });
+
+  assert.equal(row.label_status, 'quarantine');
+  assert.equal(row.label_cleaning_reason, 'missing_baseline_price');
+  assert.equal(row.chain_truth_need, 'baseline_reconstruction');
+});
