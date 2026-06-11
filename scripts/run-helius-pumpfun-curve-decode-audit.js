@@ -19,6 +19,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     pageSize: 100,
     dryRun: false,
     programId: process.env.PUMPFUN_PROGRAM_ID || DEFAULT_PUMPFUN_PROGRAM_ID,
+    checkpointOut: '',
+    resume: false,
+    progressEvery: 1,
+    stopOnRateLimit: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -31,6 +35,10 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--max-pages') { args.maxPages = Number(next); i += 1; continue; }
     if (key === '--page-size') { args.pageSize = Number(next); i += 1; continue; }
     if (key === '--program-id') { args.programId = next; i += 1; continue; }
+    if (key === '--checkpoint-out') { args.checkpointOut = next; i += 1; continue; }
+    if (key === '--resume') { args.resume = true; continue; }
+    if (key === '--progress-every') { args.progressEvery = Number(next); i += 1; continue; }
+    if (key === '--continue-on-rate-limit') { args.stopOnRateLimit = false; continue; }
     if (key === '--dry-run') { args.dryRun = true; continue; }
     if (key === '--help' || key === '-h') { args.help = true; continue; }
     throw new Error(`Unknown argument: ${key}`);
@@ -49,6 +57,10 @@ function usage() {
     '  --limit <n>        Max anchors, default 280',
     '  --max-pages <n>    Max signature pages per token, default 20',
     '  --page-size <n>    Signatures per page, default 100',
+    '  --checkpoint-out <path>  JSONL checkpoint path, default <out>.jsonl',
+    '  --resume          Reuse rows already present in checkpoint JSONL',
+    '  --progress-every <n>  Print progress every n anchors, default 1',
+    '  --continue-on-rate-limit  Keep processing after Helius 429/max-usage errors',
     '  --dry-run          Derive bonding curve PDA and write planned rows without Helius calls',
     '',
     'Requires HELIUS_API_KEY or HELIUS_RPC_URL. This is an offline readonly audit and does not write production DBs.',
@@ -84,6 +96,38 @@ function loadAnchorsFromTokensFile(filePath, limit = 280) {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+function anchorKey(row = {}) {
+  return `${row.token_ca || ''}:${row.anchor_ts || row.signal_ts || ''}`;
+}
+
+function readCheckpointRows(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try { return JSON.parse(line); } catch { return null; }
+    })
+    .filter(Boolean);
+}
+
+function appendCheckpointRow(filePath, row) {
+  if (!filePath) return;
+  fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(row)}\n`);
+}
+
+function isRateLimitError(row = {}) {
+  const text = String(row.error || '').toLowerCase();
+  return row.status === 'error' && (
+    text.includes('http 429')
+    || text.includes('max usage reached')
+    || text.includes('rate limit')
+    || text.includes('too many requests')
+  );
 }
 
 function derivePumpfunBondingCurvePda(mint, programId = DEFAULT_PUMPFUN_PROGRAM_ID) {
@@ -355,15 +399,41 @@ async function main() {
   }
   if (!args.tokensFile) throw new Error('Provide --tokens-file');
   const anchors = loadAnchorsFromTokensFile(args.tokensFile, args.limit);
+  const checkpointOut = args.checkpointOut || `${args.out}.jsonl`;
+  if (checkpointOut && !args.resume) {
+    try { fs.unlinkSync(checkpointOut); } catch {}
+  }
+  const checkpointRows = args.resume ? readCheckpointRows(checkpointOut) : [];
+  const byKey = new Map(checkpointRows.map((row) => [anchorKey(row), row]));
   const client = new HeliusHistoryClient({
     apiKey: process.env.HELIUS_API_KEY || '',
     rpcUrl: process.env.HELIUS_RPC_URL || undefined,
     pageSize: args.pageSize,
   });
   if (!args.dryRun && !client.isEnabled()) throw new Error('HELIUS_API_KEY or HELIUS_RPC_URL is required');
-  const results = [];
+  const results = [...checkpointRows];
+  let processed = 0;
   for (const anchor of anchors) {
-    results.push(await decodeAnchor(client, anchor, args));
+    const key = anchorKey(anchor);
+    if (byKey.has(key)) {
+      processed += 1;
+      if (args.progressEvery > 0 && processed % args.progressEvery === 0) {
+        console.error(`[helius-pumpfun] ${processed}/${anchors.length} resume_hit token=${anchor.token_ca.slice(-8)}`);
+      }
+      continue;
+    }
+    const row = await decodeAnchor(client, anchor, args);
+    results.push(row);
+    byKey.set(key, row);
+    appendCheckpointRow(checkpointOut, row);
+    processed += 1;
+    if (args.progressEvery > 0 && processed % args.progressEvery === 0) {
+      console.error(`[helius-pumpfun] ${processed}/${anchors.length} status=${row.status} token=${anchor.token_ca.slice(-8)} trades=${row.trades_n ?? 0} bars=${row.bars_n ?? 0}`);
+    }
+    if (args.stopOnRateLimit && isRateLimitError(row)) {
+      console.error(`[helius-pumpfun] stopping_after_rate_limit token=${anchor.token_ca.slice(-8)} error=${String(row.error || '').slice(0, 160)}`);
+      break;
+    }
   }
   const ok = results.filter((row) => row.status === 'ok');
   const report = {
@@ -378,6 +448,9 @@ async function main() {
       page_size: args.pageSize,
       program_id: args.programId,
       dry_run: args.dryRun,
+      checkpoint_out: checkpointOut,
+      resume: args.resume,
+      stop_on_rate_limit: args.stopOnRateLimit,
     },
     summary: {
       ok_n: ok.length,
@@ -385,6 +458,7 @@ async function main() {
       planned_n: results.filter((row) => row.status === 'planned').length,
       anchors_with_trades_n: ok.filter((row) => row.trades_n > 0).length,
       anchors_with_bars_n: ok.filter((row) => row.bars_n > 0).length,
+      rate_limit_error_n: results.filter(isRateLimitError).length,
       total_signatures_fetched: ok.reduce((sum, row) => sum + Number(row.signatures_fetched || 0), 0),
       total_transactions_fetched: ok.reduce((sum, row) => sum + Number(row.transactions_fetched || 0), 0),
       total_curve_trades: ok.reduce((sum, row) => sum + Number(row.trades_n || 0), 0),
