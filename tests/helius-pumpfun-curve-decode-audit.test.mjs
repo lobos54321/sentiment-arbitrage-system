@@ -9,6 +9,7 @@ import {
   decodePumpfunTradeEventsFromLogs,
   derivePumpfunBondingCurvePda,
   estimatePumpfunProgressPctFromRealTokenReserves,
+  filterSignaturesForWindow,
   inferSideAndUser,
   normalizeCurveTransaction,
   selectBaselineTradeAtAnchor,
@@ -126,6 +127,34 @@ test('estimates pump.fun progress from decoded real token reserves', () => {
   assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(793_100_000), 0);
   assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(0), 100);
   assert.equal(Math.round(estimatePumpfunProgressPctFromRealTokenReserves(396_550_000)), 50);
+});
+
+test('filters signature pages by blockTime before fetching transactions', () => {
+  const filtered = filterSignaturesForWindow([
+    { signature: 'new-1', blockTime: 1_300 },
+    { signature: 'new-2', blockTime: 1_250 },
+    { signature: 'in-1', blockTime: 1_180 },
+    { signature: 'unknown-time' },
+    { signature: 'in-2', blockTime: 1_050 },
+    { signature: 'old-1', blockTime: 990 },
+    { signature: 'old-2', blockTime: 800 },
+  ], { startTs: 1_000, endTs: 1_200 });
+
+  assert.deepEqual(filtered.fetchable.map((row) => row.signature), ['in-1', 'unknown-time', 'in-2']);
+  assert.equal(filtered.skippedAfterEnd, 2);
+  assert.equal(filtered.skippedBeforeStart, 2);
+  assert.equal(filtered.reachedStart, true);
+});
+
+test('does not stop on future signatures when scanning toward a target window', () => {
+  const filtered = filterSignaturesForWindow([
+    { signature: 'future', blockTime: 2_000 },
+    { signature: 'inside', blockTime: 1_100 },
+  ], { startTs: 1_000, endTs: 1_200 });
+
+  assert.deepEqual(filtered.fetchable.map((row) => row.signature), ['inside']);
+  assert.equal(filtered.skippedAfterEnd, 1);
+  assert.equal(filtered.reachedStart, false);
 });
 
 test('extracts exact pump.fun TradeEvent from raw transaction logs', () => {

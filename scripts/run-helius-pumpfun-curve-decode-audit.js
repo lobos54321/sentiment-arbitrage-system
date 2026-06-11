@@ -595,14 +595,53 @@ class RawRpcHistoryClient {
   async fetchHistoryPage(address, options = {}) {
     const signatures = await this.getSignaturesForAddress(address, options);
     if (!signatures.length) return { signatures: [], transactions: [] };
+    const filtered = filterSignaturesForWindow(signatures, {
+      startTs: options.startTs,
+      endTs: options.endTs,
+    });
     const transactions = [];
-    for (const sig of signatures) {
+    for (const sig of filtered.fetchable) {
       if (!sig?.signature) continue;
       const tx = await this.getTransaction(sig.signature);
       if (tx) transactions.push(tx);
     }
-    return { signatures, transactions };
+    return {
+      signatures,
+      transactions,
+      signaturesSkippedAfterEnd: filtered.skippedAfterEnd,
+      signaturesSkippedBeforeStart: filtered.skippedBeforeStart,
+      historyReachedStart: filtered.reachedStart,
+    };
   }
+}
+
+export function filterSignaturesForWindow(signatures = [], { startTs, endTs } = {}) {
+  const start = numeric(startTs);
+  const end = numeric(endTs);
+  const fetchable = [];
+  let skippedAfterEnd = 0;
+  let skippedBeforeStart = 0;
+  let reachedStart = false;
+  for (let i = 0; i < signatures.length; i += 1) {
+    const sig = signatures[i];
+    const blockTime = normalizeTs(sig?.blockTime);
+    if (blockTime != null && end != null && blockTime > end) {
+      skippedAfterEnd += 1;
+      continue;
+    }
+    if (blockTime != null && start != null && blockTime < start) {
+      skippedBeforeStart += signatures.length - i;
+      reachedStart = true;
+      break;
+    }
+    fetchable.push(sig);
+  }
+  return {
+    fetchable,
+    skippedAfterEnd,
+    skippedBeforeStart,
+    reachedStart,
+  };
 }
 
 function loadTransactionsJson(filePath) {
@@ -633,14 +672,18 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   let before = null;
   let signaturesFetched = 0;
   let transactionsFetched = 0;
+  let signaturesSkippedAfterEnd = 0;
+  let signaturesSkippedBeforeStart = 0;
   let oldestBlockTime = null;
   const transactions = [];
   for (let page = 0; page < maxPages; page += 1) {
-    const pageResult = await client.fetchHistoryPage(curvePda, { before, limit: pageSize });
+    const pageResult = await client.fetchHistoryPage(curvePda, { before, limit: pageSize, startTs, endTs });
     const signatures = pageResult.signatures || [];
     if (!signatures.length) break;
     signaturesFetched += signatures.length;
     transactionsFetched += pageResult.transactions?.length || 0;
+    signaturesSkippedAfterEnd += Number(pageResult.signaturesSkippedAfterEnd || 0);
+    signaturesSkippedBeforeStart += Number(pageResult.signaturesSkippedBeforeStart || 0);
     transactions.push(...(pageResult.transactions || []));
     before = signatures[signatures.length - 1]?.signature || null;
     for (const sig of signatures) {
@@ -648,11 +691,13 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
         oldestBlockTime = oldestBlockTime == null ? sig.blockTime : Math.min(oldestBlockTime, sig.blockTime);
       }
     }
-    if (oldestBlockTime != null && oldestBlockTime <= startTs) break;
+    if (pageResult.historyReachedStart || (oldestBlockTime != null && oldestBlockTime <= startTs)) break;
   }
   return {
     signaturesFetched,
     transactionsFetched,
+    signaturesSkippedAfterEnd,
+    signaturesSkippedBeforeStart,
     oldestBlockTime,
     newestBlockTime: null,
     historyReachedStart: oldestBlockTime != null ? oldestBlockTime <= startTs : false,
@@ -726,6 +771,8 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
       end_ts: endTs,
       signatures_fetched: fetched.signaturesFetched,
       transactions_fetched: fetched.transactionsFetched,
+      signatures_skipped_after_end: fetched.signaturesSkippedAfterEnd,
+      signatures_skipped_before_start: fetched.signaturesSkippedBeforeStart,
       transactions_in_window: fetched.transactions.length,
       oldest_block_time: fetched.oldestBlockTime,
       history_reached_start: fetched.historyReachedStart,
@@ -843,6 +890,8 @@ async function main() {
       rate_limit_error_n: results.filter(isRateLimitError).length,
       total_signatures_fetched: ok.reduce((sum, row) => sum + Number(row.signatures_fetched || 0), 0),
       total_transactions_fetched: ok.reduce((sum, row) => sum + Number(row.transactions_fetched || 0), 0),
+      total_signatures_skipped_after_end: ok.reduce((sum, row) => sum + Number(row.signatures_skipped_after_end || 0), 0),
+      total_signatures_skipped_before_start: ok.reduce((sum, row) => sum + Number(row.signatures_skipped_before_start || 0), 0),
       total_curve_trades: ok.reduce((sum, row) => sum + Number(row.trades_n || 0), 0),
       exact_trade_event_n: ok.reduce((sum, row) => sum + Number(row.exact_trade_event_n || 0), 0),
       transfer_heuristic_trade_n: ok.reduce((sum, row) => sum + Number(row.transfer_heuristic_trade_n || 0), 0),
