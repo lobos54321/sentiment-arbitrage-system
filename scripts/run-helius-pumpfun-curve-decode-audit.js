@@ -1,12 +1,16 @@
 #!/usr/bin/env node
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { pathToFileURL } from 'url';
 import { PublicKey } from '@solana/web3.js';
 
 import { HeliusHistoryClient } from '../src/market-data/helius-history-client.js';
+import { fetchWithRetry } from '../src/utils/fetch-with-retry.js';
 
 const DEFAULT_PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+const PUMPFUN_TOKEN_DECIMALS = 6;
+const TRADE_EVENT_DISCRIMINATOR = createHash('sha256').update('event:TradeEvent').digest().subarray(0, 8);
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = {
@@ -20,6 +24,11 @@ function parseArgs(argv = process.argv.slice(2)) {
     dryRun: false,
     programId: process.env.PUMPFUN_PROGRAM_ID || DEFAULT_PUMPFUN_PROGRAM_ID,
     checkpointOut: '',
+    transactionsJson: '',
+    rpcUrl: process.env.SOLANA_RPC_URL || process.env.ALCHEMY_RPC_URL || '',
+    rpcMode: 'auto',
+    rpcTxDelayMs: 0,
+    maxFeasiblePriceSol: 0,
     resume: false,
     progressEvery: 1,
     stopOnRateLimit: true,
@@ -36,6 +45,11 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--page-size') { args.pageSize = Number(next); i += 1; continue; }
     if (key === '--program-id') { args.programId = next; i += 1; continue; }
     if (key === '--checkpoint-out') { args.checkpointOut = next; i += 1; continue; }
+    if (key === '--transactions-json') { args.transactionsJson = next; i += 1; continue; }
+    if (key === '--rpc-url') { args.rpcUrl = next; i += 1; continue; }
+    if (key === '--rpc-mode') { args.rpcMode = next; i += 1; continue; }
+    if (key === '--rpc-tx-delay-ms') { args.rpcTxDelayMs = Number(next); i += 1; continue; }
+    if (key === '--max-feasible-price-sol') { args.maxFeasiblePriceSol = Number(next); i += 1; continue; }
     if (key === '--resume') { args.resume = true; continue; }
     if (key === '--progress-every') { args.progressEvery = Number(next); i += 1; continue; }
     if (key === '--continue-on-rate-limit') { args.stopOnRateLimit = false; continue; }
@@ -58,12 +72,17 @@ function usage() {
     '  --max-pages <n>    Max signature pages per token, default 20',
     '  --page-size <n>    Signatures per page, default 100',
     '  --checkpoint-out <path>  JSONL checkpoint path, default <out>.jsonl',
+    '  --transactions-json <path>  Decode an exported raw/enhanced transaction JSON instead of fetching',
+    '  --rpc-url <url>    Generic Solana RPC URL for raw getTransaction mode (Alchemy/Helius/etc.)',
+    '  --rpc-mode <auto|raw|enhanced>  History fetch mode, default auto',
+    '  --rpc-tx-delay-ms <n>  Delay between raw getTransaction calls, default 0',
+    '  --max-feasible-price-sol <n>  Optional heuristic price feasibility ceiling for transfer-derived prices',
     '  --resume          Reuse rows already present in checkpoint JSONL',
     '  --progress-every <n>  Print progress every n anchors, default 1',
     '  --continue-on-rate-limit  Keep processing after Helius 429/max-usage errors',
     '  --dry-run          Derive bonding curve PDA and write planned rows without Helius calls',
     '',
-    'Requires HELIUS_API_KEY or HELIUS_RPC_URL. This is an offline readonly audit and does not write production DBs.',
+    'Requires HELIUS_API_KEY/HELIUS_RPC_URL, --rpc-url, or --transactions-json. This is an offline readonly audit and does not write production DBs.',
   ].join('\n');
 }
 
@@ -77,6 +96,10 @@ function normalizeTs(value) {
   const n = numeric(value);
   if (n == null) return null;
   return n > 1_000_000_000_000 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+function sleep(ms) {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
 function loadAnchorsFromTokensFile(filePath, limit = 280) {
@@ -140,6 +163,117 @@ function derivePumpfunBondingCurvePda(mint, programId = DEFAULT_PUMPFUN_PROGRAM_
   return { pda: pda.toBase58(), bump };
 }
 
+function readU64LE(buffer, offset) {
+  if (offset + 8 > buffer.length) return null;
+  return buffer.readBigUInt64LE(offset);
+}
+
+function readI64LE(buffer, offset) {
+  if (offset + 8 > buffer.length) return null;
+  return buffer.readBigInt64LE(offset);
+}
+
+function readPubkey(buffer, offset) {
+  if (offset + 32 > buffer.length) return null;
+  return new PublicKey(buffer.subarray(offset, offset + 32)).toBase58();
+}
+
+function u64ToNumber(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function decodePumpfunTradeEventPayload(payload) {
+  const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || []);
+  if (buffer.length < 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8 + 8) return null;
+  if (!buffer.subarray(0, 8).equals(TRADE_EVENT_DISCRIMINATOR)) return null;
+  let offset = 8;
+  const mint = readPubkey(buffer, offset); offset += 32;
+  const solAmountRaw = readU64LE(buffer, offset); offset += 8;
+  const tokenAmountRaw = readU64LE(buffer, offset); offset += 8;
+  const isBuy = Boolean(buffer[offset]); offset += 1;
+  const user = readPubkey(buffer, offset); offset += 32;
+  const timestampRaw = readI64LE(buffer, offset); offset += 8;
+  const virtualSolRaw = readU64LE(buffer, offset); offset += 8;
+  const virtualTokenRaw = readU64LE(buffer, offset); offset += 8;
+  const realSolRaw = readU64LE(buffer, offset); offset += 8;
+  const realTokenRaw = readU64LE(buffer, offset); offset += 8;
+
+  let feeRecipient = null;
+  let feeBasisPointsRaw = null;
+  let feeRaw = null;
+  let creator = null;
+  let creatorFeeBasisPointsRaw = null;
+  let creatorFeeRaw = null;
+  if (offset + 32 <= buffer.length) {
+    feeRecipient = readPubkey(buffer, offset); offset += 32;
+  }
+  if (offset + 8 <= buffer.length) {
+    feeBasisPointsRaw = readU64LE(buffer, offset); offset += 8;
+  }
+  if (offset + 8 <= buffer.length) {
+    feeRaw = readU64LE(buffer, offset); offset += 8;
+  }
+  if (offset + 32 <= buffer.length) {
+    creator = readPubkey(buffer, offset); offset += 32;
+  }
+  if (offset + 8 <= buffer.length) {
+    creatorFeeBasisPointsRaw = readU64LE(buffer, offset); offset += 8;
+  }
+  if (offset + 8 <= buffer.length) {
+    creatorFeeRaw = readU64LE(buffer, offset); offset += 8;
+  }
+
+  const solLamports = u64ToNumber(solAmountRaw);
+  const tokenRaw = u64ToNumber(tokenAmountRaw);
+  const tokenAmount = tokenRaw == null ? null : tokenRaw / (10 ** PUMPFUN_TOKEN_DECIMALS);
+  const solAmount = solLamports == null ? null : solLamports / 1e9;
+  const virtualSolReserves = u64ToNumber(virtualSolRaw) == null ? null : u64ToNumber(virtualSolRaw) / 1e9;
+  const virtualTokenReserves = u64ToNumber(virtualTokenRaw) == null ? null : u64ToNumber(virtualTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS);
+  const reservePriceSol = virtualSolReserves && virtualTokenReserves ? virtualSolReserves / virtualTokenReserves : null;
+  return {
+    mint,
+    sol_amount: solAmount,
+    token_amount: tokenAmount,
+    price_sol: solAmount != null && tokenAmount > 0 ? solAmount / tokenAmount : null,
+    side: isBuy ? 'buy' : 'sell',
+    user,
+    timestamp: timestampRaw == null ? null : Number(timestampRaw),
+    virtual_sol_reserves: virtualSolReserves,
+    virtual_token_reserves: virtualTokenReserves,
+    real_sol_reserves: u64ToNumber(realSolRaw) == null ? null : u64ToNumber(realSolRaw) / 1e9,
+    real_token_reserves: u64ToNumber(realTokenRaw) == null ? null : u64ToNumber(realTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS),
+    reserve_price_sol: reservePriceSol,
+    fee_recipient: feeRecipient,
+    fee_basis_points: u64ToNumber(feeBasisPointsRaw),
+    fee_sol: u64ToNumber(feeRaw) == null ? null : u64ToNumber(feeRaw) / 1e9,
+    creator,
+    creator_fee_basis_points: u64ToNumber(creatorFeeBasisPointsRaw),
+    creator_fee_sol: u64ToNumber(creatorFeeRaw) == null ? null : u64ToNumber(creatorFeeRaw) / 1e9,
+    raw_event_bytes: buffer.length,
+  };
+}
+
+function decodePumpfunTradeEventsFromLogs(logMessages = [], { tokenCa } = {}) {
+  const events = [];
+  for (const line of Array.isArray(logMessages) ? logMessages : []) {
+    const match = String(line).match(/Program data:\s*([A-Za-z0-9+/=]+)/);
+    if (!match) continue;
+    let payload;
+    try {
+      payload = Buffer.from(match[1], 'base64');
+    } catch {
+      continue;
+    }
+    const event = decodePumpfunTradeEventPayload(payload);
+    if (!event) continue;
+    if (tokenCa && event.mint !== tokenCa) continue;
+    events.push(event);
+  }
+  return events;
+}
+
 function pickTransferAmount(transfer) {
   return Math.abs(
     numeric(
@@ -185,12 +319,58 @@ function inferSideAndUser({ tokenTransfer, nativeTransfer, curvePda }) {
   return { side: 'unknown', user: tokenTo || tokenFrom || nativeFrom || nativeTo || null };
 }
 
-function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda } = {}) {
-  const signature = tx.signature || null;
-  const blockTime = normalizeTs(tx.timestamp ?? tx.blockTime);
-  if (!signature || blockTime == null || tx.transactionError || tx.meta?.err) return null;
-  const tokenTransfers = Array.isArray(tx.tokenTransfers) ? tx.tokenTransfers : [];
-  const nativeTransfers = Array.isArray(tx.nativeTransfers) ? tx.nativeTransfers : [];
+function normalizeRawRpcTransaction(tx = {}) {
+  const result = tx.result || tx;
+  if (!result) return null;
+  return {
+    signature: result.transaction?.signatures?.[0] || result.signature || tx.signature || null,
+    timestamp: result.blockTime ?? result.timestamp ?? tx.blockTime ?? tx.timestamp,
+    blockTime: result.blockTime ?? result.timestamp ?? tx.blockTime ?? tx.timestamp,
+    slot: result.slot ?? tx.slot,
+    meta: result.meta || tx.meta || {},
+    transactionError: result.meta?.err || tx.transactionError || null,
+    tokenTransfers: result.tokenTransfers || tx.tokenTransfers || [],
+    nativeTransfers: result.nativeTransfers || tx.nativeTransfers || [],
+  };
+}
+
+function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda, maxFeasiblePriceSol = 0 } = {}) {
+  const rawTx = normalizeRawRpcTransaction(tx) || tx;
+  const signature = rawTx.signature || null;
+  const blockTime = normalizeTs(rawTx.timestamp ?? rawTx.blockTime);
+  const exactEvents = decodePumpfunTradeEventsFromLogs(rawTx.meta?.logMessages || rawTx.logMessages || [], { tokenCa });
+  if (signature && exactEvents.length) {
+    const event = exactEvents[0];
+    const eventBlockTime = normalizeTs(event.timestamp) ?? blockTime;
+    if (eventBlockTime == null || rawTx.transactionError || rawTx.meta?.err) return null;
+    return {
+      signature,
+      slot: numeric(rawTx.slot),
+      block_time: eventBlockTime,
+      token_ca: tokenCa,
+      curve_pda: curvePda,
+      side: event.side,
+      user: event.user,
+      token_amount: event.token_amount,
+      sol_amount: event.sol_amount,
+      price_sol: event.price_sol,
+      reserve_price_sol: event.reserve_price_sol,
+      progress_pct: null,
+      virtual_sol_reserves: event.virtual_sol_reserves,
+      virtual_token_reserves: event.virtual_token_reserves,
+      real_sol_reserves: event.real_sol_reserves,
+      real_token_reserves: event.real_token_reserves,
+      progress_decode_status: 'exact_trade_event_reserves_decoded',
+      price_decode_status: 'exact_trade_event',
+      price_feasible: true,
+      raw_event_bytes: event.raw_event_bytes,
+      fee_sol: event.fee_sol,
+      creator_fee_sol: event.creator_fee_sol,
+    };
+  }
+  if (!signature || blockTime == null || rawTx.transactionError || rawTx.meta?.err) return null;
+  const tokenTransfers = Array.isArray(rawTx.tokenTransfers) ? rawTx.tokenTransfers : [];
+  const nativeTransfers = Array.isArray(rawTx.nativeTransfers) ? rawTx.nativeTransfers : [];
   const tokenTransfer = tokenTransfers
     .filter((transfer) => transfer?.mint === tokenCa)
     .map((transfer) => ({ transfer, amount: pickTransferAmount(transfer) }))
@@ -209,7 +389,7 @@ function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda } = {}) {
   });
   return {
     signature,
-    slot: numeric(tx.slot),
+    slot: numeric(rawTx.slot),
     block_time: blockTime,
     token_ca: tokenCa,
     curve_pda: curvePda,
@@ -222,6 +402,8 @@ function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda } = {}) {
     virtual_sol_reserves: null,
     virtual_token_reserves: null,
     progress_decode_status: 'not_decoded_v1_transfer_heuristic',
+    price_decode_status: 'transfer_heuristic',
+    price_feasible: maxFeasiblePriceSol > 0 ? priceSol <= maxFeasiblePriceSol : null,
   };
 }
 
@@ -248,6 +430,11 @@ function aggregateMinuteBars(trades = []) {
         sellers: new Set(trade.side === 'sell' && trade.user ? [trade.user] : []),
         first_trade_ts: trade.block_time,
         last_trade_ts: trade.block_time,
+        exact_trade_count: trade.price_decode_status === 'exact_trade_event' ? 1 : 0,
+        heuristic_trade_count: trade.price_decode_status !== 'exact_trade_event' ? 1 : 0,
+        last_virtual_sol_reserves: trade.virtual_sol_reserves ?? null,
+        last_virtual_token_reserves: trade.virtual_token_reserves ?? null,
+        last_reserve_price_sol: trade.reserve_price_sol ?? null,
       });
     } else {
       existing.high = Math.max(existing.high, trade.price_sol);
@@ -263,6 +450,11 @@ function aggregateMinuteBars(trades = []) {
       if (trade.side === 'buy' && trade.user) existing.buyers.add(trade.user);
       if (trade.side === 'sell' && trade.user) existing.sellers.add(trade.user);
       existing.last_trade_ts = Math.max(existing.last_trade_ts, trade.block_time);
+      existing.exact_trade_count += trade.price_decode_status === 'exact_trade_event' ? 1 : 0;
+      existing.heuristic_trade_count += trade.price_decode_status !== 'exact_trade_event' ? 1 : 0;
+      if (trade.virtual_sol_reserves != null) existing.last_virtual_sol_reserves = trade.virtual_sol_reserves;
+      if (trade.virtual_token_reserves != null) existing.last_virtual_token_reserves = trade.virtual_token_reserves;
+      if (trade.reserve_price_sol != null) existing.last_reserve_price_sol = trade.reserve_price_sol;
     }
   }
   return [...buckets.values()].sort((a, b) => a.timestamp - b.timestamp).map((bar) => ({
@@ -283,9 +475,99 @@ function aggregateMinuteBars(trades = []) {
     unique_sellers: bar.sellers.size,
     first_trade_ts: bar.first_trade_ts,
     last_trade_ts: bar.last_trade_ts,
+    exact_trade_count: bar.exact_trade_count,
+    heuristic_trade_count: bar.heuristic_trade_count,
+    last_virtual_sol_reserves: bar.last_virtual_sol_reserves,
+    last_virtual_token_reserves: bar.last_virtual_token_reserves,
+    last_reserve_price_sol: bar.last_reserve_price_sol,
     progress_pct: null,
-    progress_decode_status: 'not_decoded_v1_transfer_heuristic',
+    progress_decode_status: bar.exact_trade_count > 0 ? 'exact_trade_event_reserves_decoded' : 'not_decoded_v1_transfer_heuristic',
   }));
+}
+
+class RawRpcHistoryClient {
+  constructor(config = {}) {
+    this.rpcUrl = config.rpcUrl || '';
+    this.pageSize = Number(config.pageSize || 100);
+    this.rpcTxDelayMs = Number(config.rpcTxDelayMs || 0);
+  }
+
+  isEnabled() {
+    return Boolean(this.rpcUrl);
+  }
+
+  async #postRpc(method, params) {
+    const response = await fetchWithRetry(this.rpcUrl, {
+      source: 'SOLANA_RPC',
+      method: 'POST',
+      timeout: 30000,
+      maxRetries: 3,
+      initialDelay: 1500,
+      headers: { 'content-type': 'application/json' },
+      body: { jsonrpc: '2.0', id: method, method, params },
+      silent: true,
+    });
+    if (response?.error) throw new Error(response.error?.message || JSON.stringify(response.error));
+    if (response?.result === undefined) throw new Error(`rpc_invalid_${method}`);
+    return response.result;
+  }
+
+  async getSignaturesForAddress(address, { before, limit = this.pageSize } = {}) {
+    const params = [address, {
+      limit,
+      ...(before ? { before } : {}),
+    }];
+    return this.#postRpc('getSignaturesForAddress', params);
+  }
+
+  async getTransaction(signature) {
+    await sleep(this.rpcTxDelayMs);
+    const result = await this.#postRpc('getTransaction', [
+      signature,
+      {
+        encoding: 'jsonParsed',
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      },
+    ]);
+    return result ? { ...result, signature } : null;
+  }
+
+  async fetchHistoryPage(address, options = {}) {
+    const signatures = await this.getSignaturesForAddress(address, options);
+    if (!signatures.length) return { signatures: [], transactions: [] };
+    const transactions = [];
+    for (const sig of signatures) {
+      if (!sig?.signature) continue;
+      const tx = await this.getTransaction(sig.signature);
+      if (tx) transactions.push(tx);
+    }
+    return { signatures, transactions };
+  }
+}
+
+function loadTransactionsJson(filePath) {
+  if (!filePath) return [];
+  const raw = fs.readFileSync(filePath, 'utf8').trim();
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  }
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.transactions)) return parsed.transactions;
+  if (parsed.result) return [parsed.result];
+  if (Array.isArray(parsed.results)) {
+    return parsed.results.flatMap((row) => (
+      Array.isArray(row.transactions) ? row.transactions
+        : Array.isArray(row.raw_transactions) ? row.raw_transactions
+          : row.result ? [row.result]
+            : []
+    ));
+  }
+  return [parsed];
 }
 
 async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, maxPages, pageSize }) {
@@ -312,6 +594,9 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   return {
     signaturesFetched,
     transactionsFetched,
+    oldestBlockTime,
+    newestBlockTime: null,
+    historyReachedStart: oldestBlockTime != null ? oldestBlockTime <= startTs : false,
     transactions: transactions.filter((tx) => {
       const ts = normalizeTs(tx.timestamp ?? tx.blockTime);
       return ts != null && ts >= startTs && ts <= endTs;
@@ -319,7 +604,7 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   };
 }
 
-async function decodeAnchor(client, anchor, args) {
+async function decodeAnchor(client, anchor, args, transactionsPool = null) {
   let curve;
   try {
     curve = derivePumpfunBondingCurvePda(anchor.token_ca, args.programId);
@@ -343,15 +628,32 @@ async function decodeAnchor(client, anchor, args) {
     };
   }
   try {
-    const fetched = await fetchTransactionsForAnchor(client, {
-      curvePda: curve.pda,
-      startTs,
-      endTs,
-      maxPages: args.maxPages,
-      pageSize: args.pageSize,
-    });
+    const fetched = transactionsPool
+      ? {
+        signaturesFetched: 0,
+        transactionsFetched: transactionsPool.length,
+        oldestBlockTime: null,
+        newestBlockTime: null,
+        historyReachedStart: null,
+        transactions: transactionsPool.filter((tx) => {
+          const rawTx = normalizeRawRpcTransaction(tx) || tx;
+          const ts = normalizeTs(rawTx.timestamp ?? rawTx.blockTime);
+          return ts != null && ts >= startTs && ts <= endTs;
+        }),
+      }
+      : await fetchTransactionsForAnchor(client, {
+        curvePda: curve.pda,
+        startTs,
+        endTs,
+        maxPages: args.maxPages,
+        pageSize: args.pageSize,
+      });
     const trades = fetched.transactions
-      .map((tx) => normalizeCurveTransaction(tx, { tokenCa: anchor.token_ca, curvePda: curve.pda }))
+      .map((tx) => normalizeCurveTransaction(tx, {
+        tokenCa: anchor.token_ca,
+        curvePda: curve.pda,
+        maxFeasiblePriceSol: args.maxFeasiblePriceSol,
+      }))
       .filter(Boolean)
       .sort((a, b) => a.block_time - b.block_time);
     const bars = aggregateMinuteBars(trades);
@@ -365,6 +667,9 @@ async function decodeAnchor(client, anchor, args) {
       signatures_fetched: fetched.signaturesFetched,
       transactions_fetched: fetched.transactionsFetched,
       transactions_in_window: fetched.transactions.length,
+      oldest_block_time: fetched.oldestBlockTime,
+      history_reached_start: fetched.historyReachedStart,
+      oldest_lag_sec: fetched.oldestBlockTime == null ? null : fetched.oldestBlockTime - anchor.anchor_ts,
       trades_n: trades.length,
       bars_n: bars.length,
       first_trade_lag_sec: trades[0] ? trades[0].block_time - anchor.anchor_ts : null,
@@ -374,7 +679,12 @@ async function decodeAnchor(client, anchor, args) {
       sell_count: trades.filter((trade) => trade.side === 'sell').length,
       unique_buyers: new Set(trades.filter((trade) => trade.side === 'buy' && trade.user).map((trade) => trade.user)).size,
       unique_sellers: new Set(trades.filter((trade) => trade.side === 'sell' && trade.user).map((trade) => trade.user)).size,
-      progress_decode_status: 'not_decoded_v1_transfer_heuristic',
+      exact_trade_event_n: trades.filter((trade) => trade.price_decode_status === 'exact_trade_event').length,
+      transfer_heuristic_trade_n: trades.filter((trade) => trade.price_decode_status !== 'exact_trade_event').length,
+      infeasible_transfer_price_n: trades.filter((trade) => trade.price_feasible === false).length,
+      progress_decode_status: trades.some((trade) => trade.progress_decode_status === 'exact_trade_event_reserves_decoded')
+        ? 'exact_trade_event_reserves_decoded'
+        : 'not_decoded_v1_transfer_heuristic',
       bars,
       sample_trades: trades.slice(0, 5),
     };
@@ -405,12 +715,16 @@ async function main() {
   }
   const checkpointRows = args.resume ? readCheckpointRows(checkpointOut) : [];
   const byKey = new Map(checkpointRows.map((row) => [anchorKey(row), row]));
-  const client = new HeliusHistoryClient({
-    apiKey: process.env.HELIUS_API_KEY || '',
-    rpcUrl: process.env.HELIUS_RPC_URL || undefined,
-    pageSize: args.pageSize,
-  });
-  if (!args.dryRun && !client.isEnabled()) throw new Error('HELIUS_API_KEY or HELIUS_RPC_URL is required');
+  const transactionsPool = args.transactionsJson ? loadTransactionsJson(args.transactionsJson) : null;
+  const useRawRpc = args.rpcMode === 'raw' || (args.rpcMode === 'auto' && args.rpcUrl);
+  const client = useRawRpc
+    ? new RawRpcHistoryClient({ rpcUrl: args.rpcUrl, pageSize: args.pageSize, rpcTxDelayMs: args.rpcTxDelayMs })
+    : new HeliusHistoryClient({
+      apiKey: process.env.HELIUS_API_KEY || '',
+      rpcUrl: process.env.HELIUS_RPC_URL || undefined,
+      pageSize: args.pageSize,
+    });
+  if (!args.dryRun && !transactionsPool && !client.isEnabled()) throw new Error('HELIUS_API_KEY, HELIUS_RPC_URL, --rpc-url, or --transactions-json is required');
   const results = [...checkpointRows];
   let processed = 0;
   for (const anchor of anchors) {
@@ -422,7 +736,7 @@ async function main() {
       }
       continue;
     }
-    const row = await decodeAnchor(client, anchor, args);
+    const row = await decodeAnchor(client, anchor, args, transactionsPool);
     results.push(row);
     byKey.set(key, row);
     appendCheckpointRow(checkpointOut, row);
@@ -449,6 +763,8 @@ async function main() {
       program_id: args.programId,
       dry_run: args.dryRun,
       checkpoint_out: checkpointOut,
+      transactions_json: args.transactionsJson || null,
+      rpc_mode: transactionsPool ? 'transactions_json' : (useRawRpc ? 'raw_rpc' : 'helius_enhanced'),
       resume: args.resume,
       stop_on_rate_limit: args.stopOnRateLimit,
     },
@@ -462,8 +778,15 @@ async function main() {
       total_signatures_fetched: ok.reduce((sum, row) => sum + Number(row.signatures_fetched || 0), 0),
       total_transactions_fetched: ok.reduce((sum, row) => sum + Number(row.transactions_fetched || 0), 0),
       total_curve_trades: ok.reduce((sum, row) => sum + Number(row.trades_n || 0), 0),
+      exact_trade_event_n: ok.reduce((sum, row) => sum + Number(row.exact_trade_event_n || 0), 0),
+      transfer_heuristic_trade_n: ok.reduce((sum, row) => sum + Number(row.transfer_heuristic_trade_n || 0), 0),
+      infeasible_transfer_price_n: ok.reduce((sum, row) => sum + Number(row.infeasible_transfer_price_n || 0), 0),
+      history_reached_start_n: ok.filter((row) => row.history_reached_start === true).length,
+      history_incomplete_n: ok.filter((row) => row.history_reached_start === false).length,
       total_sol_volume: Number(ok.reduce((sum, row) => sum + Number(row.total_sol_volume || 0), 0).toFixed(9)),
-      progress_decode_status: 'not_decoded_v1_transfer_heuristic',
+      progress_decode_status: ok.some((row) => row.progress_decode_status === 'exact_trade_event_reserves_decoded')
+        ? 'exact_trade_event_reserves_decoded'
+        : 'not_decoded_v1_transfer_heuristic',
     },
     results,
   };
@@ -484,7 +807,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 
 export {
   aggregateMinuteBars,
+  decodePumpfunTradeEventPayload,
+  decodePumpfunTradeEventsFromLogs,
   derivePumpfunBondingCurvePda,
   inferSideAndUser,
   normalizeCurveTransaction,
+  normalizeRawRpcTransaction,
 };
