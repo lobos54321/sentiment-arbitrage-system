@@ -515,6 +515,35 @@ function aggregateMinuteBars(trades = []) {
   }));
 }
 
+export function selectBaselineTradeAtAnchor(trades = [], anchorTs) {
+  const anchor = numeric(anchorTs);
+  if (anchor == null) return null;
+  const sorted = [...trades]
+    .filter((trade) => trade && numeric(trade.block_time) != null)
+    .sort((a, b) => a.block_time - b.block_time);
+  let selected = null;
+  for (const trade of sorted) {
+    if (trade.block_time <= anchor) selected = trade;
+    if (trade.block_time > anchor) break;
+  }
+  const source = selected ? 'chain_truth_last_pre_anchor_trade' : 'chain_truth_first_post_anchor_trade';
+  if (!selected) selected = sorted.find((trade) => trade.block_time > anchor) || null;
+  if (!selected) return null;
+  return {
+    baseline_price_sol_chain: selected.reserve_price_sol ?? selected.price_sol ?? null,
+    baseline_source: source,
+    baseline_trade_lag_sec: selected.block_time - anchor,
+    baseline_post_anchor_biased: source === 'chain_truth_first_post_anchor_trade',
+    baseline_signature: selected.signature ?? null,
+    baseline_trade_side: selected.side ?? null,
+    baseline_progress_pct: selected.progress_pct ?? null,
+    baseline_virtual_sol_reserves: selected.virtual_sol_reserves ?? null,
+    baseline_virtual_token_reserves: selected.virtual_token_reserves ?? null,
+    baseline_real_sol_reserves: selected.real_sol_reserves ?? null,
+    baseline_real_token_reserves: selected.real_token_reserves ?? null,
+  };
+}
+
 class RawRpcHistoryClient {
   constructor(config = {}) {
     this.rpcUrl = config.rpcUrl || '';
@@ -687,6 +716,7 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
       .filter(Boolean)
       .sort((a, b) => a.block_time - b.block_time);
     const bars = aggregateMinuteBars(trades);
+    const baselineAtAnchor = selectBaselineTradeAtAnchor(trades, anchor.anchor_ts);
     return {
       ...anchor,
       status: 'ok',
@@ -704,6 +734,7 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
       bars_n: bars.length,
       first_trade_lag_sec: trades[0] ? trades[0].block_time - anchor.anchor_ts : null,
       last_trade_lag_sec: trades.at(-1) ? trades.at(-1).block_time - anchor.anchor_ts : null,
+      ...(baselineAtAnchor || {}),
       total_sol_volume: Number(trades.reduce((sum, trade) => sum + trade.sol_amount, 0).toFixed(9)),
       buy_count: trades.filter((trade) => trade.side === 'buy').length,
       sell_count: trades.filter((trade) => trade.side === 'sell').length,

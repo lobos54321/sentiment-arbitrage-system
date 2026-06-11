@@ -11,6 +11,7 @@ import {
   estimatePumpfunProgressPctFromRealTokenReserves,
   inferSideAndUser,
   normalizeCurveTransaction,
+  selectBaselineTradeAtAnchor,
 } from '../scripts/run-helius-pumpfun-curve-decode-audit.js';
 
 const tokenCa = '6eEQtGNoQ7VaPFy3iUZBxNHU5LfvYZRep6umdbfpump';
@@ -192,4 +193,29 @@ test('aggregates curve trades to 1m bars with buy/sell/user metrics', () => {
   assert.equal(bars[0].sell_count, 1);
   assert.equal(bars[0].unique_buyers, 1);
   assert.equal(bars[0].unique_sellers, 1);
+});
+
+test('selects the last pre-anchor trade as chain baseline', () => {
+  const baseline = selectBaselineTradeAtAnchor([
+    { block_time: 990, reserve_price_sol: 0.1, signature: 'old', progress_pct: 10 },
+    { block_time: 999, reserve_price_sol: 0.2, signature: 'pre', progress_pct: 20 },
+    { block_time: 1005, reserve_price_sol: 0.3, signature: 'post', progress_pct: 30 },
+  ], 1000);
+
+  assert.equal(baseline.baseline_price_sol_chain, 0.2);
+  assert.equal(baseline.baseline_source, 'chain_truth_last_pre_anchor_trade');
+  assert.equal(baseline.baseline_trade_lag_sec, -1);
+  assert.equal(baseline.baseline_post_anchor_biased, false);
+  assert.equal(baseline.baseline_progress_pct, 20);
+});
+
+test('marks first post-anchor baseline as biased when no pre-anchor trade exists', () => {
+  const baseline = selectBaselineTradeAtAnchor([
+    { block_time: 1005, price_sol: 0.3, signature: 'post', progress_pct: 30 },
+  ], 1000);
+
+  assert.equal(baseline.baseline_price_sol_chain, 0.3);
+  assert.equal(baseline.baseline_source, 'chain_truth_first_post_anchor_trade');
+  assert.equal(baseline.baseline_trade_lag_sec, 5);
+  assert.equal(baseline.baseline_post_anchor_biased, true);
 });
