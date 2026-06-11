@@ -148,6 +148,45 @@ function normalizeGmgnBar(item) {
   };
 }
 
+function sumVolume(rows = []) {
+  return Number(rows.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6));
+}
+
+function sumAmount(rows = []) {
+  return Number(rows.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6));
+}
+
+function closestEntryBar(bars = [], targetTs) {
+  return bars
+    .filter((bar) => bar.ts >= targetTs)
+    .sort((a, b) => a.ts - b.ts)[0] || null;
+}
+
+function delayedEntrySnapshot(bars = [], { signalTs, delaySec }) {
+  const entryTs = Math.floor(Number(signalTs) + Number(delaySec || 0));
+  const entry = closestEntryBar(bars, entryTs);
+  if (!entry || !Number.isFinite(Number(entry.close)) || Number(entry.close) <= 0) {
+    return {
+      [`entry_${Math.floor(delaySec / 60)}m_ts`]: null,
+      [`entry_${Math.floor(delaySec / 60)}m_price`]: null,
+      [`residual_peak_${Math.floor(delaySec / 60)}m_pct`]: null,
+      [`residual_to_silver_${Math.floor(delaySec / 60)}m`]: null,
+      [`residual_to_gold_${Math.floor(delaySec / 60)}m`]: null,
+    };
+  }
+  const future = bars.filter((bar) => bar.ts >= entry.ts);
+  const maxHigh = future.length ? Math.max(...future.map((bar) => Number(bar.high)).filter(Number.isFinite)) : null;
+  const residual = maxHigh != null && Number.isFinite(maxHigh) ? (maxHigh / Number(entry.close)) - 1 : null;
+  const suffix = Math.floor(delaySec / 60);
+  return {
+    [`entry_${suffix}m_ts`]: entry.ts,
+    [`entry_${suffix}m_price`]: Number(entry.close),
+    [`residual_peak_${suffix}m_pct`]: residual == null ? null : Number(residual.toFixed(6)),
+    [`residual_to_silver_${suffix}m`]: residual == null ? null : residual >= 0.5,
+    [`residual_to_gold_${suffix}m`]: residual == null ? null : residual >= 1.0,
+  };
+}
+
 export function summarizeGmgnRaw(raw, { signalTs, preSec = 60, postSec = 7200 } = {}) {
   const startTs = Math.floor(Number(signalTs) - Number(preSec || 0));
   const endTs = Math.floor(Number(signalTs) + Number(postSec || 0));
@@ -163,9 +202,15 @@ export function summarizeGmgnRaw(raw, { signalTs, preSec = 60, postSec = 7200 } 
     .sort((a, b) => a.ts - b.ts);
   const early15End = Math.floor(Number(signalTs) + 900);
   const early5End = Math.floor(Number(signalTs) + 300);
+  const pre5Start = Math.floor(Number(signalTs) - 300);
+  const pre15Start = Math.floor(Number(signalTs) - 900);
+  const pre5 = bars.filter((bar) => bar.ts >= pre5Start && bar.ts < Number(signalTs));
+  const pre15 = bars.filter((bar) => bar.ts >= pre15Start && bar.ts < Number(signalTs));
   const early5 = bars.filter((bar) => bar.ts >= Number(signalTs) && bar.ts <= early5End);
   const early15 = bars.filter((bar) => bar.ts >= Number(signalTs) && bar.ts <= early15End);
   const nonzero = bars.filter((bar) => Number(bar.volume_usd || 0) > 0);
+  const pre5Nonzero = pre5.filter((bar) => Number(bar.volume_usd || 0) > 0);
+  const pre15Nonzero = pre15.filter((bar) => Number(bar.volume_usd || 0) > 0);
   const early5Nonzero = early5.filter((bar) => Number(bar.volume_usd || 0) > 0);
   const earlyNonzero = early15.filter((bar) => Number(bar.volume_usd || 0) > 0);
   const first = bars[0] || null;
@@ -173,22 +218,33 @@ export function summarizeGmgnRaw(raw, { signalTs, preSec = 60, postSec = 7200 } 
   return {
     bars: bars.length,
     nonzero_volume_bars: nonzero.length,
+    pre_5m_bars: pre5.length,
+    pre_5m_nonzero_volume_bars: pre5Nonzero.length,
+    pre_5m_volume_usd_sum: sumVolume(pre5Nonzero),
+    pre_5m_amount_sum: sumAmount(pre5),
+    pre_15m_bars: pre15.length,
+    pre_15m_nonzero_volume_bars: pre15Nonzero.length,
+    pre_15m_volume_usd_sum: sumVolume(pre15Nonzero),
+    pre_15m_amount_sum: sumAmount(pre15),
     early_5m_bars: early5.length,
     early_5m_nonzero_volume_bars: early5Nonzero.length,
-    early_5m_volume_usd_sum: Number(early5Nonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
-    early_5m_amount_sum: Number(early5.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
+    early_5m_volume_usd_sum: sumVolume(early5Nonzero),
+    early_5m_amount_sum: sumAmount(early5),
     early_15m_bars: early15.length,
     early_15m_nonzero_volume_bars: earlyNonzero.length,
-    early_15m_volume_usd_sum: Number(earlyNonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
-    early_15m_amount_sum: Number(early15.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
-    volume_usd_sum: Number(nonzero.reduce((sum, bar) => sum + Number(bar.volume_usd || 0), 0).toFixed(6)),
-    amount_sum: Number(bars.reduce((sum, bar) => sum + Number(bar.amount || 0), 0).toFixed(6)),
+    early_15m_volume_usd_sum: sumVolume(earlyNonzero),
+    early_15m_amount_sum: sumAmount(early15),
+    volume_usd_sum: sumVolume(nonzero),
+    amount_sum: sumAmount(bars),
     first_bar_lag_sec: first ? first.ts - Number(signalTs) : null,
     first_nonzero_volume_lag_sec: firstNonzero ? firstNonzero.ts - Number(signalTs) : null,
     first_bar_ts: first?.ts ?? null,
     first_nonzero_volume_ts: firstNonzero?.ts ?? null,
     price_min: bars.length ? Math.min(...bars.map((bar) => bar.low).filter(Number.isFinite)) : null,
     price_max: bars.length ? Math.max(...bars.map((bar) => bar.high).filter(Number.isFinite)) : null,
+    ...delayedEntrySnapshot(bars, { signalTs, delaySec: 0 }),
+    ...delayedEntrySnapshot(bars, { signalTs, delaySec: 300 }),
+    ...delayedEntrySnapshot(bars, { signalTs, delaySec: 900 }),
     sample_bars: bars.slice(0, 3).map((bar) => ({
       ts: bar.ts,
       close: bar.close,

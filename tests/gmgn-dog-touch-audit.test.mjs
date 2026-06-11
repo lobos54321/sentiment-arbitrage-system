@@ -68,28 +68,42 @@ test('summarizes GMGN object kline volume and early 15m coverage', () => {
   const signalTs = 1_780_000_000;
   const raw = {
     list: [
+      { time: (signalTs - 6 * 60) * 1000, open: '0.8', high: '0.9', low: '0.7', close: '0.8', volume: '300', amount: '200000' },
       { time: (signalTs - 60) * 1000, open: '1', high: '1.2', low: '0.9', close: '1.1', volume: '0', amount: '0' },
       { time: signalTs * 1000, open: '1.1', high: '1.5', low: '1.0', close: '1.4', volume: '1200', amount: '1000000' },
       { time: (signalTs + 60) * 1000, open: '1.4', high: '1.8', low: '1.3', close: '1.7', volume: '0', amount: '0' },
+      { time: (signalTs + 5 * 60) * 1000, open: '1.7', high: '2.5', low: '1.6', close: '2.0', volume: '100', amount: '60000' },
       { time: (signalTs + 16 * 60) * 1000, open: '1.7', high: '2.0', low: '1.6', close: '1.9', volume: '700', amount: '500000' },
     ],
   };
 
-  const summary = summarizeGmgnRaw(raw, { signalTs, preSec: 60, postSec: 7200 });
+  const summary = summarizeGmgnRaw(raw, { signalTs, preSec: 900, postSec: 7200 });
 
-  assert.equal(summary.bars, 4);
-  assert.equal(summary.nonzero_volume_bars, 2);
-  assert.equal(summary.early_5m_bars, 2);
-  assert.equal(summary.early_5m_nonzero_volume_bars, 1);
-  assert.equal(summary.early_5m_volume_usd_sum, 1200);
-  assert.equal(summary.early_5m_amount_sum, 1000000);
-  assert.equal(summary.early_15m_bars, 2);
-  assert.equal(summary.early_15m_nonzero_volume_bars, 1);
-  assert.equal(summary.early_15m_volume_usd_sum, 1200);
-  assert.equal(summary.early_15m_amount_sum, 1000000);
-  assert.equal(summary.first_bar_lag_sec, -60);
-  assert.equal(summary.first_nonzero_volume_lag_sec, 0);
-  assert.equal(summary.volume_usd_sum, 1900);
+  assert.equal(summary.bars, 6);
+  assert.equal(summary.nonzero_volume_bars, 4);
+  assert.equal(summary.pre_5m_bars, 1);
+  assert.equal(summary.pre_5m_nonzero_volume_bars, 0);
+  assert.equal(summary.pre_15m_bars, 2);
+  assert.equal(summary.pre_15m_nonzero_volume_bars, 1);
+  assert.equal(summary.pre_15m_volume_usd_sum, 300);
+  assert.equal(summary.early_5m_bars, 3);
+  assert.equal(summary.early_5m_nonzero_volume_bars, 2);
+  assert.equal(summary.early_5m_volume_usd_sum, 1300);
+  assert.equal(summary.early_5m_amount_sum, 1060000);
+  assert.equal(summary.early_15m_bars, 3);
+  assert.equal(summary.early_15m_nonzero_volume_bars, 2);
+  assert.equal(summary.early_15m_volume_usd_sum, 1300);
+  assert.equal(summary.early_15m_amount_sum, 1060000);
+  assert.equal(summary.first_bar_lag_sec, -360);
+  assert.equal(summary.first_nonzero_volume_lag_sec, -360);
+  assert.equal(summary.volume_usd_sum, 2300);
+  assert.equal(summary.entry_0m_price, 1.4);
+  assert.equal(summary.residual_peak_0m_pct, 0.785714);
+  assert.equal(summary.residual_to_silver_0m, true);
+  assert.equal(summary.entry_5m_price, 2.0);
+  assert.equal(summary.residual_peak_5m_pct, 0.25);
+  assert.equal(summary.residual_to_silver_5m, false);
+  assert.equal(summary.entry_15m_price, 1.9);
 });
 
 test('summarizes GMGN array kline responses', () => {
