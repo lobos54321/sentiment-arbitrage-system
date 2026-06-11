@@ -27,11 +27,21 @@ function usage() {
 }
 
 function isGoldSilver(row = {}) {
-  return ['gold', 'silver'].includes(String(row.tier || row.raw_sustained_tier || row.raw_primary_tier || '').toLowerCase());
+  return ['gold', 'silver'].includes(String(row.effective_tier || row.tier || row.raw_sustained_tier || row.raw_primary_tier || '').toLowerCase());
 }
 
 function tokenLine(row = {}) {
-  return `${row.token_ca}|${Math.floor(Number(row.signal_ts || 0))}|${row.symbol || row.tier || ''}`;
+  return `${row.token_ca}|${Math.floor(Number(row.signal_ts || 0))}|${row.symbol || row.effective_tier || row.tier || ''}`;
+}
+
+function chainTruthLine(row = {}) {
+  return [
+    row.token_ca,
+    Math.floor(Number(row.signal_ts || 0)),
+    'quarantine',
+    row.chain_truth_need || 'chain_truth_required',
+    row.label_cleaning_reason || 'unknown',
+  ].join('|');
 }
 
 function dedupeByTokenSignal(rows = []) {
@@ -50,8 +60,8 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function writeTokenFile(filePath, rows) {
-  fs.writeFileSync(filePath, `${rows.map(tokenLine).join('\n')}${rows.length ? '\n' : ''}`);
+function writeTokenFile(filePath, rows, { lineFn = tokenLine } = {}) {
+  fs.writeFileSync(filePath, `${rows.map(lineFn).join('\n')}${rows.length ? '\n' : ''}`);
 }
 
 export function buildPack(labelAudit = {}) {
@@ -60,9 +70,12 @@ export function buildPack(labelAudit = {}) {
   const quarantineRows = rows.filter((row) => row.label_status !== 'clean');
   const noBarsRows = quarantineRows.filter((row) => row.label_cleaning_reason === 'no_native_bars');
   const pollutedRows = quarantineRows.filter((row) => row.label_cleaning_reason === 'label_unit_corrupt');
+  const missingPeakRepairedRows = cleanRows.filter((row) => row.label_cleaning_reason === 'missing_recorded_peak_repaired_from_native_bars');
+  const chainTruthRows = quarantineRows.filter((row) => ['label_unit_corrupt', 'no_native_bars'].includes(row.label_cleaning_reason));
   const cleanDogs = dedupeByTokenSignal(cleanRows.filter(isGoldSilver));
   const cleanDuds = dedupeByTokenSignal(cleanRows.filter((row) => !isGoldSilver(row)));
   const quarantine = dedupeByTokenSignal(quarantineRows);
+  const chainTruth = dedupeByTokenSignal(chainTruthRows);
   return {
     schema_version: 'clean_rawdog_pack.v1',
     generated_at: new Date().toISOString(),
@@ -76,12 +89,16 @@ export function buildPack(labelAudit = {}) {
       quarantine_unique_n: quarantine.length,
       polluted_rows_n: pollutedRows.length,
       no_bars_rows_n: noBarsRows.length,
+      missing_peak_repaired_rows_n: missingPeakRepairedRows.length,
+      chain_truth_unique_n: chainTruth.length,
     },
     clean_dogs: cleanDogs,
     clean_duds: cleanDuds,
     quarantine_rows: quarantine,
     polluted_rows: pollutedRows,
     no_bars_rows: noBarsRows,
+    missing_peak_repaired_rows: missingPeakRepairedRows,
+    chain_truth_rows: chainTruth,
   };
 }
 
@@ -98,10 +115,13 @@ function writePack(pack, outDir) {
   writeJson(path.join(outDir, 'quarantine-rows.json'), pack.quarantine_rows);
   writeJson(path.join(outDir, 'polluted-rows.json'), pack.polluted_rows);
   writeJson(path.join(outDir, 'no-bars-rows.json'), pack.no_bars_rows);
+  writeJson(path.join(outDir, 'missing-peak-repaired-rows.json'), pack.missing_peak_repaired_rows);
+  writeJson(path.join(outDir, 'chain-truth-rows.json'), pack.chain_truth_rows);
   writeTokenFile(path.join(outDir, 'clean-dog-tokens.txt'), pack.clean_dogs);
   writeTokenFile(path.join(outDir, 'clean-dud-tokens.txt'), pack.clean_duds);
   writeTokenFile(path.join(outDir, 'quarantine-tokens.txt'), pack.quarantine_rows);
   writeTokenFile(path.join(outDir, 'polluted-tokens.txt'), pack.polluted_rows);
+  writeTokenFile(path.join(outDir, 'chain-truth-tokens.txt'), pack.chain_truth_rows, { lineFn: chainTruthLine });
   const manifest = {
     schema_version: 'clean_rawdog_pack_manifest.v1',
     generated_at: pack.generated_at,
@@ -112,10 +132,13 @@ function writePack(pack, outDir) {
       'quarantine-rows.json',
       'polluted-rows.json',
       'no-bars-rows.json',
+      'missing-peak-repaired-rows.json',
+      'chain-truth-rows.json',
       'clean-dog-tokens.txt',
       'clean-dud-tokens.txt',
       'quarantine-tokens.txt',
       'polluted-tokens.txt',
+      'chain-truth-tokens.txt',
     ],
     summary: pack.summary,
   };
@@ -142,4 +165,3 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   });
 }
-

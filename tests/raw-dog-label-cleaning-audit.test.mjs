@@ -48,3 +48,18 @@ test('buildReport summarizes clean and quarantine rows', () => {
   assert.equal(report.summary.by_reason.no_native_bars, 1);
 });
 
+test('repairs missing recorded peak from native path instead of requiring chain truth', () => {
+  const row = classifyLabelRow({
+    token_ca: 'REPAIRED',
+    signal_ts: 1,
+    tier: 'unknown',
+    baseline_price: 1,
+    max_sustained_peak_pct: null,
+    observed_max_price: 2.2,
+  });
+
+  assert.equal(row.label_status, 'clean');
+  assert.equal(row.label_cleaning_reason, 'missing_recorded_peak_repaired_from_native_bars');
+  assert.equal(row.effective_tier, 'gold');
+  assert.equal(row.chain_truth_need, 'none');
+});

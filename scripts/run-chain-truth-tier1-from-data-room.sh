@@ -129,7 +129,11 @@ run_pass() {
   if [[ "$DRY_RUN" == "1" ]]; then
     cmd+=(--dry-run)
   else
-    cmd+=(--rpc-url "$ALCHEMY_RPC_URL" --rpc-mode raw)
+    if [[ -n "$ALCHEMY_RPC_FILE" && -f "$ALCHEMY_RPC_FILE" ]]; then
+      cmd+=(--rpc-url-file "$ALCHEMY_RPC_FILE" --rpc-mode raw)
+    else
+      cmd+=(--rpc-mode raw)
+    fi
   fi
 
   echo "== Tier1 $name =="

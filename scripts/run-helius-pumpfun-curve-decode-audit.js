@@ -10,6 +10,7 @@ import { fetchWithRetry } from '../src/utils/fetch-with-retry.js';
 
 const DEFAULT_PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const PUMPFUN_TOKEN_DECIMALS = 6;
+const PUMPFUN_INITIAL_REAL_TOKEN_RESERVES = Number(process.env.PUMPFUN_INITIAL_REAL_TOKEN_RESERVES || 793_100_000);
 const TRADE_EVENT_DISCRIMINATOR = createHash('sha256').update('event:TradeEvent').digest().subarray(0, 8);
 
 function parseArgs(argv = process.argv.slice(2)) {
@@ -26,6 +27,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     checkpointOut: '',
     transactionsJson: '',
     rpcUrl: process.env.SOLANA_RPC_URL || process.env.ALCHEMY_RPC_URL || '',
+    rpcUrlFile: '',
     rpcMode: 'auto',
     rpcTxDelayMs: 0,
     maxFeasiblePriceSol: 0,
@@ -47,6 +49,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--checkpoint-out') { args.checkpointOut = next; i += 1; continue; }
     if (key === '--transactions-json') { args.transactionsJson = next; i += 1; continue; }
     if (key === '--rpc-url') { args.rpcUrl = next; i += 1; continue; }
+    if (key === '--rpc-url-file') { args.rpcUrlFile = next; i += 1; continue; }
     if (key === '--rpc-mode') { args.rpcMode = next; i += 1; continue; }
     if (key === '--rpc-tx-delay-ms') { args.rpcTxDelayMs = Number(next); i += 1; continue; }
     if (key === '--max-feasible-price-sol') { args.maxFeasiblePriceSol = Number(next); i += 1; continue; }
@@ -58,6 +61,14 @@ function parseArgs(argv = process.argv.slice(2)) {
     throw new Error(`Unknown argument: ${key}`);
   }
   return args;
+}
+
+function readSecretFile(filePath) {
+  if (!filePath) return '';
+  const raw = fs.readFileSync(filePath, 'utf8').replace(/\r?\n/g, '').trim();
+  if (!raw) return '';
+  if (raw.includes('=')) return raw.slice(raw.indexOf('=') + 1).trim();
+  return raw;
 }
 
 function usage() {
@@ -74,6 +85,7 @@ function usage() {
     '  --checkpoint-out <path>  JSONL checkpoint path, default <out>.jsonl',
     '  --transactions-json <path>  Decode an exported raw/enhanced transaction JSON instead of fetching',
     '  --rpc-url <url>    Generic Solana RPC URL for raw getTransaction mode (Alchemy/Helius/etc.)',
+    '  --rpc-url-file <path>  Read generic Solana RPC URL from a local secret file without exposing it in ps',
     '  --rpc-mode <auto|raw|enhanced>  History fetch mode, default auto',
     '  --rpc-tx-delay-ms <n>  Delay between raw getTransaction calls, default 0',
     '  --max-feasible-price-sol <n>  Optional heuristic price feasibility ceiling for transfer-derived prices',
@@ -82,7 +94,7 @@ function usage() {
     '  --continue-on-rate-limit  Keep processing after Helius 429/max-usage errors',
     '  --dry-run          Derive bonding curve PDA and write planned rows without Helius calls',
     '',
-    'Requires HELIUS_API_KEY/HELIUS_RPC_URL, --rpc-url, or --transactions-json. This is an offline readonly audit and does not write production DBs.',
+    'Requires HELIUS_API_KEY/HELIUS_RPC_URL, --rpc-url, --rpc-url-file, or --transactions-json. This is an offline readonly audit and does not write production DBs.',
   ].join('\n');
 }
 
@@ -184,6 +196,14 @@ function u64ToNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+export function estimatePumpfunProgressPctFromRealTokenReserves(realTokenReserves) {
+  const real = numeric(realTokenReserves);
+  const initial = numeric(PUMPFUN_INITIAL_REAL_TOKEN_RESERVES);
+  if (real == null || initial == null || initial <= 0) return null;
+  const pct = 100 - ((real * 100) / initial);
+  return Math.max(0, Math.min(100, pct));
+}
+
 function decodePumpfunTradeEventPayload(payload) {
   const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || []);
   if (buffer.length < 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8 + 8) return null;
@@ -231,6 +251,7 @@ function decodePumpfunTradeEventPayload(payload) {
   const solAmount = solLamports == null ? null : solLamports / 1e9;
   const virtualSolReserves = u64ToNumber(virtualSolRaw) == null ? null : u64ToNumber(virtualSolRaw) / 1e9;
   const virtualTokenReserves = u64ToNumber(virtualTokenRaw) == null ? null : u64ToNumber(virtualTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS);
+  const realTokenReserves = u64ToNumber(realTokenRaw) == null ? null : u64ToNumber(realTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS);
   const reservePriceSol = virtualSolReserves && virtualTokenReserves ? virtualSolReserves / virtualTokenReserves : null;
   return {
     mint,
@@ -243,8 +264,9 @@ function decodePumpfunTradeEventPayload(payload) {
     virtual_sol_reserves: virtualSolReserves,
     virtual_token_reserves: virtualTokenReserves,
     real_sol_reserves: u64ToNumber(realSolRaw) == null ? null : u64ToNumber(realSolRaw) / 1e9,
-    real_token_reserves: u64ToNumber(realTokenRaw) == null ? null : u64ToNumber(realTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS),
+    real_token_reserves: realTokenReserves,
     reserve_price_sol: reservePriceSol,
+    progress_pct: estimatePumpfunProgressPctFromRealTokenReserves(realTokenReserves),
     fee_recipient: feeRecipient,
     fee_basis_points: u64ToNumber(feeBasisPointsRaw),
     fee_sol: u64ToNumber(feeRaw) == null ? null : u64ToNumber(feeRaw) / 1e9,
@@ -355,12 +377,14 @@ function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda, maxFeasiblePric
       sol_amount: event.sol_amount,
       price_sol: event.price_sol,
       reserve_price_sol: event.reserve_price_sol,
-      progress_pct: null,
+      progress_pct: event.progress_pct,
       virtual_sol_reserves: event.virtual_sol_reserves,
       virtual_token_reserves: event.virtual_token_reserves,
       real_sol_reserves: event.real_sol_reserves,
       real_token_reserves: event.real_token_reserves,
-      progress_decode_status: 'exact_trade_event_reserves_decoded',
+      progress_decode_status: event.progress_pct == null
+        ? 'exact_trade_event_reserves_decoded'
+        : 'exact_trade_event_reserves_decoded_estimated_progress_v1',
       price_decode_status: 'exact_trade_event',
       price_feasible: true,
       raw_event_bytes: event.raw_event_bytes,
@@ -435,6 +459,7 @@ function aggregateMinuteBars(trades = []) {
         last_virtual_sol_reserves: trade.virtual_sol_reserves ?? null,
         last_virtual_token_reserves: trade.virtual_token_reserves ?? null,
         last_reserve_price_sol: trade.reserve_price_sol ?? null,
+        last_progress_pct: trade.progress_pct ?? null,
       });
     } else {
       existing.high = Math.max(existing.high, trade.price_sol);
@@ -455,6 +480,7 @@ function aggregateMinuteBars(trades = []) {
       if (trade.virtual_sol_reserves != null) existing.last_virtual_sol_reserves = trade.virtual_sol_reserves;
       if (trade.virtual_token_reserves != null) existing.last_virtual_token_reserves = trade.virtual_token_reserves;
       if (trade.reserve_price_sol != null) existing.last_reserve_price_sol = trade.reserve_price_sol;
+      if (trade.progress_pct != null) existing.last_progress_pct = trade.progress_pct;
     }
   }
   return [...buckets.values()].sort((a, b) => a.timestamp - b.timestamp).map((bar) => ({
@@ -480,8 +506,12 @@ function aggregateMinuteBars(trades = []) {
     last_virtual_sol_reserves: bar.last_virtual_sol_reserves,
     last_virtual_token_reserves: bar.last_virtual_token_reserves,
     last_reserve_price_sol: bar.last_reserve_price_sol,
-    progress_pct: null,
-    progress_decode_status: bar.exact_trade_count > 0 ? 'exact_trade_event_reserves_decoded' : 'not_decoded_v1_transfer_heuristic',
+    progress_pct: bar.last_progress_pct ?? null,
+    progress_decode_status: bar.exact_trade_count > 0
+      ? (bar.last_progress_pct == null
+          ? 'exact_trade_event_reserves_decoded'
+          : 'exact_trade_event_reserves_decoded_estimated_progress_v1')
+      : 'not_decoded_v1_transfer_heuristic',
   }));
 }
 
@@ -682,9 +712,11 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
       exact_trade_event_n: trades.filter((trade) => trade.price_decode_status === 'exact_trade_event').length,
       transfer_heuristic_trade_n: trades.filter((trade) => trade.price_decode_status !== 'exact_trade_event').length,
       infeasible_transfer_price_n: trades.filter((trade) => trade.price_feasible === false).length,
-      progress_decode_status: trades.some((trade) => trade.progress_decode_status === 'exact_trade_event_reserves_decoded')
-        ? 'exact_trade_event_reserves_decoded'
-        : 'not_decoded_v1_transfer_heuristic',
+      progress_decode_status: trades.some((trade) => trade.progress_decode_status === 'exact_trade_event_reserves_decoded_estimated_progress_v1')
+        ? 'exact_trade_event_reserves_decoded_estimated_progress_v1'
+        : (trades.some((trade) => trade.progress_decode_status === 'exact_trade_event_reserves_decoded')
+            ? 'exact_trade_event_reserves_decoded'
+            : 'not_decoded_v1_transfer_heuristic'),
       bars,
       sample_trades: trades.slice(0, 5),
     };
@@ -708,6 +740,9 @@ async function main() {
     return;
   }
   if (!args.tokensFile) throw new Error('Provide --tokens-file');
+  if (args.rpcUrlFile && !args.rpcUrl) {
+    args.rpcUrl = readSecretFile(args.rpcUrlFile);
+  }
   const anchors = loadAnchorsFromTokensFile(args.tokensFile, args.limit);
   const checkpointOut = args.checkpointOut || `${args.out}.jsonl`;
   if (checkpointOut && !args.resume) {
@@ -724,7 +759,7 @@ async function main() {
       rpcUrl: process.env.HELIUS_RPC_URL || undefined,
       pageSize: args.pageSize,
     });
-  if (!args.dryRun && !transactionsPool && !client.isEnabled()) throw new Error('HELIUS_API_KEY, HELIUS_RPC_URL, --rpc-url, or --transactions-json is required');
+  if (!args.dryRun && !transactionsPool && !client.isEnabled()) throw new Error('HELIUS_API_KEY, HELIUS_RPC_URL, --rpc-url, --rpc-url-file, or --transactions-json is required');
   const results = [...checkpointRows];
   let processed = 0;
   for (const anchor of anchors) {

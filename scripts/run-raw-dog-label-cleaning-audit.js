@@ -79,6 +79,14 @@ function tierFromRow(row = {}) {
   return String(row.raw_sustained_tier || row.raw_primary_tier || row.tier || '').toLowerCase();
 }
 
+function tierFromObservedMultiple(value) {
+  const multiple = numeric(value);
+  if (multiple == null) return 'unknown';
+  if (multiple >= 2) return 'gold';
+  if (multiple >= 1.5) return 'silver';
+  return 'dud';
+}
+
 function recordedPeakMultiple(row = {}) {
   const explicit = numeric(row.recorded_peak_multiple ?? row.raw_sustained_peak_multiple ?? row.peak_multiple);
   if (explicit != null && explicit > 0) return explicit;
@@ -116,28 +124,37 @@ export function classifyLabelRow(row = {}, { threshold = 2 } = {}) {
 
   let label_status = 'clean';
   let reason = 'within_tolerance';
-  if (recordedMultiple == null) {
-    label_status = 'quarantine';
-    reason = 'missing_recorded_peak';
-  } else if (numeric(row.baseline_price) == null || numeric(row.baseline_price) <= 0) {
+  let chainTruthNeed = 'none';
+  let effectiveTier = tier;
+  if (numeric(row.baseline_price) == null || numeric(row.baseline_price) <= 0) {
     label_status = 'quarantine';
     reason = 'missing_baseline_price';
   } else if (observedMultiple == null) {
     label_status = 'quarantine';
     reason = 'no_native_bars';
+    chainTruthNeed = recordedMultiple == null
+      ? 'native_path_reconstruction_for_missing_peak'
+      : 'native_path_reconstruction';
+  } else if (recordedMultiple == null) {
+    label_status = 'clean';
+    reason = 'missing_recorded_peak_repaired_from_native_bars';
+    effectiveTier = tierFromObservedMultiple(observedMultiple);
   } else if (ratio != null && ratio > threshold) {
     label_status = 'quarantine';
     reason = 'label_unit_corrupt';
+    chainTruthNeed = 'polluted_peak_window_adjudication';
   }
 
   return {
     ...row,
     tier,
+    effective_tier: effectiveTier,
     recorded_peak_multiple: recordedMultiple,
     observed_peak_multiple: observedMultiple,
     label_to_path_ratio: ratio,
     label_status,
     label_cleaning_reason: reason,
+    chain_truth_need: chainTruthNeed,
   };
 }
 

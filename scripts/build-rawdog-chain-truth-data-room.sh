@@ -209,7 +209,7 @@ else
   echo "DOG_TOUCH/DUD_TOUCH not provided; building quarantine-only chain-truth worklists."
   WORKLIST_V2="$OUT_DIR/worklists/chain-truth-worklist-v2.txt"
   node "$ROOT_DIR/scripts/build-chain-truth-worklist.js" \
-    --quarantine "$CLEAN_PACK_DIR/quarantine-tokens.txt" \
+    --quarantine "$CLEAN_PACK_DIR/chain-truth-tokens.txt" \
     --out "$WORKLIST_V2"
   node "$ROOT_DIR/scripts/build-chain-truth-tier-worklists.js" \
     --worklist "$WORKLIST_V2" \

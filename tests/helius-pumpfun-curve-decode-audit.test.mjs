@@ -8,6 +8,7 @@ import {
   decodePumpfunTradeEventPayload,
   decodePumpfunTradeEventsFromLogs,
   derivePumpfunBondingCurvePda,
+  estimatePumpfunProgressPctFromRealTokenReserves,
   inferSideAndUser,
   normalizeCurveTransaction,
 } from '../scripts/run-helius-pumpfun-curve-decode-audit.js';
@@ -116,7 +117,14 @@ test('decodes exact pump.fun TradeEvent payload', () => {
   assert.equal(event.price_sol, 0.0005);
   assert.equal(event.virtual_sol_reserves, 31);
   assert.equal(event.virtual_token_reserves, 1_073_000_000);
+  assert.equal(event.progress_pct, 0);
   assert.equal(event.fee_basis_points, 100);
+});
+
+test('estimates pump.fun progress from decoded real token reserves', () => {
+  assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(793_100_000), 0);
+  assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(0), 100);
+  assert.equal(Math.round(estimatePumpfunProgressPctFromRealTokenReserves(396_550_000)), 50);
 });
 
 test('extracts exact pump.fun TradeEvent from raw transaction logs', () => {
@@ -153,7 +161,8 @@ test('prefers exact TradeEvent over transfer heuristic when raw logs are availab
   assert.equal(trade.sol_amount, 3);
   assert.equal(trade.token_amount, 6_000);
   assert.equal(trade.price_decode_status, 'exact_trade_event');
-  assert.equal(trade.progress_decode_status, 'exact_trade_event_reserves_decoded');
+  assert.equal(trade.progress_pct, 0);
+  assert.equal(trade.progress_decode_status, 'exact_trade_event_reserves_decoded_estimated_progress_v1');
 });
 
 test('aggregates curve trades to 1m bars with buy/sell/user metrics', () => {
