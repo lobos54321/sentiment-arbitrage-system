@@ -40,9 +40,12 @@ test('delayed replay computes capture and precision by early 5m volume threshold
 
   assert.equal(row.selected_dogs, 1);
   assert.equal(row.selected_duds, 2);
+  assert.equal(row.selected_dogs_all, 1);
+  assert.equal(row.excluded_dogs_missing_entry_price, 0);
   assert.equal(row.dog_silver_capture_n, 1);
   assert.equal(row.dud_reaches_silver_n, 1);
   assert.equal(row.selected_precision_if_silver_target, 0.5);
+  assert.equal(row.precision_definition.includes('dog_silver_capture_n'), true);
 });
 
 test('buildReport emits all delay/threshold combinations', () => {
