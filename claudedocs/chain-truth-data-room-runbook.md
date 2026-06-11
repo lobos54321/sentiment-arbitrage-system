@@ -65,64 +65,55 @@ Outputs include:
 Alchemy key should stay outside the repo. The local file may contain either a full RPC URL or a shell assignment.
 
 ```bash
-source ~/.alchemy_rpc
+cat > ~/.alchemy_rpc <<'EOF'
+ALCHEMY_RPC_URL=https://...
+EOF
+chmod 600 ~/.alchemy_rpc
 ```
 
-If the file is just a raw URL:
+Validate the generated worklists without touching RPC:
 
 ```bash
-export ALCHEMY_RPC_URL="$(cat ~/.alchemy_rpc)"
+DATA_ROOM_DIR=~/sas-data-room/<pack> \
+MODE=smoke \
+DRY_RUN=1 \
+bash scripts/run-chain-truth-tier1-from-data-room.sh
 ```
 
-Smoke first:
+Run a real two-token smoke:
 
 ```bash
-node scripts/run-helius-pumpfun-curve-decode-audit.js \
-  --rpc-url "$ALCHEMY_RPC_URL" \
-  --rpc-mode raw \
-  --tokens-file ~/sas-data-room/<pack>/worklists/tiers/tier1-anchor-worklist-v2.txt \
-  --out ~/sas-data-room/<pack>/chain-truth-tier1-anchor-smoke.json \
-  --checkpoint-out ~/sas-data-room/<pack>/chain-truth-tier1-anchor-smoke.jsonl \
-  --limit 2 \
-  --pre-sec 90 \
-  --post-sec 90 \
-  --page-size 100 \
-  --max-pages 3 \
-  --rpc-tx-delay-ms 100
+DATA_ROOM_DIR=~/sas-data-room/<pack> \
+MODE=smoke \
+ALCHEMY_RPC_FILE=~/.alchemy_rpc \
+bash scripts/run-chain-truth-tier1-from-data-room.sh
 ```
 
 Then run the full Tier 1 anchor pass:
 
 ```bash
-node scripts/run-helius-pumpfun-curve-decode-audit.js \
-  --rpc-url "$ALCHEMY_RPC_URL" \
-  --rpc-mode raw \
-  --tokens-file ~/sas-data-room/<pack>/worklists/tiers/tier1-anchor-worklist-v2.txt \
-  --out ~/sas-data-room/<pack>/chain-truth-tier1-anchor.json \
-  --checkpoint-out ~/sas-data-room/<pack>/chain-truth-tier1-anchor.jsonl \
-  --pre-sec 90 \
-  --post-sec 90 \
-  --page-size 100 \
-  --max-pages 3 \
-  --rpc-tx-delay-ms 100 \
-  --resume
+DATA_ROOM_DIR=~/sas-data-room/<pack> \
+MODE=anchor \
+ALCHEMY_RPC_FILE=~/.alchemy_rpc \
+bash scripts/run-chain-truth-tier1-from-data-room.sh
 ```
 
 Peak-window adjudication:
 
 ```bash
-node scripts/run-helius-pumpfun-curve-decode-audit.js \
-  --rpc-url "$ALCHEMY_RPC_URL" \
-  --rpc-mode raw \
-  --tokens-file ~/sas-data-room/<pack>/worklists/tiers/tier1-peak-worklist-v2.txt \
-  --out ~/sas-data-room/<pack>/chain-truth-tier1-peak.json \
-  --checkpoint-out ~/sas-data-room/<pack>/chain-truth-tier1-peak.jsonl \
-  --pre-sec 180 \
-  --post-sec 180 \
-  --page-size 100 \
-  --max-pages 5 \
-  --rpc-tx-delay-ms 100 \
-  --resume
+DATA_ROOM_DIR=~/sas-data-room/<pack> \
+MODE=peak \
+ALCHEMY_RPC_FILE=~/.alchemy_rpc \
+bash scripts/run-chain-truth-tier1-from-data-room.sh
+```
+
+To run both anchor and peak passes:
+
+```bash
+DATA_ROOM_DIR=~/sas-data-room/<pack> \
+MODE=all \
+ALCHEMY_RPC_FILE=~/.alchemy_rpc \
+bash scripts/run-chain-truth-tier1-from-data-room.sh
 ```
 
 ## 4. Reading Rules
@@ -132,4 +123,3 @@ node scripts/run-helius-pumpfun-curve-decode-audit.js \
 - Any transfer-derived price with `price_feasible=false` cannot be used for peak adjudication.
 - Do not use live rolling endpoints as the audit baseline.
 - Do not change gate, matrix, RR, exit, or live size from these outputs alone.
-

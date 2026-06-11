@@ -151,12 +151,26 @@ for (const table of tables) {
   const selectSql = cols.includes('event_ts')
     ? `SELECT * FROM ${table} WHERE event_ts >= ? ORDER BY event_ts ASC, id ASC`
     : `SELECT * FROM ${table}`;
-  const rows = src.prepare(selectSql).all(...(cols.includes('event_ts') ? [sinceTs] : []));
   const tx = dst.transaction((items) => {
     for (const item of items) insert.run(cols.map((name) => item[name]));
   });
-  tx(rows);
-  console.log(`subset copied ${table}: ${rows.length} rows`);
+  const select = src.prepare(selectSql);
+  const params = cols.includes('event_ts') ? [sinceTs] : [];
+  let batch = [];
+  let copied = 0;
+  for (const row of select.iterate(...params)) {
+    batch.push(row);
+    if (batch.length >= 1000) {
+      tx(batch);
+      copied += batch.length;
+      batch = [];
+    }
+  }
+  if (batch.length) {
+    tx(batch);
+    copied += batch.length;
+  }
+  console.log(`subset copied ${table}: ${copied} rows`);
 }
 
 dst.pragma('wal_checkpoint(TRUNCATE)');
