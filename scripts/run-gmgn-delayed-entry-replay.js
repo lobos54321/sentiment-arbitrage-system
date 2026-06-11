@@ -123,9 +123,13 @@ function replayForDelay({ dogs = [], duds = [], delayMin = 0, threshold = 0 }) {
 
 function buildReport({ dogs, duds, thresholds = [] }) {
   const delays = [0, 5, 15];
+  const captureDenominatorDefinition = 'selected rows with residual_peak_<delay>m_pct available; this is an evaluable GMGN-price subset, not necessarily the full raw dog denominator';
+  const precisionDefinition = 'dog_silver_capture_n / (dog_silver_capture_n + dud_reaches_silver_n) among selected evaluable dog/dud rows';
   return {
     schema_version: 'gmgn_delayed_entry_replay.v1',
     generated_at: new Date().toISOString(),
+    capture_denominator_definition: captureDenominatorDefinition,
+    precision_definition: precisionDefinition,
     inputs: {
       dogs_n: dogs.length,
       duds_n: duds.length,

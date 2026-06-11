@@ -57,4 +57,6 @@ test('buildReport emits all delay/threshold combinations', () => {
 
   assert.equal(report.rows.length, 6);
   assert.equal(report.inputs.note.includes('T+5m'), true);
+  assert.equal(report.capture_denominator_definition.includes('GMGN-price subset'), true);
+  assert.equal(report.precision_definition.includes('dog_silver_capture_n'), true);
 });
