@@ -342,6 +342,7 @@ function buildReport({ dogs, duds, args }) {
     },
     auc: {
       early_5m_volume_usd_sum: {
+        feature_timing: 'post_anchor_0_to_5m_future_for_immediate_gate_valid_only_as_t_plus_5m_confirmation',
         full: auc(fieldValues(dogs, 'early_5m_volume_usd_sum'), fieldValues(duds, 'early_5m_volume_usd_sum')),
         positive_only: auc(
           fieldValues(dogs, 'early_5m_volume_usd_sum', { positiveOnly: true }),
@@ -350,6 +351,7 @@ function buildReport({ dogs, duds, args }) {
         by_stage: stratifiedAuc(dogs, duds, 'early_5m_volume_usd_sum'),
       },
       early_15m_volume_usd_sum: {
+        feature_timing: 'post_anchor_0_to_15m_future_for_immediate_gate_valid_only_as_t_plus_15m_confirmation',
         full: auc(fieldValues(dogs, 'early_15m_volume_usd_sum'), fieldValues(duds, 'early_15m_volume_usd_sum')),
         positive_only: auc(
           fieldValues(dogs, 'early_15m_volume_usd_sum', { positiveOnly: true }),
@@ -358,6 +360,7 @@ function buildReport({ dogs, duds, args }) {
         by_stage: stratifiedAuc(dogs, duds, 'early_15m_volume_usd_sum'),
       },
       volume_usd_sum_120m_not_ex_ante: {
+        feature_timing: 'post_anchor_120m_future_info_forbidden_for_entry_gate',
         full: auc(fieldValues(dogs, 'volume_usd_sum'), fieldValues(duds, 'volume_usd_sum')),
       },
     },
@@ -367,6 +370,7 @@ function buildReport({ dogs, duds, args }) {
         'Generate decision_ts token files and re-run GMGN touch with decision_ts anchors',
         'Treat curve_phase_unconfirmed dogs as label-quality debt until Helius/pump.fun decoding confirms traded volume before peak',
         'Use stage-stratified dog-vs-dud, not full-sample early-volume AUC, for feature claims',
+        'Do not use early_5m/early_15m volume as immediate-entry features; they are post-anchor windows and only valid for delayed confirmation or residual-upside replay',
       ],
     },
     samples: {

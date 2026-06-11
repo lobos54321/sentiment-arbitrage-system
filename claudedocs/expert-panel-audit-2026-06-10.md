@@ -87,8 +87,18 @@
 - dog first nonzero volume lag median = 1063s; dud median = -11s。
 - AUC(lag dog > dud) = 0.7039,比 signal_ts 更强。
 - 全量 early_15m volume AUC = 0.4104,positive-only AUC = 0.7451。
-- 在 `already_volume_visible_at_anchor` 子集内,early_15m volume AUC = 0.8375;dog median $60,986,dud median $10,349。
+- 在 `already_volume_visible_at_anchor` 子集内,early_15m volume AUC = 0.8375;dog median $60,986,dud median $10,349。**注意: 这是 anchor 后 15m 窗口,对即时 entry gate 是未来信息,只能用于 T+15m 延迟确认或 residual-upside replay,不能直接当 decision_ts 特征。**
 - 结论: "狗更常在决策时仍处暗区/临毕业前"不是 signal_ts 假象;锚到 decision_ts 后仍成立且更强。
+
+### C2. Future-leakage correction(2026-06-11)
+
+外部审计必须把两类特征分开:
+
+- 干净 ex-ante: `volume_visible_at_decision`。decision-anchor cohort 中,未出量段 dog=29,dud=57,P(dog)=33.7%,相对 base rate 20.7% 为 1.63x lift;已出量段 dog=12,dud=100,P(dog)=10.7%。这说明狗更常在决策时仍处曲线暗区/临毕业前。
+- 延迟确认: `early_5m_volume_usd_sum` / `early_15m_volume_usd_sum`。这些是 anchor 后窗口,不能直接进即时 gate;只能作为 T+5m/T+15m 确认策略,并且必须计算 delayed-entry residual upside 与 dud loss。
+- 禁用入场特征: `volume_usd_sum_120m`。这是完整未来窗口,只能做标签/复盘,不能做任何 entry feature。
+
+当前最小结论: `volume_visible_at_decision` 是第一条已验证的事前结构特征,但 precision 不足以单独交易;not-visible 段还需要 pump.fun 曲线进度、买压、unique buyers、buy/sell imbalance 等链上/GMGN trenches 特征继续拆。
 
 ### D. 标签质量债
 
