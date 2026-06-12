@@ -30,6 +30,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     rpcUrlFile: '',
     rpcMode: 'auto',
     rpcTxDelayMs: 0,
+    anchorDelayMs: 0,
     perTokenTimeoutMs: 0,
     maxFeasiblePriceSol: 0,
     resume: false,
@@ -53,6 +54,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--rpc-url-file') { args.rpcUrlFile = next; i += 1; continue; }
     if (key === '--rpc-mode') { args.rpcMode = next; i += 1; continue; }
     if (key === '--rpc-tx-delay-ms') { args.rpcTxDelayMs = Number(next); i += 1; continue; }
+    if (key === '--anchor-delay-ms') { args.anchorDelayMs = Number(next); i += 1; continue; }
     if (key === '--per-token-timeout-ms') { args.perTokenTimeoutMs = Number(next); i += 1; continue; }
     if (key === '--max-feasible-price-sol') { args.maxFeasiblePriceSol = Number(next); i += 1; continue; }
     if (key === '--resume') { args.resume = true; continue; }
@@ -90,6 +92,7 @@ function usage() {
     '  --rpc-url-file <path>  Read generic Solana RPC URL from a local secret file without exposing it in ps',
     '  --rpc-mode <auto|raw|enhanced>  History fetch mode, default auto',
     '  --rpc-tx-delay-ms <n>  Delay between raw getTransaction calls, default 0',
+    '  --anchor-delay-ms <n>  Delay after each newly processed anchor, default 0',
     '  --per-token-timeout-ms <n>  Wall-clock timeout per anchor, default 0 (disabled)',
     '  --max-feasible-price-sol <n>  Optional heuristic price feasibility ceiling for transfer-derived prices',
     '  --resume          Reuse rows already present in checkpoint JSONL',
@@ -909,6 +912,7 @@ async function main() {
       console.error(`[helius-pumpfun] stopping_after_rate_limit token=${anchor.token_ca.slice(-8)} error=${String(row.error || '').slice(0, 160)}`);
       break;
     }
+    await sleep(Number(args.anchorDelayMs || 0));
   }
   const ok = results.filter((row) => row.status === 'ok');
   const report = {
