@@ -34,6 +34,8 @@ ANCHOR_DELAY_MS="${ANCHOR_DELAY_MS:-750}"
 PER_TOKEN_TIMEOUT_MS="${PER_TOKEN_TIMEOUT_MS:-120000}"
 BASELINE_MODE="${BASELINE_MODE:-window}"
 BASELINE_MAX_TX_FETCHES="${BASELINE_MAX_TX_FETCHES:-10}"
+BASELINE_PRE_SEC="${BASELINE_PRE_SEC:-90}"
+BASELINE_POST_SEC="${BASELINE_POST_SEC:-90}"
 MAX_FEASIBLE_PRICE_SOL="${MAX_FEASIBLE_PRICE_SOL:-0}"
 SAS_NODE_MODULES_SOURCE="${SAS_NODE_MODULES_SOURCE:-/Users/boliu/sentiment-arbitrage-system/node_modules}"
 
@@ -60,6 +62,7 @@ Env:
   PER_TOKEN_TIMEOUT_MS=120000 per-anchor wall-clock timeout; timeout rows are checkpointed as coverage_incomplete
   BASELINE_MODE=window|last-pre-anchor
   BASELINE_MAX_TX_FETCHES=10 max transaction fetches per anchor in last-pre-anchor mode
+  BASELINE_PRE_SEC=90 and BASELINE_POST_SEC=90 set the baseline anchor window
   SMOKE_PAGE_SIZE=25 and SMOKE_MAX_PAGES=1 keep smoke runs bounded by default
   OUT_DIR defaults to $DATA_ROOM_DIR/chain-truth
 EOF
@@ -186,7 +189,7 @@ case "$MODE" in
     run_pass baseline-smoke "$BASELINE_WORKLIST" 90 90 "$SMOKE_MAX_PAGES" "$LIMIT"
     ;;
   baseline)
-    run_pass baseline "$BASELINE_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
+    run_pass baseline "$BASELINE_WORKLIST" "$BASELINE_PRE_SEC" "$BASELINE_POST_SEC" "$ANCHOR_MAX_PAGES" ""
     ;;
   anchor)
     run_pass anchor "$ANCHOR_WORKLIST" 90 90 "$ANCHOR_MAX_PAGES" ""
