@@ -11,6 +11,9 @@ import { fetchWithRetry } from '../src/utils/fetch-with-retry.js';
 const DEFAULT_PUMPFUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const PUMPFUN_TOKEN_DECIMALS = 6;
 const PUMPFUN_INITIAL_REAL_TOKEN_RESERVES = Number(process.env.PUMPFUN_INITIAL_REAL_TOKEN_RESERVES || 793_100_000);
+const PUMPFUN_INITIAL_VIRTUAL_SOL_RESERVES = Number(process.env.PUMPFUN_INITIAL_VIRTUAL_SOL_RESERVES || 30);
+const PUMPFUN_INITIAL_VIRTUAL_TOKEN_RESERVES = Number(process.env.PUMPFUN_INITIAL_VIRTUAL_TOKEN_RESERVES || 1_073_000_000);
+const PUMPFUN_VIRTUAL_TOKEN_OFFSET = PUMPFUN_INITIAL_VIRTUAL_TOKEN_RESERVES - PUMPFUN_INITIAL_REAL_TOKEN_RESERVES;
 const TRADE_EVENT_DISCRIMINATOR = createHash('sha256').update('event:TradeEvent').digest().subarray(0, 8);
 
 function parseArgs(argv = process.argv.slice(2)) {
@@ -211,6 +214,20 @@ export function estimatePumpfunProgressPctFromRealTokenReserves(realTokenReserve
   return Math.max(0, Math.min(100, pct));
 }
 
+export function estimatePumpfunReservePriceSolFromReserves({ virtualTokenReserves = null, realTokenReserves = null } = {}) {
+  let vToken = numeric(virtualTokenReserves);
+  const real = numeric(realTokenReserves);
+  if ((vToken == null || vToken <= 0) && real != null) {
+    vToken = real + PUMPFUN_VIRTUAL_TOKEN_OFFSET;
+  }
+  const initialVSol = numeric(PUMPFUN_INITIAL_VIRTUAL_SOL_RESERVES);
+  const initialVToken = numeric(PUMPFUN_INITIAL_VIRTUAL_TOKEN_RESERVES);
+  if (vToken == null || vToken <= 0 || initialVSol == null || initialVToken == null || initialVSol <= 0 || initialVToken <= 0) return null;
+  const invariant = initialVSol * initialVToken;
+  const vSol = invariant / vToken;
+  return vSol / vToken;
+}
+
 function decodePumpfunTradeEventPayload(payload) {
   const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || []);
   if (buffer.length < 8 + 32 + 8 + 8 + 1 + 32 + 8 + 8 + 8) return null;
@@ -259,12 +276,14 @@ function decodePumpfunTradeEventPayload(payload) {
   const virtualSolReserves = u64ToNumber(virtualSolRaw) == null ? null : u64ToNumber(virtualSolRaw) / 1e9;
   const virtualTokenReserves = u64ToNumber(virtualTokenRaw) == null ? null : u64ToNumber(virtualTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS);
   const realTokenReserves = u64ToNumber(realTokenRaw) == null ? null : u64ToNumber(realTokenRaw) / (10 ** PUMPFUN_TOKEN_DECIMALS);
-  const reservePriceSol = virtualSolReserves && virtualTokenReserves ? virtualSolReserves / virtualTokenReserves : null;
+  const reservePriceSol = virtualSolReserves && virtualTokenReserves
+    ? virtualSolReserves / virtualTokenReserves
+    : estimatePumpfunReservePriceSolFromReserves({ virtualTokenReserves, realTokenReserves });
   return {
     mint,
     sol_amount: solAmount,
     token_amount: tokenAmount,
-    price_sol: solAmount != null && tokenAmount > 0 ? solAmount / tokenAmount : null,
+    price_sol: solAmount != null && solAmount > 0 && tokenAmount > 0 ? solAmount / tokenAmount : null,
     side: isBuy ? 'buy' : 'sell',
     user,
     timestamp: timestampRaw == null ? null : Number(timestampRaw),

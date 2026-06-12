@@ -10,6 +10,7 @@ import {
   decodePumpfunTradeEventsFromLogs,
   derivePumpfunBondingCurvePda,
   estimatePumpfunProgressPctFromRealTokenReserves,
+  estimatePumpfunReservePriceSolFromReserves,
   filterSignaturesForWindow,
   inferSideAndUser,
   loadAnchorsFromTokensFile,
@@ -147,6 +148,15 @@ test('estimates pump.fun progress from decoded real token reserves', () => {
   assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(793_100_000), 0);
   assert.equal(estimatePumpfunProgressPctFromRealTokenReserves(0), 100);
   assert.equal(Math.round(estimatePumpfunProgressPctFromRealTokenReserves(396_550_000)), 50);
+});
+
+test('estimates reserve price from token reserves when virtual SOL reserve is absent', () => {
+  const price = estimatePumpfunReservePriceSolFromReserves({
+    virtualTokenReserves: 721_543_245.162263,
+    realTokenReserves: 441_643_245.162263,
+  });
+
+  assert.equal(price > 6.1e-8 && price < 6.3e-8, true);
 });
 
 test('filters signature pages by blockTime before fetching transactions', () => {
