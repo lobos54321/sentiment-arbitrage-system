@@ -35,6 +35,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     rpcTxDelayMs: 0,
     anchorDelayMs: 0,
     perTokenTimeoutMs: 0,
+    baselineMode: 'window',
+    baselineMaxTxFetches: 10,
     maxFeasiblePriceSol: 0,
     resume: false,
     progressEvery: 1,
@@ -59,6 +61,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--rpc-tx-delay-ms') { args.rpcTxDelayMs = Number(next); i += 1; continue; }
     if (key === '--anchor-delay-ms') { args.anchorDelayMs = Number(next); i += 1; continue; }
     if (key === '--per-token-timeout-ms') { args.perTokenTimeoutMs = Number(next); i += 1; continue; }
+    if (key === '--baseline-mode') { args.baselineMode = next; i += 1; continue; }
+    if (key === '--baseline-max-tx-fetches') { args.baselineMaxTxFetches = Number(next); i += 1; continue; }
     if (key === '--max-feasible-price-sol') { args.maxFeasiblePriceSol = Number(next); i += 1; continue; }
     if (key === '--resume') { args.resume = true; continue; }
     if (key === '--progress-every') { args.progressEvery = Number(next); i += 1; continue; }
@@ -735,6 +739,106 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   };
 }
 
+export async function fetchBaselineTradesForAnchor(client, {
+  curvePda,
+  tokenCa,
+  anchorTs,
+  startTs,
+  endTs,
+  maxPages,
+  pageSize,
+  maxTxFetches = 10,
+  maxFeasiblePriceSol = 0,
+  signal,
+} = {}) {
+  let before = null;
+  let signaturesFetched = 0;
+  let transactionsFetched = 0;
+  let signaturesSkippedAfterEnd = 0;
+  let signaturesSkippedBeforeStart = 0;
+  let oldestBlockTime = null;
+  let newestBlockTime = null;
+  let historyReachedStart = false;
+  let firstPostAnchorTrade = null;
+  let lastPreAnchorTrade = null;
+  const anchor = numeric(anchorTs);
+  const start = numeric(startTs);
+  const end = numeric(endTs);
+  const transactions = [];
+  const maxTx = Math.max(1, Number(maxTxFetches || 10));
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const signatures = await client.getSignaturesForAddress(curvePda, { before, limit: pageSize, signal });
+    if (!signatures.length) break;
+    signaturesFetched += signatures.length;
+    before = signatures[signatures.length - 1]?.signature || null;
+
+    for (const sig of signatures) {
+      const blockTime = normalizeTs(sig?.blockTime);
+      if (blockTime != null) {
+        newestBlockTime = newestBlockTime == null ? blockTime : Math.max(newestBlockTime, blockTime);
+        oldestBlockTime = oldestBlockTime == null ? blockTime : Math.min(oldestBlockTime, blockTime);
+      }
+      if (blockTime != null && end != null && blockTime > end) {
+        signaturesSkippedAfterEnd += 1;
+        continue;
+      }
+      if (blockTime != null && start != null && blockTime < start) {
+        signaturesSkippedBeforeStart += 1;
+        historyReachedStart = true;
+        break;
+      }
+      if (transactionsFetched >= maxTx) {
+        break;
+      }
+      if (anchor != null && blockTime != null && blockTime > anchor && firstPostAnchorTrade) {
+        continue;
+      }
+
+      const tx = await client.getTransaction(sig.signature, { signal });
+      transactionsFetched += 1;
+      if (!tx) continue;
+      transactions.push(tx);
+      const trade = normalizeCurveTransaction(tx, {
+        tokenCa,
+        curvePda,
+        maxFeasiblePriceSol,
+      });
+      if (!trade) continue;
+      if (anchor != null && trade.block_time > anchor) {
+        if (!firstPostAnchorTrade || trade.block_time < firstPostAnchorTrade.block_time) {
+          firstPostAnchorTrade = trade;
+        }
+        continue;
+      }
+      if (anchor == null || trade.block_time <= anchor) {
+        lastPreAnchorTrade = trade;
+        historyReachedStart = true;
+        break;
+      }
+    }
+    if (lastPreAnchorTrade || historyReachedStart || transactionsFetched >= maxTx) break;
+  }
+
+  const trades = [lastPreAnchorTrade, firstPostAnchorTrade]
+    .filter(Boolean)
+    .sort((a, b) => a.block_time - b.block_time || String(a.signature || '').localeCompare(String(b.signature || '')));
+  return {
+    signaturesFetched,
+    transactionsFetched,
+    signaturesSkippedAfterEnd,
+    signaturesSkippedBeforeStart,
+    oldestBlockTime,
+    newestBlockTime,
+    historyReachedStart,
+    transactions,
+    trades,
+    baselineScanMode: 'last_pre_anchor',
+    lastPreAnchorFound: Boolean(lastPreAnchorTrade),
+    firstPostAnchorFound: Boolean(firstPostAnchorTrade),
+  };
+}
+
 async function decodeAnchor(client, anchor, args, transactionsPool = null, signal = null) {
   let curve;
   try {
@@ -759,7 +863,21 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null, signa
     };
   }
   try {
-    const fetched = transactionsPool
+    const fetched = (!transactionsPool && args.baselineMode === 'last-pre-anchor')
+      ? await fetchBaselineTradesForAnchor(client, {
+        curvePda: curve.pda,
+        tokenCa: anchor.token_ca,
+        anchorTs: anchor.anchor_ts,
+        startTs,
+        endTs,
+        maxPages: args.maxPages,
+        pageSize: args.pageSize,
+        maxTxFetches: args.baselineMaxTxFetches,
+        maxFeasiblePriceSol: args.maxFeasiblePriceSol,
+        signal,
+      })
+      : null;
+    const fetchedHistory = fetched || (transactionsPool
       ? {
         signaturesFetched: 0,
         transactionsFetched: transactionsPool.length,
@@ -779,15 +897,17 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null, signa
         maxPages: args.maxPages,
         pageSize: args.pageSize,
         signal,
-      });
-    const trades = fetched.transactions
-      .map((tx) => normalizeCurveTransaction(tx, {
-        tokenCa: anchor.token_ca,
-        curvePda: curve.pda,
-        maxFeasiblePriceSol: args.maxFeasiblePriceSol,
-      }))
-      .filter(Boolean)
-      .sort((a, b) => a.block_time - b.block_time);
+      }));
+    const trades = fetched
+      ? fetched.trades
+      : fetchedHistory.transactions
+        .map((tx) => normalizeCurveTransaction(tx, {
+          tokenCa: anchor.token_ca,
+          curvePda: curve.pda,
+          maxFeasiblePriceSol: args.maxFeasiblePriceSol,
+        }))
+        .filter(Boolean)
+        .sort((a, b) => a.block_time - b.block_time);
     const bars = aggregateMinuteBars(trades);
     const baselineAtAnchor = selectBaselineTradeAtAnchor(trades, anchor.anchor_ts);
     return {
@@ -797,14 +917,18 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null, signa
       curve_bump: curve.bump,
       start_ts: startTs,
       end_ts: endTs,
-      signatures_fetched: fetched.signaturesFetched,
-      transactions_fetched: fetched.transactionsFetched,
-      signatures_skipped_after_end: fetched.signaturesSkippedAfterEnd,
-      signatures_skipped_before_start: fetched.signaturesSkippedBeforeStart,
-      transactions_in_window: fetched.transactions.length,
-      oldest_block_time: fetched.oldestBlockTime,
-      history_reached_start: fetched.historyReachedStart,
-      oldest_lag_sec: fetched.oldestBlockTime == null ? null : fetched.oldestBlockTime - anchor.anchor_ts,
+      signatures_fetched: fetchedHistory.signaturesFetched,
+      transactions_fetched: fetchedHistory.transactionsFetched,
+      signatures_skipped_after_end: fetchedHistory.signaturesSkippedAfterEnd,
+      signatures_skipped_before_start: fetchedHistory.signaturesSkippedBeforeStart,
+      transactions_in_window: fetchedHistory.transactions.length,
+      baseline_scan_mode: fetchedHistory.baselineScanMode || 'window',
+      baseline_last_pre_anchor_found: fetchedHistory.lastPreAnchorFound ?? null,
+      baseline_first_post_anchor_found: fetchedHistory.firstPostAnchorFound ?? null,
+      oldest_block_time: fetchedHistory.oldestBlockTime,
+      newest_block_time: fetchedHistory.newestBlockTime,
+      history_reached_start: fetchedHistory.historyReachedStart,
+      oldest_lag_sec: fetchedHistory.oldestBlockTime == null ? null : fetchedHistory.oldestBlockTime - anchor.anchor_ts,
       trades_n: trades.length,
       bars_n: bars.length,
       first_trade_lag_sec: trades[0] ? trades[0].block_time - anchor.anchor_ts : null,
@@ -944,6 +1068,8 @@ async function main() {
       post_sec: args.postSec,
       max_pages: args.maxPages,
       page_size: args.pageSize,
+      baseline_mode: args.baselineMode,
+      baseline_max_tx_fetches: args.baselineMaxTxFetches,
       program_id: args.programId,
       dry_run: args.dryRun,
       checkpoint_out: checkpointOut,

@@ -32,6 +32,8 @@ SMOKE_MAX_PAGES="${SMOKE_MAX_PAGES:-1}"
 RPC_TX_DELAY_MS="${RPC_TX_DELAY_MS:-100}"
 ANCHOR_DELAY_MS="${ANCHOR_DELAY_MS:-750}"
 PER_TOKEN_TIMEOUT_MS="${PER_TOKEN_TIMEOUT_MS:-120000}"
+BASELINE_MODE="${BASELINE_MODE:-window}"
+BASELINE_MAX_TX_FETCHES="${BASELINE_MAX_TX_FETCHES:-10}"
 MAX_FEASIBLE_PRICE_SOL="${MAX_FEASIBLE_PRICE_SOL:-0}"
 SAS_NODE_MODULES_SOURCE="${SAS_NODE_MODULES_SOURCE:-/Users/boliu/sentiment-arbitrage-system/node_modules}"
 
@@ -56,6 +58,8 @@ Env:
   LIMIT=<n> optional cap
   ANCHOR_DELAY_MS=750 delay after each newly processed anchor to avoid RPC bursts
   PER_TOKEN_TIMEOUT_MS=120000 per-anchor wall-clock timeout; timeout rows are checkpointed as coverage_incomplete
+  BASELINE_MODE=window|last-pre-anchor
+  BASELINE_MAX_TX_FETCHES=10 max transaction fetches per anchor in last-pre-anchor mode
   SMOKE_PAGE_SIZE=25 and SMOKE_MAX_PAGES=1 keep smoke runs bounded by default
   OUT_DIR defaults to $DATA_ROOM_DIR/chain-truth
 EOF
@@ -125,6 +129,8 @@ run_pass() {
     --rpc-tx-delay-ms "$RPC_TX_DELAY_MS"
     --anchor-delay-ms "$ANCHOR_DELAY_MS"
     --per-token-timeout-ms "$PER_TOKEN_TIMEOUT_MS"
+    --baseline-mode "$BASELINE_MODE"
+    --baseline-max-tx-fetches "$BASELINE_MAX_TX_FETCHES"
     --progress-every 1
     --resume
   )

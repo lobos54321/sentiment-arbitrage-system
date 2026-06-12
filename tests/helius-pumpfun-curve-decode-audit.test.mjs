@@ -11,6 +11,7 @@ import {
   derivePumpfunBondingCurvePda,
   estimatePumpfunProgressPctFromRealTokenReserves,
   estimatePumpfunReservePriceSolFromReserves,
+  fetchBaselineTradesForAnchor,
   filterSignaturesForWindow,
   inferSideAndUser,
   loadAnchorsFromTokensFile,
@@ -277,4 +278,103 @@ test('marks first post-anchor baseline as biased when no pre-anchor trade exists
   assert.equal(baseline.baseline_source, 'chain_truth_first_post_anchor_trade');
   assert.equal(baseline.baseline_trade_lag_sec, 5);
   assert.equal(baseline.baseline_post_anchor_biased, true);
+});
+
+test('baseline scanner stops after the first exact pre-anchor trade', async () => {
+  const txFor = (signature, timestamp) => ({
+    transaction: { signatures: [signature] },
+    blockTime: timestamp,
+    slot: timestamp,
+    meta: {
+      logMessages: [
+        `Program data: ${tradeEventPayload({
+          timestamp,
+          solLamports: 1_000_000_000,
+          tokenRaw: 2_000_000_000,
+        }).toString('base64')}`,
+      ],
+    },
+  });
+  const fetched = [];
+  const client = {
+    async getSignaturesForAddress() {
+      return [
+        { signature: 'too-new', blockTime: 1200 },
+        { signature: 'post', blockTime: 1005 },
+        { signature: 'noise', blockTime: 1002 },
+        { signature: 'pre', blockTime: 997 },
+        { signature: 'older-should-not-fetch', blockTime: 950 },
+      ];
+    },
+    async getTransaction(signature) {
+      fetched.push(signature);
+      if (signature === 'noise') return { signature, blockTime: 1002, meta: { logMessages: [] } };
+      return txFor(signature, signature === 'post' ? 1005 : 997);
+    },
+  };
+
+  const result = await fetchBaselineTradesForAnchor(client, {
+    curvePda: 'curve',
+    tokenCa,
+    anchorTs: 1000,
+    startTs: 900,
+    endTs: 1090,
+    maxPages: 1,
+    pageSize: 100,
+    maxTxFetches: 10,
+  });
+
+  assert.deepEqual(fetched, ['post', 'pre']);
+  assert.equal(result.lastPreAnchorFound, true);
+  assert.equal(result.firstPostAnchorFound, true);
+  assert.equal(result.transactionsFetched, 2);
+  assert.deepEqual(result.trades.map((trade) => trade.signature), ['pre', 'post']);
+});
+
+test('baseline scanner does not spend transaction budget after finding a post-anchor candidate', async () => {
+  const txFor = (signature, timestamp) => ({
+    transaction: { signatures: [signature] },
+    blockTime: timestamp,
+    slot: timestamp,
+    meta: {
+      logMessages: [
+        `Program data: ${tradeEventPayload({
+          timestamp,
+          solLamports: 1_000_000_000,
+          tokenRaw: 2_000_000_000,
+        }).toString('base64')}`,
+      ],
+    },
+  });
+  const fetched = [];
+  const client = {
+    async getSignaturesForAddress() {
+      return [
+        { signature: 'post-1', blockTime: 1009 },
+        { signature: 'post-2', blockTime: 1008 },
+        { signature: 'post-3', blockTime: 1007 },
+        { signature: 'pre', blockTime: 999 },
+      ];
+    },
+    async getTransaction(signature) {
+      fetched.push(signature);
+      return txFor(signature, signature === 'pre' ? 999 : Number(signature.slice(-1)) + 1006);
+    },
+  };
+
+  const result = await fetchBaselineTradesForAnchor(client, {
+    curvePda: 'curve',
+    tokenCa,
+    anchorTs: 1000,
+    startTs: 900,
+    endTs: 1090,
+    maxPages: 1,
+    pageSize: 100,
+    maxTxFetches: 2,
+  });
+
+  assert.deepEqual(fetched, ['post-1', 'pre']);
+  assert.equal(result.lastPreAnchorFound, true);
+  assert.equal(result.firstPostAnchorFound, true);
+  assert.deepEqual(result.trades.map((trade) => trade.signature), ['pre', 'post-1']);
 });
