@@ -463,22 +463,41 @@ function normalizeCurveTransaction(tx = {}, { tokenCa, curvePda, maxFeasiblePric
 
 function aggregateMinuteBars(trades = []) {
   const buckets = new Map();
+  const positiveNumber = (value) => Number.isFinite(Number(value)) && Number(value) > 0;
+  const effectivePriceSol = (trade) => {
+    if (positiveNumber(trade.price_sol)) return Number(trade.price_sol);
+    if (positiveNumber(trade.reserve_price_sol)) return Number(trade.reserve_price_sol);
+    return null;
+  };
+  const updateOhlc = (bar, price) => {
+    if (!positiveNumber(price)) return;
+    if (!positiveNumber(bar.open)) bar.open = price;
+    bar.high = positiveNumber(bar.high) ? Math.max(bar.high, price) : price;
+    bar.low = positiveNumber(bar.low) ? Math.min(bar.low, price) : price;
+    bar.close = price;
+  };
   for (const trade of trades) {
     const minuteTs = Math.floor(trade.block_time / 60) * 60;
+    const priceSol = effectivePriceSol(trade);
+    const solAmount = positiveNumber(trade.sol_amount) ? Number(trade.sol_amount) : 0;
+    const volumeUnavailable = !positiveNumber(trade.sol_amount)
+      && trade.price_decode_status === 'exact_trade_event'
+      && positiveNumber(trade.reserve_price_sol);
     const existing = buckets.get(minuteTs);
     if (!existing) {
       buckets.set(minuteTs, {
         timestamp: minuteTs,
-        open: trade.price_sol,
-        high: trade.price_sol,
-        low: trade.price_sol,
-        close: trade.price_sol,
-        sol_volume: trade.sol_amount,
+        open: priceSol,
+        high: priceSol,
+        low: priceSol,
+        close: priceSol,
+        sol_volume: solAmount,
+        sol_volume_unavailable_count: volumeUnavailable ? 1 : 0,
         buy_count: trade.side === 'buy' ? 1 : 0,
         sell_count: trade.side === 'sell' ? 1 : 0,
         unknown_side_count: trade.side === 'unknown' ? 1 : 0,
-        buy_sol_volume: trade.side === 'buy' ? trade.sol_amount : 0,
-        sell_sol_volume: trade.side === 'sell' ? trade.sol_amount : 0,
+        buy_sol_volume: trade.side === 'buy' ? solAmount : 0,
+        sell_sol_volume: trade.side === 'sell' ? solAmount : 0,
         users: new Set(trade.user ? [trade.user] : []),
         buyers: new Set(trade.side === 'buy' && trade.user ? [trade.user] : []),
         sellers: new Set(trade.side === 'sell' && trade.user ? [trade.user] : []),
@@ -492,15 +511,14 @@ function aggregateMinuteBars(trades = []) {
         last_progress_pct: trade.progress_pct ?? null,
       });
     } else {
-      existing.high = Math.max(existing.high, trade.price_sol);
-      existing.low = Math.min(existing.low, trade.price_sol);
-      existing.close = trade.price_sol;
-      existing.sol_volume += trade.sol_amount;
+      updateOhlc(existing, priceSol);
+      existing.sol_volume += solAmount;
+      existing.sol_volume_unavailable_count += volumeUnavailable ? 1 : 0;
       existing.buy_count += trade.side === 'buy' ? 1 : 0;
       existing.sell_count += trade.side === 'sell' ? 1 : 0;
       existing.unknown_side_count += trade.side === 'unknown' ? 1 : 0;
-      existing.buy_sol_volume += trade.side === 'buy' ? trade.sol_amount : 0;
-      existing.sell_sol_volume += trade.side === 'sell' ? trade.sol_amount : 0;
+      existing.buy_sol_volume += trade.side === 'buy' ? solAmount : 0;
+      existing.sell_sol_volume += trade.side === 'sell' ? solAmount : 0;
       if (trade.user) existing.users.add(trade.user);
       if (trade.side === 'buy' && trade.user) existing.buyers.add(trade.user);
       if (trade.side === 'sell' && trade.user) existing.sellers.add(trade.user);
@@ -520,6 +538,7 @@ function aggregateMinuteBars(trades = []) {
     low: bar.low,
     close: bar.close,
     sol_volume: Number(bar.sol_volume.toFixed(9)),
+    sol_volume_unavailable_count: bar.sol_volume_unavailable_count,
     buy_count: bar.buy_count,
     sell_count: bar.sell_count,
     unknown_side_count: bar.unknown_side_count,
@@ -1097,8 +1116,10 @@ async function main() {
       history_reached_start_n: ok.filter((row) => row.history_reached_start === true).length,
       history_incomplete_n: ok.filter((row) => row.history_reached_start === false).length,
       total_sol_volume: Number(ok.reduce((sum, row) => sum + Number(row.total_sol_volume || 0), 0).toFixed(9)),
-      progress_decode_status: ok.some((row) => row.progress_decode_status === 'exact_trade_event_reserves_decoded')
-        ? 'exact_trade_event_reserves_decoded'
+      progress_decode_status: ok.some((row) => String(row.progress_decode_status || '').startsWith('exact_trade_event_reserves_decoded'))
+        ? (ok.some((row) => row.progress_decode_status === 'exact_trade_event_reserves_decoded_estimated_progress_v1')
+            ? 'exact_trade_event_reserves_decoded_estimated_progress_v1'
+            : 'exact_trade_event_reserves_decoded')
         : 'not_decoded_v1_transfer_heuristic',
     },
     results,

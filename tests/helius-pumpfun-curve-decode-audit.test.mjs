@@ -255,6 +255,42 @@ test('aggregates curve trades to 1m bars with buy/sell/user metrics', () => {
   assert.equal(bars[0].unique_sellers, 1);
 });
 
+test('aggregates exact reserve prices when event SOL amount is unavailable', () => {
+  const bars = aggregateMinuteBars([
+    {
+      block_time: 1_000,
+      price_sol: null,
+      reserve_price_sol: 0.1,
+      sol_amount: 0,
+      side: 'buy',
+      user: 'a',
+      price_decode_status: 'exact_trade_event',
+      progress_pct: 40,
+    },
+    {
+      block_time: 1_010,
+      price_sol: null,
+      reserve_price_sol: 0.2,
+      sol_amount: 0,
+      side: 'sell',
+      user: 'b',
+      price_decode_status: 'exact_trade_event',
+      progress_pct: 50,
+    },
+  ]);
+
+  assert.equal(bars.length, 1);
+  assert.equal(bars[0].open, 0.1);
+  assert.equal(bars[0].high, 0.2);
+  assert.equal(bars[0].low, 0.1);
+  assert.equal(bars[0].close, 0.2);
+  assert.equal(bars[0].sol_volume, 0);
+  assert.equal(bars[0].sol_volume_unavailable_count, 2);
+  assert.equal(bars[0].buy_count, 1);
+  assert.equal(bars[0].sell_count, 1);
+  assert.equal(bars[0].progress_pct, 50);
+});
+
 test('selects the last pre-anchor trade as chain baseline', () => {
   const baseline = selectBaselineTradeAtAnchor([
     { block_time: 990, reserve_price_sol: 0.1, signature: 'old', progress_pct: 10 },
