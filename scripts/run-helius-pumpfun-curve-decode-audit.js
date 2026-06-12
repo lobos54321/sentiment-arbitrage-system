@@ -19,7 +19,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     out: './data/audits/helius-pumpfun-curve/latest.json',
     preSec: 7200,
     postSec: 7200,
-    limit: 280,
+    limit: 0,
     maxPages: 20,
     pageSize: 100,
     dryRun: false,
@@ -79,7 +79,7 @@ function usage() {
     'Options:',
     '  --pre-sec <n>      Seconds before anchor to fetch, default 7200',
     '  --post-sec <n>     Seconds after anchor to fetch, default 7200',
-    '  --limit <n>        Max anchors, default 280',
+    '  --limit <n>        Max anchors, default 0 (all rows)',
     '  --max-pages <n>    Max signature pages per token, default 20',
     '  --page-size <n>    Signatures per page, default 100',
     '  --checkpoint-out <path>  JSONL checkpoint path, default <out>.jsonl',
@@ -114,10 +114,11 @@ function sleep(ms) {
   return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 }
 
-function loadAnchorsFromTokensFile(filePath, limit = 280) {
+export function loadAnchorsFromTokensFile(filePath, limit = 0) {
   const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
   const out = [];
   const seen = new Set();
+  const maxRows = Number(limit || 0);
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -128,7 +129,7 @@ function loadAnchorsFromTokensFile(filePath, limit = 280) {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ token_ca: token, anchor_ts: anchorTs, symbol });
-    if (out.length >= limit) break;
+    if (maxRows > 0 && out.length >= maxRows) break;
   }
   return out;
 }

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import test from 'node:test';
 import { PublicKey } from '@solana/web3.js';
 
@@ -11,6 +12,7 @@ import {
   estimatePumpfunProgressPctFromRealTokenReserves,
   filterSignaturesForWindow,
   inferSideAndUser,
+  loadAnchorsFromTokensFile,
   normalizeCurveTransaction,
   selectBaselineTradeAtAnchor,
 } from '../scripts/run-helius-pumpfun-curve-decode-audit.js';
@@ -75,6 +77,24 @@ test('derives deterministic pump.fun bonding curve PDA', () => {
   assert.equal(first.pda, second.pda);
   assert.equal(typeof first.bump, 'number');
   assert.equal(first.pda.length > 30, true);
+});
+
+test('loads all anchors by default and only truncates with explicit limit', async (t) => {
+  const filePath = `/tmp/helius-anchor-limit-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`;
+  await t.after(() => {
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+  fs.writeFileSync(filePath, [
+    `${tokenCa}|1000|first`,
+    `${tokenCa}|1000|duplicate`,
+    `${tokenCa}|1001|second`,
+    `${tokenCa}|1002|third`,
+    '',
+  ].join('\n'));
+
+  assert.equal(loadAnchorsFromTokensFile(filePath).length, 3);
+  assert.equal(loadAnchorsFromTokensFile(filePath, 0).length, 3);
+  assert.equal(loadAnchorsFromTokensFile(filePath, 2).length, 2);
 });
 
 test('infers buy side when token recipient paid native SOL', () => {
