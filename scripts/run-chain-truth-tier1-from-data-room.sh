@@ -30,6 +30,7 @@ ANCHOR_MAX_PAGES="${ANCHOR_MAX_PAGES:-3}"
 PEAK_MAX_PAGES="${PEAK_MAX_PAGES:-5}"
 SMOKE_MAX_PAGES="${SMOKE_MAX_PAGES:-1}"
 RPC_TX_DELAY_MS="${RPC_TX_DELAY_MS:-100}"
+PER_TOKEN_TIMEOUT_MS="${PER_TOKEN_TIMEOUT_MS:-120000}"
 MAX_FEASIBLE_PRICE_SOL="${MAX_FEASIBLE_PRICE_SOL:-0}"
 SAS_NODE_MODULES_SOURCE="${SAS_NODE_MODULES_SOURCE:-/Users/boliu/sentiment-arbitrage-system/node_modules}"
 
@@ -52,6 +53,7 @@ Env:
   DRY_RUN=1 to validate worklists without RPC
   ALCHEMY_RPC_URL or ALCHEMY_RPC_FILE=~/.alchemy_rpc for real runs
   LIMIT=<n> optional cap
+  PER_TOKEN_TIMEOUT_MS=120000 per-anchor wall-clock timeout; timeout rows are checkpointed as coverage_incomplete
   SMOKE_PAGE_SIZE=25 and SMOKE_MAX_PAGES=1 keep smoke runs bounded by default
   OUT_DIR defaults to $DATA_ROOM_DIR/chain-truth
 EOF
@@ -119,6 +121,7 @@ run_pass() {
     --page-size "$PAGE_SIZE"
     --max-pages "$max_pages"
     --rpc-tx-delay-ms "$RPC_TX_DELAY_MS"
+    --per-token-timeout-ms "$PER_TOKEN_TIMEOUT_MS"
     --progress-every 1
     --resume
   )

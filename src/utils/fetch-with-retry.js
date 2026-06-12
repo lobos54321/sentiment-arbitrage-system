@@ -85,7 +85,8 @@ export async function fetchWithRetry(url, options = {}) {
         retryOnTimeout,
         retryOnNetworkError,
         silent = false,
-        returnRaw = false
+        returnRaw = false,
+        signal: externalSignal
     } = config;
 
     const log = (level, message) => {
@@ -108,6 +109,12 @@ export async function fetchWithRetry(url, options = {}) {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         const controller = new AbortController();
+        const abortFromExternalSignal = () => controller.abort();
+        if (externalSignal?.aborted) {
+            controller.abort();
+        } else if (externalSignal?.addEventListener) {
+            externalSignal.addEventListener('abort', abortFromExternalSignal, { once: true });
+        }
         const timeoutId = setTimeout(() => controller.abort(), timeout);
 
         try {
@@ -123,6 +130,9 @@ export async function fetchWithRetry(url, options = {}) {
 
             const response = await fetch(url, fetchOptions);
             clearTimeout(timeoutId);
+            if (externalSignal?.removeEventListener) {
+                externalSignal.removeEventListener('abort', abortFromExternalSignal);
+            }
 
             // ═══════════════════════════════════════════════════════
             // 处理响应状态
@@ -205,6 +215,9 @@ export async function fetchWithRetry(url, options = {}) {
 
         } catch (error) {
             clearTimeout(timeoutId);
+            if (externalSignal?.removeEventListener) {
+                externalSignal.removeEventListener('abort', abortFromExternalSignal);
+            }
 
             // 超时
             if (error.name === 'AbortError') {
@@ -213,6 +226,10 @@ export async function fetchWithRetry(url, options = {}) {
                     attempts: attempt,
                     lastError: error
                 });
+
+                if (externalSignal?.aborted) {
+                    break;
+                }
 
                 if (retryOnTimeout && attempt < maxRetries) {
                     log('warn', `请求超时, 等待 ${delay / 1000}s 后重试 (${attempt}/${maxRetries})`);

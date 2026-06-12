@@ -30,6 +30,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     rpcUrlFile: '',
     rpcMode: 'auto',
     rpcTxDelayMs: 0,
+    perTokenTimeoutMs: 0,
     maxFeasiblePriceSol: 0,
     resume: false,
     progressEvery: 1,
@@ -52,6 +53,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--rpc-url-file') { args.rpcUrlFile = next; i += 1; continue; }
     if (key === '--rpc-mode') { args.rpcMode = next; i += 1; continue; }
     if (key === '--rpc-tx-delay-ms') { args.rpcTxDelayMs = Number(next); i += 1; continue; }
+    if (key === '--per-token-timeout-ms') { args.perTokenTimeoutMs = Number(next); i += 1; continue; }
     if (key === '--max-feasible-price-sol') { args.maxFeasiblePriceSol = Number(next); i += 1; continue; }
     if (key === '--resume') { args.resume = true; continue; }
     if (key === '--progress-every') { args.progressEvery = Number(next); i += 1; continue; }
@@ -88,6 +90,7 @@ function usage() {
     '  --rpc-url-file <path>  Read generic Solana RPC URL from a local secret file without exposing it in ps',
     '  --rpc-mode <auto|raw|enhanced>  History fetch mode, default auto',
     '  --rpc-tx-delay-ms <n>  Delay between raw getTransaction calls, default 0',
+    '  --per-token-timeout-ms <n>  Wall-clock timeout per anchor, default 0 (disabled)',
     '  --max-feasible-price-sol <n>  Optional heuristic price feasibility ceiling for transfer-derived prices',
     '  --resume          Reuse rows already present in checkpoint JSONL',
     '  --progress-every <n>  Print progress every n anchors, default 1',
@@ -556,7 +559,7 @@ class RawRpcHistoryClient {
     return Boolean(this.rpcUrl);
   }
 
-  async #postRpc(method, params) {
+  async #postRpc(method, params, { signal } = {}) {
     const response = await fetchWithRetry(this.rpcUrl, {
       source: 'SOLANA_RPC',
       method: 'POST',
@@ -566,21 +569,22 @@ class RawRpcHistoryClient {
       headers: { 'content-type': 'application/json' },
       body: { jsonrpc: '2.0', id: method, method, params },
       silent: true,
+      signal,
     });
     if (response?.error) throw new Error(response.error?.message || JSON.stringify(response.error));
     if (response?.result === undefined) throw new Error(`rpc_invalid_${method}`);
     return response.result;
   }
 
-  async getSignaturesForAddress(address, { before, limit = this.pageSize } = {}) {
+  async getSignaturesForAddress(address, { before, limit = this.pageSize, signal } = {}) {
     const params = [address, {
       limit,
       ...(before ? { before } : {}),
     }];
-    return this.#postRpc('getSignaturesForAddress', params);
+    return this.#postRpc('getSignaturesForAddress', params, { signal });
   }
 
-  async getTransaction(signature) {
+  async getTransaction(signature, { signal } = {}) {
     await sleep(this.rpcTxDelayMs);
     const result = await this.#postRpc('getTransaction', [
       signature,
@@ -589,7 +593,7 @@ class RawRpcHistoryClient {
         commitment: 'confirmed',
         maxSupportedTransactionVersion: 0,
       },
-    ]);
+    ], { signal });
     return result ? { ...result, signature } : null;
   }
 
@@ -603,7 +607,7 @@ class RawRpcHistoryClient {
     const transactions = [];
     for (const sig of filtered.fetchable) {
       if (!sig?.signature) continue;
-      const tx = await this.getTransaction(sig.signature);
+      const tx = await this.getTransaction(sig.signature, { signal: options.signal });
       if (tx) transactions.push(tx);
     }
     return {
@@ -669,7 +673,7 @@ function loadTransactionsJson(filePath) {
   return [parsed];
 }
 
-async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, maxPages, pageSize }) {
+async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, maxPages, pageSize, signal }) {
   let before = null;
   let signaturesFetched = 0;
   let transactionsFetched = 0;
@@ -678,7 +682,7 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   let oldestBlockTime = null;
   const transactions = [];
   for (let page = 0; page < maxPages; page += 1) {
-    const pageResult = await client.fetchHistoryPage(curvePda, { before, limit: pageSize, startTs, endTs });
+    const pageResult = await client.fetchHistoryPage(curvePda, { before, limit: pageSize, startTs, endTs, signal });
     const signatures = pageResult.signatures || [];
     if (!signatures.length) break;
     signaturesFetched += signatures.length;
@@ -709,7 +713,7 @@ async function fetchTransactionsForAnchor(client, { curvePda, startTs, endTs, ma
   };
 }
 
-async function decodeAnchor(client, anchor, args, transactionsPool = null) {
+async function decodeAnchor(client, anchor, args, transactionsPool = null, signal = null) {
   let curve;
   try {
     curve = derivePumpfunBondingCurvePda(anchor.token_ca, args.programId);
@@ -752,6 +756,7 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
         endTs,
         maxPages: args.maxPages,
         pageSize: args.pageSize,
+        signal,
       });
     const trades = fetched.transactions
       .map((tx) => normalizeCurveTransaction(tx, {
@@ -812,6 +817,48 @@ async function decodeAnchor(client, anchor, args, transactionsPool = null) {
   }
 }
 
+function timeoutRowForAnchor(anchor, args, timeoutMs) {
+  let curve = {};
+  try {
+    curve = derivePumpfunBondingCurvePda(anchor.token_ca, args.programId);
+  } catch {}
+  return {
+    ...anchor,
+    status: 'error',
+    error: `per_token_timeout_ms:${timeoutMs}`,
+    curve_pda: curve.pda || null,
+    curve_bump: curve.bump ?? null,
+    start_ts: anchor.anchor_ts - args.preSec,
+    end_ts: anchor.anchor_ts + args.postSec,
+    coverage_incomplete: true,
+    timeout_ms: timeoutMs,
+    history_reached_start: false,
+  };
+}
+
+async function decodeAnchorWithTimeout(client, anchor, args, transactionsPool = null) {
+  const timeoutMs = Number(args.perTokenTimeoutMs || 0);
+  if (!timeoutMs || timeoutMs <= 0 || args.dryRun || transactionsPool) {
+    return decodeAnchor(client, anchor, args, transactionsPool);
+  }
+  const controller = new AbortController();
+  let timeoutId;
+  try {
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        resolve(timeoutRowForAnchor(anchor, args, timeoutMs));
+      }, timeoutMs);
+    });
+    return await Promise.race([
+      decodeAnchor(client, anchor, args, transactionsPool, controller.signal),
+      timeoutPromise,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function main() {
   const args = parseArgs();
   if (args.help) {
@@ -850,7 +897,7 @@ async function main() {
       }
       continue;
     }
-    const row = await decodeAnchor(client, anchor, args, transactionsPool);
+    const row = await decodeAnchorWithTimeout(client, anchor, args, transactionsPool);
     results.push(row);
     byKey.set(key, row);
     appendCheckpointRow(checkpointOut, row);
@@ -889,6 +936,7 @@ async function main() {
       anchors_with_trades_n: ok.filter((row) => row.trades_n > 0).length,
       anchors_with_bars_n: ok.filter((row) => row.bars_n > 0).length,
       rate_limit_error_n: results.filter(isRateLimitError).length,
+      per_token_timeout_n: results.filter((row) => String(row.error || '').startsWith('per_token_timeout_ms:')).length,
       total_signatures_fetched: ok.reduce((sum, row) => sum + Number(row.signatures_fetched || 0), 0),
       total_transactions_fetched: ok.reduce((sum, row) => sum + Number(row.transactions_fetched || 0), 0),
       total_signatures_skipped_after_end: ok.reduce((sum, row) => sum + Number(row.signatures_skipped_after_end || 0), 0),
