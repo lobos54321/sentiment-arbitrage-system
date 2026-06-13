@@ -2,7 +2,20 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
-import Database from 'better-sqlite3';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+let Database = null;
+
+function getDatabase() {
+  if (Database) return Database;
+  try {
+    Database = require('better-sqlite3');
+    return Database;
+  } catch (error) {
+    throw new Error(`better-sqlite3 is required only when --raw-db or --paper-db is provided: ${error.message}`);
+  }
+}
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = {
@@ -70,7 +83,8 @@ function normalizeTs(value) {
 }
 
 function openReadonlySqlite(filePath) {
-  const db = new Database(filePath, { readonly: true, fileMustExist: true });
+  const Sqlite = getDatabase();
+  const db = new Sqlite(filePath, { readonly: true, fileMustExist: true });
   try { db.pragma('mmap_size = 0'); } catch {}
   try { db.pragma('query_only = ON'); } catch {}
   return db;

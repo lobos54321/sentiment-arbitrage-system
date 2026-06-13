@@ -19,6 +19,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     resolution: '1m',
     gmgnCli: process.env.GMGN_CLI || 'gmgn-cli',
     timeoutMs: 30000,
+    checkpointOut: '',
+    checkpointEvery: 1,
+    resume: false,
     dryRun: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -34,6 +37,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--resolution') { args.resolution = next; i += 1; continue; }
     if (key === '--gmgn-cli') { args.gmgnCli = next; i += 1; continue; }
     if (key === '--timeout-ms') { args.timeoutMs = Number(next); i += 1; continue; }
+    if (key === '--checkpoint-out') { args.checkpointOut = next; i += 1; continue; }
+    if (key === '--checkpoint-every') { args.checkpointEvery = Number(next); i += 1; continue; }
+    if (key === '--resume') { args.resume = true; continue; }
     if (key === '--dry-run') { args.dryRun = true; continue; }
     if (key === '--help' || key === '-h') {
       args.help = true;
@@ -55,6 +61,9 @@ Options:
   --post-sec <n>       Seconds after signal_ts, default 7200
   --sleep-ms <n>       Delay between GMGN calls, default 4000
   --resolution <res>   GMGN kline resolution, default 1m
+  --checkpoint-out <p> Write partial results during long runs
+  --checkpoint-every n Write checkpoint every n anchors, default 1
+  --resume             Resume from --checkpoint-out when present
   --dry-run            Build anchor list and output planned probes without calling GMGN
 
 Requires GMGN_API_KEY in the environment or gmgn-cli config. Does not print secrets.`;
@@ -259,6 +268,43 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function attachSummary(out) {
+  const ok = out.results.filter((row) => row.status === 'ok');
+  const withBars = ok.filter((row) => Number(row.bars || 0) > 0);
+  const withNonzero = ok.filter((row) => Number(row.nonzero_volume_bars || 0) > 0);
+  const withEarlyNonzero = ok.filter((row) => Number(row.early_15m_nonzero_volume_bars || 0) > 0);
+  out.summary = {
+    ok_n: ok.length,
+    error_n: out.results.filter((row) => row.status === 'error').length,
+    bars_available_n: withBars.length,
+    nonzero_volume_available_n: withNonzero.length,
+    early_15m_nonzero_volume_available_n: withEarlyNonzero.length,
+    nonzero_volume_available_pct: ok.length ? Number((withNonzero.length / ok.length * 100).toFixed(2)) : null,
+    early_15m_nonzero_volume_available_pct: ok.length ? Number((withEarlyNonzero.length / ok.length * 100).toFixed(2)) : null,
+    verdict: ok.length === 0
+      ? 'no_successful_gmgn_responses'
+      : (withNonzero.length / ok.length >= 1 / 3
+        ? 'gmgn_reachable_fix_wiring_or_priority'
+        : (withNonzero.length / ok.length < 1 / 5
+          ? 'gmgn_insufficient_consider_onchain_bonding_curve'
+          : 'gmgn_partial_coverage_needs_targeted_routing')),
+  };
+  return out.summary;
+}
+
+function writeJson(filePath, out) {
+  fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+  attachSummary(out);
+  fs.writeFileSync(filePath, `${JSON.stringify(out, null, 2)}\n`);
+}
+
+function loadCheckpoint(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null;
+  const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  if (!Array.isArray(parsed?.results)) return null;
+  return parsed;
+}
+
 async function runGmgnKline({ gmgnCli, tokenCa, fromTs, toTs, resolution, timeoutMs }) {
   const { stdout } = await execFileAsync(gmgnCli, [
     'market',
@@ -308,8 +354,17 @@ async function main() {
     anchors_n: anchors.length,
     results: [],
   };
+  if (args.resume && args.checkpointOut) {
+    const checkpoint = loadCheckpoint(args.checkpointOut);
+    if (checkpoint) {
+      out.results = checkpoint.results;
+    }
+  }
+  const doneKeys = new Set(out.results.map((row) => `${row.token_ca}:${row.signal_ts}`));
 
   for (const [index, anchor] of anchors.entries()) {
+    const anchorKey = `${anchor.token_ca}:${anchor.signal_ts}`;
+    if (doneKeys.has(anchorKey)) continue;
     const fromTs = anchor.signal_ts - args.preSec;
     const toTs = anchor.signal_ts + args.postSec;
     const row = {
@@ -355,32 +410,14 @@ async function main() {
         error: String(error?.message || error || 'gmgn_touch_failed').replace(/GMGN_API_KEY=[^\s]+/g, 'GMGN_API_KEY=<redacted>').slice(0, 500),
       });
     }
+    if (args.checkpointOut && (out.results.length % Math.max(1, Number(args.checkpointEvery || 1)) === 0)) {
+      writeJson(args.checkpointOut, out);
+    }
     await sleep(args.sleepMs);
   }
 
-  const ok = out.results.filter((row) => row.status === 'ok');
-  const withBars = ok.filter((row) => Number(row.bars || 0) > 0);
-  const withNonzero = ok.filter((row) => Number(row.nonzero_volume_bars || 0) > 0);
-  const withEarlyNonzero = ok.filter((row) => Number(row.early_15m_nonzero_volume_bars || 0) > 0);
-  out.summary = {
-    ok_n: ok.length,
-    error_n: out.results.filter((row) => row.status === 'error').length,
-    bars_available_n: withBars.length,
-    nonzero_volume_available_n: withNonzero.length,
-    early_15m_nonzero_volume_available_n: withEarlyNonzero.length,
-    nonzero_volume_available_pct: ok.length ? Number((withNonzero.length / ok.length * 100).toFixed(2)) : null,
-    early_15m_nonzero_volume_available_pct: ok.length ? Number((withEarlyNonzero.length / ok.length * 100).toFixed(2)) : null,
-    verdict: ok.length === 0
-      ? 'no_successful_gmgn_responses'
-      : (withNonzero.length / ok.length >= 1 / 3
-        ? 'gmgn_reachable_fix_wiring_or_priority'
-        : (withNonzero.length / ok.length < 1 / 5
-          ? 'gmgn_insufficient_consider_onchain_bonding_curve'
-          : 'gmgn_partial_coverage_needs_targeted_routing')),
-  };
-
-  fs.mkdirSync(path.dirname(path.resolve(args.out)), { recursive: true });
-  fs.writeFileSync(args.out, JSON.stringify(out, null, 2));
+  writeJson(args.out, out);
+  if (args.checkpointOut && args.checkpointOut !== args.out) writeJson(args.checkpointOut, out);
   console.log(JSON.stringify({
     out: args.out,
     anchors_n: out.anchors_n,
