@@ -187,6 +187,12 @@ function classifyBaselineUnit(row = {}, gmgnRow = null) {
   }
 
   if (route === 'venue_other_needs_other_decoder') {
+    if (gmgnUsd != null && gmgnUsd > 0) {
+      return gmgnUsdBaseline(
+        'venue_other_gmgn_anchor',
+        'non-pump venue; GMGN provides anchor baseline in USD domain',
+      );
+    }
     return {
       ...row,
       unit_domain: 'venue_other',
@@ -221,7 +227,7 @@ function buildUnitRouter({ baselineRows = [], gmgnRows = [] } = {}) {
       graduated_rows_n: rows.filter((row) => row.baseline_route_v1 === 'graduated_route_gmgn_amm').length,
       graduated_gmgn_price_rows_n: graduated.length,
       missing_gmgn_anchor_price_n: rows.filter((row) => row.baseline_unit_route === 'graduated_missing_gmgn').length,
-      gmgn_recovered_incomplete_route_rows_n: rows.filter((row) => ['history_incomplete_gmgn_anchor', 'quiet_no_curve_trade_gmgn_anchor'].includes(row.baseline_unit_route)).length,
+      gmgn_recovered_incomplete_route_rows_n: rows.filter((row) => ['history_incomplete_gmgn_anchor', 'quiet_no_curve_trade_gmgn_anchor', 'venue_other_gmgn_anchor'].includes(row.baseline_unit_route)).length,
       direct_usd_per_sol_like_ratio_summary: {
         n: ratios.length,
         min: ratios.length ? Math.min(...ratios) : null,
