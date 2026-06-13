@@ -2,7 +2,16 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { createRequire } from 'module';
 import { pathToFileURL } from 'url';
+
+const require = createRequire(import.meta.url);
+let BetterSqlite = null;
+try {
+  BetterSqlite = require('better-sqlite3');
+} catch {
+  BetterSqlite = null;
+}
 
 function parseArgs(argv = process.argv.slice(2)) {
   const args = {
@@ -80,6 +89,32 @@ function sqlLiteral(value) {
 }
 
 function runSql(dbPath, sql) {
+  if (BetterSqlite) {
+    const db = new BetterSqlite(dbPath);
+    try {
+      const trimmed = sql.trim();
+      if (/^SELECT\s+1\s+FROM\s+sqlite_master/i.test(trimmed)) {
+        const rows = db.prepare(trimmed).all();
+        return rows.map((row) => String(Object.values(row)[0])).join('\n');
+      }
+      const pragmaMatch = trimmed.match(/^PRAGMA\s+table_info\(([^)]+)\);?$/i);
+      if (pragmaMatch) {
+        const rows = db.prepare(trimmed).all();
+        return rows.map((row) => [
+          row.cid,
+          row.name,
+          row.type,
+          row.notnull,
+          row.dflt_value,
+          row.pk,
+        ].join('|')).join('\n');
+      }
+      db.exec(sql);
+      return '';
+    } finally {
+      db.close();
+    }
+  }
   return execFileSync('sqlite3', [dbPath, sql], {
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,
@@ -87,6 +122,14 @@ function runSql(dbPath, sql) {
 }
 
 function runJson(dbPath, sql) {
+  if (BetterSqlite) {
+    const db = new BetterSqlite(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      return db.prepare(sql).all();
+    } finally {
+      db.close();
+    }
+  }
   const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
     encoding: 'utf8',
     maxBuffer: 20 * 1024 * 1024,

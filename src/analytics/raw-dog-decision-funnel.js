@@ -137,14 +137,37 @@ function decisionSortKey(row) {
   return entered + would + clean + Number(row.event_ts || 0) / 1e12;
 }
 
-function matchDecisionRecords(rawDog, decisionRecords, options = {}) {
-  const dog = normalizeRawDog(rawDog);
-  const records = (decisionRecords || []).map(normalizeDecisionRecord).filter((row) => (
+function buildDecisionRecordIndex(decisionRecords = []) {
+  const byToken = new Map();
+  let count = 0;
+  for (const raw of decisionRecords || []) {
+    const row = normalizeDecisionRecord(raw);
+    if (!row.token_ca || row.event_ts == null) continue;
+    if (!byToken.has(row.token_ca)) byToken.set(row.token_ca, []);
+    byToken.get(row.token_ca).push(row);
+    count += 1;
+  }
+  for (const rows of byToken.values()) {
+    rows.sort((a, b) => Number(a.event_ts || 0) - Number(b.event_ts || 0));
+  }
+  return { byToken, count };
+}
+
+function getIndexedDecisionRecords(decisionRecordsOrIndex, tokenCa) {
+  if (decisionRecordsOrIndex?.byToken instanceof Map) {
+    return decisionRecordsOrIndex.byToken.get(tokenCa) || [];
+  }
+  return (decisionRecordsOrIndex || []).map(normalizeDecisionRecord).filter((row) => (
     row.token_ca
-    && dog.token_ca
-    && row.token_ca === dog.token_ca
+    && tokenCa
+    && row.token_ca === tokenCa
     && row.event_ts != null
   ));
+}
+
+function matchDecisionRecords(rawDog, decisionRecords, options = {}) {
+  const dog = normalizeRawDog(rawDog);
+  const records = getIndexedDecisionRecords(decisionRecords, dog.token_ca);
   const window = rawDogDecisionWindow(dog, options);
   const inWindow = (row) => (
     window.start_ts != null
@@ -221,7 +244,10 @@ function buildRawDogDecisionFunnel({
   decisionWindowSec = 900,
   preSignalGraceSec = 60,
 } = {}) {
-  const matches = (rawDogs || []).map((rawDog) => matchDecisionRecords(rawDog, decisionRecords, {
+  const decisionIndex = decisionRecords?.byToken instanceof Map
+    ? decisionRecords
+    : buildDecisionRecordIndex(decisionRecords);
+  const matches = (rawDogs || []).map((rawDog) => matchDecisionRecords(rawDog, decisionIndex, {
     decisionWindowSec,
     preSignalGraceSec,
   }));
@@ -242,7 +268,7 @@ function buildRawDogDecisionFunnel({
     schema_version: 'raw_dog_decision_funnel.v1',
     summary: {
       raw_sustained_dogs: dogs.length,
-      decision_records_seen: (decisionRecords || []).length,
+      decision_records_seen: decisionIndex.count ?? (decisionRecords || []).length,
       has_decision_record: hasDecisionRecord,
       no_decision_record: dogs.length - hasDecisionRecord,
       not_quote_clean: notQuoteClean,
@@ -270,6 +296,7 @@ function buildRawDogDecisionFunnel({
 
 export {
   buildRawDogDecisionFunnel,
+  buildDecisionRecordIndex,
   matchDecisionRecords,
   normalizeDecisionRecord,
   normalizeRawDog,
