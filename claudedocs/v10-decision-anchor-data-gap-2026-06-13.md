@@ -209,6 +209,34 @@ Required fields from `canonical_trade_ledger`:
 - `loss_cap_breach`
 - `loss_cap_pct`
 
+## Export Helper
+
+Use the checked-in subset exporter to build the decision pack from a full
+`paper_trades.db` snapshot. It exports only the required tables/columns and
+widens the cohort window by a bounded margin for matching.
+
+Example:
+
+```bash
+node scripts/export-paper-decision-subset.js \
+  --paper-db /path/to/paper_trades.db \
+  --out-db /path/to/paper_decision_subset.db \
+  --cohort-dogs /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/cohort-rebuild-v10-final-native-return-guard/rebuilt-clean-dogs.json \
+  --cohort-duds /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/cohort-rebuild-v10-final-native-return-guard/rebuilt-clean-duds.json \
+  --margin-sec 900
+```
+
+Smoke validation against the local partial paper DB succeeded:
+
+- output: `/Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/paper-decision-subset-smoke/paper_decision_subset.db`
+- `a_class_decision_events`: 1922 rows
+- `opportunity_events`: 810 rows
+- `canonical_trade_ledger`: 2 rows
+
+This smoke DB is useful only to validate the exporter. It is not a valid
+decision-anchor pack for v10 because the source paper DB covers only a small
+slice of the v10 signal window.
+
 ## Next Valid Analysis After Full Decision Pack
 
 1. Matched signal-vs-decision ceiling on the same signal-level cohort.
