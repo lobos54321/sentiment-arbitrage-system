@@ -60,6 +60,21 @@ Outputs include:
 - `worklists/tiers/tier1-peak-worklist-v2.txt`
 - `manifest.json` with file hashes
 
+If the same Zeabur archive includes `paper_decision_subset.db`, build the v10
+decision-anchor pack directly from the downloaded archive:
+
+```bash
+cd /Users/boliu/sas-research
+
+node scripts/build-v10-decision-anchor-pack.js \
+  --snapshot-tgz ~/Downloads/rawdog-audit-dbs.tgz \
+  --out-dir ~/sas-data-room/<pack>/v10-decision-anchor-pack
+```
+
+The decision pack builder imports only the subset DB from the archive, runs the
+v10 clean-cohort funnel, and emits `review_required` if the subset does not
+cover the full v10 window.
+
 ## 3. Run Tier 1 With Alchemy
 
 Alchemy key should stay outside the repo. The local file may contain either a full RPC URL or a shell assignment.

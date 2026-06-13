@@ -10,6 +10,8 @@ const DEFAULT_COHORT_DIR = path.join(DEFAULT_DATA_ROOM, 'cohort-rebuild-v10-fina
 function parseArgs(argv = process.argv.slice(2)) {
   const args = {
     paperDb: '',
+    paperSubsetDb: '',
+    snapshotTgz: '',
     dataRoom: DEFAULT_DATA_ROOM,
     dogs: path.join(DEFAULT_COHORT_DIR, 'rebuilt-clean-dogs.json'),
     duds: path.join(DEFAULT_COHORT_DIR, 'rebuilt-clean-duds.json'),
@@ -22,6 +24,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     const key = argv[i];
     const next = argv[i + 1];
     if (key === '--paper-db') { args.paperDb = next; i += 1; continue; }
+    if (key === '--paper-subset-db') { args.paperSubsetDb = next; i += 1; continue; }
+    if (key === '--snapshot-tgz') { args.snapshotTgz = next; i += 1; continue; }
     if (key === '--data-room') { args.dataRoom = next; i += 1; continue; }
     if (key === '--dogs') { args.dogs = next; i += 1; continue; }
     if (key === '--duds') { args.duds = next; i += 1; continue; }
@@ -40,9 +44,11 @@ function usage() {
   return [
     'Usage:',
     '  node scripts/build-v10-decision-anchor-pack.js --paper-db /path/to/full/paper_trades.db',
+    '  node scripts/build-v10-decision-anchor-pack.js --paper-subset-db /path/to/paper_decision_subset.db',
+    '  node scripts/build-v10-decision-anchor-pack.js --snapshot-tgz /path/to/rawdog-audit-dbs.tgz',
     '',
     'One-command v10 decision-anchor pack builder:',
-    '  1. export paper_decision_subset.db',
+    '  1. export or import paper_decision_subset.db',
     '  2. run v10 clean-cohort decision funnel',
     '  3. write decision-anchor-pack-summary.json',
     '',
@@ -59,6 +65,21 @@ function runNode(script, args = []) {
   return JSON.parse(out);
 }
 
+function runSqlJson(dbPath, sql) {
+  const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  }).trim();
+  return out ? JSON.parse(out) : [];
+}
+
+function runSqlText(dbPath, sql) {
+  return execFileSync('sqlite3', [dbPath, sql], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  }).trim();
+}
+
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
@@ -70,6 +91,109 @@ function rate(num, den) {
 function numberOrNull(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function numericTs(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) return n > 1_000_000_000_000 ? Math.floor(n / 1000) : Math.floor(n);
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  }
+  return null;
+}
+
+function loadJsonRows(filePath) {
+  const parsed = readJson(filePath);
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.results)) return parsed.results;
+  if (Array.isArray(parsed.rows)) return parsed.rows;
+  return [];
+}
+
+function deriveCohortWindow(dogsPath, dudsPath) {
+  const ts = [
+    ...loadJsonRows(dogsPath),
+    ...loadJsonRows(dudsPath),
+  ].map((row) => numericTs(row.signal_ts)).filter((value) => value != null).sort((a, b) => a - b);
+  if (!ts.length) throw new Error('Could not derive cohort window from dogs/duds signal_ts');
+  return { start: ts[0], end: ts[ts.length - 1] };
+}
+
+function tableExists(dbPath, tableName) {
+  const escaped = String(tableName).replaceAll("'", "''");
+  return runSqlText(dbPath, `SELECT 1 FROM sqlite_master WHERE type='table' AND name='${escaped}' LIMIT 1;`) === '1';
+}
+
+function tableRange(dbPath, tableName, tsExpr) {
+  if (!tableExists(dbPath, tableName)) return { rows: 0, min_ts: null, max_ts: null };
+  const [row] = runSqlJson(dbPath, `SELECT count(*) AS rows, min(${tsExpr}) AS min_ts, max(${tsExpr}) AS max_ts FROM ${tableName};`);
+  return row || { rows: 0, min_ts: null, max_ts: null };
+}
+
+function subsetManifest(dbPath) {
+  if (!tableExists(dbPath, 'export_manifest')) return null;
+  const [row] = runSqlJson(dbPath, 'SELECT * FROM export_manifest LIMIT 1;');
+  return row || null;
+}
+
+function inspectDecisionSubset(dbPath, dogsPath, dudsPath, sourceMode = 'paper_subset_db') {
+  const manifest = subsetManifest(dbPath);
+  const cohortWindow = deriveCohortWindow(dogsPath, dudsPath);
+  const startTs = numberOrNull(manifest?.start_ts) ?? cohortWindow.start;
+  const endTs = numberOrNull(manifest?.end_ts) ?? cohortWindow.end;
+  const marginSec = numberOrNull(manifest?.margin_sec);
+  const aClass = tableRange(dbPath, 'a_class_decision_events', 'event_ts');
+  const opportunity = tableRange(dbPath, 'opportunity_events', 'event_ts');
+  const ledger = tableRange(dbPath, 'canonical_trade_ledger', 'entry_ts');
+  return {
+    out_db: dbPath,
+    source_mode: sourceMode,
+    source_paper_db: manifest?.source_paper_db || null,
+    source_window: manifest?.source_window || 'unknown',
+    a_class_decision_events: aClass.rows || 0,
+    opportunity_events: opportunity.rows || 0,
+    canonical_trade_ledger: ledger.rows || 0,
+    start_ts: startTs,
+    end_ts: endTs,
+    margin_sec: marginSec,
+    exported_table_ranges: {
+      a_class_decision_events: aClass,
+      opportunity_events: opportunity,
+      canonical_trade_ledger: ledger,
+    },
+  };
+}
+
+function copyIfDifferent(src, dst) {
+  if (path.resolve(src) === path.resolve(dst)) return;
+  fs.copyFileSync(src, dst);
+}
+
+function findFile(root, fileName) {
+  const entries = fs.readdirSync(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(root, entry.name);
+    if (entry.isFile() && entry.name === fileName) return fullPath;
+    if (entry.isDirectory()) {
+      const found = findFile(fullPath, fileName);
+      if (found) return found;
+    }
+  }
+  return '';
+}
+
+function extractSnapshotTgz(snapshotTgz, outDir) {
+  const extractDir = path.join(outDir, 'snapshot-extract');
+  fs.rmSync(extractDir, { recursive: true, force: true });
+  fs.mkdirSync(extractDir, { recursive: true });
+  execFileSync('tar', ['-xzf', snapshotTgz, '-C', extractDir], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const subset = findFile(extractDir, 'paper_decision_subset.db');
+  if (!subset) {
+    throw new Error(`Snapshot tgz did not contain paper_decision_subset.db: ${snapshotTgz}`);
+  }
+  return { extractDir, subset };
 }
 
 function tableRangeWarnings(exporter = {}) {
@@ -128,20 +252,41 @@ function main() {
     console.log(usage());
     return;
   }
-  if (!args.paperDb || !fs.existsSync(args.paperDb)) throw new Error('Provide an existing --paper-db');
+  const sourceCount = [args.paperDb, args.paperSubsetDb, args.snapshotTgz].filter(Boolean).length;
+  if (sourceCount !== 1) {
+    throw new Error('Provide exactly one of --paper-db, --paper-subset-db, or --snapshot-tgz');
+  }
+  if (args.paperDb && !fs.existsSync(args.paperDb)) throw new Error('Provide an existing --paper-db');
+  if (args.paperSubsetDb && !fs.existsSync(args.paperSubsetDb)) throw new Error('Provide an existing --paper-subset-db');
+  if (args.snapshotTgz && !fs.existsSync(args.snapshotTgz)) throw new Error('Provide an existing --snapshot-tgz');
   if (!fs.existsSync(args.dogs)) throw new Error(`Missing dogs file: ${args.dogs}`);
   if (!fs.existsSync(args.duds)) throw new Error(`Missing duds file: ${args.duds}`);
   fs.mkdirSync(args.outDir, { recursive: true });
 
   const subsetDb = path.join(args.outDir, 'paper_decision_subset.db');
   const funnelDir = path.join(args.outDir, 'decision-funnel');
-  const exporter = runNode(path.join('scripts', 'export-paper-decision-subset.js'), [
-    '--paper-db', args.paperDb,
-    '--out-db', subsetDb,
-    '--cohort-dogs', args.dogs,
-    '--cohort-duds', args.duds,
-    '--margin-sec', String(args.marginSec),
-  ]);
+  let exporter;
+  let sourcePaperSubsetDb = '';
+  let snapshotExtractDir = '';
+  if (args.paperDb) {
+    exporter = runNode(path.join('scripts', 'export-paper-decision-subset.js'), [
+      '--paper-db', args.paperDb,
+      '--out-db', subsetDb,
+      '--cohort-dogs', args.dogs,
+      '--cohort-duds', args.duds,
+      '--margin-sec', String(args.marginSec),
+    ]);
+  } else {
+    if (args.snapshotTgz) {
+      const extracted = extractSnapshotTgz(args.snapshotTgz, args.outDir);
+      sourcePaperSubsetDb = extracted.subset;
+      snapshotExtractDir = extracted.extractDir;
+    } else {
+      sourcePaperSubsetDb = args.paperSubsetDb;
+    }
+    copyIfDifferent(sourcePaperSubsetDb, subsetDb);
+    exporter = inspectDecisionSubset(subsetDb, args.dogs, args.duds, args.snapshotTgz ? 'snapshot_tgz' : 'paper_subset_db');
+  }
   const funnelRun = runNode(path.join('scripts', 'run-v10-decision-funnel-audit.js'), [
     '--paper-db', subsetDb,
     '--dogs', args.dogs,
@@ -157,7 +302,10 @@ function main() {
     generated_at: new Date().toISOString(),
     ...status,
     inputs: {
-      source_paper_db: args.paperDb,
+      source_mode: args.paperDb ? 'paper_db_export' : exporter.source_mode,
+      source_paper_db: args.paperDb || exporter.source_paper_db || null,
+      source_paper_subset_db: sourcePaperSubsetDb || null,
+      source_snapshot_tgz: args.snapshotTgz || null,
       dogs_json: args.dogs,
       duds_json: args.duds,
       margin_sec: args.marginSec,
@@ -169,6 +317,7 @@ function main() {
       paper_decision_subset_db: subsetDb,
       decision_funnel_json: funnelRun.paths.jsonPath,
       decision_funnel_markdown: funnelRun.paths.mdPath,
+      snapshot_extract_dir: snapshotExtractDir || null,
     },
     export_counts: {
       a_class_decision_events: exporter.a_class_decision_events,

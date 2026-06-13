@@ -261,11 +261,31 @@ node scripts/build-v10-decision-anchor-pack.js \
   --out-dir /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-decision-anchor-pack
 ```
 
-This runs the subset exporter and v10 funnel wrapper together, then writes
-`decision-anchor-pack-summary.json`. If match rates are very low, the summary is
-marked `review_required` because that can mean either a partial paper DB or a
-real pipeline coverage gap. Do not interpret low matching until source DB
-coverage is confirmed.
+If the production snapshot already contains `paper_decision_subset.db`, pass it
+directly instead of pretending it is a full paper DB:
+
+```bash
+node scripts/build-v10-decision-anchor-pack.js \
+  --paper-subset-db /path/to/paper_decision_subset.db \
+  --out-dir /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-decision-anchor-pack
+```
+
+If the downloaded Zeabur snapshot archive contains `paper_decision_subset.db`,
+the builder can import it directly:
+
+```bash
+node scripts/build-v10-decision-anchor-pack.js \
+  --snapshot-tgz ~/Downloads/rawdog-audit-dbs.tgz \
+  --out-dir /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-decision-anchor-pack
+```
+
+The builder supports exactly one of `--paper-db`, `--paper-subset-db`, or
+`--snapshot-tgz`. With `--paper-db`, it runs the subset exporter first. With the
+other two modes, it copies/imports the existing subset and runs the v10 funnel
+wrapper directly. In every mode it writes `decision-anchor-pack-summary.json`.
+If match rates are very low, the summary is marked `review_required` because
+that can mean either a partial paper DB or a real pipeline coverage gap. Do not
+interpret low matching until source DB coverage is confirmed.
 
 The pack builder also records exported table ranges for
 `a_class_decision_events`, `opportunity_events`, and `canonical_trade_ledger`.
