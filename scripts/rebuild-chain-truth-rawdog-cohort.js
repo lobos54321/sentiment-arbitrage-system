@@ -10,6 +10,7 @@ import {
 
 const PUMPFUN_GRADUATION_PRICE_SOL = 4.1088018e-7;
 const CURVE_PHYSICAL_MAX_PRICE_SOL = 4.5e-7;
+const SUSPICIOUS_NATIVE_RETURN_PCT = 15;
 
 function isPumpfunMint(tokenCa) {
   return String(tokenCa || '').endsWith('pump');
@@ -152,6 +153,19 @@ function observedNativePeak(row = {}) {
   };
 }
 
+function nativeObservedReturnPct(row = {}) {
+  const baseline = numeric(row.baseline_price);
+  const peak = numeric(row.observed_max_price);
+  if (baseline == null || baseline <= 0 || peak == null || peak <= 0) return null;
+  return (peak / baseline) - 1;
+}
+
+function nativeReturnNeedsExternalTruth(row = {}, route = null) {
+  if (route) return false;
+  const returnPct = nativeObservedReturnPct(row);
+  return returnPct != null && returnPct > SUSPICIOUS_NATIVE_RETURN_PCT;
+}
+
 function gmgnFullPeak(row = {}) {
   const peak = numeric(row.price_max);
   if (peak == null || peak <= 0) return null;
@@ -186,7 +200,7 @@ function physicalRefutation(row = {}) {
   };
 }
 
-function buildBaseline(row = {}, route = null) {
+function buildBaseline(row = {}, route = null, gmgn = null) {
   if (route?.unit_domain === 'usd_gmgn') {
     return {
       ...route,
@@ -201,6 +215,16 @@ function buildBaseline(row = {}, route = null) {
       unit_domain: 'sol_curve',
       graduation_price_sol_curve: PUMPFUN_GRADUATION_PRICE_SOL,
       baseline_source_resolved: 'baseline_unit_router_curve_sol',
+    };
+  }
+
+  const gmgnAnchor = numeric(gmgn?.entry_0m_price);
+  if (nativeReturnNeedsExternalTruth(row, route) && gmgnAnchor != null && gmgnAnchor > 0) {
+    return {
+      unit_domain: 'usd_gmgn',
+      baseline_price_usd_gmgn: gmgnAnchor,
+      baseline_unit_route: 'native_observed_high_return_gmgn_anchor',
+      baseline_source_resolved: 'native_observed_high_return_gmgn_anchor',
     };
   }
 
@@ -219,10 +243,10 @@ function buildBaseline(row = {}, route = null) {
 }
 
 function candidateReturns({ row = {}, route = null, gmgn = null, peakWindow = null } = {}) {
-  const baseline = buildBaseline(row, route);
+  const baseline = buildBaseline(row, route, gmgn);
   const candidates = [];
   const peakCandidates = [
-    observedNativePeak(row),
+    nativeReturnNeedsExternalTruth(row, route) ? null : observedNativePeak(row),
     curvePeakFromPeakWindow(peakWindow || {}),
     gmgnFullPeak(gmgn || {}),
   ].filter(Boolean);
@@ -336,7 +360,7 @@ function rebuildRow(row = {}, maps = {}) {
     };
   }
 
-  if (row.label_status === 'clean' && !refutation.refuted_by_physics) {
+  if (row.label_status === 'clean' && !refutation.refuted_by_physics && !nativeReturnNeedsExternalTruth(row, route)) {
     return {
       ...base,
       label_status: 'clean',
@@ -354,7 +378,7 @@ function rebuildRow(row = {}, maps = {}) {
     ...base,
     label_status: 'quarantine',
     label_adjudication_status: refutation.refuted_by_physics ? 'quarantine_refuted_by_physics_needs_corrected_peak' : 'quarantine_incomplete',
-    label_adjudication_reason: returns.reason || 'not_evaluable',
+    label_adjudication_reason: nativeReturnNeedsExternalTruth(row, route) && !returns.selected ? 'suspicious_native_return_needs_external_truth' : (returns.reason || 'not_evaluable'),
     effective_tier: 'unknown',
     candidate_return_count: returns.candidates.length,
     evaluable_return_count: returns.candidates.filter((candidate) => candidate.evaluable).length,

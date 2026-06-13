@@ -204,6 +204,83 @@ test('keeps non-pump native peaks out of the pumpfun physical-limit guard', () =
   assert.equal(report.rows[0].refuted_by_physics, false);
 });
 
+test('quarantines suspicious native-bar repairs without external truth', () => {
+  const report = rebuildCohort({
+    labelRows: [
+      row({
+        token_ca: 'OTHER',
+        label_status: 'clean',
+        label_cleaning_reason: 'missing_recorded_peak_repaired_from_native_bars',
+        effective_tier: 'gold',
+        tier: 'gold',
+        baseline_price: 1e-10,
+        observed_max_price: 1e-5,
+      }),
+    ],
+    baselineRows: [],
+    gmgnRows: [],
+    peakRows: [],
+  });
+
+  assert.equal(report.rows[0].label_status, 'quarantine');
+  assert.equal(report.rows[0].label_adjudication_reason, 'suspicious_native_return_needs_external_truth');
+  assert.equal(report.summary.clean_dog_unique_n, 0);
+  assert.equal(report.summary.quarantine_unique_n, 1);
+});
+
+test('quarantines suspicious native-bar returns even when the old label was within tolerance', () => {
+  const report = rebuildCohort({
+    labelRows: [
+      row({
+        token_ca: 'OTHER',
+        label_status: 'clean',
+        label_cleaning_reason: 'within_tolerance',
+        effective_tier: 'gold',
+        tier: 'gold',
+        baseline_price: 1e-7,
+        observed_max_price: 3e-6,
+      }),
+    ],
+    baselineRows: [],
+    gmgnRows: [],
+    peakRows: [],
+  });
+
+  assert.equal(report.rows[0].label_status, 'quarantine');
+  assert.equal(report.rows[0].label_adjudication_reason, 'suspicious_native_return_needs_external_truth');
+});
+
+test('rebuilds suspicious native-bar repairs from GMGN external truth when available', () => {
+  const report = rebuildCohort({
+    labelRows: [
+      row({
+        token_ca: 'OTHER',
+        label_status: 'clean',
+        label_cleaning_reason: 'missing_recorded_peak_repaired_from_native_bars',
+        effective_tier: 'gold',
+        tier: 'gold',
+        baseline_price: 1e-10,
+        observed_max_price: 1e-5,
+      }),
+    ],
+    baselineRows: [],
+    gmgnRows: [
+      {
+        token_ca: 'OTHER',
+        signal_ts: 1000,
+        entry_0m_price: 0.00001,
+        price_max: 0.000018,
+      },
+    ],
+    peakRows: [],
+  });
+
+  assert.equal(report.rows[0].label_status, 'clean');
+  assert.equal(report.rows[0].return_domain, 'usd_gmgn');
+  assert.equal(report.rows[0].return_baseline_unit_route, 'native_observed_high_return_gmgn_anchor');
+  assert.equal(report.rows[0].effective_tier, 'silver');
+});
+
 test('original clean rows pass through when no chain truth correction is available', () => {
   const report = rebuildCohort({
     labelRows: [
