@@ -81,6 +81,8 @@ function normalizeWindow(row) {
     window_start_ts: normalizeTs(row.window_start_ts),
     window_end_ts: normalizeTs(row.window_end_ts),
     label: String(row.label || ''),
+    return_domain: String(row.return_domain || 'unknown'),
+    effective_tier: String(row.effective_tier || 'unknown'),
   };
 }
 
@@ -113,6 +115,36 @@ function summarize(values) {
     p90: at(0.9),
     max: clean[clean.length - 1],
   };
+}
+
+function groupBy(rows, keyFn) {
+  const out = new Map();
+  for (const row of rows) {
+    const key = keyFn(row) || 'unknown';
+    if (!out.has(key)) out.set(key, []);
+    out.get(key).push(row);
+  }
+  return out;
+}
+
+function tradeHitSummary(rows) {
+  const windowsN = rows.length;
+  const withTrades = rows.filter((row) => row.trade_count > 0).length;
+  return {
+    windows_n: windowsN,
+    windows_with_trades_n: withTrades,
+    windows_without_trades_n: windowsN - withTrades,
+    trade_hit_rate: windowsN > 0 ? Number((withTrades / windowsN).toFixed(6)) : null,
+    warning: 'trade_hit_rate only means at least one exported trade joined the window. It is not a completeness proof unless the export query/source guarantees full window coverage.',
+  };
+}
+
+function tradeHitBy(rows, keyFn) {
+  const out = {};
+  for (const [key, groupRows] of groupBy(rows, keyFn).entries()) {
+    out[key] = tradeHitSummary(groupRows);
+  }
+  return out;
 }
 
 function main() {
@@ -202,6 +234,13 @@ function main() {
       sol_amount_by_window: summarize(perWindow.map((row) => row.sol_amount_sum)),
       missing_required_fields: missingRequired,
       warning: 'This validator checks schema and joins. It cannot prove no-trade windows are complete unless the export query/source guarantees complete window coverage.',
+    },
+    trade_hit_guardrail: {
+      all: tradeHitSummary(perWindow),
+      by_label: tradeHitBy(perWindow, (row) => row.label),
+      by_return_domain: tradeHitBy(perWindow, (row) => row.return_domain),
+      by_return_domain_x_label: tradeHitBy(perWindow, (row) => `${row.return_domain}|${row.label}`),
+      warning: 'Read these before AUC. Large dog/dud or domain-level trade-hit asymmetry can make a complete-window feature table selection-biased.',
     },
     windows_without_trades: perWindow.filter((row) => row.trade_count === 0).slice(0, 200),
     out_of_window_trades_sample: outOfWindowTrades.slice(0, 50).map((row) => ({

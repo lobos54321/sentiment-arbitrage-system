@@ -101,6 +101,13 @@ The feature table must use only `feature_coverage_status = complete_window` rows
 
 If an export source cannot guarantee complete coverage, do not pass `--assume-complete-window`; those rows must remain coverage-only and must not enter AUC.
 
+Before reading any AUC, inspect coverage symmetry:
+
+- `validate-v10-curve-feature-trade-export.js` reports `trade_hit_guardrail` by `label`, `return_domain`, and `return_domain|label`.
+- `build-v10-curve-feature-table.js` reports `feature_coverage` by `label`, `return_domain`, and `return_domain|label`.
+
+Large dog/dud or domain-level differences in complete-window coverage mean the AUC is selection-biased. In that case, fix or explain coverage first; do not treat the feature result as an edge result.
+
 ## What Not To Conclude
 
 Do not infer feature null from:
@@ -127,6 +134,8 @@ Existing scripts enforce the most important guardrail:
 
 - `build-v10-curve-feature-table.js` includes only `feature_coverage_status = complete_window` rows in AUC.
 - `history_reached_start=false` is reported as `incomplete_window`, not as zero activity.
+- `build-v10-curve-feature-table.js` reports complete-window rates by dog/dud and return domain.
+- `validate-v10-curve-feature-trade-export.js` reports trade-hit rates by dog/dud and return domain before the exported trades are converted into decode rows.
 
 This prevents repeating the earlier error of reading "not measured" as "no edge".
 

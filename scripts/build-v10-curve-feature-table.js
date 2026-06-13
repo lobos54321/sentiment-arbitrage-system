@@ -228,6 +228,26 @@ function coverageCounts(rows) {
   return out;
 }
 
+function coverageSummary(rows) {
+  const total = rows.length;
+  const counts = coverageCounts(rows);
+  const complete = counts.complete_window || 0;
+  return {
+    n: total,
+    counts,
+    complete_rate: total > 0 ? Number((complete / total).toFixed(6)) : null,
+  };
+}
+
+function coverageBy(rows, keyFn) {
+  const groups = stratify(rows, keyFn);
+  const out = {};
+  for (const [key, groupRows] of groups.entries()) {
+    out[key] = coverageSummary(groupRows);
+  }
+  return out;
+}
+
 function main() {
   const args = parseArgs();
   if (args.help || !args.dogs || !args.duds || !args.decode || !args.out) {
@@ -269,6 +289,12 @@ function main() {
     matched_decode_n: rows.filter((row) => row.decode_status !== 'missing_decode').length,
     exact_decode_rows_n: rows.filter((row) => row.exact_trade_event_n > 0).length,
     feature_coverage_counts: coverageCounts(rows),
+    feature_coverage: {
+      all: coverageSummary(rows),
+      by_label: coverageBy(rows, (row) => row.label),
+      by_return_domain: coverageBy(rows, (row) => row.return_domain),
+      by_return_domain_x_label: coverageBy(rows, (row) => `${row.return_domain}|${row.label}`),
+    },
     guardrail: 'Features are valid only for the pre-anchor window [signal_ts-900, signal_ts]. Do not use post-anchor GMGN early_5m/early_15m fields for immediate-entry gates.',
     strata,
     rows,

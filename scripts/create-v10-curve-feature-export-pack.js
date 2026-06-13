@@ -30,6 +30,13 @@ function usage() {
     '',
     'Creates a durable, self-contained input pack for an indexed pump.fun TradeEvent export.',
     'The pack includes signal windows CSV, token list, Dune-style VALUES snippet, and manifest hashes.',
+    '',
+    'Optional env:',
+    '  V10_CURVE_FEATURE_DOGS_JSON=/path/rebuilt-clean-dogs.json',
+    '  V10_CURVE_FEATURE_DUDS_JSON=/path/rebuilt-clean-duds.json',
+    '',
+    'When provided, return_domain/effective_tier are joined into the export windows so downstream',
+    'coverage checks can detect dog/dud and domain-level export skew before reading AUC.',
   ].join('\n');
 }
 
@@ -68,6 +75,34 @@ function readWorklist(filePath) {
     .filter(Boolean);
 }
 
+function readJsonIfExists(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return [];
+  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+function cohortMetaBySignal(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    const token = String(row.token_ca || '').trim();
+    const ts = normalizeTs(row.signal_ts);
+    if (!token || ts == null) continue;
+    out.set(`${token}|${ts}`, {
+      return_domain: row.return_domain || 'unknown',
+      effective_tier: row.effective_tier || row.tier || 'unknown',
+    });
+  }
+  return out;
+}
+
+function countBy(rows, keyFn) {
+  const out = {};
+  for (const row of rows) {
+    const key = keyFn(row) || 'unknown';
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
+}
+
 function writeCsv(filePath, rows, columns) {
   const lines = [
     columns.join(','),
@@ -78,7 +113,7 @@ function writeCsv(filePath, rows, columns) {
 
 function makeSqlValues(rows) {
   return rows.map((row) => (
-    `('${row.window_id}', '${row.token_ca}', ${row.signal_ts}, ${row.window_start_ts}, ${row.window_end_ts}, '${row.label}')`
+    `('${row.window_id}', '${row.token_ca}', ${row.signal_ts}, ${row.window_start_ts}, ${row.window_end_ts}, '${row.label}', '${row.return_domain}', '${row.effective_tier}')`
   )).join(',\n    ');
 }
 
@@ -88,10 +123,16 @@ function main() {
     console.log(usage());
     process.exit(args.help ? 0 : 1);
   }
+  const meta = new Map([
+    ...cohortMetaBySignal(readJsonIfExists(process.env.V10_CURVE_FEATURE_DOGS_JSON || '')),
+    ...cohortMetaBySignal(readJsonIfExists(process.env.V10_CURVE_FEATURE_DUDS_JSON || '')),
+  ]);
   const rows = readWorklist(args.worklist).map((row) => ({
     ...row,
     window_start_ts: row.signal_ts - Number(args.preSec || 0),
     window_end_ts: row.signal_ts + Number(args.postSec || 0),
+    return_domain: meta.get(`${row.token_ca}|${row.signal_ts}`)?.return_domain || 'unknown',
+    effective_tier: meta.get(`${row.token_ca}|${row.signal_ts}`)?.effective_tier || 'unknown',
   }));
   const tokenRows = [...new Set(rows.map((row) => row.token_ca))]
     .sort()
@@ -101,12 +142,12 @@ function main() {
   const tokensCsv = path.join(args.outDir, 'tokens.csv');
   const valuesSql = path.join(args.outDir, 'signal_windows_values.sql');
   const readme = path.join(args.outDir, 'README.md');
-  writeCsv(windowsCsv, rows, ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label']);
+  writeCsv(windowsCsv, rows, ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label', 'return_domain', 'effective_tier']);
   writeCsv(tokensCsv, tokenRows, ['token_ca']);
   fs.writeFileSync(valuesSql, [
     '-- Paste this CTE into an indexed pump.fun TradeEvent query.',
     '-- Required output fields are documented in claudedocs/v10-curve-feature-export-spec.md.',
-    'WITH signal_windows(window_id, token_ca, signal_ts, window_start_ts, window_end_ts, label) AS (',
+    'WITH signal_windows(window_id, token_ca, signal_ts, window_start_ts, window_end_ts, label, return_domain, effective_tier) AS (',
     '  VALUES',
     `    ${makeSqlValues(rows)}`,
     ')',
@@ -151,6 +192,8 @@ function main() {
     generated_at: new Date().toISOString(),
     inputs: {
       worklist: args.worklist,
+      dogs_json: process.env.V10_CURVE_FEATURE_DOGS_JSON || null,
+      duds_json: process.env.V10_CURVE_FEATURE_DUDS_JSON || null,
       pre_sec: Number(args.preSec || 0),
       post_sec: Number(args.postSec || 0),
     },
@@ -165,6 +208,12 @@ function main() {
     dogs: rows.filter((row) => row.label === 'dog').length,
     duds: rows.filter((row) => row.label === 'dud').length,
     unique_tokens: tokenRows.length,
+    coverage_guardrail: {
+      return_domain_counts: countBy(rows, (row) => row.return_domain),
+      return_domain_x_label_counts: countBy(rows, (row) => `${row.return_domain}|${row.label}`),
+      missing_cohort_meta_rows: rows.filter((row) => row.return_domain === 'unknown' || row.effective_tier === 'unknown').length,
+      warning: 'If missing_cohort_meta_rows is nonzero for a strategy audit pack, regenerate with V10_CURVE_FEATURE_DOGS_JSON and V10_CURVE_FEATURE_DUDS_JSON set.',
+    },
   };
   const manifestPath = path.join(args.outDir, 'manifest.json');
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
