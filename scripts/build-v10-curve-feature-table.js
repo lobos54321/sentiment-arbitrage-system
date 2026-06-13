@@ -139,7 +139,8 @@ function lastProgress(row = {}) {
 
 function buildFeatureRow(baseRow, label, decodeRow) {
   const decodeStatus = decodeRow?.status || 'missing_decode';
-  const usable = decodeStatus === 'ok';
+  const coverageComplete = decodeStatus === 'ok' && decodeRow?.history_reached_start === true;
+  const usable = coverageComplete;
   const buySol = usable ? sumBars(decodeRow, 'buy_sol_volume') : null;
   const sellSol = usable ? sumBars(decodeRow, 'sell_sol_volume') : null;
   const baselineProgress = usable ? numeric(decodeRow?.baseline_progress_pct) : null;
@@ -156,6 +157,9 @@ function buildFeatureRow(baseRow, label, decodeRow) {
     effective_tier: baseRow.effective_tier || baseRow.tier || 'unknown',
     return_domain: baseRow.return_domain || 'unknown',
     decode_status: decodeStatus,
+    feature_coverage_status: decodeStatus === 'ok'
+      ? (coverageComplete ? 'complete_window' : 'incomplete_window')
+      : 'decode_unavailable',
     history_reached_start: decodeRow?.history_reached_start ?? null,
     trades_n: trades,
     exact_trade_event_n: usable ? (numeric(decodeRow?.exact_trade_event_n) || 0) : null,
@@ -194,7 +198,7 @@ function stratify(rows, keyFn) {
 }
 
 function featureReport(rows) {
-  const usableRows = rows.filter((row) => row.decode_status === 'ok');
+  const usableRows = rows.filter((row) => row.feature_coverage_status === 'complete_window');
   const dogs = usableRows.filter((row) => row.label === 'dog');
   const duds = usableRows.filter((row) => row.label === 'dud');
   const features = {};
@@ -213,6 +217,15 @@ function featureReport(rows) {
     insufficient: dogs.length < 30 || duds.length < 30,
     features,
   };
+}
+
+function coverageCounts(rows) {
+  const out = {};
+  for (const row of rows) {
+    const key = row.feature_coverage_status || 'unknown';
+    out[key] = (out[key] || 0) + 1;
+  }
+  return out;
 }
 
 function main() {
@@ -255,6 +268,7 @@ function main() {
     decode_rows_n: decodeRows.length,
     matched_decode_n: rows.filter((row) => row.decode_status !== 'missing_decode').length,
     exact_decode_rows_n: rows.filter((row) => row.exact_trade_event_n > 0).length,
+    feature_coverage_counts: coverageCounts(rows),
     guardrail: 'Features are valid only for the pre-anchor window [signal_ts-900, signal_ts]. Do not use post-anchor GMGN early_5m/early_15m fields for immediate-entry gates.',
     strata,
     rows,
@@ -266,6 +280,7 @@ function main() {
     rows_n: report.rows_n,
     matched_decode_n: report.matched_decode_n,
     exact_decode_rows_n: report.exact_decode_rows_n,
+    feature_coverage_counts: report.feature_coverage_counts,
     all: report.strata.all.all,
   }, null, 2));
 }
