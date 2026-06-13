@@ -253,6 +253,20 @@ partial subset produced the expected warning shape: only 1/461 dogs and 6/971
 duds matched a decision record. That validates the join path but proves again
 that the partial subset cannot support a strategy conclusion.
 
+For the normal path, use the one-command pack builder instead:
+
+```bash
+node scripts/build-v10-decision-anchor-pack.js \
+  --paper-db /path/to/full/paper_trades.db \
+  --out-dir /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-decision-anchor-pack
+```
+
+This runs the subset exporter and v10 funnel wrapper together, then writes
+`decision-anchor-pack-summary.json`. If match rates are very low, the summary is
+marked `review_required` because that can mean either a partial paper DB or a
+real pipeline coverage gap. Do not interpret low matching until source DB
+coverage is confirmed.
+
 ## Next Valid Analysis After Full Decision Pack
 
 1. Matched signal-vs-decision ceiling on the same signal-level cohort.
