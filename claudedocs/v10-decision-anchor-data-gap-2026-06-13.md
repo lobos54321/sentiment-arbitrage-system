@@ -267,6 +267,13 @@ marked `review_required` because that can mean either a partial paper DB or a
 real pipeline coverage gap. Do not interpret low matching until source DB
 coverage is confirmed.
 
+The pack builder also records exported table ranges for
+`a_class_decision_events`, `opportunity_events`, and `canonical_trade_ledger`.
+If the decision tables start more than 1 hour after the cohort start, or end
+more than 1 hour before the cohort end, the summary emits explicit range
+warnings. Those warnings mean the pack is not yet a full v10 decision-anchor
+pack.
+
 If creating a fresh snapshot from a deployed shell, pass the v10 cohort files to
 `create-rawdog-audit-snapshot.sh` so it uses the cohort-window exporter instead
 of the old rolling-`HOURS` fallback:

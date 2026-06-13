@@ -67,12 +67,44 @@ function rate(num, den) {
   return den ? num / den : null;
 }
 
-function packStatus(report) {
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function tableRangeWarnings(exporter = {}) {
+  const warnings = [];
+  const startTs = numberOrNull(exporter.start_ts);
+  const endTs = numberOrNull(exporter.end_ts);
+  const ranges = exporter.exported_table_ranges || {};
+  const decisionTables = ['a_class_decision_events', 'opportunity_events'];
+  if (startTs == null || endTs == null) return warnings;
+
+  for (const table of decisionTables) {
+    const range = ranges[table] || {};
+    const rows = Number(range.rows || 0);
+    const minTs = numberOrNull(range.min_ts);
+    const maxTs = numberOrNull(range.max_ts);
+    if (!rows) {
+      warnings.push(`${table}_empty_in_exported_window`);
+      continue;
+    }
+    if (minTs != null && minTs > startTs + 3600) {
+      warnings.push(`${table}_starts_more_than_1h_after_cohort_start`);
+    }
+    if (maxTs != null && maxTs < endTs - 3600) {
+      warnings.push(`${table}_ends_more_than_1h_before_cohort_end`);
+    }
+  }
+  return warnings;
+}
+
+function packStatus(report, exporter = {}) {
   const dogs = report.dogs?.summary || {};
   const duds = report.duds?.summary || {};
   const dogDecisionRate = rate(Number(dogs.has_decision_record || 0), Number(dogs.raw_sustained_dogs || 0));
   const dudDecisionRate = rate(Number(duds.has_decision_record || 0), Number(duds.raw_sustained_dogs || 0));
-  const warnings = [];
+  const warnings = [...tableRangeWarnings(exporter)];
   if (dogDecisionRate != null && dogDecisionRate < 0.1) {
     warnings.push('dog_decision_match_rate_below_10pct_check_for_partial_paper_db_or_pipeline_gap');
   }
@@ -119,7 +151,7 @@ function main() {
     '--pre-signal-grace-sec', String(args.preSignalGraceSec),
   ]);
   const funnelReport = readJson(funnelRun.paths.jsonPath);
-  const status = packStatus(funnelReport);
+  const status = packStatus(funnelReport, exporter);
   const summary = {
     schema_version: 'v10_decision_anchor_pack.v1',
     generated_at: new Date().toISOString(),
@@ -145,6 +177,7 @@ function main() {
       start_ts: exporter.start_ts,
       end_ts: exporter.end_ts,
       margin_sec: exporter.margin_sec,
+      exported_table_ranges: exporter.exported_table_ranges || null,
     },
     funnel: {
       dogs: funnelReport.dogs.summary,

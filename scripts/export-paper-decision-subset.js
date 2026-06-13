@@ -86,6 +86,14 @@ function runSql(dbPath, sql) {
   });
 }
 
+function runJson(dbPath, sql) {
+  const out = execFileSync('sqlite3', ['-json', dbPath, sql], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  }).trim();
+  return out ? JSON.parse(out) : [];
+}
+
 function tableExists(dbPath, tableName) {
   const out = runSql(dbPath, `SELECT 1 FROM sqlite_master WHERE type='table' AND name='${sqlLiteral(tableName)}' LIMIT 1;`).trim();
   return out === '1';
@@ -278,17 +286,23 @@ DETACH DATABASE subset;
 `;
   runSql(args.paperDb, script);
 
-  const counts = JSON.parse(runSql(args.outDb, `
-SELECT json_object(
-  'a_class_decision_events', (SELECT count(*) FROM a_class_decision_events),
-  'opportunity_events', (SELECT count(*) FROM opportunity_events),
-  'canonical_trade_ledger', (SELECT count(*) FROM canonical_trade_ledger),
-  'start_ts', ${window.start},
-  'end_ts', ${window.end},
-  'margin_sec', ${margin}
-);
-`));
-  console.log(JSON.stringify({ out_db: args.outDb, ...counts }, null, 2));
+  const [aClass] = runJson(args.outDb, 'SELECT count(*) AS rows, min(event_ts) AS min_ts, max(event_ts) AS max_ts FROM a_class_decision_events;');
+  const [opportunity] = runJson(args.outDb, 'SELECT count(*) AS rows, min(event_ts) AS min_ts, max(event_ts) AS max_ts FROM opportunity_events;');
+  const [ledger] = runJson(args.outDb, 'SELECT count(*) AS rows, min(entry_ts) AS min_ts, max(entry_ts) AS max_ts FROM canonical_trade_ledger;');
+  console.log(JSON.stringify({
+    out_db: args.outDb,
+    a_class_decision_events: aClass?.rows || 0,
+    opportunity_events: opportunity?.rows || 0,
+    canonical_trade_ledger: ledger?.rows || 0,
+    start_ts: window.start,
+    end_ts: window.end,
+    margin_sec: margin,
+    exported_table_ranges: {
+      a_class_decision_events: aClass || { rows: 0, min_ts: null, max_ts: null },
+      opportunity_events: opportunity || { rows: 0, min_ts: null, max_ts: null },
+      canonical_trade_ledger: ledger || { rows: 0, min_ts: null, max_ts: null },
+    },
+  }, null, 2));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
