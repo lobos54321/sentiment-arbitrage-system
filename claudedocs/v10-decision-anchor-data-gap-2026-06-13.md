@@ -237,6 +237,22 @@ This smoke DB is useful only to validate the exporter. It is not a valid
 decision-anchor pack for v10 because the source paper DB covers only a small
 slice of the v10 signal window.
 
+Once a full-window subset exists, run the v10 decision funnel wrapper:
+
+```bash
+node scripts/run-v10-decision-funnel-audit.js \
+  --paper-db /path/to/paper_decision_subset.db \
+  --dogs /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/cohort-rebuild-v10-final-native-return-guard/rebuilt-clean-dogs.json \
+  --duds /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/cohort-rebuild-v10-final-native-return-guard/rebuilt-clean-duds.json \
+  --out-dir /path/to/v10-decision-funnel-audit
+```
+
+The wrapper consumes the v10 clean cohort directly, so it does not fall back to
+the old `raw_signal_outcomes` eligible-row logic. Smoke validation against the
+partial subset produced the expected warning shape: only 1/461 dogs and 6/971
+duds matched a decision record. That validates the join path but proves again
+that the partial subset cannot support a strategy conclusion.
+
 ## Next Valid Analysis After Full Decision Pack
 
 1. Matched signal-vs-decision ceiling on the same signal-level cohort.
