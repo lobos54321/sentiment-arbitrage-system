@@ -274,9 +274,18 @@ more than 1 hour before the cohort end, the summary emits explicit range
 warnings. Those warnings mean the pack is not yet a full v10 decision-anchor
 pack.
 
-If creating a fresh snapshot from a deployed shell, pass the v10 cohort files to
-`create-rawdog-audit-snapshot.sh` so it uses the cohort-window exporter instead
-of the old rolling-`HOURS` fallback:
+If creating a fresh snapshot from a deployed shell, pass the v10 window
+explicitly to `create-rawdog-audit-snapshot.sh` so it uses the fixed-window
+exporter instead of the old rolling-`HOURS` fallback:
+
+```bash
+START_TS=1780739887 \
+END_TS=1781189769 \
+bash scripts/create-rawdog-audit-snapshot.sh
+```
+
+If the v10 cohort files are present in the deployed shell, this equivalent form
+also works:
 
 ```bash
 COHORT_DOGS=/path/to/rebuilt-clean-dogs.json \
@@ -284,9 +293,9 @@ COHORT_DUDS=/path/to/rebuilt-clean-duds.json \
 bash scripts/create-rawdog-audit-snapshot.sh
 ```
 
-Without `COHORT_DOGS` and `COHORT_DUDS`, that snapshot script falls back to a
-rolling recent-hours subset. The fallback is useful for smoke/health checks, but
-it is not a valid v10 decision-anchor pack.
+Without either `START_TS`/`END_TS` or `COHORT_DOGS`/`COHORT_DUDS`, that snapshot
+script falls back to a rolling recent-hours subset. The fallback is useful for
+smoke/health checks, but it is not a valid v10 decision-anchor pack.
 
 ## Next Valid Analysis After Full Decision Pack
 
