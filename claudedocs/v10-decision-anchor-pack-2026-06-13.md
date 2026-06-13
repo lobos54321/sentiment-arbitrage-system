@@ -73,6 +73,17 @@ Hard blockers inside that dog bucket:
 - `quote_age_unknown`: 2
 - `liquidity_below_min`: 1
 
+All 130 dog rows with `liquidity_unknown` in this bucket had:
+
+- `provider_hydrate_outcome = success`
+- `quote_clean = true`
+- `quote_executable = true`
+- `route_available = true`
+
+So this is not simply "provider failed to hydrate quote". The quote route was
+present, but the hard prefilter still lacked a liquidity/spread evidence model
+that can certify this token stage.
+
 For matched duds in `quote_clean_no_would_enter`:
 
 - Total: 323
@@ -86,6 +97,9 @@ Hard blockers inside that dud bucket:
 - `spread_too_high`: 51
 - `spread_extreme`: 38
 - `quote_age_unknown`: 13
+
+For duds, 262/270 `liquidity_unknown` rows in the same bucket also had
+`provider_hydrate_outcome = success`.
 
 Interpretation:
 
@@ -106,6 +120,10 @@ The specific unresolved issue is not "relax the gate". It is:
 
 `liquidity_unknown / spread_* still mean AMM-style evidence, while many v10 dogs are pump.fun / GMGN / bonding-curve-stage tokens.`
 
+More precisely: the system has a route/quote success signal, but it does not yet
+have a stage-aware executable evidence contract that can turn GMGN/bonding-curve
+state into `liquidity_known` and `spread_ok` equivalents.
+
 This reinforces the existing direction:
 
 1. Do not loosen gate/matrix/RR.
@@ -123,4 +141,3 @@ It is sufficient to decide the next research question:
 > For rows with quote route clean but `liquidity_unknown`/`spread_*` hard
 > blockers, can bonding-curve/GMGN evidence prove executable status at decision
 > time, or are these true market blocks?
-
