@@ -11,6 +11,15 @@ import {
 const PUMPFUN_GRADUATION_PRICE_SOL = 4.1088018e-7;
 const CURVE_PHYSICAL_MAX_PRICE_SOL = 4.5e-7;
 
+function isPumpfunMint(tokenCa) {
+  return String(tokenCa || '').endsWith('pump');
+}
+
+function isPhysicallyImpossibleCurvePrice(tokenCa, price) {
+  const value = numeric(price);
+  return isPumpfunMint(tokenCa) && value != null && value > CURVE_PHYSICAL_MAX_PRICE_SOL;
+}
+
 function parseArgs(argv = process.argv.slice(2)) {
   const args = {
     labelAudit: '',
@@ -122,6 +131,7 @@ function curvePeakFromPeakWindow(row = {}) {
   }
   const peak = maxNumeric(prices);
   if (peak == null) return null;
+  if (isPhysicallyImpossibleCurvePrice(row.token_ca, peak)) return null;
   return {
     peak_domain: 'sol_curve',
     peak_price_sol_curve: peak,
@@ -134,6 +144,7 @@ function curvePeakFromPeakWindow(row = {}) {
 function observedNativePeak(row = {}) {
   const peak = numeric(row.observed_max_price);
   if (peak == null || peak <= 0) return null;
+  if (isPhysicallyImpossibleCurvePrice(row.token_ca, peak)) return null;
   return {
     peak_domain: 'sol_curve',
     peak_price_sol_curve: peak,
@@ -157,16 +168,21 @@ function gmgnFullPeak(row = {}) {
 function physicalRefutation(row = {}) {
   const baseline = numeric(row.baseline_price);
   const multiple = numeric(row.recorded_peak_multiple);
+  const observedPeak = numeric(row.observed_max_price);
+  const observedPeakImpossible = isPhysicallyImpossibleCurvePrice(row.token_ca, observedPeak);
   if (baseline == null || baseline <= 0 || multiple == null || multiple <= 0) {
     return {
-      refuted_by_physics: false,
+      refuted_by_physics: observedPeakImpossible,
       recorded_peak_price_sol_claim: null,
+      observed_peak_physically_impossible: observedPeakImpossible,
     };
   }
   const claim = baseline * multiple;
+  const claimImpossible = isPhysicallyImpossibleCurvePrice(row.token_ca, claim);
   return {
-    refuted_by_physics: claim > CURVE_PHYSICAL_MAX_PRICE_SOL,
+    refuted_by_physics: claimImpossible || observedPeakImpossible,
     recorded_peak_price_sol_claim: claim,
+    observed_peak_physically_impossible: observedPeakImpossible,
   };
 }
 
@@ -283,6 +299,7 @@ function rebuildRow(row = {}, maps = {}) {
     peak_window_present: Boolean(peakWindow),
     refuted_by_physics: refutation.refuted_by_physics,
     recorded_peak_price_sol_claim: refutation.recorded_peak_price_sol_claim,
+    observed_peak_physically_impossible: refutation.observed_peak_physically_impossible,
     route_unit_domain: route?.unit_domain ?? null,
     route_baseline_unit_route: route?.baseline_unit_route ?? null,
   };
@@ -319,7 +336,7 @@ function rebuildRow(row = {}, maps = {}) {
     };
   }
 
-  if (row.label_status === 'clean') {
+  if (row.label_status === 'clean' && !refutation.refuted_by_physics) {
     return {
       ...base,
       label_status: 'clean',

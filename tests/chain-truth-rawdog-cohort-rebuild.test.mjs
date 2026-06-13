@@ -156,6 +156,54 @@ test('physical refutation invalidates impossible claims but does not invent a co
   assert.equal(report.summary.active_label_unit_suspect_n, 1);
 });
 
+test('does not accept physically impossible pumpfun native bar peaks as clean curve returns', () => {
+  const report = rebuildCohort({
+    labelRows: [
+      row({
+        token_ca: 'BADpump',
+        label_status: 'clean',
+        label_cleaning_reason: 'within_tolerance',
+        effective_tier: 'gold',
+        tier: 'gold',
+        baseline_price: 2e-7,
+        recorded_peak_multiple: 3,
+        observed_max_price: 8e-7,
+      }),
+    ],
+    baselineRows: [],
+    gmgnRows: [],
+    peakRows: [],
+  });
+
+  assert.equal(report.rows[0].label_status, 'quarantine');
+  assert.equal(report.rows[0].refuted_by_physics, true);
+  assert.equal(report.rows[0].observed_peak_physically_impossible, true);
+  assert.equal(report.rows[0].label_adjudication_status, 'quarantine_refuted_by_physics_needs_corrected_peak');
+});
+
+test('keeps non-pump native peaks out of the pumpfun physical-limit guard', () => {
+  const report = rebuildCohort({
+    labelRows: [
+      row({
+        token_ca: 'OTHER',
+        label_status: 'clean',
+        label_cleaning_reason: 'within_tolerance',
+        effective_tier: 'gold',
+        tier: 'gold',
+        baseline_price: 2e-7,
+        recorded_peak_multiple: 3,
+        observed_max_price: 8e-7,
+      }),
+    ],
+    baselineRows: [],
+    gmgnRows: [],
+    peakRows: [],
+  });
+
+  assert.equal(report.rows[0].label_status, 'clean');
+  assert.equal(report.rows[0].refuted_by_physics, false);
+});
+
 test('original clean rows pass through when no chain truth correction is available', () => {
   const report = rebuildCohort({
     labelRows: [
@@ -177,4 +225,3 @@ test('original clean rows pass through when no chain truth correction is availab
   assert.equal(report.rows[0].effective_tier, 'silver');
   assert.equal(report.summary.clean_dog_unique_n, 1);
 });
-
