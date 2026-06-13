@@ -73,6 +73,32 @@ test('summarizes route domains and missing GMGN anchor prices', () => {
   assert.equal(report.summary.missing_gmgn_anchor_price_n, 1);
 });
 
+test('recovers incomplete baseline routes with GMGN anchor prices when available', () => {
+  const report = buildUnitRouter({
+    baselineRows: [
+      { token_ca: 'HOT', anchor_ts: 10, baseline_route_v1: 'hot_tail_history_incomplete_dune' },
+      { token_ca: 'QUIET', anchor_ts: 20, baseline_route_v1: 'quiet_no_curve_trade_near_anchor' },
+      { token_ca: 'MISSING', anchor_ts: 30, baseline_route_v1: 'hot_tail_history_incomplete_dune' },
+    ],
+    gmgnRows: [
+      { token_ca: 'HOT', signal_ts: 10, entry_0m_price: 0.00003, first_bar_lag_sec: 0 },
+      { token_ca: 'QUIET', signal_ts: 20, entry_0m_price: 0.00004, first_bar_lag_sec: 0 },
+    ],
+  });
+
+  assert.equal(report.summary.by_unit_domain.usd_gmgn, 2);
+  assert.equal(report.summary.by_unit_domain.history_incomplete, 1);
+  assert.equal(report.summary.gmgn_recovered_incomplete_route_rows_n, 2);
+
+  const hot = report.rows.find((row) => row.token_ca === 'HOT');
+  assert.equal(hot.baseline_unit_route, 'history_incomplete_gmgn_anchor');
+  assert.equal(hot.baseline_price_usd_gmgn, 0.00003);
+
+  const quiet = report.rows.find((row) => row.token_ca === 'QUIET');
+  assert.equal(quiet.baseline_unit_route, 'quiet_no_curve_trade_gmgn_anchor');
+  assert.equal(quiet.baseline_price_usd_gmgn, 0.00004);
+});
+
 test('computes direct unit ratio only as a diagnostic', () => {
   assertNear(directUnitRatio({ baseline_price_sol_chain: 2e-7 }, { entry_0m_price: 0.00002 }), 100);
   assert.equal(directUnitRatio({ baseline_price_sol_chain: 0 }, { entry_0m_price: 0.00002 }), null);

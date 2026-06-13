@@ -92,6 +92,25 @@ function classifyBaselineUnit(row = {}, gmgnRow = null) {
   const ratio = gmgnRow ? directUnitRatio(row, gmgnRow) : null;
   const ratioSuspect = ratio != null && ratio >= UNIT_RATIO_SUSPECT_MIN && ratio <= UNIT_RATIO_SUSPECT_MAX;
 
+  function gmgnUsdBaseline(routeName, routeReason) {
+    return {
+      ...row,
+      unit_domain: 'usd_gmgn',
+      baseline_unit_route: routeName,
+      baseline_price_usd_gmgn: gmgnUsd,
+      baseline_price_sol_chain_for_reference: curvePrice,
+      gmgn_entry_0m_ts: gmgnRow.entry_0m_ts ?? null,
+      gmgn_first_bar_lag_sec: gmgnRow.first_bar_lag_sec ?? null,
+      gmgn_first_nonzero_volume_lag_sec: gmgnRow.first_nonzero_volume_lag_sec ?? null,
+      gmgn_early_15m_volume_usd_sum: gmgnRow.early_15m_volume_usd_sum ?? null,
+      gmgn_bars: gmgnRow.bars ?? null,
+      gmgn_nonzero_volume_bars: gmgnRow.nonzero_volume_bars ?? null,
+      direct_usd_per_sol_like_ratio: ratio,
+      label_unit_suspect: ratioSuspect,
+      return_calculation_rule: `${routeReason}; compare against GMGN USD peak only`,
+    };
+  }
+
   if (route === 'graduated_route_gmgn_amm') {
     if (gmgnUsd == null || gmgnUsd <= 0) {
       return {
@@ -136,6 +155,12 @@ function classifyBaselineUnit(row = {}, gmgnRow = null) {
   }
 
   if (route === 'quiet_no_curve_trade_near_anchor') {
+    if (gmgnUsd != null && gmgnUsd > 0) {
+      return gmgnUsdBaseline(
+        'quiet_no_curve_trade_gmgn_anchor',
+        'no nearby curve trade; GMGN provides anchor baseline in USD domain',
+      );
+    }
     return {
       ...row,
       unit_domain: 'missing_curve_baseline',
@@ -146,6 +171,12 @@ function classifyBaselineUnit(row = {}, gmgnRow = null) {
   }
 
   if (route === 'hot_tail_history_incomplete_dune') {
+    if (gmgnUsd != null && gmgnUsd > 0) {
+      return gmgnUsdBaseline(
+        'history_incomplete_gmgn_anchor',
+        'curve history incomplete; GMGN provides anchor baseline in USD domain',
+      );
+    }
     return {
       ...row,
       unit_domain: 'history_incomplete',
@@ -190,6 +221,7 @@ function buildUnitRouter({ baselineRows = [], gmgnRows = [] } = {}) {
       graduated_rows_n: rows.filter((row) => row.baseline_route_v1 === 'graduated_route_gmgn_amm').length,
       graduated_gmgn_price_rows_n: graduated.length,
       missing_gmgn_anchor_price_n: rows.filter((row) => row.baseline_unit_route === 'graduated_missing_gmgn').length,
+      gmgn_recovered_incomplete_route_rows_n: rows.filter((row) => ['history_incomplete_gmgn_anchor', 'quiet_no_curve_trade_gmgn_anchor'].includes(row.baseline_unit_route)).length,
       direct_usd_per_sol_like_ratio_summary: {
         n: ratios.length,
         min: ratios.length ? Math.min(...ratios) : null,
