@@ -267,6 +267,20 @@ marked `review_required` because that can mean either a partial paper DB or a
 real pipeline coverage gap. Do not interpret low matching until source DB
 coverage is confirmed.
 
+If creating a fresh snapshot from a deployed shell, pass the v10 cohort files to
+`create-rawdog-audit-snapshot.sh` so it uses the cohort-window exporter instead
+of the old rolling-`HOURS` fallback:
+
+```bash
+COHORT_DOGS=/path/to/rebuilt-clean-dogs.json \
+COHORT_DUDS=/path/to/rebuilt-clean-duds.json \
+bash scripts/create-rawdog-audit-snapshot.sh
+```
+
+Without `COHORT_DOGS` and `COHORT_DUDS`, that snapshot script falls back to a
+rolling recent-hours subset. The fallback is useful for smoke/health checks, but
+it is not a valid v10 decision-anchor pack.
+
 ## Next Valid Analysis After Full Decision Pack
 
 1. Matched signal-vs-decision ceiling on the same signal-level cohort.

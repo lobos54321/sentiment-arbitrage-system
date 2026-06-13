@@ -14,14 +14,18 @@ set -euo pipefail
 # Optional:
 #   DATA_DIR=/app/data OUT_DIR=/app/data/audit-snapshots HOURS=24 bash scripts/create-rawdog-audit-snapshot.sh
 #   FULL_PAPER=1 MIN_FREE_MB=2500 bash scripts/create-rawdog-audit-snapshot.sh
+#   COHORT_DOGS=/path/rebuilt-clean-dogs.json COHORT_DUDS=/path/rebuilt-clean-duds.json bash scripts/create-rawdog-audit-snapshot.sh
 
 DATA_DIR="${DATA_DIR:-/app/data}"
 OUT_DIR="${OUT_DIR:-$DATA_DIR/audit-snapshots}"
 HOURS="${HOURS:-24}"
+MARGIN_SEC="${MARGIN_SEC:-900}"
 MIN_FREE_MB="${MIN_FREE_MB:-2500}"
 FULL_PAPER="${FULL_PAPER:-0}"
 RAW_DB="${RAW_SIGNAL_OUTCOMES_DB:-${RAW_DB:-$DATA_DIR/raw_signal_outcomes.db}}"
 PAPER_DB="${PAPER_DB:-$DATA_DIR/paper_trades.db}"
+COHORT_DOGS="${COHORT_DOGS:-}"
+COHORT_DUDS="${COHORT_DUDS:-}"
 
 free_mb() {
   df -Pm "$DATA_DIR" | awk 'NR==2 {print $4}'
@@ -40,10 +44,13 @@ echo "== rawdog audit snapshot preflight =="
 echo "DATA_DIR=$DATA_DIR"
 echo "OUT_DIR=$OUT_DIR"
 echo "HOURS=$HOURS"
+echo "MARGIN_SEC=$MARGIN_SEC"
 echo "MIN_FREE_MB=$MIN_FREE_MB"
 echo "FULL_PAPER=$FULL_PAPER"
 echo "RAW_DB=$RAW_DB"
 echo "PAPER_DB=$PAPER_DB"
+echo "COHORT_DOGS=${COHORT_DOGS:-}"
+echo "COHORT_DUDS=${COHORT_DUDS:-}"
 df -h "$DATA_DIR"
 
 if [[ ! -f "$RAW_DB" ]]; then
@@ -109,6 +116,17 @@ NODE
   PAPER_OUT="paper_trades.snapshot.db"
 else
   echo "== create small paper_decision_subset.db for audit =="
+  if [[ -n "$COHORT_DOGS" && -n "$COHORT_DUDS" && -f "$COHORT_DOGS" && -f "$COHORT_DUDS" && -f "scripts/export-paper-decision-subset.js" ]]; then
+    echo "Using cohort-window exporter for paper decision subset."
+    node scripts/export-paper-decision-subset.js \
+      --paper-db "$PAPER_DB" \
+      --out-db "$OUT_DIR/paper_decision_subset.db" \
+      --cohort-dogs "$COHORT_DOGS" \
+      --cohort-duds "$COHORT_DUDS" \
+      --margin-sec "$MARGIN_SEC"
+  else
+    echo "COHORT_DOGS/COHORT_DUDS not provided or exporter missing; falling back to rolling HOURS subset."
+    echo "Fallback subset is for smoke/health only and is not a v10 decision-anchor pack."
   PAPER_DB="$PAPER_DB" OUT_DIR="$OUT_DIR" HOURS="$HOURS" node --input-type=module <<'NODE'
 import Database from 'better-sqlite3';
 import fs from 'fs';
@@ -178,6 +196,7 @@ dst.close();
 src.close();
 console.log(`paper decision subset ok: ${dstPath}`);
 NODE
+  fi
   PAPER_OUT="paper_decision_subset.db"
 fi
 
