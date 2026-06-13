@@ -200,6 +200,7 @@ function summarizeFunnel(funnel) {
     matched_by: countBy(rows, 'matched_by'),
     best_source_kind: countBy(rows, (row) => row.best_decision_record?.source_kind || 'none'),
     hydrate_outcome: countBy(rows, (row) => row.best_decision_record?.provider_hydrate_outcome || 'not_recorded'),
+    rows,
   };
 }
 

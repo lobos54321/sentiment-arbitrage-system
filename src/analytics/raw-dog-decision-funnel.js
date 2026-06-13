@@ -67,6 +67,8 @@ function normalizeRawDog(row = {}) {
     held_to_gold: boolish(row.held_to_gold),
     raw_dog_entered: boolish(row.raw_dog_entered),
     raw_dog_realized: boolish(row.raw_dog_realized),
+    return_domain: row.return_domain || null,
+    return_calculation_rule: row.return_calculation_rule || null,
   };
 }
 
