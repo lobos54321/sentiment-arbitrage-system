@@ -117,6 +117,84 @@ function makeSqlValues(rows) {
   )).join(',\n    ');
 }
 
+function makeIndexedTradeExportTemplate(rows) {
+  const values = makeSqlValues(rows);
+  return [
+    '-- V10 curve-stage feature export template.',
+    '-- Replace YOUR_PUMPFUN_TRADE_EVENT_TABLE and source column names in source_trades.',
+    '-- Required semantic contract:',
+    '--   one row = one pump.fun TradeEvent for a token in signal_windows',
+    '--   block_time between window_start_ts and window_end_ts, inclusive',
+    '--   no post-signal trades; this export is for ex-ante features only',
+    '--',
+    '-- After export, validate before using it:',
+    '--   node scripts/validate-v10-curve-feature-trade-export.js --windows signal_windows.csv --trades exported_trades.csv --out validation.json',
+    '-- Read validation.trade_hit_guardrail before reading AUC.',
+    '',
+    'WITH signal_windows(window_id, token_ca, signal_ts, window_start_ts, window_end_ts, label, return_domain, effective_tier) AS (',
+    '  VALUES',
+    `    ${values}`,
+    '),',
+    'bounds AS (',
+    '  SELECT',
+    '    MIN(window_start_ts) AS min_ts,',
+    '    MAX(window_end_ts) AS max_ts',
+    '  FROM signal_windows',
+    '),',
+    'source_trades AS (',
+    '  SELECT',
+    '    -- TODO: map these aliases from the indexed pump.fun TradeEvent source.',
+    '    CAST(mint AS VARCHAR) AS token_ca,',
+    '    CAST(to_unixtime(block_time) AS BIGINT) AS block_time,',
+    '    CAST(signature AS VARCHAR) AS signature,',
+    "    CASE WHEN is_buy THEN 'buy' ELSE 'sell' END AS side,",
+    '    CAST(user AS VARCHAR) AS user,',
+    '    CAST(sol_amount AS DOUBLE) AS sol_amount,',
+    '    CAST(token_amount AS DOUBLE) AS token_amount,',
+    '    CAST(virtual_sol_reserves AS DOUBLE) AS virtual_sol_reserves,',
+    '    CAST(virtual_token_reserves AS DOUBLE) AS virtual_token_reserves,',
+    '    CAST(real_token_reserves AS DOUBLE) AS real_token_reserves',
+    '  FROM YOUR_PUMPFUN_TRADE_EVENT_TABLE',
+    '  WHERE CAST(to_unixtime(block_time) AS BIGINT) BETWEEN (SELECT min_ts FROM bounds) AND (SELECT max_ts FROM bounds)',
+    '    AND CAST(mint AS VARCHAR) IN (SELECT DISTINCT token_ca FROM signal_windows)',
+    '),',
+    'joined AS (',
+    '  SELECT',
+    '    w.window_id,',
+    '    w.token_ca,',
+    '    w.signal_ts,',
+    '    w.window_start_ts,',
+    '    w.window_end_ts,',
+    '    w.label,',
+    '    w.return_domain,',
+    '    w.effective_tier,',
+    '    t.block_time,',
+    '    t.signature,',
+    '    t.side,',
+    '    t.user,',
+    '    t.sol_amount,',
+    '    t.token_amount,',
+    '    t.virtual_sol_reserves,',
+    '    t.virtual_token_reserves,',
+    '    t.real_token_reserves,',
+    '    CASE',
+    '      WHEN t.virtual_token_reserves IS NOT NULL AND t.virtual_token_reserves != 0',
+    '      THEN t.virtual_sol_reserves / t.virtual_token_reserves',
+    '      ELSE NULL',
+    '    END AS reserve_price_sol',
+    '  FROM signal_windows w',
+    '  LEFT JOIN source_trades t',
+    '    ON t.token_ca = w.token_ca',
+    '   AND t.block_time BETWEEN w.window_start_ts AND w.window_end_ts',
+    ')',
+    'SELECT *',
+    'FROM joined',
+    'WHERE block_time IS NOT NULL',
+    'ORDER BY window_id, block_time, signature;',
+    '',
+  ].join('\n');
+}
+
 function main() {
   const args = parseArgs();
   if (args.help || !args.worklist || !args.outDir) {
@@ -141,6 +219,7 @@ function main() {
   const windowsCsv = path.join(args.outDir, 'signal_windows.csv');
   const tokensCsv = path.join(args.outDir, 'tokens.csv');
   const valuesSql = path.join(args.outDir, 'signal_windows_values.sql');
+  const exportTemplateSql = path.join(args.outDir, 'indexed_trade_export_template.sql');
   const readme = path.join(args.outDir, 'README.md');
   writeCsv(windowsCsv, rows, ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label', 'return_domain', 'effective_tier']);
   writeCsv(tokensCsv, tokenRows, ['token_ca']);
@@ -154,6 +233,7 @@ function main() {
     'SELECT * FROM signal_windows;',
     '',
   ].join('\n'));
+  fs.writeFileSync(exportTemplateSql, makeIndexedTradeExportTemplate(rows));
   fs.writeFileSync(readme, [
     '# V10 Curve Feature Export Pack',
     '',
@@ -166,11 +246,24 @@ function main() {
     '- `signal_windows.csv`: one row per signal-anchor window.',
     '- `tokens.csv`: unique token list for systems that query by token first.',
     '- `signal_windows_values.sql`: VALUES CTE for SQL engines such as Dune.',
+    '- `indexed_trade_export_template.sql`: copy/edit SQL template for indexed pump.fun TradeEvent export.',
     '- `manifest.json`: file hashes and row counts.',
+    '',
+    'Export contract:',
+    '',
+    '- Export all pump.fun TradeEvents in `[signal_ts - 900, signal_ts]` for every row.',
+    '- Keep `window_id`, `label`, `return_domain`, and `effective_tier` in the output.',
+    '- Do not use post-signal trades for this feature table.',
+    '- Validate dog/dud and return-domain coverage symmetry before reading AUC.',
     '',
     'After exporting trades, run:',
     '',
     '```bash',
+    'node scripts/validate-v10-curve-feature-trade-export.js \\',
+    '  --windows signal_windows.csv \\',
+    '  --trades <pumpfun-trades.csv-or-jsonl> \\',
+    '  --out validation.json',
+    '',
     'node scripts/build-v10-curve-feature-decode-from-trades.js \\',
     '  --worklist <worklist.txt> \\',
     '  --trades <pumpfun-trades.csv-or-jsonl> \\',
@@ -202,6 +295,7 @@ function main() {
       signal_windows_csv: windowsCsv,
       tokens_csv: tokensCsv,
       signal_windows_values_sql: valuesSql,
+      indexed_trade_export_template_sql: exportTemplateSql,
       readme,
     },
     rows: rows.length,
@@ -221,6 +315,7 @@ function main() {
     [path.basename(windowsCsv)]: sha256(windowsCsv),
     [path.basename(tokensCsv)]: sha256(tokensCsv),
     [path.basename(valuesSql)]: sha256(valuesSql),
+    [path.basename(exportTemplateSql)]: sha256(exportTemplateSql),
     [path.basename(readme)]: sha256(readme),
     [path.basename(manifestPath)]: sha256(manifestPath),
   };

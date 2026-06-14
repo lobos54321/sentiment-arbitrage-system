@@ -48,6 +48,10 @@ Current stratified sample:
 - `v10-curve-feature-v1/stratified-samples/v10-curve-feature-stratified-300.txt`
 - 299 rows: 149 dog / 150 dud
 - balanced by `return_domain`: `sol_curve`, `spliced_curve_to_gmgn`, `usd_gmgn`
+- latest export pack: `v10-curve-feature-v1/stratified-samples/export-pack-v2`
+  - `signal_windows.csv`: canonical window list with `label`, `return_domain`, and `effective_tier`
+  - `signal_windows_values.sql`: window CTE only
+  - `indexed_trade_export_template.sql`: editable SQL template for indexed pump.fun TradeEvent export
 
 Full worklist:
 
