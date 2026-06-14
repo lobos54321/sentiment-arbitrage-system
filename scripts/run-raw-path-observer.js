@@ -220,7 +220,7 @@ function anchorBackfillPriority(row, { statusField = 'status', prefix = 'raw_obs
   };
 }
 
-function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizonSec }) {
+function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizonSec, recencyFirst = false }) {
   return (signals || []).map((signal) => {
     const signalTsSec = Number(signal.signal_ts_sec ?? normalizeSignalTs(signal.timestamp_sec ?? signal.timestamp));
     const endTs = Math.min(now, signalTsSec + horizonSec);
@@ -295,7 +295,9 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
   }).sort((a, b) => (
     Number(a.raw_path_selection_priority) - Number(b.raw_path_selection_priority)
     || (b.matured_for_raw_path ? 1 : 0) - (a.matured_for_raw_path ? 1 : 0)
-    || Number(a.signal_ts_sec || 0) - Number(b.signal_ts_sec || 0)
+    || (recencyFirst
+      ? Number(b.signal_ts_sec || 0) - Number(a.signal_ts_sec || 0)
+      : Number(a.signal_ts_sec || 0) - Number(b.signal_ts_sec || 0))
   ));
 }
 
@@ -573,6 +575,7 @@ async function main() {
   const maxSignalsPerRun = envInt('RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN', 25, 1, 500);
   const horizonSec = envInt('RAW_PATH_OBSERVER_HORIZON_SEC', 7200, 300, 24 * 3600);
   const gmgnVolumePreferred = envBool('RAW_PATH_OBSERVER_GMGN_VOLUME_PREFERRED', true);
+  const recencyFirst = envBool('RAW_PATH_OBSERVER_RECENCY_FIRST', true);
   const now = nowSec();
 
   const signalDb = openSqlite(signalDbPath, { readonly: true, fileMustExist: true });
@@ -598,6 +601,7 @@ async function main() {
     horizon_sec: horizonSec,
     loaded_signals: 0,
     selection_strategy: 'missing_raw_path_first',
+    recency_first: recencyFirst,
     selection_priority_breakdown: {},
     indexed_fallback_enabled: indexedFirstEnabled,
     gmgn_volume_preferred: gmgnVolumePreferred,
@@ -627,6 +631,7 @@ async function main() {
       service,
       now,
       horizonSec,
+      recencyFirst,
     });
     summary.selection_priority_breakdown = rankedSignals.reduce((out, row) => {
       const key = row.raw_path_selection_reason || 'unknown';

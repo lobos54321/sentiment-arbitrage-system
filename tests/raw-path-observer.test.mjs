@@ -508,6 +508,70 @@ test('raw path observer prioritizes denominator coverage failures from raw outco
   rawDb.close();
 });
 
+test('raw path observer can prefer recent signals within the same backfill priority', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    );
+    CREATE TABLE raw_signal_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      observation_status TEXT,
+      coverage_reason TEXT,
+      kline_covered INTEGER,
+      baseline_ts INTEGER,
+      baseline_lag_sec REAL,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    )
+  `);
+  const insertOutcome = rawDb.prepare(`
+    INSERT INTO raw_signal_outcomes (
+      token_ca, signal_ts, observation_status, coverage_reason, kline_covered, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  insertOutcome.run('OLD', 1000, 'matured', 'no_kline_for_token', 0, 2000);
+  insertOutcome.run('NEW', 5000, 'matured', 'no_kline_for_token', 0, 2000);
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'OLD', signal_ts: 1000 }),
+    signal({ id: 2, token_ca: 'NEW', signal_ts: 5000 }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now: 20_000,
+    horizonSec: 7200,
+    recencyFirst: true,
+  });
+
+  assert.equal(ranked[0].token_ca, 'NEW');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_outcome_no_kline_for_token');
+  assert.equal(ranked[1].token_ca, 'OLD');
+  signalDb.close();
+  rawDb.close();
+});
+
 test('raw path observer requeues Gecko zero-volume paths for GMGN volume enrichment', () => {
   const signalDb = new Database(':memory:');
   const rawDb = new Database(':memory:');
