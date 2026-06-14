@@ -10441,6 +10441,9 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/data/download/sentiment-db') {
     await downloadSqliteDatabase(req, res, url, resolvedDbPath, 'sentiment_arb.db', 'Signal database', 'sentiment_arb_download');
     return;
+  } else if (url.pathname === '/api/data/download/raw-signal-outcomes') {
+    await downloadSqliteDatabase(req, res, url, getRawSignalOutcomesDbPath(), 'raw_signal_outcomes.db', 'Raw signal outcomes database', 'raw_signal_outcomes_download');
+    return;
   } else if (url.pathname === '/api/data/download/paper-trades') {
     await downloadSqliteDatabase(req, res, url, getPaperDbPath(), 'paper_trades.db', 'Paper trades database', 'paper_trades_download');
     return;
@@ -10463,6 +10466,7 @@ const server = http.createServer(async (req, res) => {
       note: 'Download DB endpoints use SQLite backup snapshots by default; pass backup=raw only for debugging.',
       downloads: {
         signal_db: `${origin}/api/data/download/sentiment-db?token=${tokenHint}`,
+        raw_signal_outcomes_db: `${origin}/api/data/download/raw-signal-outcomes?token=${tokenHint}`,
         paper_trades_db: `${origin}/api/data/download/paper-trades?token=${tokenHint}`,
         kline_cache_db: `${origin}/api/data/download/kline-cache?token=${tokenHint}`,
         lifecycle_tracks_db: `${origin}/api/data/download/lifecycle-tracks?token=${tokenHint}`,
