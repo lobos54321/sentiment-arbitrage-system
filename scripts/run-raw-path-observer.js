@@ -208,8 +208,8 @@ function anchorBackfillPriority(row, { statusField = 'status', prefix = 'raw_obs
   if (status && status !== 'matured') return null;
   const priorities = {
     no_kline_after_anchor: 0,
-    baseline_after_max_lag: 1,
-    no_kline_for_token: 2,
+    no_kline_for_token: 1,
+    baseline_after_max_lag: 2,
     raw_path_after_early_window: 3,
     no_kline_in_horizon: 4,
   };

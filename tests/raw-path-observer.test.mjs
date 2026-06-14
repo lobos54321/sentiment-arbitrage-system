@@ -642,6 +642,78 @@ test('raw path observer boosts recent OOS gaps over older anchor backlog', () =>
   rawDb.close();
 });
 
+test('raw path observer fills missing OOS paths before retrying late-baseline paths', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    );
+    CREATE TABLE raw_signal_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      observation_status TEXT,
+      coverage_reason TEXT,
+      kline_covered INTEGER,
+      baseline_ts INTEGER,
+      baseline_lag_sec REAL,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    )
+  `);
+  const now = 100_000;
+  const recentTs = now - 6 * 3600;
+  const insertOutcome = rawDb.prepare(`
+    INSERT INTO raw_signal_outcomes (
+      token_ca, signal_ts, observation_status, coverage_reason, kline_covered, baseline_lag_sec, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  insertOutcome.run('RECENT_LATE_BASELINE', recentTs - 60, 'matured', 'baseline_after_max_lag', 0, 1200, now);
+  insertOutcome.run('RECENT_NO_PATH', recentTs, 'matured', 'no_kline_for_token', 0, null, now);
+  rawDb.prepare(`
+    INSERT INTO raw_price_bars_1m (token_ca, timestamp, volume, provider, source_kind)
+    VALUES (?, ?, ?, ?, ?)
+  `).run('RECENT_LATE_BASELINE', recentTs + 1200, 10, 'gmgn', 'indexed_ohlcv');
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'RECENT_LATE_BASELINE', signal_ts: recentTs - 60 }),
+    signal({ id: 2, token_ca: 'RECENT_NO_PATH', signal_ts: recentTs }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now,
+    horizonSec: 7200,
+    recencyFirst: true,
+    recentPriorityHours: 24,
+  });
+
+  assert.equal(ranked[0].token_ca, 'RECENT_NO_PATH');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_outcome_no_kline_for_token');
+  assert.equal(ranked[1].token_ca, 'RECENT_LATE_BASELINE');
+  assert.equal(ranked[1].raw_path_selection_reason, 'raw_outcome_baseline_after_max_lag');
+  signalDb.close();
+  rawDb.close();
+});
+
 test('raw path observer requeues Gecko zero-volume paths for GMGN volume enrichment', () => {
   const signalDb = new Database(':memory:');
   const rawDb = new Database(':memory:');
