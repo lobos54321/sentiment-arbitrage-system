@@ -53,6 +53,10 @@ function countNonZeroVolumeBars(bars = []) {
   return bars.reduce((count, bar) => count + (Number(bar?.volume || 0) > 0 ? 1 : 0), 0);
 }
 
+function truncateError(error, fallback = 'repository_error') {
+  return String(error?.message || error || fallback).slice(0, 180);
+}
+
 function resolveGmgnCliPath() {
   const localPath = path.join(process.cwd(), 'node_modules', '.bin', process.platform === 'win32' ? 'gmgn-cli.cmd' : 'gmgn-cli');
   if (fs.existsSync(localPath)) return localPath;
@@ -294,7 +298,13 @@ export class SharedPoolOhlcvClient {
     const windowEnd = endTs == null ? signalTsSec + bars * 60 : normalizeMarketDataTimestampSec(endTs, signalTsSec + bars * 60);
     const minBars = options.minBars ?? 1;
 
-    const cached = this.getCachedBars(tokenCa, windowStart, windowEnd, minBars);
+    let repositoryError = null;
+    let cached = null;
+    try {
+      cached = this.getCachedBars(tokenCa, windowStart, windowEnd, minBars);
+    } catch (error) {
+      repositoryError = truncateError(error);
+    }
     if (cached) {
       const cachedNonZeroVolumeBars = countNonZeroVolumeBars(cached.bars);
       const cacheNeedsVolumeFallback = Boolean(options.preferGmgnKlineWithVolume)
@@ -331,7 +341,22 @@ export class SharedPoolOhlcvClient {
       }
     }
 
-    const resolvedPool = poolAddress || backfillResult.poolAddress || (await this.resolvePool(tokenCa)).poolAddress;
+    let poolResolution = null;
+    if (!poolAddress && !backfillResult.poolAddress) {
+      try {
+        poolResolution = await this.resolvePool(tokenCa);
+      } catch (error) {
+        repositoryError = repositoryError || truncateError(error);
+        poolResolution = {
+          provider: null,
+          poolAddress: null,
+          error: repositoryError,
+          reason: MARKET_DATA_REASON.UPSTREAM_UNAVAILABLE,
+          rateLimited: false,
+        };
+      }
+    }
+    const resolvedPool = poolAddress || backfillResult.poolAddress || poolResolution?.poolAddress || null;
     if (!resolvedPool) {
       const gmgnNoPoolFallback = await this.fetchGmgnKlineWindow({
         tokenCa,
@@ -356,6 +381,7 @@ export class SharedPoolOhlcvClient {
           priceUnit: 'USD_PER_TOKEN',
           volumeUnit: 'USD',
           fallbackProvider: 'gmgn',
+          repositoryError,
         };
       }
       return {
@@ -369,7 +395,8 @@ export class SharedPoolOhlcvClient {
         cacheHit: false,
         source: 'shared-pool-client',
         fallbackProvider: 'gmgn',
-        fallbackError: gmgnNoPoolFallback.error || null
+        fallbackError: gmgnNoPoolFallback.error || null,
+        repositoryError,
       };
     }
 
@@ -479,8 +506,12 @@ export class SharedPoolOhlcvClient {
       };
 
       if (normalized.bars.length) {
-        this.repository.upsertBars(tokenCa, resolvedPool, normalized.bars, normalized.provider || 'geckoterminal');
-        this.repository.upsertPoolMapping(tokenCa, resolvedPool, normalized.provider || 'geckoterminal');
+        try {
+          this.repository.upsertBars(tokenCa, resolvedPool, normalized.bars, normalized.provider || 'geckoterminal');
+          this.repository.upsertPoolMapping(tokenCa, resolvedPool, normalized.provider || 'geckoterminal');
+        } catch (error) {
+          normalized.repositoryError = repositoryError || truncateError(error);
+        }
         await this.runtime.setCache(cacheKey, normalized, ttlMs);
         await this.runtime.setCache(
           `ohlcv-latest:${tokenCa}`,

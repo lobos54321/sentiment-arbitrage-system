@@ -317,3 +317,69 @@ test('shared OHLCV bypasses zero-volume cache when GMGN volume is preferred', as
   assert.equal(result.fallbackReason, 'gecko_zero_volume');
   assert.equal(result.bars.every((bar) => bar.volume > 0), true);
 });
+
+test('shared OHLCV falls back to GMGN when local kline cache is malformed', async () => {
+  const tokenCa = 'TokenMalformedCache111111111111111111111111';
+  const startTs = 1_777_940_000;
+  const endTs = startTs + 2 * 60;
+
+  const client = new SharedPoolOhlcvClient({
+    evaluator: {
+      maxHistoricalBars: 20,
+      klineCacheDbPath: ':memory:',
+    },
+  }, {
+    runtime: createRuntime(),
+    repository: {
+      getBars() {
+        throw new Error('database disk image is malformed');
+      },
+      upsertBars() {
+        throw new Error('database disk image is malformed');
+      },
+      upsertPoolMapping() {},
+    },
+    poolResolver: {
+      async resolvePool() {
+        throw new Error('database disk image is malformed');
+      },
+    },
+    backfillService: {
+      async backfillWindow() {
+        return { provider: null, poolAddress: null, bars: [], error: 'backfill_skipped' };
+      },
+    },
+    gmgnKlineFallbackEnabled: true,
+    async gmgnKlineFetcher() {
+      return {
+        list: [0, 1].map((idx) => ({
+          time: (startTs + idx * 60) * 1000,
+          open: String(0.000003 + idx * 0.00000001),
+          high: String(0.0000032 + idx * 0.00000001),
+          low: String(0.0000029 + idx * 0.00000001),
+          close: String(0.0000031 + idx * 0.00000001),
+          volume: String(9000 + idx),
+        })),
+      };
+    },
+  });
+
+  const result = await client.fetchOhlcvWindow({
+    tokenCa,
+    signalTsSec: startTs,
+    startTs,
+    endTs,
+    bars: 2,
+  }, {
+    minBars: 2,
+    skipBackfill: true,
+    windows: [endTs],
+    limit: 2,
+  });
+
+  assert.equal(result.provider, 'gmgn');
+  assert.equal(result.fallbackProvider, 'gmgn');
+  assert.equal(result.bars.length, 2);
+  assert.equal(result.bars.every((bar) => bar.volume > 0), true);
+  assert.match(result.repositoryError, /database disk image is malformed/);
+});
