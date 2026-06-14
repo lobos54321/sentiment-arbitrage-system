@@ -21,6 +21,23 @@ Therefore the preferred input is an indexed/exported pump.fun TradeEvent table c
 The output must be fed into:
 
 ```bash
+node scripts/run-v10-curve-feature-export-analysis.js \
+  --pack-dir <export-pack-v2> \
+  --trades <pumpfun-trades.csv-or-jsonl> \
+  --out-dir <analysis-out> \
+  --assume-complete-window
+```
+
+The runner performs validation, decode conversion, cohort subsetting, feature-table generation, and summary writing in one pass. It automatically limits the dog/dud cohort to the windows in the pack, so a 299-row sample is not compared against the full 1432-row cohort.
+
+The manual equivalent is:
+
+```bash
+node scripts/validate-v10-curve-feature-trade-export.js \
+  --windows <export-pack-v2>/signal_windows.csv \
+  --trades <pumpfun-trades.csv-or-jsonl> \
+  --out <validation.json>
+
 node scripts/build-v10-curve-feature-decode-from-trades.js \
   --worklist <v10-curve-feature-stratified-300.txt> \
   --trades <pumpfun-trades.csv-or-jsonl> \
