@@ -184,6 +184,54 @@ function summarizeFeatureTable(table) {
   };
 }
 
+function buildDecision({ args, cohortSubset, validationSummary, featureSummary }) {
+  const blockers = [];
+  const warnings = [];
+  if (!args.assumeCompleteWindow) {
+    blockers.push('export_not_marked_complete_window');
+  }
+  if (cohortSubset.missing_n > 0) {
+    blockers.push('cohort_subset_missing_window_rows');
+  }
+  if ((featureSummary.all?.dogs_n ?? 0) < 30 || (featureSummary.all?.duds_n ?? 0) < 30) {
+    blockers.push('insufficient_complete_dog_or_dud_rows');
+  }
+  if ((featureSummary.all?.usable_n ?? 0) === 0) {
+    blockers.push('no_complete_feature_rows');
+  }
+  const labelDelta = featureSummary.label_complete_rate_delta;
+  const domainLabelDelta = featureSummary.return_domain_x_label_complete_rate_delta;
+  if (labelDelta != null && labelDelta > 0.1) {
+    blockers.push('label_complete_rate_asymmetry_gt_10pp');
+  }
+  if (domainLabelDelta != null && domainLabelDelta > 0.2) {
+    blockers.push('return_domain_x_label_complete_rate_asymmetry_gt_20pp');
+  }
+  const tradeHitLabelDelta = validationSummary.label_trade_hit_delta;
+  const tradeHitDomainLabelDelta = validationSummary.return_domain_x_label_trade_hit_delta;
+  if (tradeHitLabelDelta != null && tradeHitLabelDelta > 0.1) {
+    warnings.push('label_trade_hit_rate_asymmetry_gt_10pp');
+  }
+  if (tradeHitDomainLabelDelta != null && tradeHitDomainLabelDelta > 0.2) {
+    warnings.push('return_domain_x_label_trade_hit_rate_asymmetry_gt_20pp');
+  }
+  if ((validationSummary.windows_with_trades_n ?? 0) === 0) {
+    warnings.push('no_exported_trades_joined_any_window');
+  }
+  return {
+    status: blockers.length ? 'blocked' : 'ready_for_auc_review',
+    blockers,
+    warnings,
+    rule: {
+      min_complete_dogs: 30,
+      min_complete_duds: 30,
+      max_label_complete_rate_delta: 0.1,
+      max_return_domain_x_label_complete_rate_delta: 0.2,
+      trade_hit_rate_deltas_are_warnings_only: true,
+    },
+  };
+}
+
 function main() {
   const args = parseArgs();
   if (args.help || !args.trades || !args.outDir || (!args.packDir && !args.windows)) {
@@ -230,6 +278,14 @@ function main() {
 
   const validation = JSON.parse(fs.readFileSync(validationOut, 'utf8'));
   const featureTable = JSON.parse(fs.readFileSync(featureOut, 'utf8'));
+  const validationSummary = summarizeValidation(validation);
+  const featureSummary = summarizeFeatureTable(featureTable);
+  const decision = buildDecision({
+    args,
+    cohortSubset,
+    validationSummary,
+    featureSummary,
+  });
   const summary = {
     schema_version: 'v10_curve_feature_export_analysis_summary.v1',
     generated_at: new Date().toISOString(),
@@ -257,8 +313,9 @@ function main() {
       missing_n: cohortSubset.missing_n,
       missing_sample: cohortSubset.missing_sample,
     },
-    validation: summarizeValidation(validation),
-    feature_table: summarizeFeatureTable(featureTable),
+    decision,
+    validation: validationSummary,
+    feature_table: featureSummary,
     guardrail: 'Read validation trade-hit deltas and feature complete-rate deltas before reading any AUC. If coverage is asymmetric, explain coverage first.',
   };
   fs.writeFileSync(summaryOut, `${JSON.stringify(summary, null, 2)}\n`);

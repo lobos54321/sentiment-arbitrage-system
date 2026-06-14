@@ -30,6 +30,13 @@ node scripts/run-v10-curve-feature-export-analysis.js \
 
 The runner performs validation, decode conversion, cohort subsetting, feature-table generation, and summary writing in one pass. It automatically limits the dog/dud cohort to the windows in the pack, so a 299-row sample is not compared against the full 1432-row cohort.
 
+Read `analysis-summary.json.decision` first:
+
+- `ready_for_auc_review`: coverage and sample-size guardrails passed; AUC may be inspected next.
+- `blocked`: do not read AUC. Inspect `decision.blockers` first.
+
+The runner blocks AUC review when the export is not marked complete, the cohort subset is missing rows, complete-window dog/dud sample size is below 30, or complete-window rates differ too much by label/domain.
+
 The manual equivalent is:
 
 ```bash
