@@ -59,6 +59,22 @@ Pack balance:
 - `usd_gmgn`: 50 dog / 50 dud
 - `missing_cohort_meta_rows = 0`
 
+Before sending the pack, run:
+
+```bash
+node scripts/check-v10-curve-feature-handoff.js \
+  --pack-dir /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-curve-feature-v1/stratified-samples/export-pack-v2 \
+  --tar /Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/v10-curve-feature-v1/stratified-samples/v10-curve-feature-export-pack-v2.tgz \
+  --expected-tar-sha256 a686ab693fc1f7c99ff7fa02a90daddceef7b82979f07bb91fba516076a4bc99
+```
+
+Expected:
+
+```text
+status = ready_to_send
+blockers = []
+```
+
 ## Export Contract
 
 Export every pump.fun TradeEvent satisfying:
@@ -223,4 +239,3 @@ Possible outcomes:
 3. Coverage blocked:
    - improve indexed export or use another indexed source.
    - do not read AUC.
-
