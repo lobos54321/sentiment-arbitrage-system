@@ -370,14 +370,14 @@ function rawPathObserverLogPath() {
 }
 
 function rawPathObserverIntervalMs() {
-  const raw = Number(process.env.RAW_PATH_OBSERVER_INTERVAL_SEC || 300);
-  const value = Number.isFinite(raw) ? raw : 300;
+  const raw = Number(process.env.RAW_PATH_OBSERVER_INTERVAL_SEC || 120);
+  const value = Number.isFinite(raw) ? raw : 120;
   return Math.max(30, Math.min(3600, value)) * 1000;
 }
 
 function rawPathObserverRunTimeoutMs() {
-  const raw = Number(process.env.RAW_PATH_OBSERVER_RUN_TIMEOUT_SEC || 180);
-  const value = Number.isFinite(raw) ? raw : 180;
+  const raw = Number(process.env.RAW_PATH_OBSERVER_RUN_TIMEOUT_SEC || 900);
+  const value = Number.isFinite(raw) ? raw : 900;
   return Math.max(30, Math.min(900, value)) * 1000;
 }
 
@@ -493,8 +493,8 @@ function startRawPathObserverSupervisor() {
         RAW_SIGNAL_OUTCOMES_DB: process.env.RAW_SIGNAL_OUTCOMES_DB || join(runtimeDataDir(), 'raw_signal_outcomes.db'),
         DB_PATH: process.env.DB_PATH || process.env.SENTIMENT_DB || join(runtimeDataDir(), 'sentiment_arb.db'),
         SENTIMENT_DB: process.env.SENTIMENT_DB || process.env.DB_PATH || join(runtimeDataDir(), 'sentiment_arb.db'),
-        RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN: process.env.RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN || '25',
-        RAW_PATH_OBSERVER_LOOKBACK_HOURS: process.env.RAW_PATH_OBSERVER_LOOKBACK_HOURS || '24',
+        RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN: process.env.RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN || '10',
+        RAW_PATH_OBSERVER_LOOKBACK_HOURS: process.env.RAW_PATH_OBSERVER_LOOKBACK_HOURS || '72',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
