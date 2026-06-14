@@ -572,6 +572,76 @@ test('raw path observer can prefer recent signals within the same backfill prior
   rawDb.close();
 });
 
+test('raw path observer boosts recent OOS gaps over older anchor backlog', () => {
+  const signalDb = new Database(':memory:');
+  const rawDb = new Database(':memory:');
+  signalDb.exec(`
+    CREATE TABLE kline_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      high REAL,
+      low REAL,
+      close REAL
+    )
+  `);
+  rawDb.exec(`
+    CREATE TABLE raw_price_bars_1m (
+      token_ca TEXT,
+      timestamp INTEGER,
+      volume REAL,
+      provider TEXT,
+      source_kind TEXT
+    );
+    CREATE TABLE raw_signal_outcomes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_ca TEXT NOT NULL,
+      signal_ts INTEGER NOT NULL,
+      observation_status TEXT,
+      coverage_reason TEXT,
+      kline_covered INTEGER,
+      baseline_ts INTEGER,
+      baseline_lag_sec REAL,
+      first_bar_ts INTEGER,
+      first_bar_lag_sec INTEGER,
+      early_15m_bar_count INTEGER,
+      early_15m_bar_coverage_pct REAL,
+      early_15m_complete INTEGER,
+      updated_at INTEGER
+    )
+  `);
+  const now = 100_000;
+  const oldTs = now - 48 * 3600;
+  const recentTs = now - 6 * 3600;
+  const insertOutcome = rawDb.prepare(`
+    INSERT INTO raw_signal_outcomes (
+      token_ca, signal_ts, observation_status, coverage_reason, kline_covered, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  insertOutcome.run('OLD_ANCHOR_BACKLOG', oldTs, 'matured', 'no_kline_after_anchor', 0, now);
+  insertOutcome.run('RECENT_OOS_GAP', recentTs, 'matured', 'no_kline_for_token', 0, now);
+
+  const ranked = rankSignalsForBackfill([
+    signal({ id: 1, token_ca: 'OLD_ANCHOR_BACKLOG', signal_ts: oldTs }),
+    signal({ id: 2, token_ca: 'RECENT_OOS_GAP', signal_ts: recentTs }),
+  ], {
+    signalDb,
+    rawDb,
+    service: { getBars() { return []; } },
+    now,
+    horizonSec: 7200,
+    recencyFirst: true,
+    recentPriorityHours: 24,
+  });
+
+  assert.equal(ranked[0].token_ca, 'RECENT_OOS_GAP');
+  assert.equal(ranked[0].raw_path_selection_reason, 'raw_outcome_no_kline_for_token');
+  assert.equal(ranked[0].raw_path_recent_priority_boost, -10);
+  assert.equal(ranked[1].token_ca, 'OLD_ANCHOR_BACKLOG');
+  assert.equal(ranked[1].raw_path_recent_priority_boost, 0);
+  signalDb.close();
+  rawDb.close();
+});
+
 test('raw path observer requeues Gecko zero-volume paths for GMGN volume enrichment', () => {
   const signalDb = new Database(':memory:');
   const rawDb = new Database(':memory:');

@@ -220,7 +220,15 @@ function anchorBackfillPriority(row, { statusField = 'status', prefix = 'raw_obs
   };
 }
 
-function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizonSec, recencyFirst = false }) {
+function rankSignalsForBackfill(signals, {
+  signalDb,
+  rawDb,
+  service,
+  now,
+  horizonSec,
+  recencyFirst = false,
+  recentPriorityHours = 24,
+}) {
   return (signals || []).map((signal) => {
     const signalTsSec = Number(signal.signal_ts_sec ?? normalizeSignalTs(signal.timestamp_sec ?? signal.timestamp));
     const endTs = Math.min(now, signalTsSec + horizonSec);
@@ -267,10 +275,21 @@ function rankSignalsForBackfill(signals, { signalDb, rawDb, service, now, horizo
       priority = anchorPriority.priority;
       priorityReason = anchorPriority.reason;
     }
+    const recentPriorityCutoffSec = Number.isFinite(now) && Number.isFinite(recentPriorityHours)
+      ? now - (Math.max(0, recentPriorityHours) * 3600)
+      : null;
+    const recentPriorityBoost = recencyFirst
+      && recentPriorityCutoffSec != null
+      && Number.isFinite(signalTsSec)
+      && signalTsSec >= recentPriorityCutoffSec
+      ? -10
+      : 0;
     return {
       ...signal,
       signal_ts_sec: signalTsSec,
-      raw_path_selection_priority: priority,
+      raw_path_selection_priority: priority + recentPriorityBoost,
+      raw_path_selection_base_priority: priority,
+      raw_path_recent_priority_boost: recentPriorityBoost,
       raw_path_selection_reason: priorityReason,
       raw_path_existing_bars: raw.count,
       raw_path_nonzero_volume_bars: raw.nonzero_volume_count,
@@ -576,6 +595,7 @@ async function main() {
   const horizonSec = envInt('RAW_PATH_OBSERVER_HORIZON_SEC', 7200, 300, 24 * 3600);
   const gmgnVolumePreferred = envBool('RAW_PATH_OBSERVER_GMGN_VOLUME_PREFERRED', true);
   const recencyFirst = envBool('RAW_PATH_OBSERVER_RECENCY_FIRST', true);
+  const recentPriorityHours = envInt('RAW_PATH_OBSERVER_RECENT_PRIORITY_HOURS', 24, 0, 168);
   const now = nowSec();
 
   const signalDb = openSqlite(signalDbPath, { readonly: true, fileMustExist: true });
@@ -602,6 +622,7 @@ async function main() {
     loaded_signals: 0,
     selection_strategy: 'missing_raw_path_first',
     recency_first: recencyFirst,
+    recent_priority_hours: recentPriorityHours,
     selection_priority_breakdown: {},
     indexed_fallback_enabled: indexedFirstEnabled,
     gmgn_volume_preferred: gmgnVolumePreferred,
@@ -632,6 +653,7 @@ async function main() {
       now,
       horizonSec,
       recencyFirst,
+      recentPriorityHours,
     });
     summary.selection_priority_breakdown = rankedSignals.reduce((out, row) => {
       const key = row.raw_path_selection_reason || 'unknown';
