@@ -441,15 +441,33 @@ function loadCumulativeSeen(cumPath, provPath, packId) {
   const seen = new Set();
   let ingestedPacks = [];
   let lockedSchema = null;
-  if (fs.existsSync(cumPath)) for (const r of readRows(cumPath)) seen.add(sigKey(r));
+  const cumRowsAll = fs.existsSync(cumPath) ? readRows(cumPath) : [];
+  for (const r of cumRowsAll) seen.add(sigKey(r));
   let coverageTally = { dog: { sol_curve_total: 0, kept: 0 }, dud: { sol_curve_total: 0, kept: 0 } };
+  // coverageSeen = per-class set of UNIQUE (token_ca, signal_ts) sol_curve CANDIDATE keys
+  // ever counted in the denominator. Makes coverage_tally cross-pack idempotent.
+  const coverageSeen = { dog: new Set(), dud: new Set() };
+  let coverageSeenLoaded = false;
   if (fs.existsSync(provPath)) {
     const prov = readJson(provPath);
     ingestedPacks = prov.ingested_pack_ids || [];
     lockedSchema = prov.locked_schema_version || null;
     if (prov.coverage_tally) coverageTally = prov.coverage_tally;
+    if (prov.coverage_seen_keys) {
+      for (const lab of ['dog', 'dud']) for (const k of (prov.coverage_seen_keys[lab] || [])) coverageSeen[lab].add(k);
+      coverageSeenLoaded = true;
+    }
   }
-  return { seen, ingestedPacks, lockedSchema, coverageTally, alreadyIngested: ingestedPacks.includes(packId) };
+  // one-time migration: if coverage_seen_keys is absent, seed it from the cumulative cohort
+  // (every cumulative row is a kept sol_curve candidate). Reproduces the prior denominator
+  // exactly when no historical incomplete-window sol_curve candidates were dropped (the case
+  // for attested complete-window packs), and is correct going forward.
+  if (!coverageSeenLoaded) {
+    for (const r of cumRowsAll) {
+      if (r.return_domain === COHORT_DOMAIN && (r.label === 'dog' || r.label === 'dud')) coverageSeen[r.label].add(sigKey(r));
+    }
+  }
+  return { seen, ingestedPacks, lockedSchema, coverageTally, coverageSeen, alreadyIngested: ingestedPacks.includes(packId) };
 }
 function coverageAsymmetryPp(tally) {
   const r = (c) => (c.sol_curve_total > 0 ? c.kept / c.sol_curve_total : null);
@@ -480,7 +498,7 @@ function main() {
 
   const rows = readRows(a.featureRows);
   const manifest = a.packManifest && fs.existsSync(a.packManifest) ? readJson(a.packManifest) : {};
-  const { seen, ingestedPacks, lockedSchema, coverageTally, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
+  const { seen, ingestedPacks, lockedSchema, coverageSeen, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
 
   // same-schema gate (fail-closed): require an explicit schema, lock the cumulative to it,
   // and verify every row carries the same schema (no mixed-schema input).
@@ -497,17 +515,17 @@ function main() {
   const { cohortRows, preCohortRows, stats } = applyGates(rows, { trainingTokens, seenSigKeys: seen });
   const sym = symmetryReport(preCohortRows);
 
-  // coverage tally: accumulate per-class sol_curve candidate -> cohort survival across packs
-  const newTally = JSON.parse(JSON.stringify(coverageTally));
+  // coverage tally (CROSS-PACK IDEMPOTENT): denominator = UNIQUE (token_ca, signal_ts)
+  // sol_curve CANDIDATES ever seen; numerator (kept) = the deduped cumulative cohort.
+  // Re-ingesting an already-seen signal (same OR a new pack-id) cannot change the tally;
+  // only genuinely-new signals do. (Was a running sum, which double-counted overlapping
+  // re-ingests.)
+  const coverageSeenNext = { dog: new Set(coverageSeen.dog), dud: new Set(coverageSeen.dud) };
   if (!alreadyIngested) {
-    for (const lab of ['dog', 'dud']) {
-      const solc = preCohortRows.filter((r) => r.label === lab && r.return_domain === COHORT_DOMAIN).length;
-      const kept = cohortRows.filter((r) => r.label === lab).length;
-      newTally[lab].sol_curve_total += solc;
-      newTally[lab].kept += kept;
+    for (const r of preCohortRows) {
+      if (r.return_domain === COHORT_DOMAIN && (r.label === 'dog' || r.label === 'dud')) coverageSeenNext[r.label].add(sigKey(r));
     }
   }
-  const cumCoverageAsymPp = coverageAsymmetryPp(newTally);
 
   // 5/6. append (idempotent) + daily artifacts
   const stampedRows = cohortRows.map((r) => ({
@@ -516,18 +534,25 @@ function main() {
     schema_version: packSchema,
   }));
   writeJsonl(path.join(a.outDir, 'daily_feature_rows.jsonl'), stampedRows);
+  if (!alreadyIngested) appendJsonl(cumPath, stampedRows);
+
+  // cumulative counts (kept numerator = deduped cumulative cohort)
+  const cumRows = fs.existsSync(cumPath) ? readRows(cumPath) : stampedRows;
+  const cc = classCounts(cumRows);
+
+  const newTally = {
+    dog: { sol_curve_total: coverageSeenNext.dog.size, kept: cc.dog },
+    dud: { sol_curve_total: coverageSeenNext.dud.size, kept: cc.dud },
+  };
+  const cumCoverageAsymPp = coverageAsymmetryPp(newTally);
   if (!alreadyIngested) {
-    appendJsonl(cumPath, stampedRows);
     fs.writeFileSync(provPath, JSON.stringify({
       ingested_pack_ids: [...ingestedPacks, a.packId],
       locked_schema_version: effectiveLockedSchema,
       coverage_tally: newTally,
+      coverage_seen_keys: { dog: [...coverageSeenNext.dog].sort(), dud: [...coverageSeenNext.dud].sort() },
     }, null, 2));
   }
-
-  // cumulative counts
-  const cumRows = fs.existsSync(cumPath) ? readRows(cumPath) : stampedRows;
-  const cc = classCounts(cumRows);
   const dailyQa = {
     schema_version: 'oos_daily_qa.v1',
     pack_id: a.packId,
