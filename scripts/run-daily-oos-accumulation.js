@@ -54,8 +54,8 @@ function die(msg) { console.error(`run-daily-oos-accumulation: ${msg}`); process
 function parseArgs(argv) {
   const a = {
     schemaVersion: DEFAULT_SCHEMA, trainingTokens: DEFAULT_TRAINING_TOKENS,
-    prereg: DEFAULT_PREREG, preregLock: DEFAULT_PREREG_LOCK, dedupeWorklist: true,
-    decodeArgs: [], dryRun: false,
+    prereg: DEFAULT_PREREG, preregLock: DEFAULT_PREREG_LOCK, dedupeWorklistForSmoke: false,
+    dryRun: false,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const k = argv[i]; const v = argv[i + 1];
@@ -76,6 +76,12 @@ function parseArgs(argv) {
       case '--trades': a.trades = take(); break;
       case '--pre-sec': a.preSec = take(); break;
       case '--post-sec': a.postSec = take(); break;
+      // dune completeness proof (required for dune; see validation below)
+      case '--dune-assume-complete-window': a.duneAssumeCompleteWindow = true; break;
+      case '--validated-trade-export': a.validatedTradeExport = take(); break;
+      // provenance: production commit comes from the live pack, never research HEAD
+      case '--production-commit': a.productionCommit = take(); break;
+      case '--production-commit-from': a.productionCommitFrom = take(); break;
       // config / outputs
       case '--work-dir': a.workDir = take(); break;
       case '--cumulative-dir': a.cumulativeDir = take(); break;
@@ -84,7 +90,7 @@ function parseArgs(argv) {
       case '--prereg': a.prereg = take(); break;
       case '--prereg-lock': a.preregLock = take(); break;
       case '--look-point': a.lookPoint = Number(take()); break;
-      case '--no-dedupe-worklist': a.dedupeWorklist = false; break;
+      case '--dedupe-worklist-for-smoke': a.dedupeWorklistForSmoke = true; break;
       case '--dry-run': a.dryRun = true; break;
       case '--reveal-sealed-auc':
         die('refused: --reveal-sealed-auc is never permitted from the daily wrapper (prereg seal discipline).');
@@ -109,8 +115,14 @@ function main() {
     console.log('usage: run-daily-oos-accumulation.js --pack-id <id> --decode-mode <rpc|dune> '
       + '(--dogs <json> --duds <json> | --rebuild-label-audit <json> --rebuild-baseline-routed <jsonl> '
       + '--rebuild-gmgn-full-window <json> --rebuild-peak-window <json>) '
-      + '(--rpc-url-file <f> | --trades <f>) --work-dir <dir> --cumulative-dir <dir> '
-      + '[--training-tokens <f>] [--schema-version <s>] [--look-point 50|100|130] [--dry-run]');
+      + '(--rpc-url-file <f> | --trades <f> {--dune-assume-complete-window | --validated-trade-export <f>}) '
+      + '--work-dir <dir> --cumulative-dir <dir> '
+      + '[--production-commit <hash> | --production-commit-from <manifest>] '
+      + '[--training-tokens <f>] [--schema-version <s>] [--look-point 50|100|130] '
+      + '[--dedupe-worklist-for-smoke] [--dry-run]\n\n'
+      + 'Notes: worklist is signal-level by default (OOS unit = token_ca,signal_ts); --dedupe-worklist-for-smoke '
+      + 'is RPC-smoke ONLY. Dune requires a completeness proof or it accumulates 0 usable rows. '
+      + '--reveal-sealed-auc is never permitted.');
     return;
   }
   // ---- validate required inputs (fail-closed) ----
@@ -120,6 +132,21 @@ function main() {
   if (a.decodeMode !== 'rpc' && a.decodeMode !== 'dune') die('--decode-mode must be rpc or dune (explicit; no default).');
   if (a.decodeMode === 'rpc' && !a.rpcUrlFile) die('--decode-mode rpc requires --rpc-url-file.');
   if (a.decodeMode === 'dune' && !a.trades) die('--decode-mode dune requires --trades <csv|jsonl>.');
+  // Dune completeness gate (fail-closed): the from-trades decoder defaults to
+  // history_reached_start=false, which the feature table maps to incomplete_window,
+  // which the accumulator excludes -> a Dune run would silently accumulate 0 usable
+  // rows. So Dune requires an explicit completeness proof. The standalone validator
+  // checks schema/joins but, by its own statement, "cannot prove completeness unless
+  // the export query/source guarantees it" -> the operator attestation is required.
+  if (a.decodeMode === 'dune' && !a.duneAssumeCompleteWindow && !a.validatedTradeExport) {
+    die('--decode-mode dune requires a completeness proof: --dune-assume-complete-window '
+      + '(operator attests the Dune export query guarantees full [signal_ts-pre_sec, signal_ts] coverage) '
+      + 'and/or --validated-trade-export <report.json> (from validate-v10-curve-feature-trade-export.js). '
+      + 'Without it every row is incomplete_window and the pack accumulates 0 usable rows (fail-closed).');
+  }
+  if (a.validatedTradeExport && !fs.existsSync(a.validatedTradeExport)) {
+    die(`--validated-trade-export not found: ${a.validatedTradeExport}`);
+  }
   const hasCohort = a.dogs && a.duds;
   const hasRebuild = a.rebuildLabelAudit && a.rebuildBaselineRouted && a.rebuildGmgnFullWindow && a.rebuildPeakWindow;
   if (!hasCohort && !hasRebuild) {
@@ -153,9 +180,12 @@ function main() {
   }
 
   // ---- stage 2: curve-feature worklist ----
+  // OOS unit is (token_ca, signal_ts): NEVER dedupe to token level for formal daily
+  // OOS — it would drop second signals of the same token and change the sample
+  // denominator. --dedupe is permitted ONLY for explicit RPC smoke tests.
   const worklist = path.join(a.workDir, 'curve-feature-worklist.txt');
   run('worklist', 'build-v10-curve-feature-worklist.js', [
-    '--dogs', dogs, '--duds', duds, '--out', worklist, ...(a.dedupeWorklist ? ['--dedupe'] : []),
+    '--dogs', dogs, '--duds', duds, '--out', worklist, ...(a.dedupeWorklistForSmoke ? ['--dedupe'] : []),
   ], a.dryRun);
 
   // ---- stage 3: decode (rpc batches+merge | dune from-trades) ----
@@ -170,9 +200,12 @@ function main() {
       '--in-dir', batchDir, '--out', mergedDecode,
     ], a.dryRun);
   } else {
+    // completeness proof was required in validation above; pass --assume-complete-window
+    // so decoded windows are marked complete_window (else 0 usable rows).
     run('decode:dune', 'build-v10-curve-feature-decode-from-trades.js', [
       '--worklist', worklist, '--trades', a.trades, '--out', mergedDecode,
       '--pre-sec', String(preSec), '--post-sec', String(postSec),
+      '--assume-complete-window',
     ], a.dryRun);
   }
 
@@ -191,14 +224,38 @@ function main() {
       + `"${a.schemaVersion}". Refusing to stamp a mislabeled schema into the cumulative (fail-closed).`);
   }
 
-  // ---- (#3) pack manifest: production_commit + schema_version + per-stage sha256 ----
+  // ---- (#3) provenance: research_commit (this analysis code) vs production_commit
+  //          (the live system that produced the raw pack). NEVER spoof production with
+  //          research HEAD. production_commit comes from --production-commit or is read
+  //          from a live pack/health manifest via --production-commit-from, else null.
+  let productionCommit = a.productionCommit || null;
+  if (!productionCommit && a.productionCommitFrom) {
+    try {
+      const m = readJson(a.productionCommitFrom);
+      productionCommit = m.production_commit || m.commit || m.git_commit || m.production_sha || null;
+    } catch { productionCommit = null; }
+  }
+  if (!productionCommit) {
+    console.error('[provenance] WARNING: production_commit unknown (pass --production-commit or '
+      + '--production-commit-from <live pack/health manifest>). Recording null; research_commit is NOT a substitute.');
+  }
+
+  // ---- pack manifest: research/production commit + schema_version + completeness + per-stage sha256 ----
   stageOut.dogs = dogs; stageOut.duds = duds; stageOut.decode = mergedDecode; stageOut.feature_table = featureTable;
   const manifest = {
     schema_version: a.schemaVersion,
-    production_commit: gitHead(),
+    research_commit: gitHead(),
+    production_commit: productionCommit,
     pack_id: a.packId,
     generated_at: nowIso(),
     decode_mode: a.decodeMode,
+    dune_completeness: a.decodeMode === 'dune'
+      ? {
+        attested: Boolean(a.duneAssumeCompleteWindow),
+        validated_trade_export: a.validatedTradeExport || null,
+        validated_trade_export_sha256: a.validatedTradeExport ? sha256File(a.validatedTradeExport) : null,
+      }
+      : null,
     feature_window: { pre_sec: Number(preSec), post_sec: Number(postSec) },
     stage_sha256: Object.fromEntries(Object.entries(stageOut).map(([k, p]) => [k, sha256File(p)])),
   };
@@ -253,7 +310,8 @@ function main() {
 
   console.log(JSON.stringify({
     ok: true, pack_id: a.packId, decode_mode: a.decodeMode,
-    schema_version: a.schemaVersion, production_commit: manifest.production_commit,
+    schema_version: a.schemaVersion,
+    research_commit: manifest.research_commit, production_commit: manifest.production_commit,
     manifest: manifestPath, accumulate_out: accOut, cumulative_dir: a.cumulativeDir,
     look_point: lookSummary,
   }, null, 2));
