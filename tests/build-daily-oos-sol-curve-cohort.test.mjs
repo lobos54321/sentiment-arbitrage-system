@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifySignal } from '../scripts/build-daily-oos-sol-curve-cohort.js';
+import { classifySignal, dedupBySignal } from '../scripts/build-daily-oos-sol-curve-cohort.js';
 
 // a fully formal-eligible + native + clean row (gold dog by default)
 function row(over = {}) {
@@ -63,4 +63,32 @@ test('gate ORDER: maturation before eligibility before native before unit-suspec
 test('unknown/degenerate tier on an otherwise-eligible row -> quarantine, not labeled', () => {
   assert.equal(classifySignal(row({ raw_primary_tier: 'unknown' })).reason, 'unknown_tier');
   assert.equal(classifySignal(row({ raw_primary_tier: null })).reason, 'unknown_tier');
+});
+
+// ---- ROOT dedup to prereg unit (token_ca, signal_ts) ----
+const drow = (over = {}) => ({ token_ca: 'T', signal_ts: 100, label: 'dog', tier: 'gold', max_sustained_peak_pct: 120, baseline_price: 1e-7, ...over });
+
+test('dedup: same (token,signal_ts) x3 -> 1 row, removed=2 (prereg unit)', () => {
+  const out = dedupBySignal([drow(), drow(), drow()]);
+  assert.equal(out.rows.length, 1);
+  assert.equal(out.removed, 2);
+});
+
+test('dedup: keeps the best observation (highest max_sustained_peak_pct), deterministic', () => {
+  const out = dedupBySignal([drow({ max_sustained_peak_pct: 60 }), drow({ max_sustained_peak_pct: 300 }), drow({ max_sustained_peak_pct: 120 })]);
+  assert.equal(out.rows.length, 1);
+  assert.equal(out.rows[0].max_sustained_peak_pct, 300);
+  // order-independent: same result regardless of input order
+  const out2 = dedupBySignal([drow({ max_sustained_peak_pct: 300 }), drow({ max_sustained_peak_pct: 120 }), drow({ max_sustained_peak_pct: 60 })]);
+  assert.equal(out2.rows[0].max_sustained_peak_pct, 300);
+});
+
+test('dedup: distinct (token,signal_ts) preserved; conflicting tier resolves to best', () => {
+  const out = dedupBySignal([drow({ signal_ts: 100 }), drow({ signal_ts: 200 }), drow({ token_ca: 'U', signal_ts: 100 })]);
+  assert.equal(out.rows.length, 3);
+  assert.equal(out.removed, 0);
+  // same signal observed as dud(bronze, low peak) and dog(gold, high peak) -> keep dog (best)
+  const conflict = dedupBySignal([drow({ label: 'dud', tier: 'bronze', max_sustained_peak_pct: 30 }), drow({ label: 'dog', tier: 'gold', max_sustained_peak_pct: 200 })]);
+  assert.equal(conflict.rows.length, 1);
+  assert.equal(conflict.rows[0].label, 'dog');
 });

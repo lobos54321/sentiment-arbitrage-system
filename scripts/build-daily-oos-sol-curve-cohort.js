@@ -79,6 +79,29 @@ function classifySignal(s, opts = {}) {
   return { disposition: 'quarantine', reason: 'unknown_tier', extra: { tier } };
 }
 
+// ROOT dedup to the prereg unit (token_ca, signal_ts). A matured signal's outcome is
+// fixed, so duplicate observer rows are redundant. Deterministic: keep the highest
+// max_sustained_peak_pct (best/most-mature observation), tie-break by baseline_price desc
+// then stable input order. Returns { rows, removed }.
+function dedupBySignal(rows) {
+  const ordered = rows.map((r, i) => ({ r, i })).sort((x, y) => {
+    if (x.r.token_ca !== y.r.token_ca) return x.r.token_ca < y.r.token_ca ? -1 : 1;
+    if (x.r.signal_ts !== y.r.signal_ts) return x.r.signal_ts - y.r.signal_ts;
+    const pa = Number(x.r.max_sustained_peak_pct) || 0; const pb = Number(y.r.max_sustained_peak_pct) || 0;
+    if (pa !== pb) return pb - pa;
+    const ba = Number(x.r.baseline_price) || 0; const bb = Number(y.r.baseline_price) || 0;
+    if (ba !== bb) return bb - ba;
+    return x.i - y.i;
+  }).map((o) => o.r);
+  const seen = new Set(); const kept = []; let removed = 0;
+  for (const r of ordered) {
+    const k = `${r.token_ca}|${r.signal_ts}`;
+    if (seen.has(k)) { removed += 1; continue; }
+    seen.add(k); kept.push(r);
+  }
+  return { rows: kept, removed };
+}
+
 function sha256File(p) { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'); }
 
 async function openSnapshot(p) {
@@ -126,7 +149,7 @@ async function main() {
       not_eligible_outlier: 0, not_eligible_sustained: 0, missing_baseline: 0, non_native_baseline: 0,
       native_unit_suspect: 0, unknown_tier: 0,
     },
-    cohort: { dog: 0, dud: 0 }, tier: { gold: 0, silver: 0, bronze: 0, sub25: 0 },
+    cohort: { dog: 0, dud: 0 }, tier: { gold: 0, silver: 0, bronze: 0, sub25: 0 }, dedup_removed: 0,
   };
   const dogs = []; const duds = []; const quarantine = [];
 
@@ -138,7 +161,6 @@ async function main() {
       quarantine.push({ token_ca: s.token_ca, signal_ts: Number(s.signal_ts), quarantine_reason: c.reason, raw_primary_tier: s.raw_primary_tier || null, ...(c.extra || {}) });
       continue;
     }
-    if (tally.tier[c.tier] != null) tally.tier[c.tier] += 1;
     const row = {
       token_ca: s.token_ca, signal_ts: Number(s.signal_ts),
       label: c.disposition, effective_tier: c.tier, tier: c.tier,
@@ -152,14 +174,25 @@ async function main() {
       source_kind: s.source_kind || null, source_family: s.source_family || null,
       path_source_kind: s.path_source_kind || null, provider: s.provider || null,
     };
-    if (c.disposition === 'dog') { dogs.push(row); tally.cohort.dog += 1; } else { duds.push(row); tally.cohort.dud += 1; }
+    (c.disposition === 'dog' ? dogs : duds).push(row); // pre-dedup; tier/cohort counted after dedup
   }
 
-  const bySig = (x, y) => (x.token_ca < y.token_ca ? -1 : x.token_ca > y.token_ca ? 1 : x.signal_ts - y.signal_ts);
-  dogs.sort(bySig); duds.sort(bySig); quarantine.sort(bySig);
+  // ROOT dedup to the prereg unit (token_ca, signal_ts) at the SOURCE, so the clean
+  // dog/dud denominator is the prereg unit and no downstream/operation layer has to
+  // dedup. (Dedup globally so a (token,signal_ts) observed with conflicting tiers
+  // resolves deterministically to the single best observation.)
+  const dd = dedupBySignal([...dogs, ...duds]);
+  tally.dedup_removed = dd.removed;
+  const cleanDogs = dd.rows.filter((r) => r.label === 'dog');
+  const cleanDuds = dd.rows.filter((r) => r.label === 'dud');
+  for (const r of dd.rows) if (tally.tier[r.tier] != null) tally.tier[r.tier] += 1;
+  tally.cohort.dog = cleanDogs.length; tally.cohort.dud = cleanDuds.length;
 
-  fs.writeFileSync(path.join(outDir, 'clean-dogs.json'), JSON.stringify(dogs, null, 2));
-  fs.writeFileSync(path.join(outDir, 'clean-duds.json'), JSON.stringify(duds, null, 2));
+  const bySig = (x, y) => (x.token_ca < y.token_ca ? -1 : x.token_ca > y.token_ca ? 1 : x.signal_ts - y.signal_ts);
+  cleanDogs.sort(bySig); cleanDuds.sort(bySig); quarantine.sort(bySig);
+
+  fs.writeFileSync(path.join(outDir, 'clean-dogs.json'), JSON.stringify(cleanDogs, null, 2));
+  fs.writeFileSync(path.join(outDir, 'clean-duds.json'), JSON.stringify(cleanDuds, null, 2));
   fs.writeFileSync(path.join(outDir, 'quarantine.json'), JSON.stringify(quarantine, null, 2));
 
   const manifest = {
@@ -176,9 +209,11 @@ async function main() {
       + 'native_sol (NOT sol_curve): the bonding-curve venue is confirmed downstream by the chain decode, not here.',
     source_snapshot: { path: path.resolve(a.snapshot), sha256: sha256File(a.snapshot), snapshot_ts: snapshotTs },
     params: { max_sustained_pct: a.maxSustainedPct, dog_tiers: [...DOG_TIERS], dud_tiers: [...DUD_TIERS] },
+    dedup_note: 'clean dog/dud rows are deduped to the prereg unit (token_ca, signal_ts) at the source '
+      + '(deterministic keep-best); tally.dedup_removed = duplicate observer rows removed.',
     symmetry_note: 'All signals pass identical maturation/eligibility/native/unit-suspect gates BEFORE the dog/dud label is assigned.',
     tally,
-    outputs: { clean_dogs: dogs.length, clean_duds: duds.length, quarantined: quarantine.length },
+    outputs: { clean_dogs: cleanDogs.length, clean_duds: cleanDuds.length, quarantined: quarantine.length },
   };
   fs.writeFileSync(path.join(outDir, 'cohort-manifest.json'), JSON.stringify(manifest, null, 2));
 
@@ -192,4 +227,4 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => { console.error(`build-daily-oos-sol-curve-cohort: ${e.message}`); process.exit(1); });
 }
 
-export { classifySignal, confidenceEligible, MAX_SUSTAINED_PCT };
+export { classifySignal, dedupBySignal, confidenceEligible, MAX_SUSTAINED_PCT };
