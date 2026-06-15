@@ -30,8 +30,9 @@ const ALLOWED_LOOK_POINTS = [50, 100, 130];
 const COHORT_DOMAIN = 'sol_curve';
 const REQUIRED_ROW_FIELDS = [
   'token_ca', 'signal_ts', 'label', 'return_domain', 'trades_n',
-  'feature_coverage_status', 'unique_buyers',
+  'feature_coverage_status', 'unique_buyers', 'progress_stage',
 ];
+const DEGENERATE_STAGES = new Set([null, undefined, 'undefined', 'unknown', 'decode_unavailable', 'none', '']);
 const PRIMARY_FEATURE = 'unique_buyers';
 
 // ---------- small utils ----------
@@ -91,6 +92,7 @@ function applyGates(rows, { trainingTokens, seenSigKeys }) {
     input_rows: rows.length,
     excluded_training_token_count: 0,
     excluded_missing_fields: 0,
+    excluded_incomplete_window: 0,
     excluded_cross_pack_duplicate: 0,
     deduped_within_pack: 0,
   };
@@ -107,8 +109,13 @@ function applyGates(rows, { trainingTokens, seenSigKeys }) {
   });
   // pre-cohort coverage symmetry is measured on r (post training exclusion, pre cohort filter)
   const preCohort = r;
-  // 2. cohort filter: sol_curve AND has_trades
-  let cohort = r.filter((row) => row.return_domain === COHORT_DOMAIN && hasTrades(row));
+  // 2. cohort filter: sol_curve AND has_trades AND complete_window (prereg §5:
+  //    incomplete coverage must be reported separately, never used as a usable window).
+  let cohort = r.filter((row) => {
+    if (row.return_domain !== COHORT_DOMAIN || !hasTrades(row)) return false;
+    if (row.feature_coverage_status !== 'complete_window') { stats.excluded_incomplete_window += 1; return false; }
+    return true;
+  });
   // 3a. dedup within pack by (token_ca, signal_ts)
   const withinSeen = new Set();
   cohort = cohort.filter((row) => {
@@ -237,7 +244,15 @@ function lookpointAnalysis(cohortRows, lookPoint) {
   const top30 = topkPrecision(cohortRows, Math.min(30, k));
   const top20Lift = top20 !== null ? Number((top20 - baseDogRate).toFixed(4)) : null;
   const top30Lift = top30 !== null ? Number((top30 - baseDogRate).toFixed(4)) : null;
-  const stageSurvives = Object.values(stageSplit).some((s) => s.auc !== null && s.auc > 0.55 && s.n_dog >= 10 && s.n_dud >= 10);
+  // prereg §7/§8: the signal must survive a genuine progress/stage split. A
+  // degenerate split (one stage, or all 'undefined'/'decode_unavailable') does
+  // NOT satisfy the control -> cannot count as survival.
+  const realStageKeys = Object.keys(stageSplit).filter((k) => !DEGENERATE_STAGES.has(k));
+  const stageSurvives = realStageKeys.length >= 2
+    && realStageKeys.some((k) => {
+      const s = stageSplit[k];
+      return s.auc !== null && s.auc > 0.55 && s.n_dog >= 10 && s.n_dud >= 10;
+    });
 
   // locked thresholds (Section 8)
   const successCore = auc > 0.60 && ci && ci.lo > 0.55
@@ -283,8 +298,27 @@ function parseArgs(argv) {
     else if (k === '--prereg') { a.prereg = v; i += 1; }
     else if (k === '--prereg-lock') { a.preregLock = v; i += 1; }
     else if (k === '--look-point') { a.lookPoint = Number(v); i += 1; }
+    else if (k === '--schema-version') { a.schemaVersion = v; i += 1; }
+    else if (k === '--reveal-sealed-auc') { a.revealSealedAuc = v; i += 1; }
   }
   return a;
+}
+
+// prereg §3/§4: dog and dud must share one schema version; a cumulative table
+// must never mix schemas. Returns the schema to stamp/lock, or throws fail-closed.
+function resolveSchema(manifest, rows, override) {
+  const s = override || manifest.schema_version
+    || (rows.find((r) => r.schema_version)?.schema_version) || null;
+  if (!s || s === 'unknown') {
+    throw new Error('schema_version_required: cannot enforce same-schema gate without an explicit feature/cohort schema_version (fail-closed)');
+  }
+  return s;
+}
+function schemaGate(packSchema, lockedSchema) {
+  if (lockedSchema && lockedSchema !== packSchema) {
+    throw new Error(`schema_drift: pack schema ${packSchema} != cumulative locked schema ${lockedSchema}; do not mix. Start a new cumulative dir or re-decode under one schema (fail-closed)`);
+  }
+  return packSchema;
 }
 function loadTrainingTokens(p) {
   if (!p) return null;
@@ -299,9 +333,14 @@ function loadTrainingTokens(p) {
 function loadCumulativeSeen(cumPath, provPath, packId) {
   const seen = new Set();
   let ingestedPacks = [];
+  let lockedSchema = null;
   if (fs.existsSync(cumPath)) for (const r of readRows(cumPath)) seen.add(sigKey(r));
-  if (fs.existsSync(provPath)) ingestedPacks = readJson(provPath).ingested_pack_ids || [];
-  return { seen, ingestedPacks, alreadyIngested: ingestedPacks.includes(packId) };
+  if (fs.existsSync(provPath)) {
+    const prov = readJson(provPath);
+    ingestedPacks = prov.ingested_pack_ids || [];
+    lockedSchema = prov.locked_schema_version || null;
+  }
+  return { seen, ingestedPacks, lockedSchema, alreadyIngested: ingestedPacks.includes(packId) };
 }
 
 function main() {
@@ -327,7 +366,12 @@ function main() {
 
   const rows = readRows(a.featureRows);
   const manifest = a.packManifest && fs.existsSync(a.packManifest) ? readJson(a.packManifest) : {};
-  const { seen, ingestedPacks, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
+  const { seen, ingestedPacks, lockedSchema, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
+
+  // same-schema gate (fail-closed): require an explicit schema, lock the cumulative to it.
+  const packSchema = resolveSchema(manifest, rows, a.schemaVersion);
+  schemaGate(packSchema, lockedSchema);
+  const effectiveLockedSchema = lockedSchema || packSchema;
 
   // 4. gates
   const { cohortRows, preCohortRows, stats } = applyGates(rows, { trainingTokens, seenSigKeys: seen });
@@ -337,12 +381,15 @@ function main() {
   const stampedRows = cohortRows.map((r) => ({
     ...r, pack_id: a.packId, prereg_sha256: preregSha,
     pack_commit: manifest.production_commit || manifest.commit || null,
-    schema_version: manifest.schema_version || r.schema_version || 'unknown',
+    schema_version: packSchema,
   }));
   writeJsonl(path.join(a.outDir, 'daily_feature_rows.jsonl'), stampedRows);
   if (!alreadyIngested) {
     appendJsonl(cumPath, stampedRows);
-    fs.writeFileSync(provPath, JSON.stringify({ ingested_pack_ids: [...ingestedPacks, a.packId] }, null, 2));
+    fs.writeFileSync(provPath, JSON.stringify({
+      ingested_pack_ids: [...ingestedPacks, a.packId],
+      locked_schema_version: effectiveLockedSchema,
+    }, null, 2));
   }
 
   // cumulative counts
@@ -373,12 +420,14 @@ function main() {
   if (a.lookPoint) {
     const res = lookpointAnalysis(cumRows, a.lookPoint); // throws if not reached
     lookOut = { look_point_requested: a.lookPoint, auc_withheld: false, ...res.public };
-    if (res.sealed) {
-      fs.writeFileSync(path.join(a.outDir, `lookpoint_report_${a.lookPoint}_SEALED.json`),
-        JSON.stringify({ ...res.sealed, prereg_sha256: preregSha }, null, 2));
-    } else {
-      fs.writeFileSync(path.join(a.outDir, `lookpoint_report_${a.lookPoint}.json`),
-        JSON.stringify({ ...res.public, prereg_sha256: preregSha }, null, 2));
+    // Always write the PUBLIC verdict (no AUC value at n=50). The sealed numeric
+    // AUC is written ONLY when explicitly revealed via --reveal-sealed-auc <path>,
+    // so the default surface can never break the n=50 futility-only discipline.
+    fs.writeFileSync(path.join(a.outDir, `lookpoint_report_${a.lookPoint}.json`),
+      JSON.stringify({ ...res.public, prereg_sha256: preregSha }, null, 2));
+    if (res.sealed && a.revealSealedAuc) {
+      fs.writeFileSync(a.revealSealedAuc,
+        JSON.stringify({ ...res.sealed, prereg_sha256: preregSha, warning: 'sealed futility AUC; do not use to declare success' }, null, 2));
     }
   }
 
@@ -390,9 +439,12 @@ function main() {
   }, null, 2));
 }
 
+// NOTE: raw AUC helpers (aucRaw/bootstrapCi/topkPrecision) are intentionally NOT
+// exported. AUC may only be obtained through the guarded `lookpointAnalysis`, so
+// no caller (including tests) can compute AUC outside a reached look point.
 export {
-  applyGates, classCounts, symmetryReport, aucRaw, bootstrapCi, topkPrecision,
-  lookpointAnalysis, verifyPreregLock, hasTrades, sigKey, ALLOWED_LOOK_POINTS,
+  applyGates, classCounts, symmetryReport, lookpointAnalysis,
+  verifyPreregLock, schemaGate, resolveSchema, hasTrades, sigKey, ALLOWED_LOOK_POINTS,
 };
 
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
