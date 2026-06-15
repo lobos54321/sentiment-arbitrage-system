@@ -37,6 +37,7 @@ const REPO_ROOT = path.resolve(SCRIPTS, '..');
 const NODE = process.execPath;
 const ALLOWED_LOOK_POINTS = [50, 100, 130];
 const DEFAULT_SCHEMA = 'v10_curve_stage_feature_table.v1';
+const VALIDATOR_SCHEMA = 'v10_curve_feature_trade_export_validation.v1';
 const DEFAULT_TRAINING_TOKENS = '/Users/boliu/sas-data-room/chain-truth-recut-20260612T011545Z/oos-training-token-exclusion/training-tokens.txt';
 const DEFAULT_PREREG = path.join(REPO_ROOT, 'claudedocs/oos-sol-curve-unique-buyers-preregister.md');
 const DEFAULT_PREREG_LOCK = path.join(REPO_ROOT, 'claudedocs/oos-sol-curve-unique-buyers-preregister.sha256');
@@ -82,6 +83,7 @@ function parseArgs(argv) {
       // provenance: production commit comes from the live pack, never research HEAD
       case '--production-commit': a.productionCommit = take(); break;
       case '--production-commit-from': a.productionCommitFrom = take(); break;
+      case '--allow-unknown-production-commit-for-smoke': a.allowUnknownProductionCommitForSmoke = true; break;
       // config / outputs
       case '--work-dir': a.workDir = take(); break;
       case '--cumulative-dir': a.cumulativeDir = take(); break;
@@ -115,14 +117,15 @@ function main() {
     console.log('usage: run-daily-oos-accumulation.js --pack-id <id> --decode-mode <rpc|dune> '
       + '(--dogs <json> --duds <json> | --rebuild-label-audit <json> --rebuild-baseline-routed <jsonl> '
       + '--rebuild-gmgn-full-window <json> --rebuild-peak-window <json>) '
-      + '(--rpc-url-file <f> | --trades <f> {--dune-assume-complete-window | --validated-trade-export <f>}) '
+      + '(--rpc-url-file <f> | --trades <f> --dune-assume-complete-window [--validated-trade-export <f>]) '
       + '--work-dir <dir> --cumulative-dir <dir> '
-      + '[--production-commit <hash> | --production-commit-from <manifest>] '
+      + '(--production-commit <hash> | --production-commit-from <manifest> | --allow-unknown-production-commit-for-smoke) '
       + '[--training-tokens <f>] [--schema-version <s>] [--look-point 50|100|130] '
       + '[--dedupe-worklist-for-smoke] [--dry-run]\n\n'
       + 'Notes: worklist is signal-level by default (OOS unit = token_ca,signal_ts); --dedupe-worklist-for-smoke '
-      + 'is RPC-smoke ONLY. Dune requires a completeness proof or it accumulates 0 usable rows. '
-      + '--reveal-sealed-auc is never permitted.');
+      + 'is RPC-smoke ONLY. Dune REQUIRES --dune-assume-complete-window (operator attestation); --validated-trade-export '
+      + 'is supporting QA only and cannot authorize complete-window. A formal pack must record production_commit; '
+      + '--allow-unknown-production-commit-for-smoke permits null but forbids --look-point. --reveal-sealed-auc is never permitted.');
     return;
   }
   // ---- validate required inputs (fail-closed) ----
@@ -133,19 +136,29 @@ function main() {
   if (a.decodeMode === 'rpc' && !a.rpcUrlFile) die('--decode-mode rpc requires --rpc-url-file.');
   if (a.decodeMode === 'dune' && !a.trades) die('--decode-mode dune requires --trades <csv|jsonl>.');
   // Dune completeness gate (fail-closed): the from-trades decoder defaults to
-  // history_reached_start=false, which the feature table maps to incomplete_window,
-  // which the accumulator excludes -> a Dune run would silently accumulate 0 usable
-  // rows. So Dune requires an explicit completeness proof. The standalone validator
-  // checks schema/joins but, by its own statement, "cannot prove completeness unless
-  // the export query/source guarantees it" -> the operator attestation is required.
-  if (a.decodeMode === 'dune' && !a.duneAssumeCompleteWindow && !a.validatedTradeExport) {
-    die('--decode-mode dune requires a completeness proof: --dune-assume-complete-window '
-      + '(operator attests the Dune export query guarantees full [signal_ts-pre_sec, signal_ts] coverage) '
-      + 'and/or --validated-trade-export <report.json> (from validate-v10-curve-feature-trade-export.js). '
-      + 'Without it every row is incomplete_window and the pack accumulates 0 usable rows (fail-closed).');
+  // history_reached_start=false -> feature table marks incomplete_window ->
+  // accumulator excludes -> a Dune run would silently accumulate 0 usable rows.
+  // The LOAD-BEARING gate is the OPERATOR ATTESTATION. The standalone validator,
+  // by its own statement, "cannot prove completeness unless the export query/source
+  // guarantees it" -> a validation file alone must NOT authorize complete-window.
+  if (a.decodeMode === 'dune' && !a.duneAssumeCompleteWindow) {
+    die('--decode-mode dune requires --dune-assume-complete-window: the operator must attest the Dune export query '
+      + 'guarantees full [signal_ts-pre_sec, signal_ts] coverage. --validated-trade-export is supporting QA only and '
+      + 'CANNOT authorize complete-window on its own (it cannot prove completeness). Without the attestation every row '
+      + 'is incomplete_window and the pack accumulates 0 usable rows (fail-closed).');
   }
-  if (a.validatedTradeExport && !fs.existsSync(a.validatedTradeExport)) {
-    die(`--validated-trade-export not found: ${a.validatedTradeExport}`);
+  // --validated-trade-export is optional supporting provenance; if present it must be
+  // a genuine validator report (schema check), else fail-closed. It does NOT open the
+  // complete-window path by itself — only the attestation above does.
+  let validatedTradeExportReport = null;
+  if (a.validatedTradeExport) {
+    if (!fs.existsSync(a.validatedTradeExport)) die(`--validated-trade-export not found: ${a.validatedTradeExport}`);
+    try { validatedTradeExportReport = readJson(a.validatedTradeExport); }
+    catch { die(`--validated-trade-export is not valid JSON: ${a.validatedTradeExport}`); }
+    if (validatedTradeExportReport.schema_version !== VALIDATOR_SCHEMA) {
+      die(`--validated-trade-export schema "${validatedTradeExportReport.schema_version}" != "${VALIDATOR_SCHEMA}" `
+        + '(not a genuine validate-v10-curve-feature-trade-export.js report; fail-closed).');
+    }
   }
   const hasCohort = a.dogs && a.duds;
   const hasRebuild = a.rebuildLabelAudit && a.rebuildBaselineRouted && a.rebuildGmgnFullWindow && a.rebuildPeakWindow;
@@ -157,6 +170,29 @@ function main() {
   }
   if (!fs.existsSync(a.trainingTokens)) {
     die(`training tokens not found: ${a.trainingTokens} (run export-oos-training-tokens.js first).`);
+  }
+  // provenance fail-closed (resolved BEFORE stages run): a formal daily pack must record
+  // the live pack-producing commit. research HEAD is never a substitute. A smoke run may
+  // opt out, but then a formal look point is forbidden.
+  let productionCommit = a.productionCommit || null;
+  if (!productionCommit && a.productionCommitFrom) {
+    try {
+      const m = readJson(a.productionCommitFrom);
+      productionCommit = m.production_commit || m.commit || m.git_commit || m.production_sha || null;
+    } catch { productionCommit = null; }
+  }
+  if (!productionCommit) {
+    if (!a.allowUnknownProductionCommitForSmoke) {
+      die('production_commit unknown: pass --production-commit <hash> or --production-commit-from <live pack/health '
+        + 'manifest>. A formal daily OOS pack must record the live pack-producing commit (research HEAD is not a '
+        + 'substitute). For a throwaway smoke run pass --allow-unknown-production-commit-for-smoke (then --look-point '
+        + 'is forbidden).');
+    }
+    if (a.lookPoint !== undefined) {
+      die('--allow-unknown-production-commit-for-smoke cannot be combined with --look-point: a look point may only be '
+        + 'read on a formal pack with a recorded production_commit (fail-closed).');
+    }
+    console.error('[provenance] WARNING: production_commit unknown; proceeding as SMOKE (look points forbidden).');
   }
   fs.mkdirSync(a.workDir, { recursive: true });
 
@@ -224,28 +260,14 @@ function main() {
       + `"${a.schemaVersion}". Refusing to stamp a mislabeled schema into the cumulative (fail-closed).`);
   }
 
-  // ---- (#3) provenance: research_commit (this analysis code) vs production_commit
-  //          (the live system that produced the raw pack). NEVER spoof production with
-  //          research HEAD. production_commit comes from --production-commit or is read
-  //          from a live pack/health manifest via --production-commit-from, else null.
-  let productionCommit = a.productionCommit || null;
-  if (!productionCommit && a.productionCommitFrom) {
-    try {
-      const m = readJson(a.productionCommitFrom);
-      productionCommit = m.production_commit || m.commit || m.git_commit || m.production_sha || null;
-    } catch { productionCommit = null; }
-  }
-  if (!productionCommit) {
-    console.error('[provenance] WARNING: production_commit unknown (pass --production-commit or '
-      + '--production-commit-from <live pack/health manifest>). Recording null; research_commit is NOT a substitute.');
-  }
-
   // ---- pack manifest: research/production commit + schema_version + completeness + per-stage sha256 ----
+  // (productionCommit + validatedTradeExportReport were resolved/validated up-front.)
   stageOut.dogs = dogs; stageOut.duds = duds; stageOut.decode = mergedDecode; stageOut.feature_table = featureTable;
   const manifest = {
     schema_version: a.schemaVersion,
     research_commit: gitHead(),
     production_commit: productionCommit,
+    production_commit_smoke_unknown: !productionCommit || undefined,
     pack_id: a.packId,
     generated_at: nowIso(),
     decode_mode: a.decodeMode,
@@ -254,6 +276,7 @@ function main() {
         attested: Boolean(a.duneAssumeCompleteWindow),
         validated_trade_export: a.validatedTradeExport || null,
         validated_trade_export_sha256: a.validatedTradeExport ? sha256File(a.validatedTradeExport) : null,
+        validated_trade_export_summary: validatedTradeExportReport ? (validatedTradeExportReport.summary || null) : null,
       }
       : null,
     feature_window: { pre_sec: Number(preSec), post_sec: Number(postSec) },
