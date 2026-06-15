@@ -141,6 +141,26 @@ function buildFeatureRow(baseRow, label, decodeRow) {
   const decodeStatus = decodeRow?.status || 'missing_decode';
   const coverageComplete = decodeStatus === 'ok' && decodeRow?.history_reached_start === true;
   const usable = coverageComplete;
+  // Curve confirmation is INDEPENDENT of window completeness: a decoded row with
+  // pump.fun bonding-curve trades IS sol_curve even if the pre-window is incomplete.
+  // Use the RAW decode trades count (not the usable-gated feature `trades` below).
+  const curveTradeObservedN = numeric(decodeRow?.trades_n) || 0;
+  const curveConfirmed = decodeStatus === 'ok' && curveTradeObservedN > 0;
+  // return_domain authority: the chain decode upgrades ONLY producer-provisional
+  // native_sol rows. native_sol + curve trades -> sol_curve (EVEN IF
+  // incomplete_window, so the accumulator's coverage-symmetry gate can see it).
+  // Otherwise keep the input domain (native_sol stays excluded; usd_gmgn / spliced /
+  // already-sol_curve inputs are never touched by this upgrade).
+  const inputReturnDomain = baseRow.return_domain || 'unknown';
+  let returnDomain = inputReturnDomain;
+  let returnDomainUpgradeReason;
+  if (inputReturnDomain === 'native_sol') {
+    if (curveConfirmed) { returnDomain = 'sol_curve'; returnDomainUpgradeReason = 'upgraded_native_sol_to_sol_curve_curve_trades_observed'; }
+    else if (decodeStatus === 'ok') { returnDomainUpgradeReason = 'kept_native_sol_no_curve_trades'; }
+    else { returnDomainUpgradeReason = `kept_native_sol_decode_${decodeStatus}`; }
+  } else {
+    returnDomainUpgradeReason = 'input_domain_untouched';
+  }
   const buySol = usable ? sumBars(decodeRow, 'buy_sol_volume') : null;
   const sellSol = usable ? sumBars(decodeRow, 'sell_sol_volume') : null;
   const baselineProgress = usable ? numeric(decodeRow?.baseline_progress_pct) : null;
@@ -155,7 +175,11 @@ function buildFeatureRow(baseRow, label, decodeRow) {
     signal_ts: normalizeTs(baseRow.signal_ts),
     label,
     effective_tier: baseRow.effective_tier || baseRow.tier || 'unknown',
-    return_domain: baseRow.return_domain || 'unknown',
+    return_domain: returnDomain,
+    input_return_domain: inputReturnDomain,
+    curve_confirmed: curveConfirmed,
+    curve_trade_observed_n: curveTradeObservedN,
+    return_domain_upgrade_reason: returnDomainUpgradeReason,
     decode_status: decodeStatus,
     feature_coverage_status: decodeStatus === 'ok'
       ? (coverageComplete ? 'complete_window' : 'incomplete_window')
@@ -311,4 +335,8 @@ function main() {
   }, null, 2));
 }
 
-main();
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
+
+export { buildFeatureRow };
