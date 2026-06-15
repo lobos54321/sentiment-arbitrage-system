@@ -68,6 +68,13 @@ Rules:
 
 If only a near-term OOS window is available, mark it as `near_window_oos` and treat success as provisional until a second independent pack reproduces it.
 
+Training-window token independence is mandatory:
+
+- Exclude any `token_ca` that appears in the discovery/training cohort (`2026-06-06` through `2026-06-11`, inclusive).
+- Exclude training-window tokens before computing dog/dud counts, AUC, top-k precision, or milestone eligibility.
+- Report `excluded_training_token_count` in every OOS pack and cumulative report.
+- If token-level exclusion cannot be applied, the pack is not valid for this preregistered OOS test.
+
 ## 3. Symmetric Cohort Cleaning
 
 Both dog and dud rows must pass the same cleaning and guardrails:
@@ -99,10 +106,29 @@ Unit of analysis:
 Dud definition:
 
 - same bucket and same OOS pack as dog rows
+- `return_domain = sol_curve`
+- `has_trades = true`
+- same schema version and QA gates as dog rows
 - must be cleaned with the same return and unit guards
-- should be matched to the same `return_domain = sol_curve` and `has_trades = true` filter
+- must exclude training-window tokens under Section 2
 
 Do not compare sol-curve dogs to all duds. Do not pool `sol_curve`, `spliced_curve_to_gmgn`, and `usd_gmgn` into one headline AUC.
+
+The matched-dud rule is locked as:
+
+```text
+Use all clean same-bucket dud rows in the OOS pack/cumulative table.
+Do not use post-hoc sampled matching.
+Always report the same-bucket base dog rate.
+```
+
+Milestones are class-balanced:
+
+```text
+n=50 means at least 50 dog rows AND at least 50 dud rows.
+n=100 means at least 100 dog rows AND at least 100 dud rows.
+n=130 means at least 130 dog rows AND at least 130 dud rows.
+```
 
 ## 5. Feature Window
 
@@ -136,6 +162,12 @@ Secondary participation-breadth family:
 
 The primary endpoint cannot be changed after viewing OOS data. Secondary features are explanatory only unless a second preregistration is written for a later OOS pack.
 
+Secondary features are not alternative success endpoints:
+
+- Success/failure for this preregistered test is determined only by primary `unique_buyers`.
+- If `unique_buyers` fails or is gray, secondary features cannot be promoted to primary in this OOS pack.
+- Secondary participation features may be reported only as descriptive or hypothesis-generating evidence for a future separately preregistered test.
+
 ## 7. Required Controls
 
 The OOS report must include:
@@ -153,7 +185,22 @@ The OOS report must include:
 
 If usable-rate or trade-hit asymmetry is large, explain coverage before reading AUC.
 
-## 8. Success, Failure, And Gray Zone
+## 8. Look Points, Success, Failure, And Gray Zone
+
+Allowed look points:
+
+```text
+n=50 per class: futility only; success cannot be declared.
+n=100 per class: first success-eligible look.
+n=130 per class: conservative powered look.
+```
+
+No AUC, top-k, or success/failure interpretation may be produced between these look points. Daily reports may include counts and QA only.
+
+Futility at `n=50`:
+
+- If primary AUC `<= 0.55`, or the bootstrap CI comfortably includes `0.5`, mark `directional_null` and stop accumulation unless the user explicitly authorizes a new preregistered extension.
+- If primary AUC is above the futility cutoff, continue accumulation. Do not declare success at `n=50`.
 
 Success requires all of:
 
@@ -162,6 +209,8 @@ Success requires all of:
 3. Top-20 or top-30 precision at least `+10pp` above the same-pack sol-curve base dog rate.
 4. The signal survives the trades-present subset and at least one progress/stage split.
 5. The result is not driven by one day, one signal source, or one token duplicate cluster.
+
+Success can be declared only at `n>=100` or `n>=130` per class.
 
 Failure:
 
@@ -175,7 +224,9 @@ Gray zone:
 - AUC `> 0.60` but CI lower bound `<= 0.55`, or
 - top-k lift exists but is unstable across splits.
 
-Gray zone means: do not enter shadow gate and do not abandon the signal. Freeze interpretation and collect one more independent OOS pack.
+Gray zone at `n=100`: do not enter shadow gate and do not abandon the signal. Continue to the `n=130` conservative look if possible.
+
+Gray zone at `n>=130`: mark `weak_inconclusive`; do not declare success. Return to sourcing/target review unless the user explicitly authorizes a new preregistered extension.
 
 ## 9. Decision Rules
 
@@ -199,8 +250,12 @@ If OOS is gray:
 Forbidden before the OOS result is read:
 
 - changing the primary feature away from `unique_buyers`
+- promoting secondary participation features to primary after seeing OOS data
 - changing success thresholds
 - adding a pooled AUC headline as the main endpoint
+- reading AUC outside the `50/100/130` look points
+- declaring success at the `n=50` futility-only look
+- including tokens seen in the training/discovery cohort
 - using post-signal volume, future bars, or 120m outcomes as features
 - changing live gate/matrix/RR/liquidity/exit/size
 - treating shadow success as live-readiness
@@ -229,11 +284,13 @@ branch: runtime-stability-marker-guard
 
 1. Generate a new frozen data pack from a non-overlapping time window.
 2. Run symmetric v10-native-return-guard style cleaning for dog and dud.
-3. Build the OOS curve-feature export pack from clean rows.
-4. Run the Dune export using the locked `[signal_ts - 900s, signal_ts]` window.
-5. Build the feature table.
-6. Before reading AUC, inspect coverage and usable-rate symmetry.
-7. Read only the preregistered primary endpoint and required controls.
-8. Produce an OOS report that states: success, failure, or gray zone.
+3. Exclude any token seen in the training/discovery cohort.
+4. Build the OOS curve-feature export pack from clean dog rows and all clean same-bucket dud rows.
+5. Run the Dune export using the locked `[signal_ts - 900s, signal_ts]` window.
+6. Build the feature table.
+7. Before reading AUC, inspect coverage and usable-rate symmetry.
+8. Verify that an allowed look point has been reached.
+9. Read only the preregistered primary endpoint and required controls.
+10. Produce an OOS report that states: futility stop, success, failure, or gray zone.
 
 Live strategy remains frozen throughout.
