@@ -33,6 +33,11 @@ const REQUIRED_ROW_FIELDS = [
   'feature_coverage_status', 'unique_buyers', 'progress_stage',
 ];
 const DEGENERATE_STAGES = new Set([null, undefined, 'undefined', 'unknown', 'decode_unavailable', 'none', '']);
+// Operationalizes prereg §7 "if usable-rate/trade-hit asymmetry is large":
+// cumulative sol_curve usable-rate gap above this (percentage points) blocks success.
+const COVERAGE_ASYMMETRY_MAX_PP = 15;
+const MIN_STRATUM = 10;
+const MIN_UNIQUE_TOKENS = 20;
 const PRIMARY_FEATURE = 'unique_buyers';
 
 // ---------- small utils ----------
@@ -56,6 +61,30 @@ function appendJsonl(p, rows) {
 function numeric(v) { return (v === null || v === undefined || Number.isNaN(Number(v))) ? null : Number(v); }
 function hasTrades(row) { return (numeric(row.trades_n) || 0) > 0; }
 function sigKey(row) { return `${row.token_ca}|${row.signal_ts}`; }
+function utcDate(ts) { return new Date(Number(ts) * 1000).toISOString().slice(0, 10); }
+function uniqueByToken(rows) {
+  const seen = new Set(); const out = [];
+  for (const r of rows) { if (!seen.has(r.token_ca)) { seen.add(r.token_ca); out.push(r); } }
+  return out;
+}
+function sourceOf(row) { return row.signal_source || row.source || null; }
+
+// prereg §3/§4: every row in a pack must carry the same schema as the pack, and a
+// pack must not mix schemas. Fail-closed otherwise.
+function rowSchemaGate(rows, packSchema) {
+  const present = [...new Set(rows.map((r) => r.schema_version).filter((v) => v !== undefined && v !== null))];
+  const someHave = present.length > 0;
+  const someMissing = rows.some((r) => r.schema_version === undefined || r.schema_version === null);
+  if (someHave && present.length > 1) {
+    throw new Error(`schema_mismatch: pack carries mixed row schemas [${present.join(', ')}] (fail-closed)`);
+  }
+  if (someHave && someMissing) {
+    throw new Error('schema_mismatch: some rows carry schema_version and some do not (fail-closed)');
+  }
+  if (someHave && present[0] !== packSchema) {
+    throw new Error(`schema_mismatch: row schema ${present[0]} != pack schema ${packSchema} (fail-closed)`);
+  }
+}
 
 // reproducible RNG so the bootstrap CI is identical on re-run of a locked test
 function mulberry32(seed) {
@@ -196,7 +225,7 @@ function topkPrecision(rows, k) {
  * reached. n=50 returns a futility verdict WITHOUT exposing the AUC point estimate
  * on the public surface (the caller seals it into a report file).
  */
-function lookpointAnalysis(cohortRows, lookPoint) {
+function lookpointAnalysis(cohortRows, lookPoint, opts = {}) {
   if (!ALLOWED_LOOK_POINTS.includes(lookPoint)) {
     throw new Error(`look_point_not_allowed: ${lookPoint} not in ${ALLOWED_LOOK_POINTS.join('/')}`);
   }
@@ -239,27 +268,58 @@ function lookpointAnalysis(cohortRows, lookPoint) {
         sr.filter((r) => r.label === 'dud').map((r) => numeric(r[PRIMARY_FEATURE]))),
     };
   }
-  const k = Math.min(30, dog + dud);
+  const kMax = Math.min(30, dog + dud);
   const top20 = topkPrecision(cohortRows, 20);
-  const top30 = topkPrecision(cohortRows, Math.min(30, k));
+  const top30 = topkPrecision(cohortRows, Math.min(30, kMax));
   const top20Lift = top20 !== null ? Number((top20 - baseDogRate).toFixed(4)) : null;
   const top30Lift = top30 !== null ? Number((top30 - baseDogRate).toFixed(4)) : null;
   // prereg §7/§8: the signal must survive a genuine progress/stage split. A
   // degenerate split (one stage, or all 'undefined'/'decode_unavailable') does
   // NOT satisfy the control -> cannot count as survival.
-  const realStageKeys = Object.keys(stageSplit).filter((k) => !DEGENERATE_STAGES.has(k));
+  const realStageKeys = Object.keys(stageSplit).filter((sk) => !DEGENERATE_STAGES.has(sk));
   const stageSurvives = realStageKeys.length >= 2
-    && realStageKeys.some((k) => {
-      const s = stageSplit[k];
-      return s.auc !== null && s.auc > 0.55 && s.n_dog >= 10 && s.n_dud >= 10;
+    && realStageKeys.some((sk) => {
+      const s = stageSplit[sk];
+      return s.auc !== null && s.auc > 0.55 && s.n_dog >= MIN_STRATUM && s.n_dud >= MIN_STRATUM;
     });
+
+  // prereg §8.5: success must NOT be driven by one token cluster / one day / one source.
+  // (a) unique-token sensitivity
+  const dogU = uniqueByToken(dogRows); const dudU = uniqueByToken(dudRows);
+  const uniqueTokenAuc = aucRaw(dogU.map((r) => numeric(r[PRIMARY_FEATURE])), dudU.map((r) => numeric(r[PRIMARY_FEATURE])));
+  const uniqueTokenSurvives = dogU.length >= MIN_UNIQUE_TOKENS && dudU.length >= MIN_UNIQUE_TOKENS
+    && uniqueTokenAuc !== null && uniqueTokenAuc > 0.55;
+  // (b) UTC-date split: >=2 dates, and signal holds with the largest single day removed
+  const dates = [...new Set(cohortRows.map((r) => utcDate(r.signal_ts)))];
+  let dateSurvives = false; let leaveLargestDayOutAuc = null;
+  if (dates.length >= 2) {
+    const sizeByDate = Object.fromEntries(dates.map((d) => [d, cohortRows.filter((r) => utcDate(r.signal_ts) === d).length]));
+    const largest = [...dates].sort((a, b) => sizeByDate[b] - sizeByDate[a])[0];
+    const without = cohortRows.filter((r) => utcDate(r.signal_ts) !== largest);
+    const wd = without.filter((r) => r.label === 'dog'); const wu = without.filter((r) => r.label === 'dud');
+    leaveLargestDayOutAuc = aucRaw(wd.map((r) => numeric(r[PRIMARY_FEATURE])), wu.map((r) => numeric(r[PRIMARY_FEATURE])));
+    dateSurvives = wd.length >= MIN_STRATUM && wu.length >= MIN_STRATUM && leaveLargestDayOutAuc !== null && leaveLargestDayOutAuc > 0.55;
+  }
+  // (c) source split: only blocks when source metadata exists and is single-source
+  const sources = [...new Set(cohortRows.map(sourceOf).filter(Boolean))];
+  const hasSourceMeta = sources.length > 0;
+  const sourceControl = hasSourceMeta
+    ? { status: sources.length >= 2 ? 'multi_source' : 'single_source', n_sources: sources.length }
+    : { status: 'no_source_metadata' };
+  const sourceSurvives = hasSourceMeta ? sources.length >= 2 : true;
+  // coverage-symmetry hard gate (prereg §7): cumulative usable-rate asymmetry
+  const coverageAsymmetryPp = numeric(opts.coverageAsymmetryPp);
+  const coverageMaxPp = numeric(opts.coverageMaxPp) ?? COVERAGE_ASYMMETRY_MAX_PP;
+  const coverageOk = coverageAsymmetryPp === null || Math.abs(coverageAsymmetryPp) <= coverageMaxPp;
 
   // locked thresholds (Section 8)
   const successCore = auc > 0.60 && ci && ci.lo > 0.55
     && ((top20Lift !== null && top20Lift >= 0.10) || (top30Lift !== null && top30Lift >= 0.10))
     && aucTradesPresent > 0.55 && stageSurvives;
+  const robustnessOk = uniqueTokenSurvives && dateSurvives && sourceSurvives;
   let verdict;
-  if (successCore) verdict = 'success';
+  if (!coverageOk) verdict = 'coverage_biased_inconclusive';
+  else if (successCore && robustnessOk) verdict = 'success';
   else if (auc <= 0.56) verdict = 'failure';
   else if (lookPoint >= 130) verdict = 'weak_inconclusive';
   else verdict = 'gray_continue_to_130';
@@ -273,12 +333,21 @@ function lookpointAnalysis(cohortRows, lookPoint) {
       top20_precision: top20, top20_lift_pp: top20Lift !== null ? Number((top20Lift * 100).toFixed(1)) : null,
       top30_precision: top30, top30_lift_pp: top30Lift !== null ? Number((top30Lift * 100).toFixed(1)) : null,
       stage_split: stageSplit, stage_survives: stageSurvives,
+      robustness: {
+        unique_token_survives: uniqueTokenSurvives, unique_token_auc: uniqueTokenAuc !== null ? Number(uniqueTokenAuc.toFixed(4)) : null,
+        n_unique_dog_tokens: dogU.length, n_unique_dud_tokens: dudU.length,
+        date_survives: dateSurvives, n_dates: dates.length, leave_largest_day_out_auc: leaveLargestDayOutAuc !== null ? Number(leaveLargestDayOutAuc.toFixed(4)) : null,
+        source_control: sourceControl, source_survives: sourceSurvives,
+      },
+      coverage: { asymmetry_pp: coverageAsymmetryPp, max_allowed_pp: coverageMaxPp, coverage_ok: coverageOk },
       n_dog: dog, n_dud: dud,
       decision: verdict === 'success'
         ? 'OOS success: may design sol_curve-only PURE SHADOW ranking gate (no trade/size/exit/contract change).'
         : verdict === 'failure'
           ? 'OOS failure: do NOT tune gate/matrix/RR/liquidity; reassess sourcing or partition capture goal.'
-          : 'OOS gray: collect another OOS pack under this prereg or write a new prereg. Change nothing.',
+          : verdict === 'coverage_biased_inconclusive'
+            ? 'Coverage-biased: dog/dud usable-rate asymmetry exceeds the locked threshold. Explain/fix coverage before any AUC interpretation. Not success.'
+            : 'OOS gray/inconclusive: collect another OOS pack under this prereg or write a new prereg. Change nothing.',
     },
     sealed: null,
   };
@@ -335,12 +404,19 @@ function loadCumulativeSeen(cumPath, provPath, packId) {
   let ingestedPacks = [];
   let lockedSchema = null;
   if (fs.existsSync(cumPath)) for (const r of readRows(cumPath)) seen.add(sigKey(r));
+  let coverageTally = { dog: { sol_curve_total: 0, kept: 0 }, dud: { sol_curve_total: 0, kept: 0 } };
   if (fs.existsSync(provPath)) {
     const prov = readJson(provPath);
     ingestedPacks = prov.ingested_pack_ids || [];
     lockedSchema = prov.locked_schema_version || null;
+    if (prov.coverage_tally) coverageTally = prov.coverage_tally;
   }
-  return { seen, ingestedPacks, lockedSchema, alreadyIngested: ingestedPacks.includes(packId) };
+  return { seen, ingestedPacks, lockedSchema, coverageTally, alreadyIngested: ingestedPacks.includes(packId) };
+}
+function coverageAsymmetryPp(tally) {
+  const r = (c) => (c.sol_curve_total > 0 ? c.kept / c.sol_curve_total : null);
+  const dr = r(tally.dog); const ur = r(tally.dud);
+  return (dr === null || ur === null) ? null : Number(((dr - ur) * 100).toFixed(1));
 }
 
 function main() {
@@ -366,16 +442,30 @@ function main() {
 
   const rows = readRows(a.featureRows);
   const manifest = a.packManifest && fs.existsSync(a.packManifest) ? readJson(a.packManifest) : {};
-  const { seen, ingestedPacks, lockedSchema, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
+  const { seen, ingestedPacks, lockedSchema, coverageTally, alreadyIngested } = loadCumulativeSeen(cumPath, provPath, a.packId);
 
-  // same-schema gate (fail-closed): require an explicit schema, lock the cumulative to it.
+  // same-schema gate (fail-closed): require an explicit schema, lock the cumulative to it,
+  // and verify every row carries the same schema (no mixed-schema input).
   const packSchema = resolveSchema(manifest, rows, a.schemaVersion);
   schemaGate(packSchema, lockedSchema);
+  rowSchemaGate(rows, packSchema);
   const effectiveLockedSchema = lockedSchema || packSchema;
 
   // 4. gates
   const { cohortRows, preCohortRows, stats } = applyGates(rows, { trainingTokens, seenSigKeys: seen });
   const sym = symmetryReport(preCohortRows);
+
+  // coverage tally: accumulate per-class sol_curve candidate -> cohort survival across packs
+  const newTally = JSON.parse(JSON.stringify(coverageTally));
+  if (!alreadyIngested) {
+    for (const lab of ['dog', 'dud']) {
+      const solc = preCohortRows.filter((r) => r.label === lab && r.return_domain === COHORT_DOMAIN).length;
+      const kept = cohortRows.filter((r) => r.label === lab).length;
+      newTally[lab].sol_curve_total += solc;
+      newTally[lab].kept += kept;
+    }
+  }
+  const cumCoverageAsymPp = coverageAsymmetryPp(newTally);
 
   // 5/6. append (idempotent) + daily artifacts
   const stampedRows = cohortRows.map((r) => ({
@@ -389,6 +479,7 @@ function main() {
     fs.writeFileSync(provPath, JSON.stringify({
       ingested_pack_ids: [...ingestedPacks, a.packId],
       locked_schema_version: effectiveLockedSchema,
+      coverage_tally: newTally,
     }, null, 2));
   }
 
@@ -405,6 +496,9 @@ function main() {
     symmetry: sym,
     daily_cohort: { dog: classCounts(cohortRows).dog, dud: classCounts(cohortRows).dud },
     cumulative_cohort: { dog: cc.dog, dud: cc.dud },
+    cumulative_coverage_tally: newTally,
+    cumulative_coverage_asymmetry_pp: cumCoverageAsymPp,
+    coverage_gate: { max_allowed_pp: COVERAGE_ASYMMETRY_MAX_PP, ok: cumCoverageAsymPp === null || Math.abs(cumCoverageAsymPp) <= COVERAGE_ASYMMETRY_MAX_PP },
     milestones: ALLOWED_LOOK_POINTS.reduce((m, lp) => {
       m[`n${lp}`] = { dog_reached: cc.dog >= lp, dud_reached: cc.dud >= lp, both_reached: cc.dog >= lp && cc.dud >= lp };
       return m;
@@ -418,7 +512,7 @@ function main() {
   let lookOut = { look_point_requested: a.lookPoint, auc_withheld: true,
     reason: a.lookPoint ? 'computed below' : 'no look point requested: counts/QA only, AUC withheld by design' };
   if (a.lookPoint) {
-    const res = lookpointAnalysis(cumRows, a.lookPoint); // throws if not reached
+    const res = lookpointAnalysis(cumRows, a.lookPoint, { coverageAsymmetryPp: cumCoverageAsymPp }); // throws if not reached
     lookOut = { look_point_requested: a.lookPoint, auc_withheld: false, ...res.public };
     // Always write the PUBLIC verdict (no AUC value at n=50). The sealed numeric
     // AUC is written ONLY when explicitly revealed via --reveal-sealed-auc <path>,
@@ -444,7 +538,8 @@ function main() {
 // no caller (including tests) can compute AUC outside a reached look point.
 export {
   applyGates, classCounts, symmetryReport, lookpointAnalysis,
-  verifyPreregLock, schemaGate, resolveSchema, hasTrades, sigKey, ALLOWED_LOOK_POINTS,
+  verifyPreregLock, schemaGate, resolveSchema, rowSchemaGate,
+  hasTrades, sigKey, ALLOWED_LOOK_POINTS, COVERAGE_ASYMMETRY_MAX_PP,
 };
 
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
