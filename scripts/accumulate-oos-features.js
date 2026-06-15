@@ -219,6 +219,23 @@ function topkPrecision(rows, k) {
   if (!top.length) return null;
   return Number((top.filter((r) => r.label === 'dog').length / top.length).toFixed(4));
 }
+// leave-one-stratum-out survival: remove every row in stratum `label`, require the
+// REMAINDER (with enough of both classes) to still separate (AUC>0.55). Used for
+// both date and source robustness so that NO single day/source can carry the edge.
+function leaveOneOutAuc(rows, inStratum, label) {
+  const rem = rows.filter((r) => !inStratum(r));
+  const rd = rem.filter((r) => r.label === 'dog');
+  const ru = rem.filter((r) => r.label === 'dud');
+  const a = aucRaw(rd.map((r) => numeric(r[PRIMARY_FEATURE])), ru.map((r) => numeric(r[PRIMARY_FEATURE])));
+  const evaluable = rd.length >= MIN_STRATUM && ru.length >= MIN_STRATUM;
+  return {
+    left_out: label, evaluable, n_dog: rd.length, n_dud: ru.length,
+    auc: a !== null ? Number(a.toFixed(4)) : null,
+    // fail-closed: if removing this stratum leaves too little to evaluate, we cannot
+    // confirm the signal survives WITHOUT it -> treat as not surviving.
+    survives: evaluable && a !== null && a > 0.55,
+  };
+}
 
 /**
  * The ONLY entry point that computes AUC. It refuses unless a valid look point is
@@ -233,6 +250,28 @@ function lookpointAnalysis(cohortRows, lookPoint, opts = {}) {
   if (dog < lookPoint || dud < lookPoint) {
     throw new Error(`look_point_not_reached: dog=${dog} dud=${dud} < ${lookPoint} per class (AUC withheld)`);
   }
+
+  // COVERAGE-SYMMETRY HARD GATE (prereg §7) — evaluated FIRST, before ANY AUC read
+  // or futility decision, for EVERY look point (incl. n=50). A biased dog/dud
+  // usable-rate denominator must neither declare success NOR futility-STOP a real
+  // signal: a STOP under coverage bias could kill a true edge prematurely. When
+  // biased we do not even compute the AUC.
+  const coverageAsymmetryPp = numeric(opts.coverageAsymmetryPp);
+  const coverageMaxPp = numeric(opts.coverageMaxPp) ?? COVERAGE_ASYMMETRY_MAX_PP;
+  const coverageOk = coverageAsymmetryPp === null || Math.abs(coverageAsymmetryPp) <= coverageMaxPp;
+  const coverageBlock = { asymmetry_pp: coverageAsymmetryPp, max_allowed_pp: coverageMaxPp, coverage_ok: coverageOk };
+  if (!coverageOk) {
+    return {
+      public: {
+        look_point: lookPoint, primary: PRIMARY_FEATURE, verdict: 'coverage_biased_inconclusive',
+        coverage: coverageBlock, n_dog: dog, n_dud: dud,
+        instruction: 'Coverage asymmetry exceeds the locked threshold: do NOT read AUC and do NOT futility-STOP. Fix/explain dog-vs-dud usable-rate coverage, then re-evaluate under this prereg.',
+        decision: 'Coverage-biased: dog/dud usable-rate asymmetry exceeds the locked threshold. Not success, not stop — coverage must be corrected before any AUC interpretation.',
+      },
+      sealed: null,
+    };
+  }
+
   const dogVals = dogRows.map((r) => numeric(r[PRIMARY_FEATURE]));
   const dudVals = dudRows.map((r) => numeric(r[PRIMARY_FEATURE]));
   const auc = aucRaw(dogVals, dudVals);
@@ -243,7 +282,7 @@ function lookpointAnalysis(cohortRows, lookPoint, opts = {}) {
     // FUTILITY ONLY. Do not expose AUC on the returned public verdict.
     const directionalNull = auc <= 0.55 || (ci && ci.lo <= 0.50);
     return {
-      public: { look_point: 50, mode: 'futility_only', directional_null: directionalNull,
+      public: { look_point: 50, mode: 'futility_only', directional_null: directionalNull, coverage: coverageBlock,
         instruction: directionalNull
           ? 'STOP accumulation; mark directional_null; return to sourcing/target review unless user authorizes extension.'
           : 'CONTINUE accumulation toward n>=100. Success cannot be declared at n=50.' },
@@ -289,37 +328,38 @@ function lookpointAnalysis(cohortRows, lookPoint, opts = {}) {
   const uniqueTokenAuc = aucRaw(dogU.map((r) => numeric(r[PRIMARY_FEATURE])), dudU.map((r) => numeric(r[PRIMARY_FEATURE])));
   const uniqueTokenSurvives = dogU.length >= MIN_UNIQUE_TOKENS && dudU.length >= MIN_UNIQUE_TOKENS
     && uniqueTokenAuc !== null && uniqueTokenAuc > 0.55;
-  // (b) UTC-date split: >=2 dates, and signal holds with the largest single day removed
+  // (b) UTC-date split: >=2 dates AND signal survives leave-EACH-day-out (not just
+  //     leave-largest): otherwise one small day could carry the entire edge.
   const dates = [...new Set(cohortRows.map((r) => utcDate(r.signal_ts)))];
-  let dateSurvives = false; let leaveLargestDayOutAuc = null;
-  if (dates.length >= 2) {
-    const sizeByDate = Object.fromEntries(dates.map((d) => [d, cohortRows.filter((r) => utcDate(r.signal_ts) === d).length]));
-    const largest = [...dates].sort((a, b) => sizeByDate[b] - sizeByDate[a])[0];
-    const without = cohortRows.filter((r) => utcDate(r.signal_ts) !== largest);
-    const wd = without.filter((r) => r.label === 'dog'); const wu = without.filter((r) => r.label === 'dud');
-    leaveLargestDayOutAuc = aucRaw(wd.map((r) => numeric(r[PRIMARY_FEATURE])), wu.map((r) => numeric(r[PRIMARY_FEATURE])));
-    dateSurvives = wd.length >= MIN_STRATUM && wu.length >= MIN_STRATUM && leaveLargestDayOutAuc !== null && leaveLargestDayOutAuc > 0.55;
+  let dateSurvives; let dateDetail;
+  if (dates.length < 2) {
+    dateSurvives = false; dateDetail = { status: 'single_date', n_dates: dates.length };
+  } else {
+    const loo = dates.map((d) => leaveOneOutAuc(cohortRows, (r) => utcDate(r.signal_ts) === d, d));
+    dateSurvives = loo.every((x) => x.survives);
+    dateDetail = { status: 'multi_date', n_dates: dates.length, leave_one_date_out: loo };
   }
-  // (c) source split: only blocks when source metadata exists and is single-source
+  // (c) source split: when source metadata exists, require >=2 sources AND survival
+  //     of leave-EACH-source-out (multi-source is a precondition, not a proof).
   const sources = [...new Set(cohortRows.map(sourceOf).filter(Boolean))];
-  const hasSourceMeta = sources.length > 0;
-  const sourceControl = hasSourceMeta
-    ? { status: sources.length >= 2 ? 'multi_source' : 'single_source', n_sources: sources.length }
-    : { status: 'no_source_metadata' };
-  const sourceSurvives = hasSourceMeta ? sources.length >= 2 : true;
-  // coverage-symmetry hard gate (prereg §7): cumulative usable-rate asymmetry
-  const coverageAsymmetryPp = numeric(opts.coverageAsymmetryPp);
-  const coverageMaxPp = numeric(opts.coverageMaxPp) ?? COVERAGE_ASYMMETRY_MAX_PP;
-  const coverageOk = coverageAsymmetryPp === null || Math.abs(coverageAsymmetryPp) <= coverageMaxPp;
+  let sourceSurvives; let sourceDetail;
+  if (sources.length === 0) {
+    sourceSurvives = true; sourceDetail = { status: 'no_source_metadata' };
+  } else if (sources.length < 2) {
+    sourceSurvives = false; sourceDetail = { status: 'single_source', n_sources: 1 };
+  } else {
+    const loo = sources.map((s) => leaveOneOutAuc(cohortRows, (r) => sourceOf(r) === s, s));
+    sourceSurvives = loo.every((x) => x.survives);
+    sourceDetail = { status: 'multi_source', n_sources: sources.length, leave_one_source_out: loo };
+  }
 
-  // locked thresholds (Section 8)
+  // locked thresholds (Section 8). Coverage already gated above (always ok here).
   const successCore = auc > 0.60 && ci && ci.lo > 0.55
     && ((top20Lift !== null && top20Lift >= 0.10) || (top30Lift !== null && top30Lift >= 0.10))
     && aucTradesPresent > 0.55 && stageSurvives;
   const robustnessOk = uniqueTokenSurvives && dateSurvives && sourceSurvives;
   let verdict;
-  if (!coverageOk) verdict = 'coverage_biased_inconclusive';
-  else if (successCore && robustnessOk) verdict = 'success';
+  if (successCore && robustnessOk) verdict = 'success';
   else if (auc <= 0.56) verdict = 'failure';
   else if (lookPoint >= 130) verdict = 'weak_inconclusive';
   else verdict = 'gray_continue_to_130';
@@ -336,18 +376,16 @@ function lookpointAnalysis(cohortRows, lookPoint, opts = {}) {
       robustness: {
         unique_token_survives: uniqueTokenSurvives, unique_token_auc: uniqueTokenAuc !== null ? Number(uniqueTokenAuc.toFixed(4)) : null,
         n_unique_dog_tokens: dogU.length, n_unique_dud_tokens: dudU.length,
-        date_survives: dateSurvives, n_dates: dates.length, leave_largest_day_out_auc: leaveLargestDayOutAuc !== null ? Number(leaveLargestDayOutAuc.toFixed(4)) : null,
-        source_control: sourceControl, source_survives: sourceSurvives,
+        date_survives: dateSurvives, date_detail: dateDetail,
+        source_survives: sourceSurvives, source_detail: sourceDetail,
       },
-      coverage: { asymmetry_pp: coverageAsymmetryPp, max_allowed_pp: coverageMaxPp, coverage_ok: coverageOk },
+      coverage: coverageBlock,
       n_dog: dog, n_dud: dud,
       decision: verdict === 'success'
         ? 'OOS success: may design sol_curve-only PURE SHADOW ranking gate (no trade/size/exit/contract change).'
         : verdict === 'failure'
           ? 'OOS failure: do NOT tune gate/matrix/RR/liquidity; reassess sourcing or partition capture goal.'
-          : verdict === 'coverage_biased_inconclusive'
-            ? 'Coverage-biased: dog/dud usable-rate asymmetry exceeds the locked threshold. Explain/fix coverage before any AUC interpretation. Not success.'
-            : 'OOS gray/inconclusive: collect another OOS pack under this prereg or write a new prereg. Change nothing.',
+          : 'OOS gray/inconclusive: collect another OOS pack under this prereg or write a new prereg. Change nothing.',
     },
     sealed: null,
   };
@@ -446,6 +484,10 @@ function main() {
 
   // same-schema gate (fail-closed): require an explicit schema, lock the cumulative to it,
   // and verify every row carries the same schema (no mixed-schema input).
+  // WRAPPER CONTRACT: rowSchemaGate permits an all-rows-missing-schema pack (it is then
+  // stamped from manifest/override). The daily wrapper MUST therefore guarantee that the
+  // manifest/override schema_version IS the actual feature-table schema; otherwise a pack
+  // whose rows all lack schema_version could be mis-stamped into the cumulative.
   const packSchema = resolveSchema(manifest, rows, a.schemaVersion);
   schemaGate(packSchema, lockedSchema);
   rowSchemaGate(rows, packSchema);

@@ -19,6 +19,14 @@ function robustRows(n) {
   for (let i = 0; i < n; i += 1) rows.push(row({ token_ca: `u${i}`, signal_ts: BASE + (i % 3) * 86400 + i, label: 'dud', unique_buyers: i, progress_stage: i % 2 ? 'mid' : 'late' }));
   return rows;
 }
+// non-separable (overlapping) feature: AUC ~0.5 -> would directional_null at n=50
+function nullRows(n) {
+  const rng = (k) => Math.sin(k) * 0.5 + 0.5;
+  const rows = [];
+  for (let i = 0; i < n; i += 1) rows.push(row({ token_ca: `d${i}`, signal_ts: BASE + i, label: 'dog', unique_buyers: Math.round(rng(i) * 100) }));
+  for (let i = 0; i < n; i += 1) rows.push(row({ token_ca: `u${i}`, signal_ts: BASE + 1000 + i, label: 'dud', unique_buyers: Math.round(rng(i + 0.5) * 100) }));
+  return rows;
+}
 
 test('cohort filter keeps only sol_curve + has_trades + complete_window', () => {
   const rows = [row({ token_ca: 'a', signal_ts: 1 }), row({ token_ca: 'b', signal_ts: 2, return_domain: 'usd_gmgn' }),
@@ -121,6 +129,48 @@ test('B-new-3: coverage asymmetry above threshold -> coverage_biased_inconclusiv
   const res = A.lookpointAnalysis(robustRows(110), 100, { coverageAsymmetryPp: 30 });
   assert.equal(res.public.verdict, 'coverage_biased_inconclusive');
   assert.equal(res.public.coverage.coverage_ok, false);
+});
+
+test('R3-1: n=50 + high coverage asymmetry pre-empts futility STOP (no AUC read)', () => {
+  // nullRows would directional_null:true (STOP) at n=50; coverage bias must pre-empt
+  const res = A.lookpointAnalysis(nullRows(55), 50, { coverageAsymmetryPp: 30 });
+  assert.equal(res.public.verdict, 'coverage_biased_inconclusive');
+  assert.equal('directional_null' in res.public, false); // not the futility surface
+  assert.equal('mode' in res.public, false);
+  assert.equal(res.sealed, null); // AUC not even computed/sealed
+  // sanity: same data WITHOUT coverage bias does take the futility STOP path
+  const base = A.lookpointAnalysis(nullRows(55), 50);
+  assert.equal(base.public.directional_null, true);
+});
+
+test('R3-2: edge driven by ONE source (leave-one-source-out fails) cannot success', () => {
+  const rows = [];
+  for (let i = 0; i < 60; i += 1) { // source A: separable, carries the edge
+    rows.push(row({ token_ca: `a_d${i}`, signal_ts: BASE + (i % 3) * 86400 + i, label: 'dog', unique_buyers: 200 + i, progress_stage: i % 2 ? 'mid' : 'late', source: 'A' }));
+    rows.push(row({ token_ca: `a_u${i}`, signal_ts: BASE + (i % 3) * 86400 + i, label: 'dud', unique_buyers: i, progress_stage: i % 2 ? 'mid' : 'late', source: 'A' }));
+  }
+  for (let i = 0; i < 60; i += 1) { // source B: null (overlapping), no edge
+    rows.push(row({ token_ca: `b_d${i}`, signal_ts: BASE + (i % 3) * 86400 + i, label: 'dog', unique_buyers: 100 + (i % 5), progress_stage: i % 2 ? 'mid' : 'late', source: 'B' }));
+    rows.push(row({ token_ca: `b_u${i}`, signal_ts: BASE + (i % 3) * 86400 + i, label: 'dud', unique_buyers: 100 + (i % 5), progress_stage: i % 2 ? 'mid' : 'late', source: 'B' }));
+  }
+  const res = A.lookpointAnalysis(rows, 100);
+  assert.notEqual(res.public.verdict, 'success');
+  assert.equal(res.public.robustness.source_survives, false);
+});
+
+test('R3-3: edge driven by ONE date (leave-each-day-out, not just largest) cannot success', () => {
+  const rows = [];
+  for (let i = 0; i < 20; i += 1) { // small day D1: separable, carries the edge
+    rows.push(row({ token_ca: `s_d${i}`, signal_ts: BASE + i, label: 'dog', unique_buyers: 200 + i, progress_stage: i % 2 ? 'mid' : 'late' }));
+    rows.push(row({ token_ca: `s_u${i}`, signal_ts: BASE + i, label: 'dud', unique_buyers: i, progress_stage: i % 2 ? 'mid' : 'late' }));
+  }
+  for (let i = 0; i < 90; i += 1) { // large day D2: null (overlapping), no edge
+    rows.push(row({ token_ca: `l_d${i}`, signal_ts: BASE + 5 * 86400 + i, label: 'dog', unique_buyers: 100 + (i % 5), progress_stage: i % 2 ? 'mid' : 'late' }));
+    rows.push(row({ token_ca: `l_u${i}`, signal_ts: BASE + 5 * 86400 + i, label: 'dud', unique_buyers: 100 + (i % 5), progress_stage: i % 2 ? 'mid' : 'late' }));
+  }
+  const res = A.lookpointAnalysis(rows, 100);
+  assert.notEqual(res.public.verdict, 'success');
+  assert.equal(res.public.robustness.date_survives, false);
 });
 
 test('B3: rowSchemaGate rejects mixed / mismatched row schema; same/all-missing ok', () => {
