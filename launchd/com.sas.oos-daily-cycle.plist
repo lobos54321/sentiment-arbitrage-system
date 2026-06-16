@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.sas.oos-daily-cycle — headless daily OOS accumulation cycle (research-only).
+  Runs the launchd wrapper once/day at 10:30 local (Sydney). RunAtLoad=false (no run on load).
+  No token / API key is stored here; the wrapper reads secrets from files.
+  Install:   cp launchd/com.sas.oos-daily-cycle.plist ~/Library/LaunchAgents/ && launchctl load -w ~/Library/LaunchAgents/com.sas.oos-daily-cycle.plist
+  Uninstall: launchctl unload ~/Library/LaunchAgents/com.sas.oos-daily-cycle.plist && rm ~/Library/LaunchAgents/com.sas.oos-daily-cycle.plist
+  Status:    launchctl list | grep com.sas.oos-daily-cycle
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sas.oos-daily-cycle</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/boliu/sas-research/scripts/oos-daily-launchd-runner.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/boliu/sas-research</string>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/boliu/sas-data-room/oos-runner-logs/launchd.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/boliu/sas-data-room/oos-runner-logs/launchd.stderr.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
