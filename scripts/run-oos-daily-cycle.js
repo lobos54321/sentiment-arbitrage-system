@@ -48,7 +48,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 
 const SCRIPTS = path.dirname(new URL(import.meta.url).pathname);
 const REPO = path.resolve(SCRIPTS, '..');
@@ -73,6 +73,8 @@ const N50 = 50;                                  // futility look point per clas
 const SNAPSHOT_MIN_BYTES = 60 * 1024 * 1024;     // valid snapshots have been ~64-71MB; smaller => truncated
 const PULL_RETRIES = 3;
 const PULL_TIMEOUT_S = 240;                       // generous: 64MB body + possible zeabur cold-start
+const PULL_WALL_TIMEOUT_MS = (PULL_TIMEOUT_S + 30) * 1000;
+const PULL_STALL_TIMEOUT_MS = 90 * 1000;
 const OPS_LOG = path.join(DATAROOM, 'oos-daily-ops-log.jsonl');
 
 function die(msg) { console.error(`run-oos-daily-cycle: FAIL-CLOSED: ${msg}`); process.exit(2); }
@@ -90,6 +92,63 @@ function runStage(label, cmd, args) {
 
 function curlConfigQuote(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '');
+}
+
+function runCurlWithWatchdog(curlConfigPath, dbPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('curl', ['--config', curlConfigPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const startedAt = Date.now();
+    let stderr = '';
+    let settled = false;
+    let killReason = '';
+    let lastSize = 0;
+    let lastProgressAt = startedAt;
+
+    try {
+      lastSize = exists(dbPath) ? fs.statSync(dbPath).size : 0;
+    } catch {
+      lastSize = 0;
+    }
+
+    const killFor = (reason) => {
+      if (settled || killReason) return;
+      killReason = reason;
+      try { child.kill('SIGKILL'); } catch { /* process may already be gone */ }
+    };
+
+    const timer = setInterval(() => {
+      let size = 0;
+      try { size = exists(dbPath) ? fs.statSync(dbPath).size : 0; } catch { size = 0; }
+      if (size !== lastSize) {
+        lastSize = size;
+        lastProgressAt = Date.now();
+      }
+      const elapsed = Date.now() - startedAt;
+      const idle = Date.now() - lastProgressAt;
+      if (elapsed > PULL_WALL_TIMEOUT_MS) {
+        killFor(`wall timeout after ${Math.round(elapsed / 1000)}s`);
+      } else if (elapsed > 30_000 && idle > PULL_STALL_TIMEOUT_MS) {
+        killFor(`download stalled for ${Math.round(idle / 1000)}s at ${lastSize} bytes`);
+      }
+    }, 5_000);
+
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+    child.on('error', (err) => {
+      settled = true;
+      clearInterval(timer);
+      reject(err);
+    });
+    child.on('close', (code, signal) => {
+      settled = true;
+      clearInterval(timer);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const reason = killReason || `curl exited code=${code} signal=${signal || 'none'}`;
+      reject(new Error(`${reason}: ${stderr.slice(0, 160)}`));
+    });
+  });
 }
 
 function remoteMainHead() {
@@ -119,7 +178,7 @@ function checkPreconditions() {
   return { preregSha: actual };
 }
 
-function pullSnapshot(packDir) {
+async function pullSnapshot(packDir) {
   fs.mkdirSync(packDir, { recursive: true });
   const token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
   if (!token) die(`dashboard token file is empty: ${TOKEN_FILE}`);
@@ -146,11 +205,7 @@ function pullSnapshot(packDir) {
         '',
       ].join('\n');
       fs.writeFileSync(curlConfigPath, curlConfig, { mode: 0o600 });
-      execFileSync('curl', ['--config', curlConfigPath], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        timeout: (PULL_TIMEOUT_S + 30) * 1000,
-        killSignal: 'SIGKILL',
-      });
+      await runCurlWithWatchdog(curlConfigPath, dbPath);
     } catch (e) {
       lastErr = `curl failed (attempt ${attempt}/${PULL_RETRIES}): ${String(e.stderr || e.message).replace(token, '<redacted>').slice(0, 160)}`;
       console.error(`[snapshot] ${lastErr} — retrying`); continue;
@@ -169,7 +224,7 @@ function pullSnapshot(packDir) {
   return null; // unreachable
 }
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
   let checkOnly = false;
   for (const a of argv) {
@@ -214,7 +269,7 @@ function main() {
 
   // ---- 1. fresh snapshot -> frozen pack ----
   const packDir = path.join(DATAROOM, `oos-frozen-pack-${utcStamp()}`);
-  const pack = pullSnapshot(packDir);
+  const pack = await pullSnapshot(packDir);
   fs.writeFileSync(path.join(packDir, 'manifest.json'), JSON.stringify({
     schema_version: 'oos_frozen_pack_manifest.v1', generated_at: new Date().toISOString(),
     snapshot: { path: pack.dbPath, sha256: pack.sha256, bytes: pack.bytes, integrity: pack.integrity },
@@ -295,4 +350,4 @@ function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-main();
+main().catch((e) => die(e?.message || String(e)));

@@ -36,7 +36,9 @@ test('--help prints usage and exits 0 (no network)', () => {
 
 test('snapshot curl keeps token out of argv and has an outer watchdog timeout', () => {
   const src = fs.readFileSync(RUNNER, 'utf8');
-  assert.ok(src.includes("execFileSync('curl', ['--config', curlConfigPath]"), 'curl must use a config file, not secret-bearing argv');
+  assert.ok(src.includes("spawn('curl', ['--config', curlConfigPath]"), 'curl must use a config file, not secret-bearing argv');
   assert.ok(!src.includes("'-H', `Authorization: Bearer ${token}`"), 'token-bearing header must not be passed on argv');
-  assert.ok(src.includes('timeout: (PULL_TIMEOUT_S + 30) * 1000'), 'execFileSync must have a watchdog timeout around curl');
+  assert.ok(src.includes('PULL_WALL_TIMEOUT_MS'), 'curl must have an explicit wall-clock watchdog');
+  assert.ok(src.includes('PULL_STALL_TIMEOUT_MS'), 'curl must have an explicit stalled-download watchdog');
+  assert.ok(src.includes("child.kill('SIGKILL')"), 'watchdog must forcibly kill stalled curl');
 });
