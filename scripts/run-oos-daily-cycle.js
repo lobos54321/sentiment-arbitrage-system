@@ -88,6 +88,10 @@ function runStage(label, cmd, args) {
   execFileSync(cmd, args, { stdio: 'inherit' });
 }
 
+function curlConfigQuote(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '');
+}
+
 function remoteMainHead() {
   try {
     const out = execFileSync('git', ['-C', REPO, 'ls-remote', 'origin', 'main'], { encoding: 'utf8', timeout: 30000 }).trim();
@@ -123,13 +127,35 @@ function pullSnapshot(packDir) {
   const url = `${BASE_URL}/api/data/download/raw-signal-outcomes?token=${encodeURIComponent(token)}`;
   let lastErr = '';
   for (let attempt = 1; attempt <= PULL_RETRIES; attempt += 1) {
+    const curlConfigPath = path.join(packDir, `.snapshot-curl-${attempt}.conf`);
     try { fs.rmSync(dbPath, { force: true }); } catch { /* fresh each attempt */ }
     try {
-      // token travels in the header + query string only; the URL is never logged.
-      execFileSync('curl', ['-fsS', '--max-time', String(PULL_TIMEOUT_S), '-H', `Authorization: Bearer ${token}`, url, '-o', dbPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+      // Keep secrets out of argv/ps output. The temporary curl config is 0600 and
+      // deleted after each attempt; stdout/stderr never include the token.
+      const curlConfig = [
+        'fail',
+        'show-error',
+        'silent',
+        `max-time = ${PULL_TIMEOUT_S}`,
+        'connect-timeout = 30',
+        'speed-time = 60',
+        'speed-limit = 1024',
+        `header = "Authorization: Bearer ${curlConfigQuote(token)}"`,
+        `url = "${curlConfigQuote(url)}"`,
+        `output = "${curlConfigQuote(dbPath)}"`,
+        '',
+      ].join('\n');
+      fs.writeFileSync(curlConfigPath, curlConfig, { mode: 0o600 });
+      execFileSync('curl', ['--config', curlConfigPath], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        timeout: (PULL_TIMEOUT_S + 30) * 1000,
+        killSignal: 'SIGKILL',
+      });
     } catch (e) {
-      lastErr = `curl failed (attempt ${attempt}/${PULL_RETRIES}): ${String(e.stderr || e.message).slice(0, 160)}`;
+      lastErr = `curl failed (attempt ${attempt}/${PULL_RETRIES}): ${String(e.stderr || e.message).replace(token, '<redacted>').slice(0, 160)}`;
       console.error(`[snapshot] ${lastErr} — retrying`); continue;
+    } finally {
+      try { fs.rmSync(curlConfigPath, { force: true }); } catch { /* best effort */ }
     }
     const bytes = exists(dbPath) ? fs.statSync(dbPath).size : 0;
     if (bytes < SNAPSHOT_MIN_BYTES) { lastErr = `snapshot too small (${bytes} bytes < ${SNAPSHOT_MIN_BYTES}); likely truncated`; console.error(`[snapshot] ${lastErr} — retrying`); continue; }
