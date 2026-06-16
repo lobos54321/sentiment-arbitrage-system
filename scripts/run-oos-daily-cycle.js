@@ -88,9 +88,20 @@ function utcDate() { return new Date().toISOString().slice(0, 10).replace(/-/g, 
 function utcStamp() { return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z'); } // YYYYMMDDTHHMMSSZ
 function exists(p) { return fs.existsSync(p); }
 
-function runStage(label, cmd, args) {
+function runStage(label, cmd, args, opts = {}) {
   // None of these stages receive the dashboard token, so args are safe to echo.
   console.error(`\n[stage] ${label}: ${path.basename(cmd)} ${args.join(' ')}`);
+  if (opts.captureOutput) {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf8', stdio: 'pipe' });
+      if (out) process.stderr.write(out);
+    } catch (error) {
+      if (error.stdout) process.stderr.write(String(error.stdout));
+      if (error.stderr) process.stderr.write(String(error.stderr));
+      throw error;
+    }
+    return;
+  }
   execFileSync(cmd, args, { stdio: 'inherit' });
 }
 
@@ -271,7 +282,8 @@ function runDuneChunk({ rows, chunkId, rawDir, chunks, combinedRows }) {
   writeDuneSqlForWindows(chunkSql, rows);
   try {
     runStage(`DUNE ${chunkId}`, PYTHON, [DUNE_EXPORT, '--sql', chunkSql,
-      '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE]);
+      '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE],
+    { captureOutput: true });
   } catch (error) {
     if (!isDuneSplittableQueryFailure(error)) throw error;
     const splits = splitFailedDuneRows(rows);
