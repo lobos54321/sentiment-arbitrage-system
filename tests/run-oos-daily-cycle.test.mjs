@@ -46,7 +46,9 @@ test('snapshot curl keeps token out of argv and has an outer watchdog timeout', 
 test('Dune export is chunked rather than one monolithic query', () => {
   const src = fs.readFileSync(RUNNER, 'utf8');
   assert.ok(src.includes('DUNE_CHUNK_SIZE'), 'runner must have a configurable Dune chunk size');
+  assert.ok(src.includes('DUNE_CHUNK_MAX_SPAN_S'), 'runner must bound Dune chunks by time span, not only row count');
   assert.ok(src.includes('exportDuneInChunks'), 'runner must export Dune windows in chunks');
+  assert.ok(src.includes('chunkSignalWindows'), 'runner must use a chunking helper for signal windows');
   assert.ok(src.includes('chunked:') && src.includes('chunks,'), 'combined Dune manifest must preserve chunk provenance');
   assert.ok(!src.includes("runStage('DUNE', PYTHON, [DUNE_EXPORT, '--sql', path.join(duneDir, 'oos.sql')"), 'runner must not execute the whole daily SQL as one Dune query');
 });
