@@ -68,6 +68,7 @@ const DUNE_EXPORT = path.join(SCRIPTS, 'run-dune-sql-export.py');
 const VALIDATOR = path.join(SCRIPTS, 'validate-v10-curve-feature-trade-export.js');
 const PREREG = path.join(REPO, 'claudedocs/oos-sol-curve-unique-buyers-preregister.md');
 const PREREG_LOCK = path.join(REPO, 'claudedocs/oos-sol-curve-unique-buyers-preregister.sha256');
+const DUNE_TEMPLATE = path.join(SCRIPTS, 'oos-dune-trade-export.template.sql');
 
 const N50 = 50;                                  // futility look point per class (dog AND dud)
 const SNAPSHOT_MIN_BYTES = 60 * 1024 * 1024;     // valid snapshots have been ~64-71MB; smaller => truncated
@@ -75,6 +76,7 @@ const PULL_RETRIES = 3;
 const PULL_TIMEOUT_S = 240;                       // generous: 64MB body + possible zeabur cold-start
 const PULL_WALL_TIMEOUT_MS = (PULL_TIMEOUT_S + 30) * 1000;
 const PULL_STALL_TIMEOUT_MS = 90 * 1000;
+const DUNE_CHUNK_SIZE = Number(E.OOS_DUNE_CHUNK_SIZE || 12);
 const OPS_LOG = path.join(DATAROOM, 'oos-daily-ops-log.jsonl');
 
 function die(msg) { console.error(`run-oos-daily-cycle: FAIL-CLOSED: ${msg}`); process.exit(2); }
@@ -161,6 +163,103 @@ function remoteMainHead() {
 
 function appendOpsLog(result) {
   try { fs.appendFileSync(OPS_LOG, `${JSON.stringify(result)}\n`); } catch { /* logging is best-effort */ }
+}
+
+function readJsonlRows(p) {
+  if (!exists(p)) return [];
+  return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function writeJsonlRows(p, rows) {
+  fs.writeFileSync(p, rows.map((row) => JSON.stringify(sortObjectKeys(row), null, 0)).join('\n') + (rows.length ? '\n' : ''));
+}
+
+function sortObjectKeys(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return row;
+  return Object.keys(row).sort().reduce((out, key) => { out[key] = row[key]; return out; }, {});
+}
+
+function parseSignalWindowsCsv(csvPath) {
+  const lines = fs.readFileSync(csvPath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
+  const header = lines.shift()?.split(',') || [];
+  return lines.map((line) => {
+    const cells = line.split(',');
+    const row = {};
+    header.forEach((key, idx) => { row[key] = cells[idx] ?? ''; });
+    return row;
+  });
+}
+
+function writeSignalWindowsCsv(csvPath, rows) {
+  const header = ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label', 'return_domain', 'effective_tier'];
+  fs.writeFileSync(csvPath, `${header.join(',')}\n${rows.map((row) => header.map((key) => row[key]).join(',')).join('\n')}\n`);
+}
+
+function sqlQuote(value) {
+  return String(value).replace(/'/g, "''");
+}
+
+function writeDuneSqlForWindows(sqlPath, rows) {
+  const template = fs.readFileSync(DUNE_TEMPLATE, 'utf8');
+  const values = rows.map((r) => (
+    `    ('${sqlQuote(r.window_id)}', '${sqlQuote(r.token_ca)}', ${Number(r.signal_ts)}, ${Number(r.window_start_ts)}, ${Number(r.window_end_ts)}, '${sqlQuote(r.label)}', '${sqlQuote(r.return_domain)}', '${sqlQuote(r.effective_tier)}')`
+  )).join(',\n');
+  fs.writeFileSync(sqlPath, template.replace('{{SIGNAL_WINDOWS_VALUES}}', values));
+}
+
+function exportDuneInChunks({ signalWindowsPath, rawDir, tradesPath, manifestPath }) {
+  const allWindows = parseSignalWindowsCsv(signalWindowsPath)
+    .sort((a, b) => Number(a.window_end_ts) - Number(b.window_end_ts) || String(a.window_id).localeCompare(String(b.window_id)));
+  fs.mkdirSync(rawDir, { recursive: true });
+  const chunkSize = Math.max(1, DUNE_CHUNK_SIZE);
+  const chunks = [];
+  const combinedRows = [];
+  for (let i = 0; i < allWindows.length; i += chunkSize) {
+    const rows = allWindows.slice(i, i + chunkSize);
+    const chunkIndex = Math.floor(i / chunkSize) + 1;
+    const chunkId = `chunk-${String(chunkIndex).padStart(3, '0')}`;
+    const chunkDir = path.join(rawDir, chunkId);
+    fs.mkdirSync(chunkDir, { recursive: true });
+    const chunkWindows = path.join(chunkDir, 'signal_windows.csv');
+    const chunkSql = path.join(chunkDir, 'oos.sql');
+    const chunkTrades = path.join(chunkDir, 'trades.jsonl');
+    const chunkManifest = path.join(chunkDir, 'dune-manifest.json');
+    writeSignalWindowsCsv(chunkWindows, rows);
+    writeDuneSqlForWindows(chunkSql, rows);
+    runStage(`DUNE ${chunkId}/${Math.ceil(allWindows.length / chunkSize)}`, PYTHON, [DUNE_EXPORT, '--sql', chunkSql,
+      '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE]);
+    const cm = readJson(chunkManifest);
+    const chunkRows = readJsonlRows(chunkTrades);
+    combinedRows.push(...chunkRows);
+    chunks.push({
+      chunk_id: chunkId,
+      windows: rows.length,
+      min_window_start_ts: Math.min(...rows.map((r) => Number(r.window_start_ts))),
+      max_window_end_ts: Math.max(...rows.map((r) => Number(r.window_end_ts))),
+      execution_id: cm.execution_id,
+      row_count: cm.row_count,
+      out_jsonl_sha256: cm.out_jsonl_sha256,
+      sql_sha256: cm.sql_sha256,
+    });
+  }
+  writeJsonlRows(tradesPath, combinedRows);
+  const generatedAt = new Date().toISOString();
+  const manifest = {
+    schema_version: 'dune_sql_export_manifest.v1',
+    generated_at: generatedAt,
+    started_at: chunks[0]?.started_at || generatedAt,
+    sql_file: 'chunked',
+    sql_sha256: crypto.createHash('sha256').update(chunks.map((c) => c.sql_sha256).join('\n')).digest('hex'),
+    execution_id: `chunked:${chunks.map((c) => c.execution_id).join(',')}`,
+    chunked: true,
+    chunks,
+    out_jsonl: tradesPath,
+    out_jsonl_sha256: sha256File(tradesPath),
+    row_count: combinedRows.length,
+    columns: combinedRows.length ? Object.keys(combinedRows[0]).sort() : [],
+    page_limit: null,
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 }
 
 function checkPreconditions() {
@@ -301,8 +400,7 @@ async function main() {
   const tradesPath = path.join(rawDir, 'trades.jsonl');
   const duneManifestPath = path.join(rawDir, 'dune-manifest.json');
   const validationPath = path.join(rawDir, 'validation.json');
-  runStage('DUNE', PYTHON, [DUNE_EXPORT, '--sql', path.join(duneDir, 'oos.sql'),
-    '--out-jsonl', tradesPath, '--manifest', duneManifestPath, '--key-file', DUNE_KEY_FILE]);
+  exportDuneInChunks({ signalWindowsPath: path.join(duneDir, 'signal_windows.csv'), rawDir, tradesPath, manifestPath: duneManifestPath });
 
   // ---- 4. validate (out_of_window must be 0; orchestrator also re-checks) ----
   runStage('VALIDATE', NODE, [VALIDATOR, '--windows', path.join(duneDir, 'signal_windows.csv'), '--trades', tradesPath, '--out', validationPath]);

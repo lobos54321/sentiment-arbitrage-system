@@ -42,3 +42,11 @@ test('snapshot curl keeps token out of argv and has an outer watchdog timeout', 
   assert.ok(src.includes('PULL_STALL_TIMEOUT_MS'), 'curl must have an explicit stalled-download watchdog');
   assert.ok(src.includes("child.kill('SIGKILL')"), 'watchdog must forcibly kill stalled curl');
 });
+
+test('Dune export is chunked rather than one monolithic query', () => {
+  const src = fs.readFileSync(RUNNER, 'utf8');
+  assert.ok(src.includes('DUNE_CHUNK_SIZE'), 'runner must have a configurable Dune chunk size');
+  assert.ok(src.includes('exportDuneInChunks'), 'runner must export Dune windows in chunks');
+  assert.ok(src.includes('chunked:') && src.includes('chunks,'), 'combined Dune manifest must preserve chunk provenance');
+  assert.ok(!src.includes("runStage('DUNE', PYTHON, [DUNE_EXPORT, '--sql', path.join(duneDir, 'oos.sql')"), 'runner must not execute the whole daily SQL as one Dune query');
+});
