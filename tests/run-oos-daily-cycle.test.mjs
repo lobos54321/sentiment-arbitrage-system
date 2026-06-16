@@ -47,8 +47,19 @@ test('Dune export is chunked rather than one monolithic query', () => {
   const src = fs.readFileSync(RUNNER, 'utf8');
   assert.ok(src.includes('DUNE_CHUNK_SIZE'), 'runner must have a configurable Dune chunk size');
   assert.ok(src.includes('DUNE_CHUNK_MAX_SPAN_S'), 'runner must bound Dune chunks by time span, not only row count');
+  assert.ok(src.includes('DUNE_CHUNK_MIN_SPAN_S'), 'runner must be able to split a failed single window into smaller time slices');
   assert.ok(src.includes('exportDuneInChunks'), 'runner must export Dune windows in chunks');
   assert.ok(src.includes('chunkSignalWindows'), 'runner must use a chunking helper for signal windows');
+  assert.ok(src.includes('splitFailedDuneRows'), 'runner must recursively split failed Dune chunks');
+  assert.ok(src.includes('query_start_ts') && src.includes('query_end_ts'), 'runner must preserve original windows while narrowing query slices');
   assert.ok(src.includes('chunked:') && src.includes('chunks,'), 'combined Dune manifest must preserve chunk provenance');
   assert.ok(!src.includes("runStage('DUNE', PYTHON, [DUNE_EXPORT, '--sql', path.join(duneDir, 'oos.sql')"), 'runner must not execute the whole daily SQL as one Dune query');
+});
+
+test('Dune SQL template filters by query slice while exporting original window fields', () => {
+  const template = fs.readFileSync(new URL('../scripts/oos-dune-trade-export.template.sql', import.meta.url), 'utf8');
+  assert.ok(template.includes('query_start_ts') && template.includes('query_end_ts'), 'template must accept query slice bounds');
+  assert.ok(template.includes('min(query_start_ts)') && template.includes('max(query_end_ts)'), 'source scan must be bounded by query slice bounds');
+  assert.ok(template.includes('t.block_time BETWEEN w.query_start_ts AND w.query_end_ts'), 'join must use query slice bounds');
+  assert.ok(template.includes('w.window_start_ts') && template.includes('w.window_end_ts'), 'output must retain original window bounds');
 });

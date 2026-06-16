@@ -78,6 +78,7 @@ const PULL_WALL_TIMEOUT_MS = (PULL_TIMEOUT_S + 30) * 1000;
 const PULL_STALL_TIMEOUT_MS = 90 * 1000;
 const DUNE_CHUNK_SIZE = Number(E.OOS_DUNE_CHUNK_SIZE || 12);
 const DUNE_CHUNK_MAX_SPAN_S = Number(E.OOS_DUNE_CHUNK_MAX_SPAN_S || 3600);
+const DUNE_CHUNK_MIN_SPAN_S = Number(E.OOS_DUNE_CHUNK_MIN_SPAN_S || 60);
 const OPS_LOG = path.join(DATAROOM, 'oos-daily-ops-log.jsonl');
 
 function die(msg) { console.error(`run-oos-daily-cycle: FAIL-CLOSED: ${msg}`); process.exit(2); }
@@ -192,7 +193,7 @@ function parseSignalWindowsCsv(csvPath) {
 }
 
 function writeSignalWindowsCsv(csvPath, rows) {
-  const header = ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label', 'return_domain', 'effective_tier'];
+  const header = ['window_id', 'token_ca', 'signal_ts', 'window_start_ts', 'window_end_ts', 'label', 'return_domain', 'effective_tier', 'query_start_ts', 'query_end_ts'];
   fs.writeFileSync(csvPath, `${header.join(',')}\n${rows.map((row) => header.map((key) => row[key]).join(',')).join('\n')}\n`);
 }
 
@@ -203,10 +204,13 @@ function sqlQuote(value) {
 function writeDuneSqlForWindows(sqlPath, rows) {
   const template = fs.readFileSync(DUNE_TEMPLATE, 'utf8');
   const values = rows.map((r) => (
-    `    ('${sqlQuote(r.window_id)}', '${sqlQuote(r.token_ca)}', ${Number(r.signal_ts)}, ${Number(r.window_start_ts)}, ${Number(r.window_end_ts)}, '${sqlQuote(r.label)}', '${sqlQuote(r.return_domain)}', '${sqlQuote(r.effective_tier)}')`
+    `    ('${sqlQuote(r.window_id)}', '${sqlQuote(r.token_ca)}', ${Number(r.signal_ts)}, ${Number(r.window_start_ts)}, ${Number(r.window_end_ts)}, '${sqlQuote(r.label)}', '${sqlQuote(r.return_domain)}', '${sqlQuote(r.effective_tier)}', ${queryStartTs(r)}, ${queryEndTs(r)})`
   )).join(',\n');
   fs.writeFileSync(sqlPath, template.replace('{{SIGNAL_WINDOWS_VALUES}}', values));
 }
+
+function queryStartTs(row) { return Number(row.query_start_ts || row.window_start_ts); }
+function queryEndTs(row) { return Number(row.query_end_ts || row.window_end_ts); }
 
 function chunkSignalWindows(rows) {
   const chunks = [];
@@ -215,8 +219,8 @@ function chunkSignalWindows(rows) {
   const maxSpan = Math.max(900, DUNE_CHUNK_MAX_SPAN_S);
   const spanWith = (candidate) => {
     const all = [...current, candidate];
-    const minStart = Math.min(...all.map((r) => Number(r.window_start_ts)));
-    const maxEnd = Math.max(...all.map((r) => Number(r.window_end_ts)));
+    const minStart = Math.min(...all.map(queryStartTs));
+    const maxEnd = Math.max(...all.map(queryEndTs));
     return maxEnd - minStart;
   };
   for (const row of rows) {
@@ -230,8 +234,71 @@ function chunkSignalWindows(rows) {
   return chunks;
 }
 
+function splitFailedDuneRows(rows) {
+  if (rows.length > 1) {
+    const mid = Math.ceil(rows.length / 2);
+    return [rows.slice(0, mid), rows.slice(mid)];
+  }
+  const row = rows[0];
+  const start = queryStartTs(row);
+  const end = queryEndTs(row);
+  const span = end - start + 1;
+  if (span <= Math.max(1, DUNE_CHUNK_MIN_SPAN_S)) return null;
+  const mid = Math.floor((start + end) / 2);
+  return [
+    [{ ...row, query_start_ts: start, query_end_ts: mid }],
+    [{ ...row, query_start_ts: mid + 1, query_end_ts: end }],
+  ];
+}
+
+function runDuneChunk({ rows, chunkId, rawDir, chunks, combinedRows }) {
+  const chunkDir = path.join(rawDir, chunkId);
+  fs.mkdirSync(chunkDir, { recursive: true });
+  const chunkWindows = path.join(chunkDir, 'signal_windows.csv');
+  const chunkSql = path.join(chunkDir, 'oos.sql');
+  const chunkTrades = path.join(chunkDir, 'trades.jsonl');
+  const chunkManifest = path.join(chunkDir, 'dune-manifest.json');
+  writeSignalWindowsCsv(chunkWindows, rows);
+  writeDuneSqlForWindows(chunkSql, rows);
+  try {
+    runStage(`DUNE ${chunkId}`, PYTHON, [DUNE_EXPORT, '--sql', chunkSql,
+      '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE]);
+  } catch (error) {
+    const splits = splitFailedDuneRows(rows);
+    if (!splits) throw error;
+    console.error(`[dune] ${chunkId} failed; splitting into ${splits.length} smaller chunk(s) and retrying.`);
+    splits.forEach((splitRows, idx) => runDuneChunk({
+      rows: splitRows,
+      chunkId: `${chunkId}-${String.fromCharCode(97 + idx)}`,
+      rawDir,
+      chunks,
+      combinedRows,
+    }));
+    return;
+  }
+  const cm = readJson(chunkManifest);
+  const chunkRows = readJsonlRows(chunkTrades);
+  combinedRows.push(...chunkRows);
+  chunks.push({
+    chunk_id: chunkId,
+    windows: new Set(rows.map((r) => r.window_id)).size,
+    query_slices: rows.length,
+    min_window_start_ts: Math.min(...rows.map((r) => Number(r.window_start_ts))),
+    max_window_end_ts: Math.max(...rows.map((r) => Number(r.window_end_ts))),
+    min_query_start_ts: Math.min(...rows.map(queryStartTs)),
+    max_query_end_ts: Math.max(...rows.map(queryEndTs)),
+    max_span_s: DUNE_CHUNK_MAX_SPAN_S,
+    min_span_s: DUNE_CHUNK_MIN_SPAN_S,
+    execution_id: cm.execution_id,
+    row_count: cm.row_count,
+    out_jsonl_sha256: cm.out_jsonl_sha256,
+    sql_sha256: cm.sql_sha256,
+  });
+}
+
 function exportDuneInChunks({ signalWindowsPath, rawDir, tradesPath, manifestPath }) {
   const allWindows = parseSignalWindowsCsv(signalWindowsPath)
+    .map((row) => ({ ...row, query_start_ts: row.window_start_ts, query_end_ts: row.window_end_ts }))
     .sort((a, b) => Number(a.window_end_ts) - Number(b.window_end_ts) || String(a.window_id).localeCompare(String(b.window_id)));
   fs.mkdirSync(rawDir, { recursive: true });
   const windowChunks = chunkSignalWindows(allWindows);
@@ -241,30 +308,7 @@ function exportDuneInChunks({ signalWindowsPath, rawDir, tradesPath, manifestPat
     const rows = windowChunks[i];
     const chunkIndex = i + 1;
     const chunkId = `chunk-${String(chunkIndex).padStart(3, '0')}`;
-    const chunkDir = path.join(rawDir, chunkId);
-    fs.mkdirSync(chunkDir, { recursive: true });
-    const chunkWindows = path.join(chunkDir, 'signal_windows.csv');
-    const chunkSql = path.join(chunkDir, 'oos.sql');
-    const chunkTrades = path.join(chunkDir, 'trades.jsonl');
-    const chunkManifest = path.join(chunkDir, 'dune-manifest.json');
-    writeSignalWindowsCsv(chunkWindows, rows);
-    writeDuneSqlForWindows(chunkSql, rows);
-    runStage(`DUNE ${chunkId}/${windowChunks.length}`, PYTHON, [DUNE_EXPORT, '--sql', chunkSql,
-      '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE]);
-    const cm = readJson(chunkManifest);
-    const chunkRows = readJsonlRows(chunkTrades);
-    combinedRows.push(...chunkRows);
-    chunks.push({
-      chunk_id: chunkId,
-      windows: rows.length,
-      min_window_start_ts: Math.min(...rows.map((r) => Number(r.window_start_ts))),
-      max_window_end_ts: Math.max(...rows.map((r) => Number(r.window_end_ts))),
-      max_span_s: DUNE_CHUNK_MAX_SPAN_S,
-      execution_id: cm.execution_id,
-      row_count: cm.row_count,
-      out_jsonl_sha256: cm.out_jsonl_sha256,
-      sql_sha256: cm.sql_sha256,
-    });
+    runDuneChunk({ rows, chunkId: `${chunkId}-of-${String(windowChunks.length).padStart(3, '0')}`, rawDir, chunks, combinedRows });
   }
   writeJsonlRows(tradesPath, combinedRows);
   const generatedAt = new Date().toISOString();

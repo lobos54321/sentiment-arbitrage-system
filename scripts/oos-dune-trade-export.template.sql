@@ -2,12 +2,12 @@
 -- Generated locally; output is one row per TradeEvent joined to one signal window.
 -- Paste this CTE into an indexed pump.fun TradeEvent query.
 -- Required output fields are documented in claudedocs/v10-curve-feature-export-spec.md.
-WITH signal_windows(window_id, token_ca, signal_ts, window_start_ts, window_end_ts, label, return_domain, effective_tier) AS (
+WITH signal_windows(window_id, token_ca, signal_ts, window_start_ts, window_end_ts, label, return_domain, effective_tier, query_start_ts, query_end_ts) AS (
   VALUES
 {{SIGNAL_WINDOWS_VALUES}}
 ),
 window_bounds AS (
-  SELECT min(window_start_ts) AS min_start_ts, max(window_end_ts) AS max_end_ts FROM signal_windows
+  SELECT min(query_start_ts) AS min_start_ts, max(query_end_ts) AS max_end_ts FROM signal_windows
 ),
 tokens AS (
   SELECT DISTINCT token_ca FROM signal_windows
@@ -55,7 +55,7 @@ joined AS (
   FROM signal_windows w
   JOIN source_trades t
     ON t.token_ca = w.token_ca
-   AND t.block_time BETWEEN w.window_start_ts AND w.window_end_ts
+   AND t.block_time BETWEEN w.query_start_ts AND w.query_end_ts
 )
 SELECT *
 FROM joined
