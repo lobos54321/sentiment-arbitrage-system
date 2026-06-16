@@ -251,9 +251,11 @@ function splitFailedDuneRows(rows) {
   ];
 }
 
-function isDuneQueryResourceCap(error) {
+function isDuneSplittableQueryFailure(error) {
   const msg = String(error?.stderr || error?.stdout || error?.message || error || '');
   return msg.includes('FAILED_TYPE_RESOURCES_CAP_REACHED')
+    || msg.includes('FAILED_TYPE_EXECUTION_TIMEOUT')
+    || /query execution timed out/i.test(msg)
     || /exceeded .*resources/i.test(msg)
     || /resources cap/i.test(msg);
 }
@@ -271,7 +273,7 @@ function runDuneChunk({ rows, chunkId, rawDir, chunks, combinedRows }) {
     runStage(`DUNE ${chunkId}`, PYTHON, [DUNE_EXPORT, '--sql', chunkSql,
       '--out-jsonl', chunkTrades, '--manifest', chunkManifest, '--key-file', DUNE_KEY_FILE]);
   } catch (error) {
-    if (!isDuneQueryResourceCap(error)) throw error;
+    if (!isDuneSplittableQueryFailure(error)) throw error;
     const splits = splitFailedDuneRows(rows);
     if (!splits) throw error;
     console.error(`[dune] ${chunkId} failed; splitting into ${splits.length} smaller chunk(s) and retrying.`);

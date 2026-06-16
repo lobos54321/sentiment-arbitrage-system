@@ -51,7 +51,8 @@ test('Dune export is chunked rather than one monolithic query', () => {
   assert.ok(src.includes('exportDuneInChunks'), 'runner must export Dune windows in chunks');
   assert.ok(src.includes('chunkSignalWindows'), 'runner must use a chunking helper for signal windows');
   assert.ok(src.includes('splitFailedDuneRows'), 'runner must recursively split failed Dune chunks');
-  assert.ok(src.includes('isDuneQueryResourceCap'), 'runner must only split query resource-cap failures, not billing/auth errors');
+  assert.ok(src.includes('isDuneSplittableQueryFailure'), 'runner must only split query resource/time failures, not billing/auth errors');
+  assert.ok(src.includes('FAILED_TYPE_EXECUTION_TIMEOUT'), 'Dune execution timeouts should be split and retried at finer granularity');
   assert.ok(src.includes('query_start_ts') && src.includes('query_end_ts'), 'runner must preserve original windows while narrowing query slices');
   assert.ok(src.includes('chunked:') && src.includes('chunks,'), 'combined Dune manifest must preserve chunk provenance');
   assert.ok(!src.includes("runStage('DUNE', PYTHON, [DUNE_EXPORT, '--sql', path.join(duneDir, 'oos.sql')"), 'runner must not execute the whole daily SQL as one Dune query');
