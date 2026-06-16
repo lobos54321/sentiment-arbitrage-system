@@ -49,6 +49,7 @@ test('Dune export is chunked rather than one monolithic query', () => {
   assert.ok(src.includes('DUNE_CHUNK_SIZE'), 'runner must have a configurable Dune chunk size');
   assert.ok(src.includes('DUNE_CHUNK_MAX_SPAN_S'), 'runner must bound Dune chunks by time span, not only row count');
   assert.ok(src.includes('DUNE_CHUNK_MIN_SPAN_S'), 'runner must be able to split a failed single window into smaller time slices');
+  assert.ok(src.includes('DUNE_CHUNK_PAUSE_MS'), 'runner should pause between Dune chunks to avoid rate-limit bursts');
   assert.ok(src.includes('exportDuneInChunks'), 'runner must export Dune windows in chunks');
   assert.ok(src.includes('chunkSignalWindows'), 'runner must use a chunking helper for signal windows');
   assert.ok(src.includes('splitFailedDuneRows'), 'runner must recursively split failed Dune chunks');
@@ -73,6 +74,7 @@ test('Dune exporter retries transient API/network failures but not HTTP failures
   assert.ok(src.includes('TRANSIENT_RETRIES'), 'Dune exporter should have a bounded transient retry budget');
   assert.ok(src.includes('urllib.error.URLError'), 'Dune exporter should classify URL/DNS failures as transient');
   assert.ok(src.includes('retrying in'), 'Dune exporter should log transient retries');
+  assert.ok(src.includes('exc.code == 429'), 'Dune exporter should retry HTTP 429 rate limits with backoff');
   assert.ok(src.includes('except urllib.error.HTTPError'), 'Dune HTTP failures should stay fail-closed');
   assert.ok(src.indexOf('except urllib.error.HTTPError') < src.indexOf('except Exception as exc'), 'HTTP errors must be handled before generic transient retries');
 });
@@ -80,6 +82,6 @@ test('Dune exporter retries transient API/network failures but not HTTP failures
 test('Dune exporter opts into a non-deprecated query engine tier', () => {
   const src = fs.readFileSync(DUNE_EXPORT, 'utf8');
   assert.ok(src.includes('"performance": performance'), 'Dune SQL execute body must include a performance tier');
-  assert.ok(src.includes('DUNE_PERFORMANCE", "medium"'), 'Dune exporter should default to the medium engine');
+  assert.ok(src.includes('DUNE_PERFORMANCE", "small"'), 'Dune exporter should default to the small/free-account-compatible engine');
   assert.ok(src.includes('"performance": args.performance'), 'Dune manifest should record the performance tier');
 });

@@ -25,6 +25,8 @@ from pathlib import Path
 API_BASE = "https://api.dune.com/api/v1"
 TRANSIENT_RETRIES = 5
 TRANSIENT_RETRY_BASE_SECONDS = 2
+RATE_LIMIT_RETRIES = 6
+RATE_LIMIT_DEFAULT_SLEEP_SECONDS = 60
 
 
 def now_iso() -> str:
@@ -73,6 +75,20 @@ def request_json(method: str, url: str, api_key: str, body: dict | None = None, 
             break
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429 and attempt < RATE_LIMIT_RETRIES:
+                retry_after = exc.headers.get("Retry-After")
+                try:
+                    sleep_for = int(retry_after) if retry_after else RATE_LIMIT_DEFAULT_SLEEP_SECONDS
+                except ValueError:
+                    sleep_for = RATE_LIMIT_DEFAULT_SLEEP_SECONDS
+                print(
+                    f"[dune] HTTP 429 rate limit; retrying in {sleep_for}s "
+                    f"({attempt + 1}/{RATE_LIMIT_RETRIES})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(sleep_for)
+                continue
             raise RuntimeError(f"Dune HTTP {exc.code} for {url}: {error_body}") from exc
         except Exception as exc:
             if not is_transient_network_error(exc) or attempt >= TRANSIENT_RETRIES:
@@ -170,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--page-limit", type=int, default=1000)
     parser.add_argument("--poll-seconds", type=int, default=10)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
-    parser.add_argument("--performance", default=os.environ.get("DUNE_PERFORMANCE", "medium"), choices=["small", "medium", "large"])
+    parser.add_argument("--performance", default=os.environ.get("DUNE_PERFORMANCE", "small"), choices=["small", "medium", "large", "free"])
     args = parser.parse_args(argv)
 
     sql_path = Path(args.sql)

@@ -79,6 +79,7 @@ const PULL_STALL_TIMEOUT_MS = 90 * 1000;
 const DUNE_CHUNK_SIZE = Number(E.OOS_DUNE_CHUNK_SIZE || 3);
 const DUNE_CHUNK_MAX_SPAN_S = Number(E.OOS_DUNE_CHUNK_MAX_SPAN_S || 3600);
 const DUNE_CHUNK_MIN_SPAN_S = Number(E.OOS_DUNE_CHUNK_MIN_SPAN_S || 60);
+const DUNE_CHUNK_PAUSE_MS = Number(E.OOS_DUNE_CHUNK_PAUSE_MS || 5000);
 const OPS_LOG = path.join(DATAROOM, 'oos-daily-ops-log.jsonl');
 
 function die(msg) { console.error(`run-oos-daily-cycle: FAIL-CLOSED: ${msg}`); process.exit(2); }
@@ -103,6 +104,10 @@ function runStage(label, cmd, args, opts = {}) {
     return;
   }
   execFileSync(cmd, args, { stdio: 'inherit' });
+}
+
+function sleepMs(ms) {
+  if (ms > 0) execFileSync('sleep', [String(ms / 1000)]);
 }
 
 function curlConfigQuote(value) {
@@ -316,6 +321,7 @@ function runDuneChunk({ rows, chunkId, rawDir, chunks, combinedRows }) {
     out_jsonl_sha256: cm.out_jsonl_sha256,
     sql_sha256: cm.sql_sha256,
   });
+  sleepMs(DUNE_CHUNK_PAUSE_MS);
 }
 
 function exportDuneInChunks({ signalWindowsPath, rawDir, tradesPath, manifestPath }) {
