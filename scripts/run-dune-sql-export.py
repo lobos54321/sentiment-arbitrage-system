@@ -88,8 +88,14 @@ def request_json(method: str, url: str, api_key: str, body: dict | None = None, 
     return json.loads(payload) if payload else {}
 
 
-def execute_sql(sql: str, api_key: str) -> str:
-    response = request_json("POST", f"{API_BASE}/sql/execute", api_key, {"sql": sql}, timeout=120)
+def execute_sql(sql: str, api_key: str, performance: str) -> str:
+    response = request_json(
+        "POST",
+        f"{API_BASE}/sql/execute",
+        api_key,
+        {"sql": sql, "performance": performance},
+        timeout=120,
+    )
     execution_id = response.get("execution_id") or response.get("executionId")
     if not execution_id:
         raise RuntimeError(f"Could not find execution_id in response: {response}")
@@ -164,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--page-limit", type=int, default=1000)
     parser.add_argument("--poll-seconds", type=int, default=10)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
+    parser.add_argument("--performance", default=os.environ.get("DUNE_PERFORMANCE", "medium"), choices=["small", "medium", "large"])
     args = parser.parse_args(argv)
 
     sql_path = Path(args.sql)
@@ -173,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     api_key = read_api_key(args.key_file)
 
     started_at = now_iso()
-    execution_id = args.execution_id or execute_sql(sql, api_key)
+    execution_id = args.execution_id or execute_sql(sql, api_key, args.performance)
     print(f"[dune] execution_id={execution_id}", flush=True)
     status = poll_execution(execution_id, api_key, args.poll_seconds, args.timeout_seconds)
     row_count, columns = fetch_all_results(execution_id, api_key, out_jsonl, args.page_limit)
@@ -192,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "row_count": row_count,
         "columns": columns,
         "page_limit": args.page_limit,
+        "performance": args.performance,
     }
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

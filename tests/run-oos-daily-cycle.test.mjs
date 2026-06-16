@@ -76,3 +76,10 @@ test('Dune exporter retries transient API/network failures but not HTTP failures
   assert.ok(src.includes('except urllib.error.HTTPError'), 'Dune HTTP failures should stay fail-closed');
   assert.ok(src.indexOf('except urllib.error.HTTPError') < src.indexOf('except Exception as exc'), 'HTTP errors must be handled before generic transient retries');
 });
+
+test('Dune exporter opts into a non-deprecated query engine tier', () => {
+  const src = fs.readFileSync(DUNE_EXPORT, 'utf8');
+  assert.ok(src.includes('"performance": performance'), 'Dune SQL execute body must include a performance tier');
+  assert.ok(src.includes('DUNE_PERFORMANCE", "medium"'), 'Dune exporter should default to the medium engine');
+  assert.ok(src.includes('"performance": args.performance'), 'Dune manifest should record the performance tier');
+});
