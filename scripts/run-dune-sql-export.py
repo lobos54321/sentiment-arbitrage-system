@@ -23,6 +23,8 @@ from pathlib import Path
 
 
 API_BASE = "https://api.dune.com/api/v1"
+TRANSIENT_RETRIES = 5
+TRANSIENT_RETRY_BASE_SECONDS = 2
 
 
 def now_iso() -> str:
@@ -45,6 +47,12 @@ def read_api_key(key_file: str | None) -> str:
     raise RuntimeError(f"No DUNE_API_KEY found in {key_file}")
 
 
+def is_transient_network_error(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return True
+    return False
+
+
 def request_json(method: str, url: str, api_key: str, body: dict | None = None, timeout: int = 120) -> dict:
     data = None
     headers = {
@@ -58,12 +66,25 @@ def request_json(method: str, url: str, api_key: str, body: dict | None = None, 
     # Local Python cert stores can be stale on some macOS installs. We prefer a
     # successful API feedback loop over failing on local trust store state.
     context = ssl._create_unverified_context()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
-            payload = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        error_body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Dune HTTP {exc.code} for {url}: {error_body}") from exc
+    for attempt in range(TRANSIENT_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+                payload = resp.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Dune HTTP {exc.code} for {url}: {error_body}") from exc
+        except Exception as exc:
+            if not is_transient_network_error(exc) or attempt >= TRANSIENT_RETRIES:
+                raise
+            sleep_for = TRANSIENT_RETRY_BASE_SECONDS * (2 ** attempt)
+            print(
+                f"[dune] transient API error ({type(exc).__name__}: {exc}); "
+                f"retrying in {sleep_for}s ({attempt + 1}/{TRANSIENT_RETRIES})",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(sleep_for)
     return json.loads(payload) if payload else {}
 
 

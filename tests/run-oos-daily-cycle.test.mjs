@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
 const RUNNER = new URL('../scripts/run-oos-daily-cycle.js', import.meta.url).pathname;
+const DUNE_EXPORT = new URL('../scripts/run-dune-sql-export.py', import.meta.url).pathname;
 
 // These probes hit the arg loop BEFORE any network / precondition / pull, so they
 // are deterministic and offline: the runner must refuse AUC-revealing flags and
@@ -65,4 +66,13 @@ test('Dune SQL template filters by query slice while exporting original window f
   assert.ok(template.includes('min(query_start_ts)') && template.includes('max(query_end_ts)'), 'source scan must be bounded by query slice bounds');
   assert.ok(template.includes('t.block_time BETWEEN w.query_start_ts AND w.query_end_ts'), 'join must use query slice bounds');
   assert.ok(template.includes('w.window_start_ts') && template.includes('w.window_end_ts'), 'output must retain original window bounds');
+});
+
+test('Dune exporter retries transient API/network failures but not HTTP failures', () => {
+  const src = fs.readFileSync(DUNE_EXPORT, 'utf8');
+  assert.ok(src.includes('TRANSIENT_RETRIES'), 'Dune exporter should have a bounded transient retry budget');
+  assert.ok(src.includes('urllib.error.URLError'), 'Dune exporter should classify URL/DNS failures as transient');
+  assert.ok(src.includes('retrying in'), 'Dune exporter should log transient retries');
+  assert.ok(src.includes('except urllib.error.HTTPError'), 'Dune HTTP failures should stay fail-closed');
+  assert.ok(src.indexOf('except urllib.error.HTTPError') < src.indexOf('except Exception as exc'), 'HTTP errors must be handled before generic transient retries');
 });
