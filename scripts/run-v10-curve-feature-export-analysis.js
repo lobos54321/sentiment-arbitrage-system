@@ -274,6 +274,7 @@ function main() {
     '--duds', cohortSubset.duds,
     '--decode', decodeOut,
     '--out', featureOut,
+    '--include-discrimination-report',
   ]);
 
   const validation = JSON.parse(fs.readFileSync(validationOut, 'utf8'));

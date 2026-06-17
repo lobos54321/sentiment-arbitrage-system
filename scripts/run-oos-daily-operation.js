@@ -41,6 +41,12 @@ const DEFAULT_TEMPLATE = path.join(SCRIPTS, 'oos-dune-trade-export.template.sql'
 function sha256File(p) { return fs.existsSync(p) ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') : null; }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 function jsonlCount(p) { return fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).length : 0; }
+function hasExactKey(obj, key) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(obj, key)) return true;
+  if (Array.isArray(obj)) return obj.some((v) => hasExactKey(v, key));
+  return Object.values(obj).some((v) => hasExactKey(v, key));
+}
 function die(msg) { console.error(`run-oos-daily-operation: ${msg}`); process.exit(2); }
 function gitHead() { try { return execFileSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return null; } }
 
@@ -219,6 +225,8 @@ function main() {
   const accDir = path.join(workDir, 'accumulate-out');
   const leak = fs.readdirSync(accDir).filter((f) => /lookpoint|sealed|auc/i.test(f));
   if (leak.length) die(`AUC artifact leak: ${leak.join(', ')}`);
+  const featureTable = readJson(path.join(workDir, 'curve-feature-table.json'));
+  if (hasExactKey(featureTable, 'auc')) die('AUC field present in daily feature table before a look point (fail-closed).');
   const qa = readJson(path.join(accDir, 'daily_qa_report.json'));
   if ('auc' in qa) die('AUC field present in daily QA before a look point (fail-closed).');
 

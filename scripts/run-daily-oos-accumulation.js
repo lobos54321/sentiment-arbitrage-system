@@ -44,6 +44,12 @@ const DEFAULT_PREREG_LOCK = path.join(REPO_ROOT, 'claudedocs/oos-sol-curve-uniqu
 
 function sha256File(p) { return fs.existsSync(p) ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') : null; }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+function hasExactKey(obj, key) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(obj, key)) return true;
+  if (Array.isArray(obj)) return obj.some((v) => hasExactKey(v, key));
+  return Object.values(obj).some((v) => hasExactKey(v, key));
+}
 function gitHead() {
   try { return execFileSync('git', ['-C', REPO_ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); }
   catch { return null; }
@@ -255,6 +261,9 @@ function main() {
 
   // ---- (#3) schema contract: feature-table manifest schema MUST equal the forced schema ----
   const ft = readJson(featureTable);
+  if (hasExactKey(ft, 'auc')) {
+    die('AUC field present in daily feature table before a look point (fail-closed). Rebuild without discrimination report.');
+  }
   if (ft.schema_version && ft.schema_version !== a.schemaVersion) {
     die(`schema_contract_violation: feature-table schema_version "${ft.schema_version}" != forced --schema-version `
       + `"${a.schemaVersion}". Refusing to stamp a mislabeled schema into the cumulative (fail-closed).`);

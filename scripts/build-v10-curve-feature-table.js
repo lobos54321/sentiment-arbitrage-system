@@ -25,6 +25,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     duds: '',
     decode: '',
     out: '',
+    includeDiscriminationReport: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -33,6 +34,7 @@ function parseArgs(argv = process.argv.slice(2)) {
     if (key === '--duds') { args.duds = next; i += 1; continue; }
     if (key === '--decode') { args.decode = next; i += 1; continue; }
     if (key === '--out') { args.out = next; i += 1; continue; }
+    if (key === '--include-discrimination-report') { args.includeDiscriminationReport = true; continue; }
     if (key === '--help' || key === '-h') { args.help = true; continue; }
     throw new Error(`Unknown argument: ${key}`);
   }
@@ -44,7 +46,10 @@ function usage() {
     'Usage:',
     '  node scripts/build-v10-curve-feature-table.js --dogs rebuilt-clean-dogs.json --duds rebuilt-clean-duds.json --decode curve-decode.json --out feature-table.json',
     '',
-    'Builds a signal-anchor, no-future-leak curve-stage feature table and stratified dog-vs-dud AUC report.',
+    'Builds a signal-anchor, no-future-leak curve-stage feature table.',
+    '',
+    'Daily/OOS default: rows + coverage QA only, no discrimination/AUC report.',
+    'For offline discovery analysis only, pass --include-discrimination-report.',
   ].join('\n');
 }
 
@@ -284,20 +289,6 @@ function main() {
   const decodeByKey = new Map(decodeRows.map((row) => [anchorKey(row), row]));
   const rows = [...dogs, ...duds].map((row) => buildFeatureRow(row, row.__label, decodeByKey.get(signalKey(row))));
 
-  const strata = {};
-  const maps = {
-    all: new Map([['all', rows]]),
-    return_domain: stratify(rows, (row) => row.return_domain),
-    progress_stage: stratify(rows, (row) => row.progress_stage),
-    return_domain_x_progress_stage: stratify(rows, (row) => `${row.return_domain}|${row.progress_stage}`),
-  };
-  for (const [name, groups] of Object.entries(maps)) {
-    strata[name] = {};
-    for (const [key, groupRows] of groups.entries()) {
-      strata[name][key] = featureReport(groupRows);
-    }
-  }
-
   const report = {
     schema_version: 'v10_curve_stage_feature_table.v1',
     generated_at: new Date().toISOString(),
@@ -320,19 +311,36 @@ function main() {
       by_return_domain_x_label: coverageBy(rows, (row) => `${row.return_domain}|${row.label}`),
     },
     guardrail: 'Features are valid only for the pre-anchor window [signal_ts-900, signal_ts]. Do not use post-anchor GMGN early_5m/early_15m fields for immediate-entry gates.',
-    strata,
     rows,
   };
+  if (args.includeDiscriminationReport) {
+    const strata = {};
+    const maps = {
+      all: new Map([['all', rows]]),
+      return_domain: stratify(rows, (row) => row.return_domain),
+      progress_stage: stratify(rows, (row) => row.progress_stage),
+      return_domain_x_progress_stage: stratify(rows, (row) => `${row.return_domain}|${row.progress_stage}`),
+    };
+    for (const [name, groups] of Object.entries(maps)) {
+      strata[name] = {};
+      for (const [key, groupRows] of groups.entries()) {
+        strata[name][key] = featureReport(groupRows);
+      }
+    }
+    report.strata = strata;
+  }
   fs.mkdirSync(path.dirname(path.resolve(args.out)), { recursive: true });
   fs.writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(JSON.stringify({
+  const stdout = {
     out: args.out,
     rows_n: report.rows_n,
     matched_decode_n: report.matched_decode_n,
     exact_decode_rows_n: report.exact_decode_rows_n,
     feature_coverage_counts: report.feature_coverage_counts,
-    all: report.strata.all.all,
-  }, null, 2));
+    discrimination_report_included: Boolean(report.strata),
+  };
+  if (report.strata) stdout.all = report.strata.all.all;
+  console.log(JSON.stringify(stdout, null, 2));
 }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {

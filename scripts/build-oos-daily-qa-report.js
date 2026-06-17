@@ -23,6 +23,12 @@ function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
 function sha256File(p) { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'); }
 function jsonlCount(p) { return fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).length; }
 function uniqTokens(rows) { return new Set(rows.map((r) => r.token_ca)).size; }
+function hasExactKey(obj, key) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(obj, key)) return true;
+  if (Array.isArray(obj)) return obj.some((v) => hasExactKey(v, key));
+  return Object.values(obj).some((v) => hasExactKey(v, key));
+}
 
 function parseArgs(argv) {
   const a = {};
@@ -53,7 +59,8 @@ function main() {
   const val = readJson(path.join(RUN, 'dune/validation.json'));
   const packMan = readJson(path.join(RUN, 'work/pack-manifest.json'));
   const qa = readJson(path.join(RUN, 'work/accumulate-out/daily_qa_report.json'));
-  const ft = readJson(path.join(RUN, 'work/curve-feature-table.json')).rows;
+  const featureTable = readJson(path.join(RUN, 'work/curve-feature-table.json'));
+  const ft = featureTable.rows;
   const tradesPath = path.join(RUN, 'dune/trades.jsonl');
 
   // ---- consistency checks (fail-closed) ----
@@ -68,6 +75,7 @@ function main() {
   const leakFiles = fs.readdirSync(accDir).filter((f) => /lookpoint|sealed|auc/i.test(f));
   checks.no_auc_artifacts = leakFiles.length === 0;
   checks.no_auc_field_in_daily_qa = !('auc' in qa);
+  checks.no_auc_field_in_feature_table = !hasExactKey(featureTable, 'auc');
   const allChecksPass = Object.values(checks).every(Boolean);
 
   // ---- feature-table breakdown ----

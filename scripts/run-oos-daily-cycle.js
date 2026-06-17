@@ -84,6 +84,12 @@ const OPS_LOG = path.join(DATAROOM, 'oos-daily-ops-log.jsonl');
 
 function die(msg) { console.error(`run-oos-daily-cycle: FAIL-CLOSED: ${msg}`); process.exit(2); }
 function readJson(p) { return JSON.parse(fs.readFileSync(p, 'utf8')); }
+function hasExactKey(obj, key) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Object.prototype.hasOwnProperty.call(obj, key)) return true;
+  if (Array.isArray(obj)) return obj.some((v) => hasExactKey(v, key));
+  return Object.values(obj).some((v) => hasExactKey(v, key));
+}
 function sha256File(p) { return fs.existsSync(p) ? crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') : null; }
 function utcDate() { return new Date().toISOString().slice(0, 10).replace(/-/g, ''); }            // YYYYMMDD
 function utcStamp() { return new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z'); } // YYYYMMDDTHHMMSSZ
@@ -512,6 +518,8 @@ async function main() {
   const accDir = path.join(outDir, 'work', 'accumulate-out');
   const leak = exists(accDir) ? fs.readdirSync(accDir).filter((f) => /lookpoint|sealed|auc/i.test(f)) : [];
   if (leak.length) die(`AUC artifact leak: ${leak.join(', ')}`);
+  const featureTablePath = path.join(outDir, 'work', 'curve-feature-table.json');
+  if (exists(featureTablePath) && hasExactKey(readJson(featureTablePath), 'auc')) die('AUC field present in daily feature table before a look point.');
   const qa = readJson(path.join(accDir, 'daily_qa_report.json'));
   if ('auc' in qa) die('AUC field present in daily QA before a look point.');
 
