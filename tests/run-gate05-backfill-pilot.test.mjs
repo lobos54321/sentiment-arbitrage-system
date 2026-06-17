@@ -57,6 +57,39 @@ function makePremiumDb(filePath) {
   db.close();
 }
 
+function makePremiumDbWithMillisecondTimestamps(filePath) {
+  const db = new Database(filePath);
+  db.exec(`
+    CREATE TABLE premium_signals (
+      id INTEGER PRIMARY KEY,
+      token_ca TEXT NOT NULL,
+      symbol TEXT,
+      timestamp INTEGER NOT NULL,
+      signal_type TEXT,
+      is_ath INTEGER,
+      narrative_score REAL,
+      ai_narrative_tier TEXT,
+      raw_message TEXT,
+      source_message_ts INTEGER,
+      receive_ts INTEGER,
+      signal_source TEXT,
+      source_event_id TEXT,
+      market_cap REAL,
+      volume_24h REAL,
+      age TEXT
+    );
+  `);
+  const insert = db.prepare(`
+    INSERT INTO premium_signals
+      (token_ca, symbol, timestamp, signal_type, is_ath, narrative_score, ai_narrative_tier,
+       raw_message, source_message_ts, receive_ts, signal_source, source_event_id, market_cap, volume_24h, age)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  insert.run('A'.repeat(32) + 'pump', 'AAA', ts('2026-06-06T00:00:00Z') * 1000 + 831, 'ATH', 1, 0, null, 'msg-a', ts('2026-06-06T00:00:00Z') * 1000, ts('2026-06-06T00:00:01Z') * 1000, 'premium_channel', 'e1', 40_000, 1000, '1h');
+  insert.run('B'.repeat(32) + 'pump', 'BBB', ts('2026-06-06T00:10:00Z') * 1000 + 182, 'NEW_TRENDING', 0, 7, 'CONFIRMED', 'msg-b', ts('2026-06-06T00:10:00Z') * 1000, ts('2026-06-06T00:10:01Z') * 1000, 'premium_channel', 'e2', 200_000, 2000, '2h');
+  db.close();
+}
+
 function makeObserverDb(filePath, {
   pathSourceKind = 'bonding_curve',
   pathSourceFamily = pathSourceKind === 'bonding_curve' ? 'onchain_swap' : 'third_party_kline',
@@ -208,6 +241,31 @@ test('prepare fails closed on a wrong/small premium DB unless smoke override is 
   } catch (err) {
     assert.match(String(err.stderr), /premium_signals DB identity guard failed/);
   }
+});
+
+test('prepare normalizes millisecond premium_signals timestamps before filtering', () => {
+  const dir = tmpdir();
+  const premiumDb = path.join(dir, 'premium-ms.db');
+  const observerDb = path.join(dir, 'observer.db');
+  const prepareDir = path.join(dir, 'prepare');
+  makePremiumDbWithMillisecondTimestamps(premiumDb);
+  makeObserverDb(observerDb, { pathSourceKind: 'indexed_ohlcv', pathSourceFamily: 'third_party_kline', pathProvider: 'geckoterminal' });
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'prepare',
+    '--premium-db', premiumDb,
+    '--observer-db', observerDb,
+    '--out-dir', prepareDir,
+    '--limit', '2',
+    '--allow-small-premium-db-for-smoke',
+  ], { stdio: 'pipe' });
+
+  const signals = JSON.parse(fs.readFileSync(path.join(prepareDir, 'pilot-signals.json'), 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(prepareDir, 'prepare-manifest.json'), 'utf8'));
+  assert.equal(signals.length, 2);
+  assert.equal(signals[0].signal_ts, ts('2026-06-06T00:00:00Z'));
+  assert.equal(manifest.inputs.premium_db.identity.timestamp_normalization, 'timestamp_ms_if_gt_1e12_else_unix_seconds');
 });
 
 test('prepare and evaluate run end to end with observer reconciliation and no edge metrics', () => {

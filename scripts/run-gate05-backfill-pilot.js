@@ -42,6 +42,7 @@ const FORBIDDEN_STRATIFICATION_FIELDS = ['signal_type', 'is_ath', 'narrative_sco
 const ALLOWED_STRATIFICATION_FIELDS = ['month', 'date', 'token_age_proxy', 'preliminary_domain_proxy', 'provider_availability_proxy'];
 const FORBIDDEN_REPORT_KEYS = new Set(['auc', 'precision', 'recall', 'lift', 'signal_type_dog_rate', 'is_ath_dog_rate', 'narrative_score_split']);
 const REPRODUCIBLE_OBSERVER_PROVIDERS = new Set(['geckoterminal', 'gmgn']);
+const PREMIUM_SIGNAL_TS_EXPR = "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE timestamp END";
 
 function die(message) {
   console.error(`run-gate05-backfill-pilot: ${message}`);
@@ -180,7 +181,7 @@ function loadPremiumSignals(premiumDbPath, {
     : '0';
   const monthInventory = db.prepare(`
     SELECT
-      substr(datetime(timestamp, 'unixepoch'), 1, 7) AS month,
+      substr(datetime(${PREMIUM_SIGNAL_TS_EXPR}, 'unixepoch'), 1, 7) AS month,
       COUNT(*) AS rows,
       COUNT(DISTINCT token_ca) AS tokens,
       ${signalTypeRowsExpr} AS signal_type_rows,
@@ -196,7 +197,8 @@ function loadPremiumSignals(premiumDbPath, {
       ${optionalSelect(cols, 'id', 'premium_id')},
       token_ca,
       ${optionalSelect(cols, 'symbol')},
-      timestamp AS signal_ts,
+      ${PREMIUM_SIGNAL_TS_EXPR} AS signal_ts,
+      timestamp AS raw_timestamp,
       ${optionalSelect(cols, 'created_at')},
       ${optionalSelect(cols, 'signal_type')},
       ${optionalSelect(cols, 'is_ath')},
@@ -213,9 +215,9 @@ function loadPremiumSignals(premiumDbPath, {
     FROM premium_signals
     WHERE token_ca IS NOT NULL
       AND timestamp IS NOT NULL
-      AND timestamp >= ?
-      AND timestamp < ?
-    ORDER BY timestamp ASC, token_ca ASC
+      AND ${PREMIUM_SIGNAL_TS_EXPR} >= ?
+      AND ${PREMIUM_SIGNAL_TS_EXPR} < ?
+    ORDER BY signal_ts ASC, token_ca ASC
   `).all(Math.min(historyStart, overlapStart), Math.max(historyEnd, overlapEnd));
   db.close();
 
@@ -259,6 +261,7 @@ function loadPremiumSignals(premiumDbPath, {
       row_count: totalRows,
       required_columns: required,
       month_inventory: monthInventory,
+      timestamp_normalization: 'timestamp_ms_if_gt_1e12_else_unix_seconds',
       allow_small_db_for_smoke: Boolean(allowSmallPremiumDbForSmoke),
     },
   };
