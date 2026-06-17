@@ -68,10 +68,35 @@ test('dune canary accepts complete label-bearing trade export but emits no forbi
   assert.equal(outRows[0].has_wallet, true);
   assert.equal(outRows[0].has_progress, true);
   assert.equal(summary.verdict, 'PASS');
+  assert.equal(summary.provider_summary.usable_curve_window_rate, 1);
   assert.equal(hasForbiddenKey(outRows), null);
   assert.equal(hasForbiddenKey(summary), null);
   const sql = fs.readFileSync(path.join(outDir, 'curve_observability_canary.sql'), 'utf8');
   assert.doesNotMatch(sql, /\blabel\b|\bdog\b|\bdud\b|\breturn_domain\b|\bauc\b/i);
+});
+
+test('complete empty windows cannot produce a hollow PASS', () => {
+  const dir = tmpdir();
+  const rowsPath = path.join(dir, 'signals.json');
+  const tradesPath = path.join(dir, 'trades.jsonl');
+  const outDir = path.join(dir, 'out');
+  writeJson(rowsPath, [
+    baseSignal({ token_ca: `${'1'.repeat(36)}pump`, signal_ts: NOW - 10_000 }),
+    baseSignal({ token_ca: `${'2'.repeat(36)}pump`, signal_ts: NOW - 11_000 }),
+    baseSignal({ token_ca: `${'3'.repeat(36)}pump`, signal_ts: NOW - 12_000 }),
+  ]);
+  writeJsonl(tradesPath, [
+    { token_ca: `${'1'.repeat(36)}pump`, signal_ts: NOW - 10_000, block_time: NOW - 10_000, side: 'buy', user: 'w1', sol_amount: 1, real_token_reserves: 1 },
+  ]);
+  execFileSync(process.execPath, [SCRIPT,
+    '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath,
+    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '3',
+  ], { cwd: '/Users/boliu/sas-research' });
+  const summary = JSON.parse(fs.readFileSync(path.join(outDir, 'canary-summary.json'), 'utf8'));
+  assert.equal(summary.provider_summary.complete_rate, 1);
+  assert.equal(summary.provider_summary.usable_curve_window_rate, 0.333333);
+  assert.equal(summary.verdict, 'PARTIAL');
+  assert.equal(summary.reason, 'usable_curve_window_rate_below_floor');
 });
 
 test('post-signal trade fails closed while block_time == signal_ts is allowed', () => {
