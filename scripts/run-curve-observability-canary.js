@@ -28,7 +28,7 @@ const SCRIPTS = path.dirname(new URL(import.meta.url).pathname);
 const DEFAULT_TEMPLATE = path.join(SCRIPTS, 'curve-observability-dune-canary.template.sql');
 const DEFAULT_PRE_SEC = 900;
 const DEFAULT_LIMIT = 30;
-const DEFAULT_MIN_USABLE_CURVE_WINDOW_RATE = 0.6;
+const MIN_USABLE_CURVE_WINDOW_RATE = 0.6;
 const MIN_SAMPLE = 20;
 const MAX_SAMPLE = 50;
 const FORBIDDEN_KEYS = new Set([
@@ -462,7 +462,7 @@ async function summarizeGmgn({ windows }) {
   }));
 }
 
-function computeVerdict(rows, selectedN, { minUsableCurveWindowRate = DEFAULT_MIN_USABLE_CURVE_WINDOW_RATE } = {}) {
+function computeVerdict(rows, selectedN) {
   const disabled = rows.length > 0 && rows.every((r) => r.error === 'provider_disabled');
   const leakageRows = rows.filter((r) => Number(r.out_of_window_trade_count || 0) > 0);
   const completeRows = rows.filter((r) => (
@@ -489,10 +489,13 @@ function computeVerdict(rows, selectedN, { minUsableCurveWindowRate = DEFAULT_MI
   } else if (disabled) {
     verdict = 'FAIL';
     reason = 'provider_disabled';
-  } else if (completeRate >= 0.9 && usableCurveWindowRate >= minUsableCurveWindowRate) {
+  } else if (selectedN < MIN_SAMPLE) {
+    verdict = 'FAIL';
+    reason = 'sample_below_minimum';
+  } else if (completeRate >= 0.9 && usableCurveWindowRate >= MIN_USABLE_CURVE_WINDOW_RATE) {
     verdict = 'PASS';
     reason = 'complete_and_usable_curve_window_rates_pass';
-  } else if (completeRate >= 0.9 && usableCurveWindowRate < minUsableCurveWindowRate) {
+  } else if (completeRate >= 0.9 && usableCurveWindowRate < MIN_USABLE_CURVE_WINDOW_RATE) {
     verdict = 'PARTIAL';
     reason = 'usable_curve_window_rate_below_floor';
   } else if (completeRate >= 0.6) {
@@ -507,7 +510,8 @@ function computeVerdict(rows, selectedN, { minUsableCurveWindowRate = DEFAULT_MI
     complete_rate: Number(completeRate.toFixed(6)),
     usable_curve_window_n: usableRows.length,
     usable_curve_window_rate: Number(usableCurveWindowRate.toFixed(6)),
-    min_usable_curve_window_rate: minUsableCurveWindowRate,
+    min_usable_curve_window_rate: MIN_USABLE_CURVE_WINDOW_RATE,
+    min_sample: MIN_SAMPLE,
     leakage_rows_n: leakageRows.length,
     median_latency_ms: medianLatency,
     total_cost_units: totalCost,
@@ -539,7 +543,6 @@ function parseArgs(argv = process.argv.slice(2)) {
     heliusPageSize: 100,
     heliusSignatureRps: 2,
     heliusTransactionRps: 1,
-    minUsableCurveWindowRate: DEFAULT_MIN_USABLE_CURVE_WINDOW_RATE,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -566,7 +569,6 @@ function parseArgs(argv = process.argv.slice(2)) {
       case '--helius-rpc-url-file': args.heliusRpcUrlFile = take(); break;
       case '--helius-max-pages': args.heliusMaxPages = Number(take()); break;
       case '--helius-page-size': args.heliusPageSize = Number(take()); break;
-      case '--min-usable-curve-window-rate': args.minUsableCurveWindowRate = Number(take()); break;
       case '--help': case '-h': args.help = true; break;
       default: throw new Error(`Unknown argument: ${key}`);
     }
@@ -640,7 +642,7 @@ async function main() {
   const leakage = rows.filter((r) => Number(r.out_of_window_trade_count || 0) > 0);
   const outJsonl = path.join(args.outDir, 'canary_observability.jsonl');
   fs.writeFileSync(outJsonl, rows.map((row) => JSON.stringify(row, Object.keys(row).sort())).join('\n') + (rows.length ? '\n' : ''));
-  const verdict = computeVerdict(rows, windows.length, { minUsableCurveWindowRate: args.minUsableCurveWindowRate });
+  const verdict = computeVerdict(rows, windows.length);
   const summary = {
     schema_version: 'curve_observability_canary_summary.v1',
     generated_at: new Date().toISOString(),

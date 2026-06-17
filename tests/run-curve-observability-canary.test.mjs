@@ -30,6 +30,30 @@ function baseSignal(over = {}) {
   return { token_ca: pump, signal_ts: NOW - 10_000, label: 'dog', return_domain: 'sol_curve', unique_buyers: 999, ...over };
 }
 
+function pumpToken(i) {
+  return `${String(i).padStart(36, String(i % 10 || 1))}pump`;
+}
+
+function manySignals(n, startOffset = 10_000) {
+  return Array.from({ length: n }, (_, i) => baseSignal({
+    token_ca: pumpToken(i + 1),
+    signal_ts: NOW - startOffset - i * 100,
+  }));
+}
+
+function tradesForSignals(signals, take = signals.length) {
+  return signals.slice(0, take).map((s, i) => ({
+    token_ca: s.token_ca,
+    signal_ts: s.signal_ts,
+    block_time: s.signal_ts,
+    side: i % 2 ? 'sell' : 'buy',
+    user: `wallet${i}`,
+    sol_amount: 1,
+    token_amount: 100,
+    real_token_reserves: 700000000 - i,
+  }));
+}
+
 test('selection is label-stripped, deterministic, pump-only, and chronological by token/signal', () => {
   const rows = [
     baseSignal({ token_ca: 'notpumpx', signal_ts: NOW - 10_000 }),
@@ -51,19 +75,22 @@ test('dune canary accepts complete label-bearing trade export but emits no forbi
   const rowsPath = path.join(dir, 'signals.json');
   const tradesPath = path.join(dir, 'trades.jsonl');
   const outDir = path.join(dir, 'out');
-  writeJson(rowsPath, [baseSignal()]);
-  writeJsonl(tradesPath, [
-    { token_ca: pump, block_time: NOW - 10_000 - 10, label: 'dog', return_domain: 'sol_curve', side: 'buy', user: 'wallet1', sol_amount: 1, token_amount: 100, real_token_reserves: 700000000 },
-    { token_ca: pump, block_time: NOW - 10_000, effective_tier: 'gold', side: 'sell', user: 'wallet2', sol_amount: 0.5, token_amount: 50, virtual_sol_reserves: 40, virtual_token_reserves: 900000000 },
-  ]);
+  const signals = manySignals(20);
+  writeJson(rowsPath, signals);
+  writeJsonl(tradesPath, tradesForSignals(signals).map((r, i) => ({
+    ...r,
+    label: i === 0 ? 'dog' : undefined,
+    return_domain: i === 0 ? 'sol_curve' : undefined,
+    effective_tier: i === 1 ? 'gold' : undefined,
+  })));
   execFileSync(process.execPath, [SCRIPT,
     '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath,
-    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '1',
+    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '20',
   ], { cwd: '/Users/boliu/sas-research' });
   const outRows = fs.readFileSync(path.join(outDir, 'canary_observability.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   const summary = JSON.parse(fs.readFileSync(path.join(outDir, 'canary-summary.json'), 'utf8'));
-  assert.equal(outRows.length, 1);
-  assert.equal(outRows[0].in_window_trade_count, 2);
+  assert.equal(outRows.length, 20);
+  assert.equal(outRows[0].in_window_trade_count, 1);
   assert.equal(outRows[0].history_reached_start, true);
   assert.equal(outRows[0].has_wallet, true);
   assert.equal(outRows[0].has_progress, true);
@@ -80,23 +107,37 @@ test('complete empty windows cannot produce a hollow PASS', () => {
   const rowsPath = path.join(dir, 'signals.json');
   const tradesPath = path.join(dir, 'trades.jsonl');
   const outDir = path.join(dir, 'out');
-  writeJson(rowsPath, [
-    baseSignal({ token_ca: `${'1'.repeat(36)}pump`, signal_ts: NOW - 10_000 }),
-    baseSignal({ token_ca: `${'2'.repeat(36)}pump`, signal_ts: NOW - 11_000 }),
-    baseSignal({ token_ca: `${'3'.repeat(36)}pump`, signal_ts: NOW - 12_000 }),
-  ]);
-  writeJsonl(tradesPath, [
-    { token_ca: `${'1'.repeat(36)}pump`, signal_ts: NOW - 10_000, block_time: NOW - 10_000, side: 'buy', user: 'w1', sol_amount: 1, real_token_reserves: 1 },
-  ]);
+  const signals = manySignals(20);
+  writeJson(rowsPath, signals);
+  writeJsonl(tradesPath, tradesForSignals(signals, 10));
   execFileSync(process.execPath, [SCRIPT,
     '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath,
-    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '3',
+    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '20',
   ], { cwd: '/Users/boliu/sas-research' });
   const summary = JSON.parse(fs.readFileSync(path.join(outDir, 'canary-summary.json'), 'utf8'));
   assert.equal(summary.provider_summary.complete_rate, 1);
-  assert.equal(summary.provider_summary.usable_curve_window_rate, 0.333333);
+  assert.equal(summary.provider_summary.usable_curve_window_rate, 0.5);
   assert.equal(summary.verdict, 'PARTIAL');
   assert.equal(summary.reason, 'usable_curve_window_rate_below_floor');
+});
+
+test('sample below 20 cannot PASS even with complete usable windows', () => {
+  const dir = tmpdir();
+  const rowsPath = path.join(dir, 'signals.json');
+  const tradesPath = path.join(dir, 'trades.jsonl');
+  const outDir = path.join(dir, 'out');
+  const signals = manySignals(10);
+  writeJson(rowsPath, signals);
+  writeJsonl(tradesPath, tradesForSignals(signals));
+  execFileSync(process.execPath, [SCRIPT,
+    '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath,
+    '--dune-assume-complete-window', '--out-dir', outDir, '--now-ts', String(NOW), '--limit', '10',
+  ], { cwd: '/Users/boliu/sas-research' });
+  const summary = JSON.parse(fs.readFileSync(path.join(outDir, 'canary-summary.json'), 'utf8'));
+  assert.equal(summary.provider_summary.complete_rate, 1);
+  assert.equal(summary.provider_summary.usable_curve_window_rate, 1);
+  assert.equal(summary.verdict, 'FAIL');
+  assert.equal(summary.reason, 'sample_below_minimum');
 });
 
 test('post-signal trade fails closed while block_time == signal_ts is allowed', () => {
@@ -124,6 +165,21 @@ test('dune provider requires explicit complete-window attestation', () => {
   const res = spawnSync(process.execPath, [SCRIPT, '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath, '--out-dir', path.join(dir, 'out'), '--now-ts', String(NOW)], { cwd: '/Users/boliu/sas-research', encoding: 'utf8' });
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /dune-assume-complete-window/);
+});
+
+test('usable curve window floor is sealed and not runtime-overridable', () => {
+  const dir = tmpdir();
+  const rowsPath = path.join(dir, 'signals.json');
+  const tradesPath = path.join(dir, 'trades.jsonl');
+  writeJson(rowsPath, manySignals(20));
+  writeJsonl(tradesPath, []);
+  const res = spawnSync(process.execPath, [SCRIPT,
+    '--provider', 'dune', '--rows', rowsPath, '--trades', tradesPath,
+    '--dune-assume-complete-window', '--out-dir', path.join(dir, 'out'),
+    '--now-ts', String(NOW), '--min-usable-curve-window-rate', '0',
+  ], { cwd: '/Users/boliu/sas-research', encoding: 'utf8' });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /Unknown argument: --min-usable-curve-window-rate/);
 });
 
 test('dune canary joins by window_id so repeated-token windows do not create false leakage', () => {
