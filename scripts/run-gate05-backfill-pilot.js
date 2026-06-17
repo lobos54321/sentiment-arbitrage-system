@@ -29,6 +29,8 @@ const DEFAULT_OVERLAP_START = Date.parse('2026-06-06T00:00:00Z') / 1000;
 const DEFAULT_OVERLAP_END = Date.parse('2026-06-08T00:00:00Z') / 1000;
 const DEFAULT_HISTORY_START = Date.parse('2026-04-01T00:00:00Z') / 1000;
 const DEFAULT_HISTORY_END = Date.parse('2026-06-06T00:00:00Z') / 1000;
+const MAY_METADATA_START = Date.parse('2026-05-01T00:00:00Z') / 1000;
+const MIN_PREMIUM_SIGNAL_ROWS = 30_000;
 const HORIZON_SEC = 7200;
 const RECONCILE_PASS = 0.90;
 const RECONCILE_PARTIAL = 0.80;
@@ -148,10 +150,46 @@ function loadPremiumSignals(premiumDbPath, {
   historyEnd = DEFAULT_HISTORY_END,
   overlapStart = DEFAULT_OVERLAP_START,
   overlapEnd = DEFAULT_OVERLAP_END,
+  allowSmallPremiumDbForSmoke = false,
 } = {}) {
   const db = openDb(premiumDbPath);
   const cols = tableColumns(db, 'premium_signals');
-  requireColumns(cols, ['token_ca', 'timestamp'], 'premium_signals');
+  const required = ['token_ca', 'timestamp', 'signal_type', 'is_ath', 'raw_message'];
+  const includesMayOrLater = Math.max(historyEnd, overlapEnd) > MAY_METADATA_START;
+  if (includesMayOrLater) required.push('narrative_score');
+  requireColumns(cols, required, 'premium_signals');
+  const totalRows = db.prepare('SELECT COUNT(*) AS n FROM premium_signals').get().n;
+  if (!allowSmallPremiumDbForSmoke && totalRows < MIN_PREMIUM_SIGNAL_ROWS) {
+    db.close();
+    die(`premium_signals DB identity guard failed: row_count=${totalRows} < ${MIN_PREMIUM_SIGNAL_ROWS}. `
+      + 'Pass the real sas_sentiment_current.db, not server_sentiment_arb.db. '
+      + 'Use --allow-small-premium-db-for-smoke only for synthetic tests.');
+  }
+  const signalTypeRowsExpr = cols.includes('signal_type')
+    ? "SUM(CASE WHEN signal_type IS NOT NULL AND signal_type <> '' THEN 1 ELSE 0 END)"
+    : '0';
+  const isAthRowsExpr = cols.includes('is_ath')
+    ? 'SUM(CASE WHEN is_ath IS NOT NULL THEN 1 ELSE 0 END)'
+    : '0';
+  const narrativeRowsExpr = cols.includes('narrative_score')
+    ? 'SUM(CASE WHEN narrative_score IS NOT NULL THEN 1 ELSE 0 END)'
+    : '0';
+  const rawMessageRowsExpr = cols.includes('raw_message')
+    ? "SUM(CASE WHEN raw_message IS NOT NULL AND raw_message <> '' THEN 1 ELSE 0 END)"
+    : '0';
+  const monthInventory = db.prepare(`
+    SELECT
+      substr(datetime(timestamp, 'unixepoch'), 1, 7) AS month,
+      COUNT(*) AS rows,
+      COUNT(DISTINCT token_ca) AS tokens,
+      ${signalTypeRowsExpr} AS signal_type_rows,
+      ${isAthRowsExpr} AS is_ath_rows,
+      ${narrativeRowsExpr} AS narrative_score_rows,
+      ${rawMessageRowsExpr} AS raw_message_rows
+    FROM premium_signals
+    GROUP BY month
+    ORDER BY month
+  `).all();
   const rows = db.prepare(`
     SELECT
       ${optionalSelect(cols, 'id', 'premium_id')},
@@ -213,7 +251,16 @@ function loadPremiumSignals(premiumDbPath, {
       age: row.age || null,
     });
   }
-  return { rows: [...dedup.values()], duplicateRows };
+  return {
+    rows: [...dedup.values()],
+    duplicateRows,
+    identity: {
+      row_count: totalRows,
+      required_columns: required,
+      month_inventory: monthInventory,
+      allow_small_db_for_smoke: Boolean(allowSmallPremiumDbForSmoke),
+    },
+  };
 }
 
 function loadObserverRows(observerDbPath, {
@@ -240,6 +287,7 @@ function loadObserverRows(observerDbPath, {
       path_source_kind,
       path_source_family,
       path_provider,
+      sustained_reason,
       coverage_reason,
       kline_covered,
       same_source_path,
@@ -457,6 +505,7 @@ function parseArgs(argv) {
     runCard: DEFAULT_RUN_CARD,
     costCredits: null,
     runtimeMs: null,
+    allowSmallPremiumDbForSmoke: false,
   };
   const take = (argvRef, i) => {
     if (i + 1 >= argvRef.length || String(argvRef[i + 1] || '').startsWith('--')) die(`${argvRef[i]} requires a value`);
@@ -492,6 +541,7 @@ function parseArgs(argv) {
         const v = take(argv, i); a.historyEnd = normalizeTs(Number.isNaN(Number(v)) ? Date.parse(v) / 1000 : v); i += 1; break;
       }
       case '--run-card': a.runCard = take(argv, i); i += 1; break;
+      case '--allow-small-premium-db-for-smoke': a.allowSmallPremiumDbForSmoke = true; break;
       default:
         die(`unknown arg: ${k}`);
     }
@@ -508,6 +558,8 @@ function usage() {
     'notes:',
     '  prepare emits pilot-signals.json, burned_keys.txt, signal_windows.csv, and provider-request.json.',
     '  evaluate consumes provider 1m bars and reuses src/analytics/raw-signal-outcomes.js.',
+    '  prepare expects the real premium_signals metadata DB; use --allow-small-premium-db-for-smoke only for synthetic tests.',
+    '  recommended Dune template: scripts/gate05-backfill-pilot-dune-bars.template.sql (stage-aware bars, 30-credit fetch ceiling).',
   ].join('\n');
 }
 
@@ -537,6 +589,9 @@ function runPrepare(args) {
   ].join('\n') + '\n');
   writeJson(path.join(args.outDir, 'provider-request.json'), {
     schema_version: 'gate05_backfill_provider_request.v1',
+    recommended_dune_template: 'scripts/gate05-backfill-pilot-dune-bars.template.sql',
+    provider_cost_ceiling_credits: 30,
+    fetch_must_abort_if_estimated_or_final_cost_exceeds_ceiling: true,
     required_bar_schema: {
       token_ca: 'string',
       timestamp: 'unix seconds minute timestamp',
@@ -558,7 +613,7 @@ function runPrepare(args) {
     generated_at: new Date().toISOString(),
     run_card: { path: path.resolve(args.runCard), sha256: sha256File(args.runCard) },
     inputs: {
-      premium_db: { path: path.resolve(args.premiumDb), sha256: sha256File(args.premiumDb) },
+      premium_db: { path: path.resolve(args.premiumDb), sha256: sha256File(args.premiumDb), identity: premium.identity },
       observer_db: { path: path.resolve(args.observerDb), sha256: sha256File(args.observerDb) },
     },
     params: {
@@ -572,6 +627,8 @@ function runPrepare(args) {
       burned: true,
     },
     premium_inventory: {
+      full_db_row_count: premium.identity.row_count,
+      month_inventory: premium.identity.month_inventory,
       input_rows_in_range: premium.rows.length,
       duplicate_rows_removed: premium.duplicateRows,
       by_month: countBy(premium.rows, (row) => row.month),

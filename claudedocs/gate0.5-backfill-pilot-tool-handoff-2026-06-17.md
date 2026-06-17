@@ -10,6 +10,7 @@ This handoff covers:
 - `claudedocs/gate0.5-step1-pilot-run-card-2026-06-17.md`
 - `claudedocs/gate0.5-step1-pilot-run-card-2026-06-17.sha256`
 - `scripts/run-gate05-backfill-pilot.js`
+- `scripts/gate05-backfill-pilot-dune-bars.template.sql`
 - `tests/run-gate05-backfill-pilot.test.mjs`
 
 The tool is research-only and has no production path.
@@ -28,6 +29,13 @@ Implement the locked Gate-0.5 Step-1 pilot skeleton:
 It does not query Dune or Gecko itself. That spend is intentionally separated:
 `prepare` emits windows; `evaluate` consumes returned bars.
 
+The recommended Dune export template is
+`scripts/gate05-backfill-pilot-dune-bars.template.sql`. It emits stage-aware
+native/SOL 1m bars from decoded pump.fun TradeEvents, including
+`source_kind='bonding_curve'`, `source_family='onchain_swap'`, and
+`price_unit='native'`. The provider fetch step must abort before spend if the
+estimated/final Dune cost would exceed the locked 30-credit pilot ceiling.
+
 ## Commands
 
 Prepare-only:
@@ -40,6 +48,11 @@ node scripts/run-gate05-backfill-pilot.js \
   --out-dir <out-dir> \
   --limit 200
 ```
+
+`prepare` now fails closed if the supplied `premium_signals` DB does not look
+like the real metadata snapshot: required metadata columns must exist, May+
+runs require `narrative_score`, and row count must be at least 30,000 unless
+`--allow-small-premium-db-for-smoke` is explicitly supplied for synthetic tests.
 
 Evaluate after provider bars are available:
 
@@ -78,16 +91,20 @@ node scripts/run-gate05-backfill-pilot.js \
 - Labeling reuses `buildRawSignalOutcomeReport()` from
   `src/analytics/raw-signal-outcomes.js`.
 - Stage-resolution is reported separately from outcome labelability.
+- Wrong premium DB usage is fail-closed before any pilot sample is emitted.
+- Observer reconciliation includes `sustained_reason`, so sustained-definition
+  disagreements can be classified instead of falling through.
 
 ## Verification Performed
 
 - `node --check scripts/run-gate05-backfill-pilot.js`
 - `node --test tests/run-gate05-backfill-pilot.test.mjs`
 - `node scripts/run-gate05-backfill-pilot.js --help`
-- prepare smoke against local `server_sentiment_arb.db` and latest observer
-  snapshot. It selected `0` rows because that local DB is not the 36,941-row
-  `sas_sentiment_current.db` used in the Phase-1 analysis; this is expected and
-  confirms the tool requires the correct DB path explicitly.
+- wrong-DB smoke against local `server_sentiment_arb.db` now fails closed unless
+  smoke override is explicitly supplied. This prevents the old silent 0-row or
+  all-null-metadata pilot path.
+- disagreement taxonomy tests cover coverage, baseline, unit, and sustained
+  definition differences.
 
 ## Review Focus
 
@@ -98,11 +115,15 @@ node scripts/run-gate05-backfill-pilot.js \
    - `<0.80` not feasible?
 3. Is the stage-resolution proxy too weak for final feasibility, or acceptable
    as a pilot-level first pass?
-4. Should the provider-window output be converted into a Dune SQL template now,
-   or should the first paid pilot use the generic provider request JSON?
+4. Does the Dune template emit enough stage-distinguishing fields for the pilot
+   (`source_kind`, `source_family`, `price_unit`) and does the operator fetch
+   path enforce the 30-credit ceiling before spend?
 
 ## Known Boundary
 
 This implementation is not the paid pilot run. It is the auditable harness that
 prevents the paid pilot from becoming a feature-fishing surface.
 
+The template currently resolves the bonding-curve side. If the historical pilot
+needs post-graduation AMM stage labels as well, the provider export must add a
+separate AMM/GMGN source with the same required bar schema before the paid run.

@@ -8,6 +8,7 @@ import test from 'node:test';
 import Database from 'better-sqlite3';
 
 import {
+  compareOutcomes,
   computeFinalVerdict,
   reconciliationVerdict,
   selectPilotSample,
@@ -75,6 +76,7 @@ function makeObserverDb(filePath) {
       path_source_kind TEXT,
       path_source_family TEXT,
       path_provider TEXT,
+      sustained_reason TEXT,
       coverage_reason TEXT,
       kline_covered INTEGER,
       same_source_path INTEGER,
@@ -86,13 +88,13 @@ function makeObserverDb(filePath) {
   const insert = db.prepare(`
     INSERT INTO raw_signal_outcomes
       (token_ca, signal_ts, raw_primary_tier, raw_sustained_tier, max_sustained_peak_pct,
-       baseline_price, baseline_ts, baseline_lag_sec, baseline_price_unit, baseline_confidence,
+      baseline_price, baseline_ts, baseline_lag_sec, baseline_price_unit, baseline_confidence,
        peak_120m_pct, time_to_sustained_peak_sec, path_source_kind, path_source_family, path_provider,
-       coverage_reason, kline_covered, same_source_path, sustained_evaluable, observation_status, outlier_flag)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       sustained_reason, coverage_reason, kline_covered, same_source_path, sustained_evaluable, observation_status, outlier_flag)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  insert.run('A'.repeat(32) + 'pump', ts('2026-06-06T00:00:00Z'), 'gold', 'gold', 120, 1, ts('2026-06-06T00:00:00Z'), 0, 'native', 'high', 120, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'covered', 1, 1, 1, 'matured', 0);
-  insert.run('B'.repeat(32) + 'pump', ts('2026-06-06T00:10:00Z'), 'sub25', 'sub25', 10, 1, ts('2026-06-06T00:10:00Z'), 0, 'native', 'high', 10, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'covered', 1, 1, 1, 'matured', 0);
+  insert.run('A'.repeat(32) + 'pump', ts('2026-06-06T00:00:00Z'), 'gold', 'gold', 120, 1, ts('2026-06-06T00:00:00Z'), 0, 'native', 'high', 120, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'sustained_gold', 'covered', 1, 1, 1, 'matured', 0);
+  insert.run('B'.repeat(32) + 'pump', ts('2026-06-06T00:10:00Z'), 'sub25', 'sub25', 10, 1, ts('2026-06-06T00:10:00Z'), 0, 'native', 'high', 10, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'sub25', 'covered', 1, 1, 1, 'matured', 0);
   db.close();
 }
 
@@ -137,6 +139,47 @@ test('verdict thresholds are locked', () => {
   assert.equal(computeFinalVerdict({ reconciliation: { verdict: 'PASS' }, stage: { verdict: 'NOT_FEASIBLE' }, costOk: true }), 'HISTORICAL_BACKFILL_NOT_FEASIBLE');
 });
 
+test('compareOutcomes classifies disagreement reasons', () => {
+  const base = {
+    token_ca: 'T',
+    signal_ts: ts('2026-06-06T00:00:00Z'),
+    raw_primary_tier: 'gold',
+    max_sustained_peak_pct: 120,
+    coverage_reason: 'covered',
+    baseline_price: 1,
+    baseline_price_unit: 'native',
+    sustained_reason: 'sustained_gold',
+    path_source_kind: 'bonding_curve',
+  };
+  assert.equal(compareOutcomes(base, { ...base, raw_primary_tier: 'bronze', coverage_reason: 'no_kline_for_token' }).difference_reason, 'coverage');
+  assert.equal(compareOutcomes(base, { ...base, raw_primary_tier: 'bronze', baseline_price: 1.2 }).difference_reason, 'baseline');
+  assert.equal(compareOutcomes(base, { ...base, raw_primary_tier: 'bronze', baseline_price_unit: 'usd' }).difference_reason, 'unit');
+  assert.equal(compareOutcomes(base, { ...base, raw_primary_tier: 'bronze', sustained_reason: 'different_definition' }).difference_reason, 'sustained_definition');
+});
+
+test('prepare fails closed on a wrong/small premium DB unless smoke override is explicit', () => {
+  const dir = tmpdir();
+  const premiumDb = path.join(dir, 'premium.db');
+  const observerDb = path.join(dir, 'observer.db');
+  const prepareDir = path.join(dir, 'prepare');
+  makePremiumDb(premiumDb);
+  makeObserverDb(observerDb);
+
+  try {
+    execFileSync(process.execPath, [
+      SCRIPT,
+      '--mode', 'prepare',
+      '--premium-db', premiumDb,
+      '--observer-db', observerDb,
+      '--out-dir', prepareDir,
+      '--limit', '2',
+    ], { stdio: 'pipe' });
+    assert.fail('prepare should have failed the premium DB identity guard');
+  } catch (err) {
+    assert.match(String(err.stderr), /premium_signals DB identity guard failed/);
+  }
+});
+
 test('prepare and evaluate run end to end with observer reconciliation and no edge metrics', () => {
   const dir = tmpdir();
   const premiumDb = path.join(dir, 'premium.db');
@@ -155,6 +198,7 @@ test('prepare and evaluate run end to end with observer reconciliation and no ed
     '--observer-db', observerDb,
     '--out-dir', prepareDir,
     '--limit', '2',
+    '--allow-small-premium-db-for-smoke',
   ], { stdio: 'pipe' });
 
   const burned = fs.readFileSync(path.join(prepareDir, 'burned_keys.txt'), 'utf8').trim().split('\n');
@@ -181,4 +225,3 @@ test('prepare and evaluate run end to end with observer reconciliation and no ed
   assert.equal(Object.prototype.hasOwnProperty.call(summary, 'auc'), false);
   assert.ok(!JSON.stringify(summary).includes('signal_type_dog_rate'));
 });
-
