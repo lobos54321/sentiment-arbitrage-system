@@ -41,6 +41,7 @@ const DUD_TIERS = new Set(['bronze', 'sub25']);
 const FORBIDDEN_STRATIFICATION_FIELDS = ['signal_type', 'is_ath', 'narrative_score', 'raw_message'];
 const ALLOWED_STRATIFICATION_FIELDS = ['month', 'date', 'token_age_proxy', 'preliminary_domain_proxy', 'provider_availability_proxy'];
 const FORBIDDEN_REPORT_KEYS = new Set(['auc', 'precision', 'recall', 'lift', 'signal_type_dog_rate', 'is_ath_dog_rate', 'narrative_score_split']);
+const REPRODUCIBLE_OBSERVER_PROVIDERS = new Set(['geckoterminal', 'gmgn']);
 
 function die(message) {
   console.error(`run-gate05-backfill-pilot: ${message}`);
@@ -405,12 +406,24 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
   const byToken = barsByToken(bars);
   const mismatches = [];
   const checked = [];
+  const excluded = [];
+  const comparableKeys = new Set();
   let noBars = 0;
   for (const pilot of pilotSignals) {
     const observer = observerByKey.get(keyOf(pilot));
     if (!observer) continue;
     const expectedProvider = normalizeSourceValue(observer.path_provider);
     const expectedKind = normalizeSourceValue(observer.path_source_kind);
+    if (!REPRODUCIBLE_OBSERVER_PROVIDERS.has(expectedProvider)) {
+      excluded.push({
+        token_ca: pilot.token_ca,
+        signal_ts: pilot.signal_ts,
+        reason: 'source_not_reproducible',
+        expected_provider: expectedProvider,
+        expected_source_kind: expectedKind,
+      });
+      continue;
+    }
     const windowBars = (byToken.get(pilot.token_ca) || [])
       .filter((bar) => bar.timestamp >= pilot.signal_ts && bar.timestamp <= pilot.signal_ts + HORIZON_SEC);
     if (!windowBars.length) {
@@ -440,18 +453,23 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
       source_kind_match: kindOk,
     };
     checked.push(record);
+    if (providerOk && kindOk) comparableKeys.add(keyOf(pilot));
     if (!providerOk || !kindOk) mismatches.push(record);
   }
   return {
     checked_n: checked.length + noBars,
+    comparable_n: comparableKeys.size,
+    excluded_source_not_reproducible_n: excluded.length,
     matched_n: checked.filter((row) => row.provider_match && row.source_kind_match).length,
     no_bars_n: noBars,
     mismatch_n: mismatches.length,
     ok: mismatches.length === 0,
+    comparable_keys: comparableKeys,
     provider_distribution: countBy(checked.flatMap((row) => row.observed_providers), (value) => value),
     observer_provider_distribution: countBy(checked, (row) => row.expected_provider || 'unknown'),
     source_kind_distribution: countBy(checked.flatMap((row) => row.observed_source_kinds), (value) => value),
     observer_source_kind_distribution: countBy(checked, (row) => row.expected_source_kind || 'unknown'),
+    excluded_source_not_reproducible_examples: excluded.slice(0, 20),
     mismatches: mismatches.slice(0, 20),
   };
 }
@@ -807,6 +825,7 @@ function runEvaluate(args) {
     const key = keyOf(pilot);
     const observerRow = observer.byKey.get(key);
     const backfillRow = outcomesByKey.get(key);
+    if (!reconciliationSourceMatch.comparable_keys.has(key)) continue;
     if (!observerRow || !backfillRow) continue;
     reconciliationRows.push(compareOutcomes(backfillRow, observerRow));
   }
@@ -848,6 +867,7 @@ function runEvaluate(args) {
     cost_ceiling_credits: 30,
     cost_ok: actualCredits == null ? null : actualCredits <= 30,
   };
+  const { comparable_keys: _internalComparableKeys, ...reconciliationSourceMatchSummary } = reconciliationSourceMatch;
   const finalVerdict = computeFinalVerdict({
     reconciliation,
     stage,
@@ -872,7 +892,7 @@ function runEvaluate(args) {
       cost_ceiling_credits: 30,
     },
     outcome_labelability: outcomeLabelability,
-    reconciliation_source_match: reconciliationSourceMatch,
+    reconciliation_source_match: reconciliationSourceMatchSummary,
     stage_resolution: stage,
     reconciliation,
     cost,

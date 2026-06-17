@@ -100,6 +100,10 @@ source mismatch against the frozen observer labels and could create a false
 `evaluate` enforces this for observer-overlap rows: window bars must match the
 frozen observer's `path_provider` and, when present, `path_source_kind`. A
 provider/source mismatch exits fail-closed before the labeler runs.
+Observer rows whose source is not externally reproducible for the pilot (for
+example `local_cache`) are excluded from reconciliation and reported as
+`source_not_reproducible`; they do not kill the whole pilot and they do not enter
+the agreement denominator.
 
 ## Discipline
 
@@ -119,6 +123,8 @@ provider/source mismatch exits fail-closed before the labeler runs.
   not just a handoff comment. Unknown completed cost with a cap set is
   fail-closed.
 - Reconciliation-source mismatch is fail-closed before `buildRawSignalOutcomeReport()`.
+- Non-reproducible observer sources are excluded and counted, not silently
+  compared to a different source.
 
 ## Verification Performed
 
@@ -135,6 +141,8 @@ provider/source mismatch exits fail-closed before the labeler runs.
   for reconciliation while separate Dune stage tags provide stage resolution.
 - an evaluate test verifies Dune/curve bars are rejected when the observer
   expected Gecko/indexed OHLCV bars.
+- an evaluate test verifies `local_cache` observer rows are excluded/reported
+  while Gecko rows still reconcile.
 
 ## Review Focus
 
