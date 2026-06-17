@@ -184,6 +184,12 @@ def poll_execution(
         credit_suffix = f" credits={credits}" if credits is not None else ""
         print(f"[dune] {now_iso()} execution={execution_id} state={state or '?'}{credit_suffix}", flush=True)
         if state in {"QUERY_STATE_COMPLETED", "COMPLETED", "SUCCESS", "SUCCEEDED"}:
+            if max_credits is not None and credits is None:
+                cancel_execution(execution_id, api_key)
+                raise RuntimeError(
+                    f"Dune execution {execution_id} completed without a recognized credit field "
+                    "while --max-credits was set; fail-closed because cost could not be verified"
+                )
             return status
         if state in {"QUERY_STATE_FAILED", "FAILED", "CANCELLED", "CANCELED"}:
             raise RuntimeError(f"Dune execution failed: {status}")
@@ -258,6 +264,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[dune] execution_id={execution_id}", flush=True)
     status = poll_execution(execution_id, api_key, args.poll_seconds, args.timeout_seconds, args.max_credits)
     final_credits = enforce_credit_cap(status, args.max_credits, execution_id, api_key, phase="completion")
+    if args.max_credits is not None and final_credits is None:
+        raise RuntimeError(
+            f"Dune execution {execution_id} has no recognized credit field after completion; "
+            "--max-credits cannot be verified"
+        )
     row_count, columns = fetch_all_results(execution_id, api_key, out_jsonl, args.page_limit)
     finished_at = now_iso()
 

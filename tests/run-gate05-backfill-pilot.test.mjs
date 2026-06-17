@@ -57,7 +57,11 @@ function makePremiumDb(filePath) {
   db.close();
 }
 
-function makeObserverDb(filePath) {
+function makeObserverDb(filePath, {
+  pathSourceKind = 'bonding_curve',
+  pathSourceFamily = pathSourceKind === 'bonding_curve' ? 'onchain_swap' : 'third_party_kline',
+  pathProvider = pathSourceKind === 'bonding_curve' ? 'dune_test' : 'geckoterminal',
+} = {}) {
   const db = new Database(filePath);
   db.exec(`
     CREATE TABLE raw_signal_outcomes (
@@ -93,8 +97,8 @@ function makeObserverDb(filePath) {
        sustained_reason, coverage_reason, kline_covered, same_source_path, sustained_evaluable, observation_status, outlier_flag)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  insert.run('A'.repeat(32) + 'pump', ts('2026-06-06T00:00:00Z'), 'gold', 'gold', 120, 1, ts('2026-06-06T00:00:00Z'), 0, 'native', 'high', 120, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'sustained_gold', 'covered', 1, 1, 1, 'matured', 0);
-  insert.run('B'.repeat(32) + 'pump', ts('2026-06-06T00:10:00Z'), 'sub25', 'sub25', 10, 1, ts('2026-06-06T00:10:00Z'), 0, 'native', 'high', 10, 60, 'bonding_curve', 'onchain_swap', 'dune_test', 'sub25', 'covered', 1, 1, 1, 'matured', 0);
+  insert.run('A'.repeat(32) + 'pump', ts('2026-06-06T00:00:00Z'), 'gold', 'gold', 120, 1, ts('2026-06-06T00:00:00Z'), 0, 'native', 'high', 120, 60, pathSourceKind, pathSourceFamily, pathProvider, 'sustained_gold', 'covered', 1, 1, 1, 'matured', 0);
+  insert.run('B'.repeat(32) + 'pump', ts('2026-06-06T00:10:00Z'), 'sub25', 'sub25', 10, 1, ts('2026-06-06T00:10:00Z'), 0, 'native', 'high', 10, 60, pathSourceKind, pathSourceFamily, pathProvider, 'sub25', 'covered', 1, 1, 1, 'matured', 0);
   db.close();
 }
 
@@ -249,7 +253,7 @@ test('evaluate can use observer-source bars for reconciliation and separate Dune
   const bars = path.join(dir, 'gecko-bars.jsonl');
   const stageTags = path.join(dir, 'stage-tags.jsonl');
   makePremiumDb(premiumDb);
-  makeObserverDb(observerDb);
+  makeObserverDb(observerDb, { pathSourceKind: 'indexed_ohlcv', pathSourceFamily: 'third_party_kline', pathProvider: 'geckoterminal' });
   writeBars(bars, { sourceKind: 'indexed_ohlcv', sourceFamily: 'third_party_kline', provider: 'geckoterminal' });
   writeStageTags(stageTags);
 
@@ -279,4 +283,41 @@ test('evaluate can use observer-source bars for reconciliation and separate Dune
   assert.equal(summary.stage_resolution.stage_source, 'separate_stage_tags');
   assert.equal(summary.stage_resolution.stage_tag_matched_n, 2);
   assert.equal(summary.stage_resolution.stage_resolved_rate, 1);
+});
+
+test('evaluate fails closed when reconciliation bars do not match observer provider/source', () => {
+  const dir = tmpdir();
+  const premiumDb = path.join(dir, 'premium.db');
+  const observerDb = path.join(dir, 'observer.db');
+  const prepareDir = path.join(dir, 'prepare');
+  const evalDir = path.join(dir, 'eval');
+  const bars = path.join(dir, 'wrong-source-bars.jsonl');
+  makePremiumDb(premiumDb);
+  makeObserverDb(observerDb, { pathSourceKind: 'indexed_ohlcv', pathSourceFamily: 'third_party_kline', pathProvider: 'geckoterminal' });
+  writeBars(bars, { sourceKind: 'bonding_curve', sourceFamily: 'onchain_swap', provider: 'dune_test' });
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'prepare',
+    '--premium-db', premiumDb,
+    '--observer-db', observerDb,
+    '--out-dir', prepareDir,
+    '--limit', '2',
+    '--allow-small-premium-db-for-smoke',
+  ], { stdio: 'pipe' });
+
+  try {
+    execFileSync(process.execPath, [
+      SCRIPT,
+      '--mode', 'evaluate',
+      '--observer-db', observerDb,
+      '--pilot-signals', path.join(prepareDir, 'pilot-signals.json'),
+      '--bars-jsonl', bars,
+      '--out-dir', evalDir,
+      '--cost-credits', '1',
+    ], { stdio: 'pipe' });
+    assert.fail('evaluate should have rejected mismatched reconciliation bars');
+  } catch (err) {
+    assert.match(String(err.stderr), /reconciliation bars do not match observer source/);
+  }
 });

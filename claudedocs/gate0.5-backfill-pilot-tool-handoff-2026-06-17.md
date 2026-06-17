@@ -43,7 +43,8 @@ The paid pilot has two separate data inputs:
 
 Run Dune through `scripts/run-dune-sql-export.py --max-credits 30` or an
 equivalent wrapper. The exporter now fails closed if Dune status reports credits
-above the cap before result fetch.
+above the cap before result fetch. It also fails closed if `--max-credits` is
+set and the completed Dune status does not expose a recognized credit field.
 
 ## Commands
 
@@ -96,6 +97,10 @@ pump.fun curve-only bars. Curve-only bars would make label reconciliation a
 source mismatch against the frozen observer labels and could create a false
 `NOT_FEASIBLE` verdict on graduation-spanning dogs.
 
+`evaluate` enforces this for observer-overlap rows: window bars must match the
+frozen observer's `path_provider` and, when present, `path_source_kind`. A
+provider/source mismatch exits fail-closed before the labeler runs.
+
 ## Discipline
 
 - No candidate feature effect is computed.
@@ -111,7 +116,9 @@ source mismatch against the frozen observer labels and could create a false
 - Observer reconciliation includes `sustained_reason`, so sustained-definition
   disagreements can be classified instead of falling through.
 - Dune exports can be capped with `--max-credits`; this is a real exporter gate,
-  not just a handoff comment.
+  not just a handoff comment. Unknown completed cost with a cap set is
+  fail-closed.
+- Reconciliation-source mismatch is fail-closed before `buildRawSignalOutcomeReport()`.
 
 ## Verification Performed
 
@@ -126,6 +133,8 @@ source mismatch against the frozen observer labels and could create a false
   definition differences.
 - an evaluate test verifies observer-source `indexed_ohlcv` bars can be used
   for reconciliation while separate Dune stage tags provide stage resolution.
+- an evaluate test verifies Dune/curve bars are rejected when the observer
+  expected Gecko/indexed OHLCV bars.
 
 ## Review Focus
 

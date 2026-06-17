@@ -384,6 +384,78 @@ function normalizeBar(row) {
   };
 }
 
+function normalizeSourceValue(value) {
+  const s = String(value || '').trim().toLowerCase();
+  if (!s) return null;
+  if (s === 'gecko' || s === 'geckoterminal') return 'geckoterminal';
+  if (s === 'cache') return 'local_cache';
+  return s;
+}
+
+function barsByToken(rows) {
+  const out = new Map();
+  for (const row of rows) {
+    if (!out.has(row.token_ca)) out.set(row.token_ca, []);
+    out.get(row.token_ca).push(row);
+  }
+  return out;
+}
+
+function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
+  const byToken = barsByToken(bars);
+  const mismatches = [];
+  const checked = [];
+  let noBars = 0;
+  for (const pilot of pilotSignals) {
+    const observer = observerByKey.get(keyOf(pilot));
+    if (!observer) continue;
+    const expectedProvider = normalizeSourceValue(observer.path_provider);
+    const expectedKind = normalizeSourceValue(observer.path_source_kind);
+    const windowBars = (byToken.get(pilot.token_ca) || [])
+      .filter((bar) => bar.timestamp >= pilot.signal_ts && bar.timestamp <= pilot.signal_ts + HORIZON_SEC);
+    if (!windowBars.length) {
+      noBars += 1;
+      mismatches.push({
+        token_ca: pilot.token_ca,
+        signal_ts: pilot.signal_ts,
+        reason: 'no_reconciliation_bars_for_observer_labeled_signal',
+        expected_provider: expectedProvider,
+        expected_source_kind: expectedKind,
+      });
+      continue;
+    }
+    const providers = [...new Set(windowBars.map((bar) => normalizeSourceValue(bar.provider)).filter(Boolean))].sort();
+    const kinds = [...new Set(windowBars.map((bar) => normalizeSourceValue(bar.source_kind)).filter(Boolean))].sort();
+    const providerOk = Boolean(expectedProvider) && providers.length > 0 && providers.every((provider) => provider === expectedProvider);
+    const kindOk = !expectedKind || (kinds.length > 0 && kinds.every((kind) => kind === expectedKind));
+    const record = {
+      token_ca: pilot.token_ca,
+      signal_ts: pilot.signal_ts,
+      expected_provider: expectedProvider,
+      observed_providers: providers,
+      expected_source_kind: expectedKind,
+      observed_source_kinds: kinds,
+      bar_count: windowBars.length,
+      provider_match: providerOk,
+      source_kind_match: kindOk,
+    };
+    checked.push(record);
+    if (!providerOk || !kindOk) mismatches.push(record);
+  }
+  return {
+    checked_n: checked.length + noBars,
+    matched_n: checked.filter((row) => row.provider_match && row.source_kind_match).length,
+    no_bars_n: noBars,
+    mismatch_n: mismatches.length,
+    ok: mismatches.length === 0,
+    provider_distribution: countBy(checked.flatMap((row) => row.observed_providers), (value) => value),
+    observer_provider_distribution: countBy(checked, (row) => row.expected_provider || 'unknown'),
+    source_kind_distribution: countBy(checked.flatMap((row) => row.observed_source_kinds), (value) => value),
+    observer_source_kind_distribution: countBy(checked, (row) => row.expected_source_kind || 'unknown'),
+    mismatches: mismatches.slice(0, 20),
+  };
+}
+
 function readJsonl(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8').trim();
   if (!raw) return [];
@@ -717,6 +789,11 @@ function runEvaluate(args) {
   const pilotSignals = readJson(args.pilotSignals);
   const bars = readJsonl(args.barsJsonl).map(normalizeBar).filter((row) => row.token_ca && row.timestamp != null && row.high != null && row.low != null && row.close != null);
   const stageTags = args.stageTagsJsonl ? readStageTags(args.stageTagsJsonl) : null;
+  const observer = loadObserverRows(args.observerDb, args);
+  const reconciliationSourceMatch = summarizeReconciliationSourceMatch(pilotSignals, bars, observer.byKey);
+  if (!reconciliationSourceMatch.ok) {
+    die(`reconciliation bars do not match observer source: ${JSON.stringify(reconciliationSourceMatch.mismatches)}`);
+  }
   const nowTs = Math.max(...pilotSignals.map((row) => Number(row.signal_ts || 0))) + HORIZON_SEC + 1;
   const report = buildRawSignalOutcomeReport({
     signals: pilotSignals.map((row) => ({ token_ca: row.token_ca, symbol: row.symbol, timestamp_sec: row.signal_ts, signal_type: row.signal_type })),
@@ -724,7 +801,6 @@ function runEvaluate(args) {
     nowTs,
     horizonSec: HORIZON_SEC,
   });
-  const observer = loadObserverRows(args.observerDb, args);
   const outcomesByKey = new Map(report.outcomes.map((row) => [keyOf(row), row]));
   const reconciliationRows = [];
   for (const pilot of pilotSignals) {
@@ -796,6 +872,7 @@ function runEvaluate(args) {
       cost_ceiling_credits: 30,
     },
     outcome_labelability: outcomeLabelability,
+    reconciliation_source_match: reconciliationSourceMatch,
     stage_resolution: stage,
     reconciliation,
     cost,
