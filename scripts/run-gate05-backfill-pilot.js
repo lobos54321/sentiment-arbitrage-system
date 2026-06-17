@@ -390,6 +390,32 @@ function readJsonl(filePath) {
   return raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function readStageTags(filePath) {
+  if (!filePath) return null;
+  const rows = readJsonl(filePath);
+  const byKey = new Map();
+  for (const raw of rows) {
+    const token = String(raw.token_ca || '').trim();
+    const signalTs = normalizeTs(raw.signal_ts);
+    if (!token || signalTs == null) continue;
+    const curveTotal = Number(raw.curve_trade_count_total ?? raw.curve_trade_count ?? 0);
+    const preCurve = Number(raw.pre_signal_curve_trade_count ?? 0);
+    const postCurve = Number(raw.post_signal_curve_trade_count ?? 0);
+    const outOfWindow = Number(raw.out_of_window_trade_count ?? 0);
+    byKey.set(`${token}|${signalTs}`, {
+      token_ca: token,
+      signal_ts: signalTs,
+      stage_tag: raw.stage_tag || (curveTotal > 0 ? 'curve_activity_observed' : 'no_curve_trade_observed'),
+      curve_trade_count_total: Number.isFinite(curveTotal) ? curveTotal : 0,
+      pre_signal_curve_trade_count: Number.isFinite(preCurve) ? preCurve : 0,
+      post_signal_curve_trade_count: Number.isFinite(postCurve) ? postCurve : 0,
+      out_of_window_trade_count: Number.isFinite(outOfWindow) ? outOfWindow : 0,
+      stage_source: raw.stage_source || raw.provider || 'dune_stage_tag',
+    });
+  }
+  return { rows, byKey };
+}
+
 function classifyStageFromOutcome(row) {
   const kind = String(row.path_source_kind || row.source_kind || '').toLowerCase();
   const provider = String(row.path_provider || row.provider || '').toLowerCase();
@@ -406,13 +432,37 @@ function stageResolved(stage) {
   return stage === 'curve_active' || stage === 'graduated_amm' || stage === 'mature_recovery';
 }
 
-function summarizeStage(outcomes) {
-  const rows = outcomes.map((row) => ({ ...row, stage: classifyStageFromOutcome(row) }));
+function classifyStageFromTag(tag) {
+  if (!tag) return 'unknown';
+  if (Number(tag.curve_trade_count_total || 0) > 0) return 'curve_active';
+  return 'indexed_unknown';
+}
+
+function summarizeStage(outcomes, stageTags = null) {
+  const rows = outcomes.map((row) => {
+    const tag = stageTags?.byKey?.get(keyOf(row));
+    return {
+      ...row,
+      stage: tag ? classifyStageFromTag(tag) : classifyStageFromOutcome(row),
+      stage_tag: tag?.stage_tag || null,
+      curve_trade_count_total: tag?.curve_trade_count_total ?? null,
+      pre_signal_curve_trade_count: tag?.pre_signal_curve_trade_count ?? null,
+      post_signal_curve_trade_count: tag?.post_signal_curve_trade_count ?? null,
+      out_of_window_trade_count: tag?.out_of_window_trade_count ?? null,
+    };
+  });
   const resolved = rows.filter((row) => stageResolved(row.stage));
   const progressAvailable = rows.filter((row) => row.baseline_price != null && row.baseline_price_unit === 'native');
   return {
+    stage_source: stageTags ? 'separate_stage_tags' : 'outcome_bar_source_proxy',
     total: rows.length,
     stage_distribution: countBy(rows, (row) => row.stage),
+    stage_tag_rows: stageTags?.rows?.length ?? null,
+    stage_tag_matched_n: stageTags ? rows.filter((row) => stageTags.byKey.has(keyOf(row))).length : null,
+    curve_trade_observed_n: stageTags ? rows.filter((row) => Number(row.curve_trade_count_total || 0) > 0).length : null,
+    stage_tag_out_of_window_trade_count: stageTags
+      ? rows.reduce((sum, row) => sum + Number(row.out_of_window_trade_count || 0), 0)
+      : null,
     stage_resolved_n: resolved.length,
     stage_resolved_rate: pct(resolved.length, rows.length),
     progress_available_proxy_n: progressAvailable.length,
@@ -524,6 +574,7 @@ function parseArgs(argv) {
       case '--out-dir': a.outDir = take(argv, i); i += 1; break;
       case '--pilot-signals': a.pilotSignals = take(argv, i); i += 1; break;
       case '--bars-jsonl': a.barsJsonl = take(argv, i); i += 1; break;
+      case '--stage-tags-jsonl': a.stageTagsJsonl = take(argv, i); i += 1; break;
       case '--dune-manifest': a.duneManifest = take(argv, i); i += 1; break;
       case '--cost-credits': a.costCredits = Number(take(argv, i)); i += 1; break;
       case '--runtime-ms': a.runtimeMs = Number(take(argv, i)); i += 1; break;
@@ -559,7 +610,7 @@ function usage() {
     '  prepare emits pilot-signals.json, burned_keys.txt, signal_windows.csv, and provider-request.json.',
     '  evaluate consumes provider 1m bars and reuses src/analytics/raw-signal-outcomes.js.',
     '  prepare expects the real premium_signals metadata DB; use --allow-small-premium-db-for-smoke only for synthetic tests.',
-    '  recommended Dune template: scripts/gate05-backfill-pilot-dune-bars.template.sql (stage-aware bars, 30-credit fetch ceiling).',
+    '  reconciliation bars must match the observer price source; use --stage-tags-jsonl for separate Dune curve-presence tags.',
   ].join('\n');
 }
 
@@ -589,7 +640,8 @@ function runPrepare(args) {
   ].join('\n') + '\n');
   writeJson(path.join(args.outDir, 'provider-request.json'), {
     schema_version: 'gate05_backfill_provider_request.v1',
-    recommended_dune_template: 'scripts/gate05-backfill-pilot-dune-bars.template.sql',
+    reconciliation_bars_must_match_observer_source: true,
+    stage_tag_dune_template: 'scripts/gate05-backfill-pilot-stage-tags-dune.template.sql',
     provider_cost_ceiling_credits: 30,
     fetch_must_abort_if_estimated_or_final_cost_exceeds_ceiling: true,
     required_bar_schema: {
@@ -664,6 +716,7 @@ function runEvaluate(args) {
   fs.mkdirSync(args.outDir, { recursive: true });
   const pilotSignals = readJson(args.pilotSignals);
   const bars = readJsonl(args.barsJsonl).map(normalizeBar).filter((row) => row.token_ca && row.timestamp != null && row.high != null && row.low != null && row.close != null);
+  const stageTags = args.stageTagsJsonl ? readStageTags(args.stageTagsJsonl) : null;
   const nowTs = Math.max(...pilotSignals.map((row) => Number(row.signal_ts || 0))) + HORIZON_SEC + 1;
   const report = buildRawSignalOutcomeReport({
     signals: pilotSignals.map((row) => ({ token_ca: row.token_ca, symbol: row.symbol, timestamp_sec: row.signal_ts, signal_type: row.signal_type })),
@@ -694,7 +747,7 @@ function runEvaluate(args) {
     difference_taxonomy: countBy(reconciliationRows.filter((row) => !row.class_match || !row.tier_match), (row) => row.difference_reason),
     verdict: reconciliationVerdict(reconRate),
   };
-  const stage = summarizeStage(report.outcomes);
+  const stage = summarizeStage(report.outcomes, stageTags);
   stage.verdict = stageVerdict(stage.stage_resolved_rate);
   const labelable = report.outcomes.filter((row) => ['gold', 'silver', 'bronze', 'sub25'].includes(String(row.raw_primary_tier)));
   const outcomeLabelability = {
@@ -731,6 +784,7 @@ function runEvaluate(args) {
     inputs: {
       pilot_signals: { path: path.resolve(args.pilotSignals), sha256: sha256File(args.pilotSignals), rows: pilotSignals.length },
       bars_jsonl: { path: path.resolve(args.barsJsonl), sha256: sha256File(args.barsJsonl), rows: bars.length },
+      stage_tags_jsonl: args.stageTagsJsonl ? { path: path.resolve(args.stageTagsJsonl), sha256: sha256File(args.stageTagsJsonl), rows: stageTags?.rows?.length || 0 } : null,
       observer_db: { path: path.resolve(args.observerDb), sha256: sha256File(args.observerDb) },
       dune_manifest: args.duneManifest ? { path: path.resolve(args.duneManifest), sha256: sha256File(args.duneManifest) } : null,
     },

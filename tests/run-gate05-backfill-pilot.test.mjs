@@ -98,16 +98,30 @@ function makeObserverDb(filePath) {
   db.close();
 }
 
-function writeBars(filePath) {
+function writeBars(filePath, {
+  sourceKind = 'bonding_curve',
+  sourceFamily = sourceKind === 'bonding_curve' ? 'onchain_swap' : 'third_party_kline',
+  provider = sourceKind === 'bonding_curve' ? 'dune_test' : 'geckoterminal',
+} = {}) {
   const a = 'A'.repeat(32) + 'pump';
   const b = 'B'.repeat(32) + 'pump';
   const rows = [
-    { token_ca: a, timestamp: ts('2026-06-06T00:00:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 100, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${a}`, price_unit: 'native' },
-    { token_ca: a, timestamp: ts('2026-06-06T00:01:00Z'), open: 1, high: 2.2, low: 1, close: 1.8, volume: 1000, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${a}`, price_unit: 'native' },
-    { token_ca: a, timestamp: ts('2026-06-06T00:02:00Z'), open: 1.8, high: 2.0, low: 1.7, close: 1.75, volume: 1000, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${a}`, price_unit: 'native' },
-    { token_ca: b, timestamp: ts('2026-06-06T00:10:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 100, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${b}`, price_unit: 'native' },
-    { token_ca: b, timestamp: ts('2026-06-06T00:11:00Z'), open: 1, high: 1.1, low: 1, close: 1.05, volume: 100, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${b}`, price_unit: 'native' },
-    { token_ca: b, timestamp: ts('2026-06-06T00:12:00Z'), open: 1.05, high: 1.05, low: 1, close: 1.02, volume: 100, provider: 'dune_test', source_kind: 'bonding_curve', source_family: 'onchain_swap', pool_address: `bonding_curve:${b}`, price_unit: 'native' },
+    { token_ca: a, timestamp: ts('2026-06-06T00:00:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 100, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${a}`, price_unit: 'native' },
+    { token_ca: a, timestamp: ts('2026-06-06T00:01:00Z'), open: 1, high: 2.2, low: 1, close: 1.8, volume: 1000, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${a}`, price_unit: 'native' },
+    { token_ca: a, timestamp: ts('2026-06-06T00:02:00Z'), open: 1.8, high: 2.0, low: 1.7, close: 1.75, volume: 1000, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${a}`, price_unit: 'native' },
+    { token_ca: b, timestamp: ts('2026-06-06T00:10:00Z'), open: 1, high: 1, low: 1, close: 1, volume: 100, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${b}`, price_unit: 'native' },
+    { token_ca: b, timestamp: ts('2026-06-06T00:11:00Z'), open: 1, high: 1.1, low: 1, close: 1.05, volume: 100, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${b}`, price_unit: 'native' },
+    { token_ca: b, timestamp: ts('2026-06-06T00:12:00Z'), open: 1.05, high: 1.05, low: 1, close: 1.02, volume: 100, provider, source_kind: sourceKind, source_family: sourceFamily, pool_address: `${sourceKind}:${b}`, price_unit: 'native' },
+  ];
+  fs.writeFileSync(filePath, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+}
+
+function writeStageTags(filePath) {
+  const a = 'A'.repeat(32) + 'pump';
+  const b = 'B'.repeat(32) + 'pump';
+  const rows = [
+    { token_ca: a, signal_ts: ts('2026-06-06T00:00:00Z'), curve_trade_count_total: 3, pre_signal_curve_trade_count: 0, post_signal_curve_trade_count: 3, out_of_window_trade_count: 0, stage_tag: 'curve_activity_observed', stage_source: 'dune_pumpfun_tradeevent' },
+    { token_ca: b, signal_ts: ts('2026-06-06T00:10:00Z'), curve_trade_count_total: 2, pre_signal_curve_trade_count: 0, post_signal_curve_trade_count: 2, out_of_window_trade_count: 0, stage_tag: 'curve_activity_observed', stage_source: 'dune_pumpfun_tradeevent' },
   ];
   fs.writeFileSync(filePath, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
 }
@@ -224,4 +238,45 @@ test('prepare and evaluate run end to end with observer reconciliation and no ed
   assert.equal(summary.verdict, 'HISTORICAL_BACKFILL_FEASIBLE');
   assert.equal(Object.prototype.hasOwnProperty.call(summary, 'auc'), false);
   assert.ok(!JSON.stringify(summary).includes('signal_type_dog_rate'));
+});
+
+test('evaluate can use observer-source bars for reconciliation and separate Dune stage tags', () => {
+  const dir = tmpdir();
+  const premiumDb = path.join(dir, 'premium.db');
+  const observerDb = path.join(dir, 'observer.db');
+  const prepareDir = path.join(dir, 'prepare');
+  const evalDir = path.join(dir, 'eval');
+  const bars = path.join(dir, 'gecko-bars.jsonl');
+  const stageTags = path.join(dir, 'stage-tags.jsonl');
+  makePremiumDb(premiumDb);
+  makeObserverDb(observerDb);
+  writeBars(bars, { sourceKind: 'indexed_ohlcv', sourceFamily: 'third_party_kline', provider: 'geckoterminal' });
+  writeStageTags(stageTags);
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'prepare',
+    '--premium-db', premiumDb,
+    '--observer-db', observerDb,
+    '--out-dir', prepareDir,
+    '--limit', '2',
+    '--allow-small-premium-db-for-smoke',
+  ], { stdio: 'pipe' });
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'evaluate',
+    '--observer-db', observerDb,
+    '--pilot-signals', path.join(prepareDir, 'pilot-signals.json'),
+    '--bars-jsonl', bars,
+    '--stage-tags-jsonl', stageTags,
+    '--out-dir', evalDir,
+    '--cost-credits', '1',
+  ], { stdio: 'pipe' });
+
+  const summary = JSON.parse(fs.readFileSync(path.join(evalDir, 'pilot-evaluation-summary.json'), 'utf8'));
+  assert.equal(summary.reconciliation.dog_dud_agreement_rate, 1);
+  assert.equal(summary.stage_resolution.stage_source, 'separate_stage_tags');
+  assert.equal(summary.stage_resolution.stage_tag_matched_n, 2);
+  assert.equal(summary.stage_resolution.stage_resolved_rate, 1);
 });

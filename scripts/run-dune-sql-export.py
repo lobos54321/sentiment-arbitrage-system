@@ -104,6 +104,55 @@ def request_json(method: str, url: str, api_key: str, body: dict | None = None, 
     return json.loads(payload) if payload else {}
 
 
+def extract_execution_cost_credits(payload: object) -> float | None:
+    """Best-effort Dune credit extraction across status/manifest shapes."""
+    candidate_keys = {
+        "execution_cost_credits",
+        "executionCostCredits",
+        "credits_used",
+        "creditsUsed",
+        "cost_credits",
+        "costCredits",
+    }
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in candidate_keys:
+                try:
+                    n = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if n >= 0:
+                    return n
+        for value in payload.values():
+            found = extract_execution_cost_credits(value)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = extract_execution_cost_credits(item)
+            if found is not None:
+                return found
+    return None
+
+
+def cancel_execution(execution_id: str, api_key: str) -> None:
+    try:
+        request_json("POST", f"{API_BASE}/execution/{execution_id}/cancel", api_key, timeout=30)
+    except Exception as exc:  # best effort; caller still fails closed
+        print(f"[dune] warning: failed to cancel execution={execution_id}: {exc}", file=sys.stderr, flush=True)
+
+
+def enforce_credit_cap(status: dict, max_credits: float | None, execution_id: str, api_key: str, *, phase: str) -> float | None:
+    credits = extract_execution_cost_credits(status)
+    if max_credits is not None and credits is not None and credits > max_credits:
+        cancel_execution(execution_id, api_key)
+        raise RuntimeError(
+            f"Dune execution {execution_id} exceeded --max-credits during {phase}: "
+            f"{credits} > {max_credits}"
+        )
+    return credits
+
+
 def execute_sql(sql: str, api_key: str, performance: str) -> str:
     response = request_json(
         "POST",
@@ -118,14 +167,22 @@ def execute_sql(sql: str, api_key: str, performance: str) -> str:
     return str(execution_id)
 
 
-def poll_execution(execution_id: str, api_key: str, poll_seconds: int, timeout_seconds: int) -> dict:
+def poll_execution(
+    execution_id: str,
+    api_key: str,
+    poll_seconds: int,
+    timeout_seconds: int,
+    max_credits: float | None = None,
+) -> dict:
     deadline = time.time() + timeout_seconds
     last = None
     while True:
         status = request_json("GET", f"{API_BASE}/execution/{execution_id}/status", api_key, timeout=60)
         last = status
+        credits = enforce_credit_cap(status, max_credits, execution_id, api_key, phase="poll")
         state = str(status.get("state") or status.get("status") or "").upper()
-        print(f"[dune] {now_iso()} execution={execution_id} state={state or '?'}", flush=True)
+        credit_suffix = f" credits={credits}" if credits is not None else ""
+        print(f"[dune] {now_iso()} execution={execution_id} state={state or '?'}{credit_suffix}", flush=True)
         if state in {"QUERY_STATE_COMPLETED", "COMPLETED", "SUCCESS", "SUCCEEDED"}:
             return status
         if state in {"QUERY_STATE_FAILED", "FAILED", "CANCELLED", "CANCELED"}:
@@ -187,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--poll-seconds", type=int, default=10)
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--performance", default=os.environ.get("DUNE_PERFORMANCE", "small"), choices=["small", "medium", "large", "free"])
+    parser.add_argument("--max-credits", type=float, default=None, help="Fail closed if Dune status reports execution credits above this cap")
     args = parser.parse_args(argv)
 
     sql_path = Path(args.sql)
@@ -198,7 +256,8 @@ def main(argv: list[str] | None = None) -> int:
     started_at = now_iso()
     execution_id = args.execution_id or execute_sql(sql, api_key, args.performance)
     print(f"[dune] execution_id={execution_id}", flush=True)
-    status = poll_execution(execution_id, api_key, args.poll_seconds, args.timeout_seconds)
+    status = poll_execution(execution_id, api_key, args.poll_seconds, args.timeout_seconds, args.max_credits)
+    final_credits = enforce_credit_cap(status, args.max_credits, execution_id, api_key, phase="completion")
     row_count, columns = fetch_all_results(execution_id, api_key, out_jsonl, args.page_limit)
     finished_at = now_iso()
 
@@ -210,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
         "sql_sha256": hashlib.sha256(sql.encode("utf-8")).hexdigest(),
         "execution_id": execution_id,
         "final_status": status,
+        "execution_cost_credits": final_credits,
+        "max_credits": args.max_credits,
         "out_jsonl": str(out_jsonl),
         "out_jsonl_sha256": sha256_file(out_jsonl),
         "row_count": row_count,
