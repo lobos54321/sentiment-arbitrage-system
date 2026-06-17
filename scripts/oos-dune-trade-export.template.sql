@@ -26,6 +26,11 @@ source_trades AS (
     CAST(real_token_reserves AS DOUBLE) / 1e6 AS real_token_reserves
   FROM pumpdotfun_solana.pump_evt_tradeevent
   WHERE mint IN (SELECT token_ca FROM tokens)
+    -- evt_block_date is the table partition key. Keep this alongside the
+    -- Unix timestamp predicate so Dune's small/free engine does not scan the
+    -- full decoded pump.fun table for narrow OOS windows.
+    AND evt_block_date BETWEEN (SELECT CAST(from_unixtime(min_start_ts) AS DATE) FROM window_bounds)
+                           AND (SELECT CAST(from_unixtime(max_end_ts) AS DATE) FROM window_bounds)
     AND CAST(timestamp AS BIGINT) BETWEEN (SELECT min_start_ts FROM window_bounds) AND (SELECT max_end_ts FROM window_bounds)
 ),
 joined AS (
