@@ -7,6 +7,63 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { buildWindows, valuesSql } from '../scripts/build-oos-wallet-quality-spike-windows.js';
 import { summarize, hasForbiddenKey } from '../scripts/validate-oos-wallet-quality-spike.js';
 
+const WINDOWS_MANIFEST_365D = { selection: { history_days: 365 } };
+
+function completeSpikeRow(extra = {}) {
+  return {
+    window_id: 'w1',
+    token_ca: 'tok1',
+    signal_ts: 1000,
+    window_complete: true,
+    n_buyers: 2,
+    buy_sol_total: 3,
+    n_buyers_with_prior_history: 1,
+    n_buyers_qualify_k1_7d: 1,
+    n_buyers_qualify_k3_7d: 0,
+    n_buyers_qualify_k5_7d: 0,
+    buy_sol_from_qualify_k3_7d: 0,
+    n_buyers_qualify_k1_7d_nonsniper: 1,
+    n_buyers_qualify_k3_7d_nonsniper: 0,
+    n_buyers_qualify_k5_7d_nonsniper: 0,
+    buy_sol_from_qualify_k3_7d_nonsniper: 0,
+    n_buyers_qualify_k1_14d: 1,
+    n_buyers_qualify_k3_14d: 0,
+    n_buyers_qualify_k5_14d: 0,
+    buy_sol_from_qualify_k3_14d: 0,
+    n_buyers_qualify_k1_14d_nonsniper: 1,
+    n_buyers_qualify_k3_14d_nonsniper: 0,
+    n_buyers_qualify_k5_14d_nonsniper: 0,
+    buy_sol_from_qualify_k3_14d_nonsniper: 0,
+    n_buyers_qualify_k1_30d: 1,
+    n_buyers_qualify_k3_30d: 0,
+    n_buyers_qualify_k5_30d: 0,
+    buy_sol_from_qualify_k3_30d: 0,
+    n_buyers_qualify_k1_30d_nonsniper: 1,
+    n_buyers_qualify_k3_30d_nonsniper: 0,
+    n_buyers_qualify_k5_30d_nonsniper: 0,
+    buy_sol_from_qualify_k3_30d_nonsniper: 0,
+    n_buyers_qualify_k1_all: 1,
+    n_buyers_qualify_k3_all: 1,
+    n_buyers_qualify_k5_all: 0,
+    buy_sol_from_qualify_k3_all: 1.2,
+    n_buyers_qualify_k1_all_nonsniper: 1,
+    n_buyers_qualify_k3_all_nonsniper: 1,
+    n_buyers_qualify_k5_all_nonsniper: 0,
+    buy_sol_from_qualify_k3_all_nonsniper: 1.2,
+    n_buyers_creator_excluded: 0,
+    n_buyers_first_block_sniper: 1,
+    n_buyers_prior_sniper: 0,
+    n_buyers_any_sniper_proxy: 1,
+    prior_trades_per_buyer_median: 2,
+    prior_trades_per_buyer_p90: 4,
+    prior_snipe_rate_buyer_median: 0,
+    prior_snipe_rate_buyer_p90: 0.25,
+    max_prior_bt: 900,
+    asof_ok: true,
+    ...extra,
+  };
+}
+
 test('buildWindows emits deterministic label-stripped windows', () => {
   const rows = [
     { token_ca: 'b', signal_ts: 200, label: 'dog', unique_buyers: 9 },
@@ -49,48 +106,55 @@ test('window builder CLI writes CSV/SQL without labels or AUC', () => {
 });
 
 test('validator summarizes coverage only and forbids labels/AUC/as-of leaks', () => {
-  const rows = [
-    { window_id: 'w1', token_ca: 'tok1', signal_ts: 1000, window_complete: true, n_buyers: 2, buy_sol_total: 3, n_buyers_with_prior_history: 1,
-      n_buyers_qualify_k1_7d: 1, n_buyers_qualify_k3_7d: 0, n_buyers_qualify_k5_7d: 0,
-      n_buyers_qualify_k1_14d: 1, n_buyers_qualify_k3_14d: 0, n_buyers_qualify_k5_14d: 0,
-      n_buyers_qualify_k1_30d: 1, n_buyers_qualify_k3_30d: 0, n_buyers_qualify_k5_30d: 0,
-      n_buyers_qualify_k1_all: 1, n_buyers_qualify_k3_all: 1, n_buyers_qualify_k5_all: 0,
-      buy_sol_from_qualify_k3_7d: 0, buy_sol_from_qualify_k3_14d: 0, buy_sol_from_qualify_k3_30d: 0, buy_sol_from_qualify_k3_all: 1.2,
-      n_buyers_creator_excluded: 0, n_buyers_first_block_sniper: 1,
-      prior_trades_per_buyer_median: 2, prior_trades_per_buyer_p90: 4,
-      max_prior_bt: 900, asof_ok: true },
-  ];
-  const report = summarize(rows);
+  const rows = [completeSpikeRow()];
+  const report = summarize(rows, null, WINDOWS_MANIFEST_365D);
   assert.equal(report.verdict, 'SPIKE_QA_PASS_NO_EDGE_CLAIM');
   assert.equal(report.windows_total, 1);
   assert.equal(report.availability_frac_window_ge1_qualify.all.frac_window_ge1_k3, 1);
+  assert.equal(report.availability_frac_window_ge1_qualify.all.frac_window_ge1_k3_nonsniper, 1);
   assert.equal(report.asof_integrity_violations, 0);
+  assert.equal(report.lookback_guard.ok, true);
   assert.equal(report.forbidden_outputs.no_auc, true);
 
   assert.equal(hasForbiddenKey([{ ...rows[0], label: 'dog' }]), 'label');
   assert.equal(hasForbiddenKey([{ nested: { auc: 0.7 } }]), 'auc');
-  assert.equal(summarize([{ ...rows[0], max_prior_bt: 1000 }]).verdict, 'SPIKE_QA_FAIL_FIX_PIPELINE');
+  assert.equal(summarize([{ ...rows[0], max_prior_bt: 1000 }], null, WINDOWS_MANIFEST_365D).verdict, 'SPIKE_QA_FAIL_FIX_PIPELINE');
+  assert.equal(summarize(rows, null, { selection: { history_days: 7 } }).verdict, 'SPIKE_QA_FAIL_FIX_PIPELINE');
+  assert.equal(summarize(rows, null, { selection: { history_days: 7 } }).lookback_guard.reason, 'history_days_missing_or_less_than_max_lookback');
 });
 
 test('validator CLI fails closed on forbidden label field', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wallet-spike-'));
   const rows = path.join(dir, 'rows.jsonl');
   const out = path.join(dir, 'validation.json');
-  fs.writeFileSync(rows, JSON.stringify({
-    window_id: 'w1', token_ca: 'tok1', signal_ts: 1000, label: 'dog', window_complete: true, n_buyers: 0, buy_sol_total: 0,
-    n_buyers_with_prior_history: 0, n_buyers_qualify_k1_7d: 0, n_buyers_qualify_k3_7d: 0, n_buyers_qualify_k5_7d: 0,
-    n_buyers_qualify_k1_14d: 0, n_buyers_qualify_k3_14d: 0, n_buyers_qualify_k5_14d: 0,
-    n_buyers_qualify_k1_30d: 0, n_buyers_qualify_k3_30d: 0, n_buyers_qualify_k5_30d: 0,
-    n_buyers_qualify_k1_all: 0, n_buyers_qualify_k3_all: 0, n_buyers_qualify_k5_all: 0,
-    n_buyers_creator_excluded: 0, n_buyers_first_block_sniper: 0,
-    prior_trades_per_buyer_median: 0, prior_trades_per_buyer_p90: 0,
-    asof_ok: true,
-  }) + '\n');
-  const res = spawnSync(process.execPath, ['scripts/validate-oos-wallet-quality-spike.js', '--rows', rows, '--out', out], {
+  const windowsManifest = path.join(dir, 'windows-manifest.json');
+  fs.writeFileSync(windowsManifest, JSON.stringify(WINDOWS_MANIFEST_365D));
+  fs.writeFileSync(rows, JSON.stringify(completeSpikeRow({ label: 'dog', n_buyers: 0, buy_sol_total: 0 })) + '\n');
+  const res = spawnSync(process.execPath, ['scripts/validate-oos-wallet-quality-spike.js', '--rows', rows, '--windows-manifest', windowsManifest, '--out', out], {
     cwd: '/Users/boliu/sas-research', encoding: 'utf8',
   });
   assert.notEqual(res.status, 0);
   const report = JSON.parse(fs.readFileSync(out, 'utf8'));
   assert.equal(report.verdict, 'SPIKE_QA_FAIL_FIX_PIPELINE');
   assert.equal(report.forbidden_key_found, 'label');
+});
+
+test('validator CLI requires a 365d windows manifest', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wallet-spike-'));
+  const rows = path.join(dir, 'rows.jsonl');
+  const out = path.join(dir, 'validation.json');
+  fs.writeFileSync(rows, `${JSON.stringify(completeSpikeRow())}\n`);
+  const missing = spawnSync(process.execPath, ['scripts/validate-oos-wallet-quality-spike.js', '--rows', rows, '--out', out], {
+    cwd: '/Users/boliu/sas-research', encoding: 'utf8',
+  });
+  assert.notEqual(missing.status, 0);
+
+  const shortManifest = path.join(dir, 'windows-manifest-short.json');
+  fs.writeFileSync(shortManifest, JSON.stringify({ selection: { history_days: 30 } }));
+  const short = spawnSync(process.execPath, ['scripts/validate-oos-wallet-quality-spike.js', '--rows', rows, '--windows-manifest', shortManifest, '--out', out], {
+    cwd: '/Users/boliu/sas-research', encoding: 'utf8',
+  });
+  assert.notEqual(short.status, 0);
+  const report = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(report.lookback_guard.ok, false);
 });

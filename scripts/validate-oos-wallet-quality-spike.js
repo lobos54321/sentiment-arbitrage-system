@@ -12,15 +12,20 @@ import path from 'path';
 import crypto from 'crypto';
 import { parse as parseCsv } from 'csv-parse/sync';
 
+const LOOKBACKS = ['7d', '14d', '30d', 'all'];
+const QUALIFY_KS = [1, 3, 5];
+const MAX_LOOKBACK_DAYS = 365;
+
 const REQUIRED_FIELDS = [
   'window_id', 'token_ca', 'signal_ts', 'window_complete',
   'n_buyers', 'buy_sol_total', 'n_buyers_with_prior_history',
-  'n_buyers_qualify_k1_7d', 'n_buyers_qualify_k3_7d', 'n_buyers_qualify_k5_7d',
-  'n_buyers_qualify_k1_14d', 'n_buyers_qualify_k3_14d', 'n_buyers_qualify_k5_14d',
-  'n_buyers_qualify_k1_30d', 'n_buyers_qualify_k3_30d', 'n_buyers_qualify_k5_30d',
-  'n_buyers_qualify_k1_all', 'n_buyers_qualify_k3_all', 'n_buyers_qualify_k5_all',
-  'n_buyers_creator_excluded', 'n_buyers_first_block_sniper',
+  ...LOOKBACKS.flatMap((lb) => QUALIFY_KS.map((k) => `n_buyers_qualify_k${k}_${lb}`)),
+  ...LOOKBACKS.map((lb) => `buy_sol_from_qualify_k3_${lb}`),
+  ...LOOKBACKS.flatMap((lb) => QUALIFY_KS.map((k) => `n_buyers_qualify_k${k}_${lb}_nonsniper`)),
+  ...LOOKBACKS.map((lb) => `buy_sol_from_qualify_k3_${lb}_nonsniper`),
+  'n_buyers_creator_excluded', 'n_buyers_first_block_sniper', 'n_buyers_prior_sniper', 'n_buyers_any_sniper_proxy',
   'prior_trades_per_buyer_median', 'prior_trades_per_buyer_p90',
+  'prior_snipe_rate_buyer_median', 'prior_snipe_rate_buyer_p90',
   'asof_ok',
 ];
 const FORBIDDEN_KEYS = ['label', 'tier', 'effective_tier', 'auc', 'dog', 'dud'];
@@ -68,7 +73,12 @@ function frac(n, d) {
   return d > 0 ? Number((n / d).toFixed(6)) : null;
 }
 
-function summarize(rows, manifest = null) {
+function historyDaysFromManifest(windowsManifest) {
+  const n = Number(windowsManifest?.selection?.history_days);
+  return Number.isFinite(n) ? n : null;
+}
+
+function summarize(rows, manifest = null, windowsManifest = null) {
   const windows = rows.length;
   const missingRequired = {};
   for (const f of REQUIRED_FIELDS) missingRequired[f] = rows.filter((r) => r[f] === undefined || r[f] === null || r[f] === '').length;
@@ -84,19 +94,25 @@ function summarize(rows, manifest = null) {
   const buyersTotal = rows.reduce((s, r) => s + (num(r.n_buyers) || 0), 0);
   const noHistoryBuyers = rows.reduce((s, r) => s + Math.max(0, (num(r.n_buyers) || 0) - (num(r.n_buyers_with_prior_history) || 0)), 0);
   const availability = {};
-  for (const lb of ['7d', '14d', '30d', 'all']) {
+  for (const lb of LOOKBACKS) {
     availability[lb] = {};
-    for (const k of [1, 3, 5]) {
+    for (const k of QUALIFY_KS) {
       const field = `n_buyers_qualify_k${k}_${lb}`;
+      const nonsniperField = `n_buyers_qualify_k${k}_${lb}_nonsniper`;
       availability[lb][`frac_window_ge1_k${k}`] = frac(rows.filter((r) => (num(r[field]) || 0) > 0).length, windows);
+      availability[lb][`frac_window_ge1_k${k}_nonsniper`] = frac(rows.filter((r) => (num(r[nonsniperField]) || 0) > 0).length, windows);
     }
     const solField = `buy_sol_from_qualify_k3_${lb}`;
+    const solNonsniperField = `buy_sol_from_qualify_k3_${lb}_nonsniper`;
     availability[lb].buy_sol_from_qualify_k3_total = Number(rows.reduce((s, r) => s + (num(r[solField]) || 0), 0).toFixed(9));
+    availability[lb].buy_sol_from_qualify_k3_nonsniper_total = Number(rows.reduce((s, r) => s + (num(r[solNonsniperField]) || 0), 0).toFixed(9));
   }
+  const historyDays = historyDaysFromManifest(windowsManifest);
+  const lookbackOk = historyDays !== null && historyDays >= MAX_LOOKBACK_DAYS;
   return {
     schema_version: 'oos_wallet_quality_spike_validation.v0',
     generated_at: new Date().toISOString(),
-    verdict: forbidden || Object.values(missingRequired).some((n) => n > 0) || asofViolations.length
+    verdict: forbidden || Object.values(missingRequired).some((n) => n > 0) || asofViolations.length || !lookbackOk
       ? 'SPIKE_QA_FAIL_FIX_PIPELINE'
       : 'SPIKE_QA_PASS_NO_EDGE_CLAIM',
     forbidden_key_found: forbidden,
@@ -113,12 +129,22 @@ function summarize(rows, manifest = null) {
     },
     asof_integrity_violations: asofViolations.length,
     asof_integrity_examples: asofViolations.slice(0, 5).map((r) => ({ window_id: r.window_id, token_ca: r.token_ca, signal_ts: r.signal_ts, max_prior_bt: r.max_prior_bt, asof_ok: r.asof_ok })),
+    lookback_guard: {
+      ok: lookbackOk,
+      history_days: historyDays,
+      required_history_days: MAX_LOOKBACK_DAYS,
+      reason: lookbackOk ? null : 'history_days_missing_or_less_than_max_lookback',
+    },
     runtime: {
       dune_execution_id: manifest?.execution_id || null,
       dune_row_count: manifest?.row_count ?? rows.length,
       performance_tier: manifest?.performance || null,
       final_state: manifest?.final_status?.state || manifest?.final_status?.status || null,
-      query_runtime_millis: manifest?.final_status?.query_execution_ms || manifest?.final_status?.execution_time_millis || null,
+      query_runtime_millis: manifest?.final_status?.query_execution_ms
+        || manifest?.final_status?.execution_time_millis
+        || manifest?.final_status?.result_metadata?.execution_time_millis
+        || null,
+      execution_cost_credits: manifest?.final_status?.execution_cost_credits ?? null,
     },
     forbidden_outputs: {
       no_auc: forbidden !== 'auc',
@@ -135,6 +161,7 @@ function parseArgs(argv) {
     const k = argv[i]; const v = argv[i + 1];
     if (k === '--rows') { a.rows = v; i += 1; }
     else if (k === '--dune-manifest') { a.duneManifest = v; i += 1; }
+    else if (k === '--windows-manifest') { a.windowsManifest = v; i += 1; }
     else if (k === '--out') { a.out = v; i += 1; }
     else if (k === '--help' || k === '-h') { a.help = true; }
     else throw new Error(`Unknown argument: ${k}`);
@@ -145,15 +172,19 @@ function parseArgs(argv) {
 function main() {
   const a = parseArgs(process.argv);
   if (a.help || !a.rows || !a.out) {
-    console.log('usage: validate-oos-wallet-quality-spike.js --rows spike-results.jsonl --out validation.json [--dune-manifest manifest.json]');
+    console.log('usage: validate-oos-wallet-quality-spike.js --rows spike-results.jsonl --windows-manifest windows-manifest.json --out validation.json [--dune-manifest manifest.json]');
     process.exit(a.help ? 0 : 2);
   }
+  if (!a.windowsManifest) throw new Error('--windows-manifest is required so history_days cannot be silently under-scoped');
   const rows = readRows(a.rows);
   const manifest = readJsonMaybe(a.duneManifest);
-  const report = summarize(rows, manifest);
+  const windowsManifest = readJsonMaybe(a.windowsManifest);
+  const report = summarize(rows, manifest, windowsManifest);
   report.inputs = {
     rows: a.rows,
     rows_sha256: sha256File(a.rows),
+    windows_manifest: a.windowsManifest,
+    windows_manifest_sha256: sha256File(a.windowsManifest),
     dune_manifest: a.duneManifest || null,
     dune_manifest_sha256: a.duneManifest ? sha256File(a.duneManifest) : null,
   };

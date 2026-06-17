@@ -53,6 +53,23 @@ node --test \
 
 Result: 20/20 pass.
 
+## Post-Audit Fixes
+
+After review of commit `85e2a5a6`, four fixes were applied:
+
+1. The validator now requires a windows manifest and fails closed unless
+   `history_days >= 365`. This prevents a 7d smoke from being mistaken for the
+   max-lookback availability curve.
+2. The SQL now emits `n_buyers_qualify_k{1,3,5}_{7d,14d,30d,all}_nonsniper`
+   plus nonsniper K3 SOL totals.
+3. The sniper proxy now includes a prior-history proxy: a wallet is flagged
+   when it has at least 3 prior buy trades and at least 50% of those buys
+   occurred within 5 seconds of the prior token's observed first trade in the
+   history window. This is still a proxy, not a funding graph.
+4. Runtime validation now reads Dune execution runtime/cost from
+   `final_status.result_metadata.execution_time_millis` and
+   `final_status.execution_cost_credits`.
+
 ## Dune Smoke
 
 Smallest practical Dune smoke:
@@ -86,13 +103,31 @@ All three original locations now have `after_has_auc=false` and
 `after_has_strata=false`; original hashes are preserved in the quarantine
 manifest.
 
+## 365d Cost Calibration
+
+The required 1-window x 365d calibration was attempted on Dune `small`:
+
+- Execution: `01KV9R0K99P905ESZNMZFCXVBT`
+- Output directory:
+  `/Users/boliu/sas-data-room/oos-wallet-quality-spike-calibration-20260617T025418Z`
+- Result: timeout after the 2 minute small-tier limit
+- Credits consumed before timeout: `58.449558824`
+- Result rows: none
+- Failure artifact:
+  `/Users/boliu/sas-data-room/oos-wallet-quality-spike-calibration-20260617T025418Z/calibration-failure.json`
+
+Interpretation: the current 365d as-of wallet-quality query is not tractable on
+Dune small tier for even one window. A 20-window run should not be authorized
+without further query optimization, a more constrained history strategy, or an
+explicit higher-tier budget decision.
+
 ## Current Judgment
 
 The spike tooling is ready for review. The feature is not yet ready for prereg.
 
-Recommended next step is a deliberate, authorized 20-window feasibility run
-after reviewing Dune cost expectations. That run should remain label-free and
-should be judged only on:
+Recommended next step is query-cost reduction or an explicit budget decision,
+not a 20-window run. Any future run must remain label-free and should be judged
+only on:
 
 - as-of integrity violations;
 - availability of qualifying wallets across K/lookback settings;
