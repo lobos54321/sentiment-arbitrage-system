@@ -20,6 +20,10 @@ No candidate feature has yet cleared a locked OOS test:
   source-family/source-kind are degenerate, and component scores are unavailable.
 - smart-money/wallet-quality: conceptually promising, but the leak-free as-of
   wallet-history join is currently cost-blocked.
+- B1 Helius live-curve canary: sealed run did not PASS. Helius completed
+  28/30 windows but had 0/30 usable curve windows; Dune full-window comparison
+  on the same 30 windows found only 2/30 usable windows. This closes the
+  "maybe a live curve provider rescues the current source" hypothesis.
 
 The measurement layer is now materially stronger, but the business target is
 ahead of the evidence. The current evidence does not support 60/60/200 as an
@@ -61,6 +65,7 @@ Only one of the following can re-open a candidate line:
 - post-anchor windows;
 - unsealed threshold changes;
 - live trading intuition.
+- rerunning B1 with looser provider/completeness thresholds.
 
 ## Reversibility
 
