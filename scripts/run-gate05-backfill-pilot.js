@@ -409,7 +409,8 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
   const byToken = barsByToken(bars);
   const mismatches = [];
   const checked = [];
-  const excluded = [];
+  const sourceNotReproducible = [];
+  const noBarExclusions = [];
   const comparableKeys = new Set();
   let noBars = 0;
   for (const pilot of pilotSignals) {
@@ -418,7 +419,7 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
     const expectedProvider = normalizeSourceValue(observer.path_provider);
     const expectedKind = normalizeSourceValue(observer.path_source_kind);
     if (!REPRODUCIBLE_OBSERVER_PROVIDERS.has(expectedProvider)) {
-      excluded.push({
+      sourceNotReproducible.push({
         token_ca: pilot.token_ca,
         signal_ts: pilot.signal_ts,
         reason: 'source_not_reproducible',
@@ -431,10 +432,10 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
       .filter((bar) => bar.timestamp >= pilot.signal_ts && bar.timestamp <= pilot.signal_ts + HORIZON_SEC);
     if (!windowBars.length) {
       noBars += 1;
-      mismatches.push({
+      noBarExclusions.push({
         token_ca: pilot.token_ca,
         signal_ts: pilot.signal_ts,
-        reason: 'no_reconciliation_bars_for_observer_labeled_signal',
+        reason: 'observer_source_repull_no_bars',
         expected_provider: expectedProvider,
         expected_source_kind: expectedKind,
       });
@@ -462,7 +463,8 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
   return {
     checked_n: checked.length + noBars,
     comparable_n: comparableKeys.size,
-    excluded_source_not_reproducible_n: excluded.length,
+    excluded_source_not_reproducible_n: sourceNotReproducible.length,
+    excluded_no_reconciliation_bars_n: noBars,
     matched_n: checked.filter((row) => row.provider_match && row.source_kind_match).length,
     no_bars_n: noBars,
     mismatch_n: mismatches.length,
@@ -472,7 +474,8 @@ function summarizeReconciliationSourceMatch(pilotSignals, bars, observerByKey) {
     observer_provider_distribution: countBy(checked, (row) => row.expected_provider || 'unknown'),
     source_kind_distribution: countBy(checked.flatMap((row) => row.observed_source_kinds), (value) => value),
     observer_source_kind_distribution: countBy(checked, (row) => row.expected_source_kind || 'unknown'),
-    excluded_source_not_reproducible_examples: excluded.slice(0, 20),
+    excluded_source_not_reproducible_examples: sourceNotReproducible.slice(0, 20),
+    excluded_no_reconciliation_bars_examples: noBarExclusions.slice(0, 20),
     mismatches: mismatches.slice(0, 20),
   };
 }

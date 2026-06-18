@@ -431,3 +431,47 @@ test('evaluate excludes non-reproducible local_cache observer rows instead of ki
   assert.equal(summary.reconciliation.overlap_compared_n, 1);
   assert.equal(Object.prototype.hasOwnProperty.call(summary.reconciliation_source_match, 'comparable_keys'), false);
 });
+
+test('evaluate excludes observer-source windows that could not be re-pulled instead of killing the pilot', () => {
+  const dir = tmpdir();
+  const premiumDb = path.join(dir, 'premium.db');
+  const observerDb = path.join(dir, 'observer.db');
+  const prepareDir = path.join(dir, 'prepare');
+  const evalDir = path.join(dir, 'eval');
+  const bars = path.join(dir, 'gecko-bars.jsonl');
+  makePremiumDb(premiumDb);
+  makeObserverDb(observerDb, { pathSourceKind: 'indexed_ohlcv', pathSourceFamily: 'third_party_kline', pathProvider: 'geckoterminal' });
+  writeBars(bars, { sourceKind: 'indexed_ohlcv', sourceFamily: 'third_party_kline', provider: 'geckoterminal' });
+  const onlyFirstToken = fs.readFileSync(bars, 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.includes('A'.repeat(32) + 'pump'))
+    .join('\n') + '\n';
+  fs.writeFileSync(bars, onlyFirstToken);
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'prepare',
+    '--premium-db', premiumDb,
+    '--observer-db', observerDb,
+    '--out-dir', prepareDir,
+    '--limit', '2',
+    '--allow-small-premium-db-for-smoke',
+  ], { stdio: 'pipe' });
+
+  execFileSync(process.execPath, [
+    SCRIPT,
+    '--mode', 'evaluate',
+    '--observer-db', observerDb,
+    '--pilot-signals', path.join(prepareDir, 'pilot-signals.json'),
+    '--bars-jsonl', bars,
+    '--out-dir', evalDir,
+    '--cost-credits', '1',
+  ], { stdio: 'pipe' });
+
+  const summary = JSON.parse(fs.readFileSync(path.join(evalDir, 'pilot-evaluation-summary.json'), 'utf8'));
+  assert.equal(summary.reconciliation_source_match.comparable_n, 1);
+  assert.equal(summary.reconciliation_source_match.excluded_no_reconciliation_bars_n, 1);
+  assert.equal(summary.reconciliation_source_match.excluded_source_not_reproducible_n, 0);
+  assert.equal(summary.reconciliation_source_match.ok, true);
+  assert.equal(summary.reconciliation.overlap_compared_n, 1);
+});
