@@ -10510,6 +10510,21 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = boundedIntParam(url, 'limit', 10000, 1, 100000);
+      const parseOptionalTs = (name, alias) => {
+        const raw = url.searchParams.get(name) ?? (alias ? url.searchParams.get(alias) : null);
+        if (raw == null || raw === '') return null;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) throw new Error(`${name} must be a non-negative unix timestamp`);
+        return n > 1_000_000_000_000 ? Math.floor(n / 1000) : Math.floor(n);
+      };
+      const startTs = parseOptionalTs('start_ts', 'from_ts');
+      const endTs = parseOptionalTs('end_ts', 'to_ts');
+      if ((startTs == null) !== (endTs == null)) {
+        throw new Error('start_ts/from_ts and end_ts/to_ts must be supplied together');
+      }
+      if (startTs != null && endTs != null && startTs > endTs) {
+        throw new Error('start_ts/from_ts must be <= end_ts/to_ts');
+      }
       paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const tables = {};
@@ -10521,12 +10536,20 @@ const server = http.createServer(async (req, res) => {
         const orderCol = table === 'canonical_trade_ledger'
           ? 'COALESCE(entry_ts, exit_ts, created_at, 0)'
           : (table === 'a_class_decision_events' ? 'event_ts' : 'COALESCE(created_event_ts, 0)');
+        const timeCol = table === 'canonical_trade_ledger'
+          ? 'COALESCE(entry_ts, exit_ts, created_at, 0)'
+          : (table === 'a_class_decision_events' ? 'event_ts' : 'COALESCE(created_event_ts, 0)');
+        const where = startTs != null && endTs != null
+          ? `WHERE ${timeCol} >= @startTs AND ${timeCol} <= @endTs`
+          : '';
+        const params = { limit, startTs, endTs };
         const rows = paperDb.prepare(`
           SELECT *
           FROM ${table}
+          ${where}
           ORDER BY ${orderCol} DESC, id DESC
           LIMIT @limit
-        `).all({ limit });
+        `).all(params);
         tables[table] = { available: true, count: rows.length, rows };
       }
       const payload = {
@@ -10534,6 +10557,12 @@ const server = http.createServer(async (req, res) => {
         db_path: paperDbPath,
         export_type: 'canonical_ledger_and_a_class_evidence',
         limit,
+        window: startTs != null && endTs != null ? {
+          start_ts: startTs,
+          start_iso: new Date(startTs * 1000).toISOString(),
+          end_ts: endTs,
+          end_iso: new Date(endTs * 1000).toISOString(),
+        } : null,
         tables,
       };
       const text = JSON.stringify(payload, null, 2);
