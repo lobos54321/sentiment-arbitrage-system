@@ -15647,6 +15647,7 @@ const server = http.createServer(async (req, res) => {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
       const limit = boundedIntParam(url, 'limit', 100, 1, 500);
       // Read-only keyset pagination cursor for bounded evidence pulls.
+      const beforeTs = parseUnixishTime(url.searchParams.get('before_ts'));
       const beforeId = boundedIntParam(url, 'before_id', 0, 0, Number.MAX_SAFE_INTEGER);
       const action = String(url.searchParams.get('action') || '').trim().toUpperCase();
       paperDb = openDashboardSqlite(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
@@ -15675,7 +15676,11 @@ const server = http.createServer(async (req, res) => {
         filters.push('UPPER(action) = @action');
         params.action = action;
       }
-      if (beforeId > 0) {
+      if (beforeTs != null && beforeId > 0) {
+        filters.push('(event_ts < @beforeTs OR (event_ts = @beforeTs AND id < @beforeId))');
+        params.beforeTs = beforeTs;
+        params.beforeId = beforeId;
+      } else if (beforeId > 0) {
         filters.push('id < @beforeId');
         params.beforeId = beforeId;
       }
@@ -15699,7 +15704,7 @@ const server = http.createServer(async (req, res) => {
                ${optionalAceSelect('discovery_exit_json')}
         FROM a_class_decision_events
         ${where}
-        ORDER BY ${beforeId > 0 ? 'id DESC' : 'event_ts DESC, id DESC'}
+        ORDER BY event_ts DESC, id DESC
         LIMIT @limit
       `).all(params).map(aClassEventRow);
       res.writeHead(p0ColumnsReady ? 200 : 202, apiJsonHeaders());
@@ -15711,6 +15716,7 @@ const server = http.createServer(async (req, res) => {
         shadow_pending: !p0ColumnsReady,
         since_ts: sinceTs,
         action: action || null,
+        before_ts: beforeTs,
         before_id: beforeId || null,
         events,
       }, null, 2));
