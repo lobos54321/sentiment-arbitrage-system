@@ -7928,30 +7928,50 @@ const server = http.createServer(async (req, res) => {
     let paperDb;
     try {
       const limit = boundedIntParam(url, 'limit', 10000, 1, 100000);
+      const sinceTs = boundedWindowedSinceTs(url, 24, 24 * 120, { allowAll: true });
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
       const tables = {};
-      for (const table of ['canonical_trade_ledger', 'a_class_decision_events', 'paper_missed_signal_attribution']) {
+      for (const table of ['canonical_trade_ledger', 'paper_trades', 'paper_decision_events', 'a_class_decision_events', 'paper_missed_signal_attribution']) {
         if (!tableNames.has(table)) {
           tables[table] = { available: false, rows: [] };
           continue;
         }
-        const orderCol = table === 'canonical_trade_ledger'
-          ? 'COALESCE(entry_ts, exit_ts, created_at, 0)'
-          : (table === 'a_class_decision_events' ? 'event_ts' : 'COALESCE(created_event_ts, 0)');
+        const cols = getTableColumns(paperDb, table);
+        const firstExisting = (names, fallback = '0') => names.find((name) => cols.has(name)) || fallback;
+        const orderCol = (table === 'canonical_trade_ledger' || table === 'paper_trades')
+          ? `COALESCE(${[
+              firstExisting(['entry_ts'], null),
+              firstExisting(['exit_ts'], null),
+              firstExisting(['created_at'], null),
+              '0',
+            ].filter(Boolean).join(', ')})`
+          : ((table === 'a_class_decision_events' || table === 'paper_decision_events')
+              ? firstExisting(['event_ts'], '0')
+              : `COALESCE(${[
+                  firstExisting(['created_event_ts'], null),
+                  firstExisting(['signal_ts'], null),
+                  firstExisting(['created_at'], null),
+                  '0',
+                ].filter(Boolean).join(', ')})`);
+        const whereClause = sinceTs == null ? '' : `WHERE ${orderCol} >= @sinceTs`;
+        const orderBy = cols.has('id') ? 'id DESC' : `${orderCol} DESC`;
         const rows = paperDb.prepare(`
           SELECT *
           FROM ${table}
-          ORDER BY ${orderCol} DESC, id DESC
+          ${whereClause}
+          ORDER BY ${orderBy}
           LIMIT @limit
-        `).all({ limit });
-        tables[table] = { available: true, count: rows.length, rows };
+        `).all({ limit, sinceTs: sinceTs ?? 0 });
+        tables[table] = { available: true, count: rows.length, rows, since_ts: sinceTs };
       }
       const payload = {
         generated_at: new Date().toISOString(),
         db_path: paperDbPath,
         export_type: 'canonical_ledger_and_a_class_evidence',
         limit,
+        since_ts: sinceTs,
+        window_hours: sinceTs == null ? null : Math.round((Math.floor(Date.now() / 1000) - sinceTs) / 3600),
         tables,
       };
       const text = JSON.stringify(payload, null, 2);
@@ -12558,6 +12578,8 @@ const server = http.createServer(async (req, res) => {
     try {
       const sinceTs = boundedWindowedSinceTs(url, 6, 168, { allowAll: true });
       const limit = boundedIntParam(url, 'limit', 100, 1, 500);
+      // read-only keyset pagination cursor (page backward by primary key); 0 = not set.
+      const beforeId = boundedIntParam(url, 'before_id', 0, 0, Number.MAX_SAFE_INTEGER);
       const action = String(url.searchParams.get('action') || '').trim().toUpperCase();
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 1500, 0, 5000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
@@ -12585,6 +12607,10 @@ const server = http.createServer(async (req, res) => {
         filters.push('UPPER(action) = @action');
         params.action = action;
       }
+      if (beforeId > 0) {
+        filters.push('id < @beforeId');
+        params.beforeId = beforeId;
+      }
       const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
       const events = paperDb.prepare(`
         SELECT id, event_ts, token_ca, symbol, lifecycle_id, route_bucket,
@@ -12605,7 +12631,7 @@ const server = http.createServer(async (req, res) => {
                ${optionalAceSelect('discovery_exit_json')}
         FROM a_class_decision_events
         ${where}
-        ORDER BY event_ts DESC, id DESC
+        ORDER BY ${beforeId > 0 ? 'id DESC' : 'event_ts DESC, id DESC'}
         LIMIT @limit
       `).all(params).map(aClassEventRow);
       res.writeHead(p0ColumnsReady ? 200 : 202, apiJsonHeaders());
@@ -12617,6 +12643,7 @@ const server = http.createServer(async (req, res) => {
         shadow_pending: !p0ColumnsReady,
         since_ts: sinceTs,
         action: action || null,
+        before_id: beforeId || null,
         events,
       }, null, 2));
     } catch (e) {
