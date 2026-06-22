@@ -4139,6 +4139,7 @@ export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
     '/api/logs/gmgn-scout': env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log',
+    '/api/logs/runtime-final-evidence': env.RUNTIME_FINAL_EVIDENCE_LOG || '/app/data/runtime_final_evidence.jsonl',
     '/api/logs/raw-path-observer': env.RAW_PATH_OBSERVER_LOG || '/app/data/raw-path-observer.log',
     '/api/logs/raw-dog-discovery-observer': env.RAW_DOG_DISCOVERY_OBSERVER_LOG || '/app/data/raw-dog-discovery-observer.log',
     '/api/logs/paper-fast-lane': env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log',
