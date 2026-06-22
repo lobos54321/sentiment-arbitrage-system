@@ -2,6 +2,9 @@
 set -e
 
 mkdir -p /app/data /app/logs
+: "${RUNTIME_FINAL_EVIDENCE_LOG:=/app/data/runtime_final_evidence.jsonl}"
+export RUNTIME_FINAL_EVIDENCE_LOG
+echo "[STARTUP] Runtime final evidence log: $RUNTIME_FINAL_EVIDENCE_LOG"
 
 shutdown() {
   echo "[SHUTDOWN] Forwarding termination signal..."
