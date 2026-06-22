@@ -11120,6 +11120,11 @@ def arm_pre_pass_resonance_tiny_probe(
         base_detail,
         lifecycle=scout_lifecycle,
         entry_mode=PRE_PASS_RESONANCE_TINY_PROBE_MODE,
+        evidence_identity={
+            'token_ca': token_ca,
+            'signal_ts': sig.get('timestamp') or registered_entry.get('signal_ts'),
+            'premium_signal_id': sig.get('id') or registered_entry.get('premium_signal_id'),
+        },
     )
     detail = evaluate_pre_pass_resonance_tiny_probe(
         token_ca,
@@ -11371,6 +11376,11 @@ def arm_lotto_upstream_realtime_tiny_scout(
         detail,
         lifecycle=scout_lifecycle,
         entry_mode=LOTTO_UPSTREAM_REALTIME_TINY_SCOUT_MODE,
+        evidence_identity={
+            'token_ca': token_ca,
+            'signal_ts': signal_ts,
+            'premium_signal_id': premium_signal_id,
+        },
     )
     detail['gmgn_policy'] = gmgn_policy
     detail['gmgn_action'] = gmgn_policy.get('action')
@@ -16383,6 +16393,11 @@ def process_discovery_tracking_candidates(
                 detail,
                 lifecycle=lifecycle,
                 entry_mode=mode,
+                evidence_identity={
+                    'token_ca': token_ca,
+                    'signal_ts': candidate.get('signal_ts'),
+                    'premium_signal_id': candidate.get('signal_id'),
+                },
             )
             detail['gmgn_policy'] = gmgn_policy
             detail['gmgn_action'] = gmgn_policy.get('action')
@@ -22876,6 +22891,11 @@ def run_monitor(db):
                         _lotto_detail,
                         lifecycle=_lotto_lifecycle,
                         entry_mode=_lotto_detail.get('entry_mode'),
+                        evidence_identity={
+                            'token_ca': w_entry.get('ca') or w_entry.get('token_ca'),
+                            'signal_ts': w_entry.get('signal_ts'),
+                            'premium_signal_id': w_entry.get('premium_signal_id'),
+                        },
                     )
                     _lotto_detail = {
                         **_lotto_detail,

@@ -18,6 +18,7 @@ import time
 
 from sqlite_write_coordinator import SQLiteSingleWriterLock
 from paper_db_integrity_guard import require_unmarked_paper_db
+from runtime_final_evidence import emit_runtime_final_evidence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -568,6 +569,40 @@ def upsert_candidate(db, candidate):
             updated_at = CURRENT_TIMESTAMP
         """,
         tuple(candidate.get(key) for key in keys),
+    )
+    emit_runtime_final_evidence(
+        "source_resonance",
+        {
+            "token_ca": candidate.get("token_ca"),
+            "signal_ts": candidate.get("signal_ts"),
+            "premium_signal_id": candidate.get("telegram_signal_id"),
+        },
+        {
+            "gmgn_first_seen_ts": candidate.get("gmgn_first_seen_ts"),
+            "gmgn_last_seen_ts": candidate.get("gmgn_last_seen_ts"),
+            "lead_time_sec": candidate.get("gmgn_lead_time_sec"),
+            "resonance_source": candidate.get("cohort"),
+            "resonance_score": candidate.get("resonance_score"),
+            "timestamp_valid": bool(candidate.get("gmgn_first_seen_ts") and candidate.get("gmgn_last_seen_ts")),
+        },
+        source=SOURCE_NAME,
+    )
+    emit_runtime_final_evidence(
+        "worker_health",
+        {
+            "token_ca": candidate.get("token_ca"),
+            "signal_ts": candidate.get("signal_ts"),
+            "premium_signal_id": candidate.get("telegram_signal_id"),
+        },
+        {
+            "worker_name": SOURCE_NAME,
+            "worker_status": "ok",
+            "heartbeat_ts": int(time.time()),
+            "provider_status": "ok",
+            "error_count_window": 0,
+            "degraded_reason": "none",
+        },
+        source=SOURCE_NAME,
     )
 
 
