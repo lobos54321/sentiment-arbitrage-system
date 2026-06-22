@@ -2,6 +2,10 @@
 set -e
 
 mkdir -p /app/data /app/logs
+: "${RUNTIME_FINAL_EVIDENCE_LOG:=/app/data/runtime_final_evidence.jsonl}"
+export RUNTIME_FINAL_EVIDENCE_LOG
+echo "[STARTUP] Runtime final evidence log: $RUNTIME_FINAL_EVIDENCE_LOG"
+
 export PORT="${PORT:-8080}"
 export ZEABUR_LOG_TRIM_MAX_MB="${ZEABUR_LOG_TRIM_MAX_MB:-64}"
 export ZEABUR_LOG_TRIM_KEEP_MB="${ZEABUR_LOG_TRIM_KEEP_MB:-16}"
