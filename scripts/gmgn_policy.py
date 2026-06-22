@@ -8,9 +8,11 @@ kept separate from gmgn_readonly so the data adapter remains non-opinionated.
 
 import os
 
+from runtime_final_evidence import emit_runtime_final_evidence
 from scout_quality import evaluate_scout_quality
 
 
+GMGN_POLICY_VERSION = "gmgn_paper_policy.v1"
 GMGN_PAPER_POLICY_ENABLED = os.environ.get("GMGN_PAPER_POLICY_ENABLED", "true").lower() != "false"
 GMGN_PAPER_REJECT_ENABLED = os.environ.get("GMGN_PAPER_REJECT_ENABLED", "true").lower() != "false"
 GMGN_PAPER_BOOST_ENABLED = os.environ.get("GMGN_PAPER_BOOST_ENABLED", "true").lower() != "false"
@@ -167,22 +169,44 @@ def _noop(reason):
     }
 
 
-def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mode=None):
+def emit_gmgn_policy_evidence(policy, identity=None, *, source="gmgn_policy.evaluate_gmgn_lotto_policy"):
+    identity = identity or {}
+    if not identity.get("token_ca") or not identity.get("signal_ts"):
+        return {"emitted": False, "reason": "missing_gmgn_policy_evidence_identity"}
+    policy = policy or {}
+    return emit_runtime_final_evidence(
+        "gmgn_policy",
+        identity,
+        {
+            "gmgn_policy_decision": policy.get("action") or "unknown",
+            "gmgn_policy_reason": policy.get("reason") or "unknown",
+            "gmgn_policy_source": source,
+            "gmgn_policy_version": GMGN_POLICY_VERSION,
+        },
+        source=source,
+    )
+
+
+def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mode=None, evidence_identity=None):
     """
     Evaluate GMGN enrichment for paper LOTTO entries.
 
     The policy can reject, downsize, or boost paper entries. It never increases
     position size and returns allow/no-op when GMGN is unavailable.
     """
+    def finish(policy):
+        emit_gmgn_policy_evidence(policy, evidence_identity)
+        return policy
+
     if not GMGN_PAPER_POLICY_ENABLED:
-        return _noop("gmgn_policy_disabled")
+        return finish(_noop("gmgn_policy_disabled"))
     gmgn = gmgn or {}
     if gmgn.get("available") is False:
         result = _noop("gmgn_unavailable")
         result["features"] = {"source_reason": gmgn.get("reason")}
-        return result
+        return finish(result)
     if not gmgn:
-        return _noop("gmgn_missing")
+        return finish(_noop("gmgn_missing"))
 
     lotto_detail = lotto_detail or {}
     entry_mode = entry_mode or lotto_detail.get("entry_mode") or ""
@@ -320,7 +344,7 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
         action = "boost"
         reason = "gmgn_clean_smart_money_boost" if features["smart_degen_count"] >= GMGN_SMART_BOOST_COUNT else "gmgn_clean_structure_boost"
 
-    return {
+    return finish({
         "enabled": True,
         "action": action,
         "reason": reason,
@@ -330,7 +354,7 @@ def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mo
         "spread_penalty_pct": spread_penalty_pct,
         "flags": flags,
         "features": features,
-    }
+    })
 
 
 def gmgn_policy_blocks_explosive_direct(policy):
