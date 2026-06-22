@@ -2240,6 +2240,7 @@ export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
     '/api/logs/gmgn-scout': env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log',
+    '/api/logs/runtime-final-evidence': env.RUNTIME_FINAL_EVIDENCE_LOG || '/app/data/runtime_final_evidence.jsonl',
     '/api/logs/paper-fast-lane': env.PAPER_FAST_LANE_LOG || '/app/data/paper-fast-lane.log',
     '/api/logs/v27-telegram-signal-mirror': env.V27_TELEGRAM_SIGNAL_MIRROR_LOG || '/app/data/v27-telegram-signal-mirror.log',
     '/api/logs/v27-source-label-mirror': env.V27_SOURCE_LABEL_MIRROR_LOG || '/app/data/v27-source-label-mirror.log',
