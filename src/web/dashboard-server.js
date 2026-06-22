@@ -7927,7 +7927,11 @@ const server = http.createServer(async (req, res) => {
     }
     let paperDb;
     try {
-      const limit = boundedIntParam(url, 'limit', 10000, 1, 100000);
+      // HARD CAP: large limits made this endpoint SELECT * x 5 tables (incl big *_json columns)
+      // and serialize tens of thousands of rows, which overloaded/crashed the live dashboard
+      // (limit=20000 -> 90s+ then all endpoints 502). Cap at 2000 so a single request stays bounded.
+      // Complete a_class coverage comes from the paginated /api/a-class/events (before_id) instead.
+      const limit = boundedIntParam(url, 'limit', 1000, 1, 2000);
       const sinceTs = boundedWindowedSinceTs(url, 24, 24 * 120, { allowAll: true });
       paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 5000, 1000, 30000) });
       const tableNames = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
