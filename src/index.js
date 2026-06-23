@@ -1017,7 +1017,7 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
 }
 
 function startCandidateShadowObserver(config) {
-  if (!envFlag('CANDIDATE_SHADOW_OBSERVER_ENABLED', true)) {
+  if (!envFlag('CANDIDATE_SHADOW_OBSERVER_ENABLED', false)) {
     console.log('[CandidateShadow] disabled by CANDIDATE_SHADOW_OBSERVER_ENABLED=false');
     return [];
   }
