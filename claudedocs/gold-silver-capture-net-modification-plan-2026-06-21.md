@@ -12731,3 +12731,113 @@ GOAL_16_STATUS (§15.39)
 ACTUAL_ENTRYPOINT_PATCHED | MAIN_DEPLOYED_0C15101A | DASHBOARD_TOKEN_VERIFIED
 RUNTIME_FINAL_ENDPOINT_REACHABLE | FILE_NOT_CREATED_YET | WAIT_FOR_FIRST_EMIT
 ```
+
+---
+
+## §15.40 STATUS — Goal 17: runtime-final diagnostics deployed; missing file is now explicit health, not ambiguity (2026-06-23)
+
+After §15.39, `/api/logs/runtime-final-evidence` still returned 404. To remove ambiguity, a read-only diagnostic patch was
+deployed to `main`.
+
+### Runtime-side change
+
+Commit on `main`:
+
+```text
+cb77efa1 Surface runtime final evidence diagnostics
+```
+
+Changes:
+
+```text
+src/web/dashboard-server.js
+  - health now exposes runtime_final_evidence:
+      configured
+      path
+      parent_exists
+      available
+      status
+      size_bytes / mtime when present
+
+scripts/gmgn_policy.py
+  - if gmgn_policy runtime-final evidence emit fails, stderr now logs:
+      reason
+      shortened token
+      signal_ts
+      source
+  - this is diagnostic only; return values and trading decisions are unchanged.
+```
+
+Validation before push:
+
+```text
+node --check src/web/dashboard-server.js                  OK
+python3 -m py_compile scripts/gmgn_policy.py scripts/runtime_final_evidence.py   OK
+python3 -m pytest -q test_runtime_final_evidence.py       5/5 OK
+node --test tests/dashboard-heavy-api-utils.test.mjs      55/55 OK
+```
+
+### Live deployment check
+
+Health now reports:
+
+```text
+commit = cb77efa18739bc499eca8939ba851bddf18be455
+worker_started_at = 2026-06-23T00:21:18.500Z
+
+runtime_final_evidence:
+  configured=true
+  parent_exists=true
+  path=/app/data/runtime_final_evidence.jsonl
+  available=false
+  status=runtime_final_evidence_missing
+```
+
+Endpoint still returns:
+
+```text
+/api/logs/runtime-final-evidence
+status=404
+body={"error":"log not found at /app/data/runtime_final_evidence.jsonl"}
+```
+
+### Interpretation
+
+The 404 is now fully classified:
+
+```text
+NOT auth failure
+NOT route missing
+NOT env missing
+NOT parent directory missing
+YES file not yet created
+```
+
+The new paper-trader worker starts from:
+
+```text
+Starting from signal ID > 44146 (latest_source_snapshot)
+worker_started_at = 2026-06-23T00:21:18.500Z
+premium_signals latest at startup = 2026-06-23T00:17:24Z
+```
+
+Therefore the post-deploy worker intentionally skips old pre-deploy signals. It needs a new same-window signal that runs
+through a runtime-final emitter before the file can exist.
+
+### Next wait condition
+
+Do not change strategy. Poll for one of:
+
+```text
+1. runtime_final_evidence.available=true in /health
+2. /api/logs/runtime-final-evidence returns 200
+3. paper-trader log shows [RUNTIME_FINAL_EVIDENCE] gmgn_policy emit skipped ...
+```
+
+If (3) appears, use the logged reason to decide the next patch. If no new signals arrive, no conclusion can be drawn.
+
+```text
+GOAL_17_STATUS (§15.40)
+MAIN_DEPLOYED_CB77EFA1 | HEALTH_CLASSIFIES_RUNTIME_FINAL_FILE | ENV_CONFIGURED_TRUE
+FILE_MISSING_CONFIRMED | WAIT_FOR_POST_DEPLOY_SIGNAL_OR_DIAGNOSTIC_REASON
+```
