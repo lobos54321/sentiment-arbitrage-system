@@ -12532,6 +12532,9 @@ const server = http.createServer(async (req, res) => {
       entry_bar_color: "CASE WHEN COALESCE(json_extract(o.payload_json, '$.entry_bar_green'), 0) THEN 'green' WHEN COALESCE(json_extract(o.payload_json, '$.entry_bar_red'), 0) THEN 'red' ELSE 'unknown' END",
       candle_pattern: "COALESCE(json_extract(o.payload_json, '$.candle_pattern'), 'UNKNOWN')",
       volume_profile: "COALESCE(json_extract(o.payload_json, '$.volume_profile'), 'UNKNOWN')",
+      source_resonance_state: "COALESCE(json_extract(o.payload_json, '$.source_resonance_state'), 'UNKNOWN')",
+      source_quote_clean: "CASE WHEN json_extract(o.payload_json, '$.source_quote_clean_seen') IS NULL THEN 'unknown' WHEN COALESCE(json_extract(o.payload_json, '$.source_quote_clean_seen'), 0) THEN 'true' ELSE 'false' END",
+      source_quote_executable_proxy: "CASE WHEN json_extract(o.payload_json, '$.source_quote_executable_proxy') IS NULL THEN 'unknown' WHEN COALESCE(json_extract(o.payload_json, '$.source_quote_executable_proxy'), 0) THEN 'true' ELSE 'false' END",
       market_cap_bucket: `
         CASE
           WHEN json_extract(o.payload_json, '$.market_cap') IS NULL THEN 'unknown'
@@ -12566,7 +12569,8 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'unsupported_dimension', supported_dimensions: [
         'signal_type', 'hard_gate_status', 'not_ath', 'fbr_time_legal',
         'fbr_lookahead_warning', 'entry_bar_color', 'candle_pattern',
-        'volume_profile', 'market_cap_bucket', 'fbr_bucket', 'first3_mom_bucket',
+        'volume_profile', 'source_resonance_state', 'source_quote_clean',
+        'source_quote_executable_proxy', 'market_cap_bucket', 'fbr_bucket', 'first3_mom_bucket',
       ] }));
       return;
     }

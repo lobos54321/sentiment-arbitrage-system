@@ -430,6 +430,60 @@ def load_kline_bars(conn, token_ca, signal_ts_sec, limit=125):
     return [dict(row) for row in rows]
 
 
+def load_source_resonance_features(conn, token_ca, signal_ts_sec):
+    if not conn or not token_ca or not signal_ts_sec:
+        return {}
+    cols = get_columns(conn, "source_resonance_candidates")
+    if not cols:
+        return {}
+    wanted = [
+        "cohort",
+        "quote_clean_seen",
+        "two_quote_clean_snapshots",
+        "entry_quote_success_seen",
+        "entry_quote_fail_seen",
+        "gmgn_pre_seen",
+        "gmgn_lead_time_sec",
+        "resonance_level",
+        "resonance_score",
+    ]
+    select_parts = [col if col in cols else f"NULL AS {col}" for col in wanted]
+    try:
+        row = conn.execute(
+            f"""
+            SELECT {', '.join(select_parts)}
+            FROM source_resonance_candidates
+            WHERE token_ca = ? AND signal_ts BETWEEN ? AND ?
+            ORDER BY ABS(signal_ts - ?) ASC, COALESCE(resonance_score, 0) DESC
+            LIMIT 1
+            """,
+            (token_ca, int(signal_ts_sec) - 600, int(signal_ts_sec) + 600, int(signal_ts_sec)),
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row:
+        return {}
+    quote_clean = bool(
+        safe_bool(row["quote_clean_seen"])
+        or safe_bool(row["two_quote_clean_snapshots"])
+        or safe_bool(row["entry_quote_success_seen"])
+    )
+    cohort = row["cohort"]
+    level = first_number(row["resonance_level"])
+    return {
+        "source_resonance_seen": True,
+        "source_resonance_state": cohort or (f"level_{int(level)}" if level is not None else "seen"),
+        "source_resonance_cohort": cohort,
+        "source_resonance_level": level,
+        "source_resonance_score": first_number(row["resonance_score"]),
+        "gmgn_pre_seen": safe_bool(row["gmgn_pre_seen"]),
+        "gmgn_lead_time_sec": first_number(row["gmgn_lead_time_sec"]),
+        "source_quote_clean_seen": quote_clean,
+        "source_quote_executable_proxy": quote_clean,
+        "source_entry_quote_fail_seen": safe_bool(row["entry_quote_fail_seen"]),
+    }
+
+
 def json_get(url, timeout=12):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "candidate-shadow-observer/1.0"})
@@ -676,7 +730,7 @@ def compute_kline_features(bars, signal_ts_sec, now_sec):
     return features
 
 
-def extract_signal_features(row, kline_features):
+def extract_signal_features(row, kline_features, source_features=None):
     text = "\n".join(str(row[key] or "") for key in ("description", "raw_message"))
     signal_ts = normalize_ts_sec(row["timestamp"]) or normalize_ts_sec(row["receive_ts"])
     signal_type = str(row["signal_type"] or "").upper()
@@ -718,6 +772,7 @@ def extract_signal_features(row, kline_features):
         "status_pass": status == "PASS",
     }
     features.update(kline_features)
+    features.update(source_features or {})
     return features
 
 
@@ -983,6 +1038,16 @@ def payload_for(features, candidate, matched, reason):
         "narrative_score",
         "super_index",
         "signal_price_positive",
+        "source_resonance_seen",
+        "source_resonance_state",
+        "source_resonance_cohort",
+        "source_resonance_level",
+        "source_resonance_score",
+        "gmgn_pre_seen",
+        "gmgn_lead_time_sec",
+        "source_quote_clean_seen",
+        "source_quote_executable_proxy",
+        "source_entry_quote_fail_seen",
         "kline_projection_available",
         "kline_bar_count",
         "entry_bar_open_ts",
@@ -1457,7 +1522,8 @@ def run_once(args):
             if fetched_count:
                 bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit)
         kline_features = compute_kline_features(bars, signal_ts, observed_at)
-        signal_features = extract_signal_features(row, kline_features)
+        source_features = load_source_resonance_features(out_conn, row["token_ca"], signal_ts)
+        signal_features = extract_signal_features(row, kline_features, source_features)
         try:
             written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
             virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
