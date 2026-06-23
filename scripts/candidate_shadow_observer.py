@@ -484,124 +484,6 @@ def load_source_resonance_features(conn, token_ca, signal_ts_sec):
     }
 
 
-def json_dict(value):
-    if not value:
-        return {}
-    try:
-        data = json.loads(value)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def nested_get(value, path):
-    cur = value
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
-
-
-def extract_markov_bucket(payload):
-    paths = [
-        ("gate", "markov_bucket"),
-        ("gate", "markovBucket"),
-        ("markov_reclaim_gate", "markov_bucket"),
-        ("markov_reclaim_gate", "markovBucket"),
-        ("markovReclaimGate", "markov_bucket"),
-        ("markovReclaimGate", "markovBucket"),
-        ("markov_reclaim_forecast", "gate", "markov_bucket"),
-        ("markov_reclaim_forecast", "gate", "markovBucket"),
-        ("markovReclaimForecast", "gate", "markov_bucket"),
-        ("markovReclaimForecast", "gate", "markovBucket"),
-        ("lotto_markov_reclaim_forecast", "gate", "markov_bucket"),
-        ("lotto_markov_reclaim_forecast", "gate", "markovBucket"),
-        ("revival_canary", "markov_bucket"),
-        ("revival_canary", "markovBucket"),
-        ("revival_canary", "markov_reclaim_gate", "markov_bucket"),
-        ("revival_canary", "markov_reclaim_gate", "markovBucket"),
-        ("revival_canary", "markov_reclaim_forecast", "gate", "markov_bucket"),
-        ("revival_canary", "markov_reclaim_forecast", "gate", "markovBucket"),
-        ("learning_bypass", "markov_bucket"),
-        ("learning_bypass", "markovBucket"),
-        ("markov_bucket",),
-        ("markovBucket",),
-    ]
-    for path in paths:
-        value = nested_get(payload, path)
-        if value:
-            return str(value).strip().lower()
-    return None
-
-
-def query_runtime_rows(conn, table, token_ca, signal_id, signal_ts_sec):
-    cols = get_columns(conn, table)
-    if "token_ca" not in cols:
-        return []
-    ts_cols = [name for name in ("signal_ts", "event_ts", "created_event_ts", "baseline_ts") if name in cols]
-    ts_expr = "COALESCE(" + ", ".join(ts_cols) + ", 0)" if ts_cols else "0"
-    select_parts = [
-        "signal_id" if "signal_id" in cols else "NULL AS signal_id",
-        "lifecycle_state" if "lifecycle_state" in cols else "NULL AS lifecycle_state",
-        "vitality_score" if "vitality_score" in cols else "NULL AS vitality_score",
-        "entry_bias" if "entry_bias" in cols else "NULL AS entry_bias",
-        "payload_json" if "payload_json" in cols else "NULL AS payload_json",
-        f"{ts_expr} AS runtime_ts",
-    ]
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT {', '.join(select_parts)}
-            FROM {table}
-            WHERE token_ca = ? AND {ts_expr} BETWEEN ? AND ?
-            ORDER BY
-              CASE WHEN signal_id IS NOT NULL AND signal_id = ? THEN 0 ELSE 1 END,
-              ABS({ts_expr} - ?) ASC
-            LIMIT 5
-            """,
-            (token_ca, int(signal_ts_sec) - 600, int(signal_ts_sec) + 600, int(signal_id), int(signal_ts_sec)),
-        ).fetchall()
-    except sqlite3.Error:
-        return []
-    return [dict(row) | {"runtime_source_table": table} for row in rows]
-
-
-def load_runtime_state_features(conn, token_ca, signal_id, signal_ts_sec):
-    if not conn or not token_ca or not signal_ts_sec:
-        return {}
-    rows = []
-    for table in ("paper_decision_events", "paper_missed_signal_attribution"):
-        if get_columns(conn, table):
-            rows.extend(query_runtime_rows(conn, table, token_ca, signal_id, signal_ts_sec))
-    if not rows:
-        return {}
-    rows.sort(
-        key=lambda row: (
-            0 if row.get("signal_id") == signal_id else 1,
-            abs((first_number(row.get("runtime_ts")) or 0) - int(signal_ts_sec)),
-        )
-    )
-    best = rows[0]
-    payloads = [json_dict(row.get("payload_json")) for row in rows]
-    markov_bucket = next((extract_markov_bucket(payload) for payload in payloads if extract_markov_bucket(payload)), None)
-    lifecycle_state = best.get("lifecycle_state")
-    entry_bias = best.get("entry_bias")
-    lifecycle_profile = ":".join(
-        part for part in (str(lifecycle_state or "").upper(), str(entry_bias or "").upper()) if part
-    ) or None
-    return {
-        "runtime_state_seen": True,
-        "runtime_state_source": best.get("runtime_source_table"),
-        "lifecycle_state": lifecycle_state,
-        "lifecycle_entry_bias": entry_bias,
-        "lifecycle_vitality_score": first_number(best.get("vitality_score")),
-        "lifecycle_profile": lifecycle_profile,
-        "markov_bucket": markov_bucket,
-        "markov_bucket_seen": bool(markov_bucket),
-    }
-
-
 def json_get(url, timeout=12):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "candidate-shadow-observer/1.0"})
@@ -1166,14 +1048,6 @@ def payload_for(features, candidate, matched, reason):
         "source_quote_clean_seen",
         "source_quote_executable_proxy",
         "source_entry_quote_fail_seen",
-        "runtime_state_seen",
-        "runtime_state_source",
-        "lifecycle_state",
-        "lifecycle_entry_bias",
-        "lifecycle_vitality_score",
-        "lifecycle_profile",
-        "markov_bucket",
-        "markov_bucket_seen",
         "kline_projection_available",
         "kline_bar_count",
         "entry_bar_open_ts",
@@ -1649,8 +1523,7 @@ def run_once(args):
                 bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit)
         kline_features = compute_kline_features(bars, signal_ts, observed_at)
         source_features = load_source_resonance_features(out_conn, row["token_ca"], signal_ts)
-        runtime_features = load_runtime_state_features(out_conn, row["token_ca"], int(row["id"]), signal_ts)
-        signal_features = extract_signal_features(row, kline_features, {**source_features, **runtime_features})
+        signal_features = extract_signal_features(row, kline_features, source_features)
         try:
             written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
             virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
@@ -1781,35 +1654,6 @@ def self_test():
         kl.commit()
         kl.close()
 
-        out_seed = sqlite3.connect(out_db)
-        out_seed.execute(
-            """
-            CREATE TABLE paper_decision_events (
-              signal_id INTEGER,
-              token_ca TEXT,
-              signal_ts INTEGER,
-              event_ts INTEGER,
-              lifecycle_state TEXT,
-              vitality_score REAL,
-              entry_bias TEXT,
-              payload_json TEXT
-            )
-            """
-        )
-        out_seed.execute(
-            """
-            INSERT INTO paper_decision_events
-            VALUES (1, 'TESTCA', ?, ?, 'RECLAIM_CONFIRMED', 88.0, 'PROBE', ?)
-            """,
-            (
-                signal_ts,
-                signal_ts + 10,
-                json.dumps({"markov_reclaim_forecast": {"gate": {"markov_bucket": "green"}}}),
-            ),
-        )
-        out_seed.commit()
-        out_seed.close()
-
         args = argparse.Namespace(
             registry=str(registry_path),
             signal_db=str(signal_db),
@@ -1840,11 +1684,6 @@ def self_test():
         active = out.execute(
             "SELECT matched FROM candidate_shadow_observations WHERE candidate_id='kline:active_mom30_first3'"
         ).fetchone()[0]
-        payload = json.loads(
-            out.execute(
-                "SELECT payload_json FROM candidate_shadow_observations WHERE candidate_id='current_all'"
-            ).fetchone()[0]
-        )
         out.close()
         assert summary["candidate_count"] == EXPECTED_CANDIDATE_COUNT
         assert total == EXPECTED_CANDIDATE_COUNT
@@ -1852,8 +1691,6 @@ def self_test():
         assert closed_total > 0
         assert old_filter == 1
         assert active == 1
-        assert payload["markov_bucket"] == "green"
-        assert payload["lifecycle_profile"] == "RECLAIM_CONFIRMED:PROBE"
     print("SELF_TEST_PASS candidate_shadow_observer")
 
 
