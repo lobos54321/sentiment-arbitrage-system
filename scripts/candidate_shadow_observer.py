@@ -1370,7 +1370,7 @@ def run_once(args):
     except sqlite3.Error as exc:
         raise RuntimeError(f"out_db_schema_error path={args.out_db}: {exc}") from exc
     kline_conn = None
-    if args.kline_db and Path(args.kline_db).exists():
+    if args.kline_db:
         try:
             kline_conn = open_sqlite(args.kline_db, "kline_db")
             ensure_kline_schema(kline_conn)
