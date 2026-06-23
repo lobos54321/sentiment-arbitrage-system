@@ -73,6 +73,12 @@ shutdown() {
 
 trap shutdown TERM INT
 
+# Optional sidecars may be disabled by environment. Keep their PID variables
+# defined because this script runs with `set -u`.
+CANDIDATE_SHADOW_PID=""
+SCOUT_PID=""
+RESONANCE_PID=""
+
 echo "[STARTUP] Checking gmgn-cli..."
 if command -v gmgn-cli >/dev/null 2>&1; then
   echo "[STARTUP] gmgn-cli found: $(command -v gmgn-cli)"
@@ -233,7 +239,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
 ) &
 PAPER_PID=$!
 
-if [ "${CANDIDATE_SHADOW_OBSERVER_ENABLED:-true}" != "false" ]; then
+if [ "${CANDIDATE_SHADOW_OBSERVER_ENABLED:-false}" = "true" ]; then
   echo "[STARTUP] Starting candidate-shadow-observer..."
   (
     while true; do
@@ -331,7 +337,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -342,7 +348,11 @@ kill -0 "$PAPER_PID" 2>/dev/null || echo "WARN: PAPER dead"
 if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
   kill -0 "$CANDIDATE_SHADOW_PID" 2>/dev/null || echo "WARN: CANDIDATE_SHADOW dead"
 fi
-kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
-kill -0 "$RESONANCE_PID" 2>/dev/null || echo "WARN: SOURCE_RESONANCE dead"
+if [ -n "${SCOUT_PID:-}" ]; then
+  kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
+fi
+if [ -n "${RESONANCE_PID:-}" ]; then
+  kill -0 "$RESONANCE_PID" 2>/dev/null || echo "WARN: SOURCE_RESONANCE dead"
+fi
 kill -0 "$SOCIAL_PID" 2>/dev/null || echo "WARN: SOCIAL dead"
 wait
