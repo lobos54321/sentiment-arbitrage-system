@@ -1500,6 +1500,8 @@ def run_once(args):
         "virtual_waiting": virtual_waiting,
         "kline_fallback_fetches": kline_fallback_fetches,
         "kline_fallback_bars": kline_fallback_bars,
+        "kline_db": args.kline_db,
+        "kline_fallback_enabled": bool(args.kline_fallback_enabled),
         "observed_at": observed_at,
         "top_matched_candidates": by_candidate,
         "paper_only": True,

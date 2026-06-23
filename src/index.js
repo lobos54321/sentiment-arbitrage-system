@@ -1037,6 +1037,7 @@ function startCandidateShadowObserver(config) {
         '--interval', process.env.CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC || '60',
         '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '300',
         '--kline-limit', process.env.CANDIDATE_SHADOW_KLINE_LIMIT || '125',
+        '--kline-fallback-enabled',
         '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '20',
         '--kline-fallback-cooldown-sec', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC || '900',
       ],
