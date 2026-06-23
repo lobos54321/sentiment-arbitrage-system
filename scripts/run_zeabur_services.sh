@@ -220,6 +220,7 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
     V27_MODE_READINESS_PATH=/app/data/v27_read_models/mode_readiness.json \
     V27_RUNTIME_MODE_GATE_ENABLED="${V27_RUNTIME_MODE_GATE_ENABLED:-true}" \
     V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE="${V27_PAPER_MONITOR_RUNTIME_MODE_GATE_MIN_MODE:-ultra_tiny}" \
+    RUNTIME_FINAL_EVIDENCE_LOG="${RUNTIME_FINAL_EVIDENCE_LOG:-/app/data/runtime_final_evidence.jsonl}" \
     PYTHONUNBUFFERED=1 \
     python3 scripts/paper_trade_monitor.py >> /app/data/paper-trader.log 2>&1
     EXIT_CODE=$?
