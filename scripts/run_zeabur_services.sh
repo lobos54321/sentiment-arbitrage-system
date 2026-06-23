@@ -272,7 +272,7 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
-if [ "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_ENABLED:-false}" = "true" ]; then
+if [ "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_ENABLED:-true}" = "true" ]; then
   echo "[STARTUP] Starting candidate-shadow-runtime materializer..."
   (
     sleep "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_START_DELAY_SEC:-120}"
