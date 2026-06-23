@@ -64,7 +64,6 @@ shutdown() {
     "${LIFECYCLE_PID:-}" \
     "${PAPER_PID:-}" \
     "${CANDIDATE_SHADOW_PID:-}" \
-    "${RUNTIME_CROSS_MATERIALIZER_PID:-}" \
     "${SCOUT_PID:-}" \
     "${RESONANCE_PID:-}" \
     "${SOCIAL_PID:-}" 2>/dev/null || true
@@ -77,7 +76,6 @@ trap shutdown TERM INT
 # Optional sidecars may be disabled by environment. Keep their PID variables
 # defined because this script runs with `set -u`.
 CANDIDATE_SHADOW_PID=""
-RUNTIME_CROSS_MATERIALIZER_PID=""
 SCOUT_PID=""
 RESONANCE_PID=""
 
@@ -272,28 +270,6 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
-if [ "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_ENABLED:-true}" = "true" ]; then
-  echo "[STARTUP] Starting candidate-shadow-runtime materializer..."
-  (
-    sleep "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_START_DELAY_SEC:-120}"
-    while true; do
-      echo "[candidate-shadow-runtime-materializer] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/candidate-shadow-runtime-materializer.log
-      PAPER_DB=/app/data/paper_trades.db \
-      CANDIDATE_SHADOW_RUNTIME_CROSS_SUMMARY_PATH="${CANDIDATE_SHADOW_RUNTIME_CROSS_SUMMARY_PATH:-/app/data/candidate_shadow_runtime_cross_summary.json}" \
-      PYTHONUNBUFFERED=1 \
-      python3 scripts/materialize_candidate_shadow_runtime_cross.py \
-        --hours "${CANDIDATE_SHADOW_RUNTIME_CROSS_HOURS:-24}" \
-        --min-closed "${CANDIDATE_SHADOW_RUNTIME_CROSS_MIN_CLOSED:-20}" \
-        --limit "${CANDIDATE_SHADOW_RUNTIME_CROSS_LIMIT:-500}" 2>&1 | tee -a /app/data/candidate-shadow-runtime-materializer.log || true
-      echo "[candidate-shadow-runtime-materializer] $(date -u '+%Y-%m-%dT%H:%M:%SZ') sleeping" | tee -a /app/data/candidate-shadow-runtime-materializer.log
-      sleep "${CANDIDATE_SHADOW_RUNTIME_MATERIALIZER_INTERVAL_SEC:-1800}"
-    done
-  ) &
-  RUNTIME_CROSS_MATERIALIZER_PID=$!
-else
-  echo "[STARTUP] Candidate shadow runtime materializer disabled."
-fi
-
 if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
   echo "[STARTUP] Starting GMGN external-alpha scout..."
   (
@@ -361,7 +337,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} runtime_cross_materializer=${RUNTIME_CROSS_MATERIALIZER_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -371,9 +347,6 @@ kill -0 "$LIFECYCLE_PID" 2>/dev/null || echo "WARN: LIFECYCLE dead"
 kill -0 "$PAPER_PID" 2>/dev/null || echo "WARN: PAPER dead"
 if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
   kill -0 "$CANDIDATE_SHADOW_PID" 2>/dev/null || echo "WARN: CANDIDATE_SHADOW dead"
-fi
-if [ -n "${RUNTIME_CROSS_MATERIALIZER_PID:-}" ]; then
-  kill -0 "$RUNTIME_CROSS_MATERIALIZER_PID" 2>/dev/null || echo "WARN: CANDIDATE_SHADOW_RUNTIME_MATERIALIZER dead"
 fi
 if [ -n "${SCOUT_PID:-}" ]; then
   kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
