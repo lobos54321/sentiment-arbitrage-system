@@ -857,6 +857,9 @@ function stopIndexRuntimeSupervisor(signal) {
   indexRuntimeSupervisorStopping = true;
   stopRawPathObserverSupervisor(signal);
   stopRawDogDiscoverySupervisor(signal);
+  for (const worker of global.__shadowDataSidecars || []) {
+    try { worker.stop?.(); } catch {}
+  }
   updateIndexRuntimeStatus({
     shutdown_signal: signal,
     shutdown_at: new Date().toISOString(),
@@ -873,6 +876,7 @@ function startIndexRuntimeSupervisor() {
   process.env.DASHBOARD_RUNTIME_ROLE ||= 'index_dashboard_supervisor';
   startDashboardOnce();
   startRuntimeMaintenanceLoop();
+  global.__shadowDataSidecars = startCandidateShadowObserver({});
   startRawPathObserverSupervisor();
   startRawDogDiscoverySupervisor();
   updateIndexRuntimeStatus();
@@ -2363,10 +2367,7 @@ class PremiumChannelSystem {
         // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
         startDashboardOnce();
         this.writePaperModeSafetyRuntimeEvidence('before_sidecars');
-        this.shadowDataSidecars = [
-          ...startCandidateShadowObserver(this.config),
-          ...startShadowDataSidecars(this.config),
-        ];
+        this.shadowDataSidecars = startShadowDataSidecars(this.config);
         global.__shadowDataSidecars = this.shadowDataSidecars;
 
         const isLive = premiumLiveExecutionEnabled(this.config);
