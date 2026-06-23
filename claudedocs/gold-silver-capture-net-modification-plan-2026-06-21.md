@@ -12841,3 +12841,124 @@ GOAL_17_STATUS (§15.40)
 MAIN_DEPLOYED_CB77EFA1 | HEALTH_CLASSIFIES_RUNTIME_FINAL_FILE | ENV_CONFIGURED_TRUE
 FILE_MISSING_CONFIRMED | WAIT_FOR_POST_DEPLOY_SIGNAL_OR_DIAGNOSTIC_REASON
 ```
+
+---
+
+## §15.41 STATUS — Goal 18: pass runtime-final evidence env into paper trader, then wait for first post-restart signal (2026-06-23)
+
+After §15.40, the health endpoint showed `RUNTIME_FINAL_EVIDENCE_LOG` configured in the Node supervisor, but paper-trader
+stderr still showed:
+
+```text
+[RUNTIME_FINAL_EVIDENCE] gmgn_policy emit skipped reason=runtime_final_evidence_log_not_configured ...
+```
+
+That proved the remaining gap was not the dashboard route and not the parent directory. The Python paper trader process was
+not receiving the evidence-log env var on its active startup path.
+
+### Runtime-side change
+
+Commit on `main`:
+
+```text
+ee983069 Pass runtime evidence log to paper trader
+```
+
+Change:
+
+```text
+scripts/run_zeabur_services.sh
+  - passes RUNTIME_FINAL_EVIDENCE_LOG explicitly on the paper-trader command line:
+      RUNTIME_FINAL_EVIDENCE_LOG="${RUNTIME_FINAL_EVIDENCE_LOG:-/app/data/runtime_final_evidence.jsonl}" \
+```
+
+This is an env propagation fix only:
+
+```text
+NO strategy threshold change
+NO entry/exit/size change
+NO mode promotion
+NO live execution enablement
+```
+
+Validation before push:
+
+```text
+bash -n scripts/run_zeabur_services.sh                 OK
+python3 -m pytest -q test_runtime_final_evidence.py    5/5 OK
+```
+
+### Live deployment check
+
+Health now reports:
+
+```text
+commit = ee9830697df036c463071a631e2270ffb396fb9f
+
+runtime_final_evidence:
+  configured=true
+  parent_exists=true
+  path=/app/data/runtime_final_evidence.jsonl
+  available=false
+  status=runtime_final_evidence_missing
+```
+
+The paper-trader worker restarted after the commit:
+
+```text
+[paper-trader] 2026-06-23T00:38:32Z starting
+2026-06-23 00:38:37 [INFO] === Paper Trade Monitor Started ===
+2026-06-23 00:38:38 [INFO] premium_signals latest: 2026-06-23 00:35:46 UTC (sample=44149)
+2026-06-23 00:38:51 [INFO] Starting from signal ID > 44149 (latest_source_snapshot)
+2026-06-23 00:38:52 [INFO] [heartbeat] signals=44149 ... pending=0 discovery=0
+```
+
+Endpoint still returns 404 at this point:
+
+```text
+/api/logs/runtime-final-evidence
+status=404
+body={"error":"log not found at /app/data/runtime_final_evidence.jsonl"}
+```
+
+### Interpretation
+
+This 404 is not yet a failed Goal 18. The new worker starts from `signal ID > 44149`, so it intentionally skipped all
+pre-restart signals that previously produced the `runtime_final_evidence_log_not_configured` diagnostic.
+
+As of the last check, the paper-trader log tail had no post-restart signal processing after the startup heartbeat. Therefore
+there has not yet been a post-`ee983069` opportunity to create `runtime_final_evidence.jsonl`.
+
+### Next verification gate
+
+Poll until a signal after `44149` is processed. Then classify:
+
+```text
+PASS:
+  /health.runtime_final_evidence.available=true
+  OR /api/logs/runtime-final-evidence returns 200 with JSONL rows
+
+FAIL:
+  post-00:38:37 paper-trader log contains:
+    [RUNTIME_FINAL_EVIDENCE] ... runtime_final_evidence_log_not_configured
+
+NO SIGNAL YET:
+  health still file_missing
+  endpoint 404
+  paper-trader latest signal remains 44149
+  no post-restart A_CLASS / LOTTO / gmgn_policy processing
+```
+
+If `FAIL`, the next smallest runtime patch is to give `scripts/runtime_final_evidence.py` a Python-side default path of
+`/app/data/runtime_final_evidence.jsonl`, so evidence emission no longer depends on shell env propagation. Only do this if
+the post-restart diagnostic proves env is still missing.
+
+If `PASS`, ingest the JSONL into the research evidence pack and rerun the runtime-final join scripts. EV remains
+fail-closed until real entered/fill/ledger/exit/friction rows exist.
+
+```text
+GOAL_18_STATUS (§15.41)
+MAIN_DEPLOYED_EE983069 | PAPER_TRADER_ENV_EXPLICITLY_PASSED
+WORKER_RESTARTED_FROM_SIGNAL_GT_44149 | FILE_STILL_MISSING_BECAUSE_NO_POST_RESTART_EMIT_YET
+WAIT_FOR_SIGNAL_GT_44149_THEN_INGEST_OR_PATCH_PYTHON_FALLBACK
+```
