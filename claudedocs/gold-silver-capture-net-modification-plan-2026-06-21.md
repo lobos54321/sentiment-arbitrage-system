@@ -13105,3 +13105,122 @@ HEALTH_RUNTIME_FINAL_AVAILABLE_TRUE | DASHBOARD_LOG_ENDPOINT_200
 FIRST_RUNTIME_FINAL_ROW_CAPTURED_GMGN_POLICY | COPIED_TO_RESEARCH_RUNTIME_INGEST
 NEXT_RUN_RUNTIME_FINAL_JOIN_WITH_WINDOW_MATCHING_ONLY
 ```
+
+---
+
+## §15.43 STATUS — Goal 13 rerun after runtime evidence became available: join blocked by missing same-window fullnet cohort (2026-06-23)
+
+After §15.42, the runtime evidence channel was no longer empty:
+
+```text
+raw runtime_final_evidence rows = 1
+raw file = sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl
+```
+
+The single row is valid runtime-final evidence:
+
+```text
+module_group = gmgn_policy
+token_ca = 4FM6WkZy9P4B2dNf2SgZ1sXTuw2LXC6QZLrX8zm2pump
+premium_signal_id = 44147
+signal_ts = 1782174245  (2026-06-23T00:24:05Z)
+evidence_ts = 1782176595 (2026-06-23T01:03:15Z)
+```
+
+### Goal 13 rerun command
+
+The rerun used the only available local fullnet cohort:
+
+```text
+fullnet_row = sas-data-room/fullnet-evidence-pack-fresh-20260621T123643Z/fullnet-row-v2-final-blockers/row.jsonl
+window = 1782172800..1782180000
+```
+
+Commands:
+
+```bash
+/usr/bin/python3 /Users/boliu/sentiment-arbitrage-system/scripts/runtime_final_evidence.py export \
+  --raw-log /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl \
+  --fullnet-row /Users/boliu/sas-data-room/fullnet-evidence-pack-fresh-20260621T123643Z/fullnet-row-v2-final-blockers/row.jsonl \
+  --window-start-ts 1782172800 \
+  --window-end-ts 1782180000 \
+  --out /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime-final-export.jsonl
+
+node scripts/export-runtime-final-emitters-window.js \
+  --window-start-ts 1782172800 \
+  --window-end-ts 1782180000 \
+  --fullnet-row /Users/boliu/sas-data-room/fullnet-evidence-pack-fresh-20260621T123643Z/fullnet-row-v2-final-blockers/row.jsonl \
+  --runtime-final-export /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime-final-export.jsonl \
+  --out-dir /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window
+```
+
+### Result
+
+```text
+runtime_final_raw_rows = 1
+runtime_final_exported_rows = 0
+joined_rows = 0
+cohort_signals = 329
+covered_modules_after = []
+still_blocked_modules =
+  gmgn_policy
+  source_resonance
+  worker_health
+  training_manifest
+  holdout_negative_controls
+  assumptions_false_negative_budget
+```
+
+Output files:
+
+```text
+sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime-final-export.jsonl
+sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window/runtime-final-emitter-window.jsonl
+sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window/runtime-final-emitter-summary.json
+sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window/runtime-final-emitter-health.json
+sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window/runtime-final-emitter-contract-report.json
+sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window/runtime-final-emitter-source-manifest.json
+```
+
+### Interpretation
+
+This is not a runtime-final writer failure and not a strategy finding.
+
+The exporter is intentionally strict: it only exports rows where `(token_ca, signal_ts)` exists in the fullnet cohort and
+`evidence_ts` falls inside the selected window. The available local fullnet cohort is from the 2026-06-21 pack, while the
+runtime row is from 2026-06-23. Therefore the row is valid but cannot be joined to the historical 2026-06-21 cohort.
+
+Concrete finding:
+
+```text
+runtime_final_channel = alive
+runtime_final_raw_evidence = present
+same_window_fullnet_row_for_2026_06_23 = missing locally
+join_verdict = SAME_WINDOW_FULLNET_COHORT_MISSING
+```
+
+### Next required goal
+
+Do not force-join the row to an older pack. The next step is to build or pull a same-window 2026-06-23 fullnet pack that
+contains the `premium_signal_id=44147` / `token_ca=4FM...` row, then rerun Goal 13.
+
+Only after same-window join succeeds can the module closure move from:
+
+```text
+gmgn_policy FINAL-blocked
+```
+
+to:
+
+```text
+gmgn_policy covered for matched rows only
+```
+
+EV remains fail-closed until entered/fill/ledger/exit/friction evidence exists.
+
+```text
+GOAL_13_RERUN_STATUS (§15.43)
+RAW_RUNTIME_FINAL_ROWS_1 | EXPORT_ROWS_0 | JOINED_ROWS_0
+RUNTIME_CHANNEL_ALIVE | SAME_WINDOW_FULLNET_COHORT_MISSING
+NEXT_BUILD_OR_PULL_2026_06_23_FULLNET_PACK_THEN_RERUN_JOIN
+```
