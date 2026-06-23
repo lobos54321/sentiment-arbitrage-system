@@ -19,8 +19,10 @@ from pathlib import Path
 WINDOW_SEC = 600
 DIMENSIONS = (
     "markov_bucket",
+    "matrix_bucket",
     "lifecycle_profile",
     "lifecycle_state",
+    "source_component",
     "source_resonance_state",
     "source_quote_clean",
     "source_quote_executable_proxy",
@@ -95,35 +97,67 @@ def markov(payload):
     return str(v).lower() if v not in (None, "") else None
 
 
+def matrix_bucket(payload):
+    if not isinstance(payload, dict) or not payload:
+        return None
+    grade = payload.get("matrix_grade") or payload.get("grade")
+    if grade not in (None, ""):
+        return str(grade).lower()
+    try:
+        green = int(payload.get("green_count") or 0)
+        yellow = int(payload.get("yellow_count") or 0)
+        red = int(payload.get("red_count") or 0)
+        hard_red = int(payload.get("hard_red_dimensions") or 0)
+    except Exception:
+        return None
+    if hard_red > 0 or red > green:
+        return "red"
+    if green >= 2 and red == 0:
+        return "green"
+    if green > 0 or yellow > 0:
+        return "yellow"
+    return None
+
+
+def clean_value(value):
+    if value in (None, ""):
+        return None
+    text = str(value)
+    return None if text.upper() == "UNKNOWN" else text
+
+
 def nearest(index, token, signal_ts):
     rows = index.get(token) or []
     if signal_ts is None:
         return {}
-    best = None
-    best_gap = WINDOW_SEC + 1
+    matches = []
     for row_ts, data in rows:
         gap = abs(row_ts - signal_ts)
-        if gap < best_gap:
-            best_gap, best = gap, data
-    return best or {}
+        if gap <= WINDOW_SEC:
+            matches.append((gap, data))
+    merged = {}
+    for _, data in sorted(matches, key=lambda item: item[0], reverse=True):
+        merged.update(data)
+    return merged
 
 
 def load_source(db, since):
-    if not table_exists(db, "source_resonance_candidates"):
-        return {}
-    c = cols(db, "source_resonance_candidates")
-    rows = db.execute(
-        f"""
-        SELECT {col(c,'token_ca')}, {col(c,'signal_ts')}, {col(c,'cohort')},
-               {col(c,'quote_clean_seen')}, {col(c,'two_quote_clean_snapshots')},
-               {col(c,'entry_quote_success_seen')}, {col(c,'entry_quote_fail_seen')},
-               {col(c,'resonance_level')}, {col(c,'resonance_score')}
-        FROM source_resonance_candidates
-        WHERE signal_ts >= ?
-        """,
-        (since - WINDOW_SEC,),
-    ).fetchall()
     out = defaultdict(list)
+    if not table_exists(db, "source_resonance_candidates"):
+        rows = []
+    else:
+        c = cols(db, "source_resonance_candidates")
+        rows = db.execute(
+            f"""
+            SELECT {col(c,'token_ca')}, {col(c,'signal_ts')}, {col(c,'cohort')},
+                   {col(c,'quote_clean_seen')}, {col(c,'two_quote_clean_snapshots')},
+                   {col(c,'entry_quote_success_seen')}, {col(c,'entry_quote_fail_seen')},
+                   {col(c,'resonance_level')}, {col(c,'resonance_score')}
+            FROM source_resonance_candidates
+            WHERE signal_ts >= ?
+            """,
+            (since - WINDOW_SEC,),
+        ).fetchall()
     for r in rows:
         row_ts = ts(r["signal_ts"])
         token = r["token_ca"]
@@ -132,10 +166,74 @@ def load_source(db, since):
         quote_clean = boolish(r["quote_clean_seen"]) or boolish(r["two_quote_clean_snapshots"]) or boolish(r["entry_quote_success_seen"])
         state = r["cohort"] or ("level_%s" % r["resonance_level"] if r["resonance_level"] is not None else "seen")
         out[token].append((row_ts, {
+            "source_component": "source_resonance_candidates",
             "source_resonance_state": state,
             "source_quote_clean": "true" if quote_clean else "false",
             "source_quote_executable_proxy": "true" if quote_clean else "false",
         }))
+
+    if table_exists(db, "a_class_decision_events"):
+        c = cols(db, "a_class_decision_events")
+        rows = db.execute(
+            f"""
+            SELECT {col(c,'token_ca')}, {col(c,'event_ts')},
+                   {col(c,'source_component')}, {col(c,'source_reason')},
+                   {col(c,'quote_available')}, {col(c,'quote_executable')},
+                   {col(c,'quote_clean')}, {col(c,'route_bucket')},
+                   {col(c,'matrix_json')}, {col(c,'risk_json')}
+            FROM a_class_decision_events
+            WHERE event_ts >= ?
+            """,
+            (since - WINDOW_SEC,),
+        ).fetchall()
+        for r in rows:
+            row_ts = ts(r["event_ts"])
+            token = r["token_ca"]
+            if not token or row_ts is None:
+                continue
+            risk = jloads(r["risk_json"])
+            clean = boolish(r["quote_clean"]) or boolish(risk.get("quote_clean_verified"))
+            executable = boolish(r["quote_executable"]) or clean
+            component = r["source_component"] or "a_class_decision_events"
+            reason = r["source_reason"]
+            source_state = ":".join(str(x) for x in (component, reason) if x not in (None, "")) or "seen"
+            out[token].append((row_ts, {
+                "matrix_bucket": matrix_bucket(jloads(r["matrix_json"])) or "UNKNOWN",
+                "source_component": str(component),
+                "source_resonance_state": source_state,
+                "source_quote_clean": "true" if clean else "false",
+                "source_quote_executable_proxy": "true" if executable else "false",
+            }))
+
+    if table_exists(db, "opportunity_events"):
+        c = cols(db, "opportunity_events")
+        rows = db.execute(
+            f"""
+            SELECT {col(c,'token_ca')}, {col(c,'event_ts')},
+                   {col(c,'source_component')}, {col(c,'source_reason')},
+                   {col(c,'source_type')}, {col(c,'quote_available')},
+                   {col(c,'quote_executable')}, {col(c,'quote_clean')}
+            FROM opportunity_events
+            WHERE event_ts >= ?
+            """,
+            (since - WINDOW_SEC,),
+        ).fetchall()
+        for r in rows:
+            row_ts = ts(r["event_ts"])
+            token = r["token_ca"]
+            if not token or row_ts is None:
+                continue
+            component = r["source_component"] or r["source_type"] or "opportunity_events"
+            reason = r["source_reason"]
+            state = ":".join(str(x) for x in (component, reason) if x not in (None, "")) or "seen"
+            clean = boolish(r["quote_clean"])
+            executable = boolish(r["quote_executable"]) or clean
+            out[token].append((row_ts, {
+                "source_component": str(component),
+                "source_resonance_state": state,
+                "source_quote_clean": "true" if clean else "false",
+                "source_quote_executable_proxy": "true" if executable else "false",
+            }))
     return out
 
 
@@ -264,9 +362,10 @@ def summarize(candidate_db, runtime_db, hours, min_closed, limit):
             "observation_rows": len(obs),
             "virtual_rows": len(trades),
             "candidate_ids": len({r["candidate_id"] for r in obs}),
-            "source_seen_signals": sum(1 for f in signals.values() if f.get("source_resonance_state")),
-            "markov_seen_signals": sum(1 for f in signals.values() if f.get("markov_bucket")),
-            "lifecycle_seen_signals": sum(1 for f in signals.values() if f.get("lifecycle_profile") or f.get("lifecycle_state")),
+            "source_seen_signals": sum(1 for f in signals.values() if clean_value(f.get("source_component")) or clean_value(f.get("source_resonance_state"))),
+            "markov_seen_signals": sum(1 for f in signals.values() if clean_value(f.get("markov_bucket"))),
+            "matrix_seen_signals": sum(1 for f in signals.values() if clean_value(f.get("matrix_bucket"))),
+            "lifecycle_seen_signals": sum(1 for f in signals.values() if clean_value(f.get("lifecycle_profile")) or clean_value(f.get("lifecycle_state"))),
         },
         "dimensions": out,
     }
@@ -282,17 +381,21 @@ def self_test():
         CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, token_ca TEXT, candidate_id TEXT, family TEXT, status TEXT, entry_ts INTEGER, exit_ts INTEGER, net_pnl_pct REAL, observed_at INTEGER);
         CREATE TABLE source_resonance_candidates(token_ca TEXT, signal_ts INTEGER, cohort TEXT, quote_clean_seen INTEGER, two_quote_clean_snapshots INTEGER, entry_quote_success_seen INTEGER, entry_quote_fail_seen INTEGER, resonance_level INTEGER, resonance_score REAL);
         CREATE TABLE paper_decision_events(signal_id INTEGER, token_ca TEXT, event_ts INTEGER, lifecycle_state TEXT, entry_bias TEXT, vitality_score REAL, payload_json TEXT);
+        CREATE TABLE a_class_decision_events(token_ca TEXT, event_ts INTEGER, source_component TEXT, source_reason TEXT, quote_available INTEGER, quote_executable INTEGER, quote_clean INTEGER, route_bucket TEXT, matrix_json TEXT, risk_json TEXT);
         """)
         db.execute("INSERT INTO candidate_shadow_observations VALUES (1,'CA',?, 'cand', 'base', ?, '{}')", (now - 60, now - 10))
         db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (1,'CA','cand','base','VIRTUAL_CLOSED',?,?,5,?)", (now - 50, now - 20, now - 10))
         db.execute("INSERT INTO source_resonance_candidates VALUES ('CA',?,'clean',1,0,0,0,1,1.0)", (now - 61,))
         db.execute("INSERT INTO paper_decision_events VALUES (1,'CA',?,'RECLAIM','PROBE',1.0,?)", (now - 59, json.dumps({"markov_reclaim_forecast": {"gate": {"markov_bucket": "green"}}})))
+        db.execute("INSERT INTO a_class_decision_events VALUES ('CA',?,'scout_quality','pass',1,1,1,'LOTTO',?,?)", (now - 58, json.dumps({"green_count": 3, "red_count": 0}), json.dumps({"quote_clean_verified": True})))
         db.commit()
         db.close()
         s = summarize(str(p), str(p), 1, 1, 10)
         assert s["coverage"]["source_seen_signals"] == 1
         assert s["coverage"]["markov_seen_signals"] == 1
+        assert s["coverage"]["matrix_seen_signals"] == 1
         assert s["dimensions"]["markov_bucket"][0]["slice_value"] == "green"
+        assert s["dimensions"]["matrix_bucket"][0]["slice_value"] == "green"
         assert s["dimensions"]["lifecycle_profile"][0]["slice_value"] == "RECLAIM:PROBE"
     print("SELF_TEST_PASS offline_candidate_runtime_cross")
 
