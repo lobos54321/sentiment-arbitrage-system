@@ -63,6 +63,7 @@ shutdown() {
     "${MAINTENANCE_PID:-}" \
     "${LIFECYCLE_PID:-}" \
     "${PAPER_PID:-}" \
+    "${CANDIDATE_SHADOW_PID:-}" \
     "${SCOUT_PID:-}" \
     "${RESONANCE_PID:-}" \
     "${SOCIAL_PID:-}" 2>/dev/null || true
@@ -232,6 +233,37 @@ echo "[STARTUP] Starting paper-trader (with auto-restart)..."
 ) &
 PAPER_PID=$!
 
+if [ "${CANDIDATE_SHADOW_OBSERVER_ENABLED:-true}" != "false" ]; then
+  echo "[STARTUP] Starting candidate-shadow-observer..."
+  (
+    while true; do
+      echo "[candidate-shadow-observer] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/candidate-shadow-observer.log
+      if paper_db_marked; then
+        echo "[candidate-shadow-observer] paper DB integrity marker present; idling until quarantine preflight clears it" | tee -a /app/data/candidate-shadow-observer.log
+        run_marker_aware_preflight "candidate_shadow_start_guard"
+        sleep 15
+        continue
+      fi
+      PAPER_DB=/app/data/paper_trades.db \
+      SENTIMENT_DB=/app/data/sentiment_arb.db \
+      KLINE_DB=/app/data/kline_cache.db \
+      PYTHONUNBUFFERED=1 \
+      python3 scripts/candidate_shadow_observer.py \
+        --loop \
+        --interval "${CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC:-60}" \
+        --limit "${CANDIDATE_SHADOW_OBSERVER_LIMIT:-300}" \
+        --kline-limit "${CANDIDATE_SHADOW_KLINE_LIMIT:-125}" \
+        --kline-fallback-max-fetches "${CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES:-20}" \
+        --kline-fallback-cooldown-sec "${CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC:-900}" 2>&1 | tee -a /app/data/candidate-shadow-observer.log
+      echo "[candidate-shadow-observer] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/candidate-shadow-observer.log
+      sleep 15
+    done
+  ) &
+  CANDIDATE_SHADOW_PID=$!
+else
+  echo "[STARTUP] Candidate shadow observer disabled."
+fi
+
 if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
   echo "[STARTUP] Starting GMGN external-alpha scout..."
   (
@@ -299,7 +331,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -307,6 +339,9 @@ kill -0 "$NODE_PID" 2>/dev/null || echo "WARN: NODE dead"
 kill -0 "$MAINTENANCE_PID" 2>/dev/null || echo "WARN: MAINTENANCE dead"
 kill -0 "$LIFECYCLE_PID" 2>/dev/null || echo "WARN: LIFECYCLE dead"
 kill -0 "$PAPER_PID" 2>/dev/null || echo "WARN: PAPER dead"
+if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
+  kill -0 "$CANDIDATE_SHADOW_PID" 2>/dev/null || echo "WARN: CANDIDATE_SHADOW dead"
+fi
 kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
 kill -0 "$RESONANCE_PID" 2>/dev/null || echo "WARN: SOURCE_RESONANCE dead"
 kill -0 "$SOCIAL_PID" 2>/dev/null || echo "WARN: SOCIAL dead"
