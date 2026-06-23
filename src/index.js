@@ -1012,6 +1012,40 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
   });
 }
 
+function startCandidateShadowObserver(config) {
+  if (!envFlag('CANDIDATE_SHADOW_OBSERVER_ENABLED', true)) {
+    console.log('[CandidateShadow] disabled by CANDIDATE_SHADOW_OBSERVER_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = runtimeDataDir();
+  const paperDb = runtimePaperDbPath();
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
+  const klineDb = process.env.KLINE_DB || join(dataDir, 'kline_cache.db');
+
+  return [
+    startPythonSidecar({
+      name: 'candidate-shadow-observer',
+      logPath: process.env.CANDIDATE_SHADOW_LOG || join(dataDir, 'candidate-shadow-observer.log'),
+      args: [
+        'scripts/candidate_shadow_observer.py',
+        '--loop',
+        '--interval', process.env.CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC || '60',
+        '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '300',
+        '--kline-limit', process.env.CANDIDATE_SHADOW_KLINE_LIMIT || '125',
+        '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '20',
+        '--kline-fallback-cooldown-sec', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC || '900',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+        KLINE_DB: klineDb,
+      },
+    }),
+  ];
+}
+
 function startShadowDataSidecars(config) {
   const paperDb = process.env.PAPER_DB || './data/paper_trades.db';
   const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || './data/sentiment_arb.db';
@@ -2329,7 +2363,10 @@ class PremiumChannelSystem {
         // could take 30-60s, causing Zeabur to kill the container before port 3000 responded.
         startDashboardOnce();
         this.writePaperModeSafetyRuntimeEvidence('before_sidecars');
-        this.shadowDataSidecars = startShadowDataSidecars(this.config);
+        this.shadowDataSidecars = [
+          ...startCandidateShadowObserver(this.config),
+          ...startShadowDataSidecars(this.config),
+        ];
         global.__shadowDataSidecars = this.shadowDataSidecars;
 
         const isLive = premiumLiveExecutionEnabled(this.config);

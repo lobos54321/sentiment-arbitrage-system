@@ -4172,6 +4172,7 @@ function paperDbHealthIsUsable(health) {
 
 export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
+    '/api/logs/candidate-shadow-observer': env.CANDIDATE_SHADOW_LOG || '/app/data/candidate-shadow-observer.log',
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
     '/api/logs/gmgn-scout': env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log',
     '/api/logs/runtime-final-evidence': env.RUNTIME_FINAL_EVIDENCE_LOG || '/app/data/runtime_final_evidence.jsonl',
