@@ -328,6 +328,20 @@ def load_registry(path):
     return registry, modes
 
 
+def open_sqlite(path, label):
+    try:
+        conn = sqlite3.connect(path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"{label}_connect_error path={path}: {exc}") from exc
+
+
+def warn_json(**payload):
+    print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+
+
 def build_candidate_catalog(registry_modes):
     catalog = []
     for candidate_id in BASE_CANDIDATES:
@@ -1349,17 +1363,35 @@ def write_virtual_trades(out_conn, signal_features, catalog_evaluations, bars, o
 def run_once(args):
     registry, modes = load_registry(args.registry)
     catalog = build_candidate_catalog(modes)
-    signal_conn = sqlite3.connect(args.signal_db)
-    signal_conn.row_factory = sqlite3.Row
-    out_conn = sqlite3.connect(args.out_db)
-    out_conn.row_factory = sqlite3.Row
-    ensure_schema(out_conn)
-    kline_conn = sqlite3.connect(args.kline_db) if args.kline_db and Path(args.kline_db).exists() else None
-    if kline_conn:
-        kline_conn.row_factory = sqlite3.Row
-        ensure_kline_schema(kline_conn)
+    signal_conn = open_sqlite(args.signal_db, "signal_db")
+    out_conn = open_sqlite(args.out_db, "out_db")
+    try:
+        ensure_schema(out_conn)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"out_db_schema_error path={args.out_db}: {exc}") from exc
+    kline_conn = None
+    if args.kline_db and Path(args.kline_db).exists():
+        try:
+            kline_conn = open_sqlite(args.kline_db, "kline_db")
+            ensure_kline_schema(kline_conn)
+        except sqlite3.Error as exc:
+            warn_json(
+                warning="kline_db_disabled",
+                path=args.kline_db,
+                reason=str(exc),
+                script="candidate_shadow_observer",
+            )
+            try:
+                if kline_conn:
+                    kline_conn.close()
+            except Exception:
+                pass
+            kline_conn = None
 
-    signals = load_signals(signal_conn, args.limit, args.since_id)
+    try:
+        signals = load_signals(signal_conn, args.limit, args.since_id)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"signal_db_load_error path={args.signal_db}: {exc}") from exc
     observed_at = int(time.time())
     total_rows = 0
     total_matched = 0
@@ -1373,7 +1405,22 @@ def run_once(args):
     by_candidate = {}
     for row in signals:
         signal_ts = normalize_ts_sec(row["timestamp"]) or normalize_ts_sec(row["receive_ts"])
-        bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit) if kline_conn else []
+        try:
+            bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit) if kline_conn else []
+        except sqlite3.Error as exc:
+            warn_json(
+                warning="kline_db_disabled",
+                path=args.kline_db,
+                token_ca=row["token_ca"],
+                reason=str(exc),
+                script="candidate_shadow_observer",
+            )
+            try:
+                kline_conn.close()
+            except Exception:
+                pass
+            kline_conn = None
+            bars = []
         if (
             args.kline_fallback_enabled
             and kline_conn
@@ -1381,7 +1428,22 @@ def run_once(args):
             and kline_fallback_fetches < args.kline_fallback_max_fetches
             and should_fetch_kline(out_conn, row["token_ca"], observed_at, args.kline_fallback_cooldown_sec)
         ):
-            fetched_count, fetch_reason = fetch_kline_fallback(kline_conn, row["token_ca"])
+            try:
+                fetched_count, fetch_reason = fetch_kline_fallback(kline_conn, row["token_ca"])
+            except sqlite3.Error as exc:
+                warn_json(
+                    warning="kline_fallback_disabled",
+                    path=args.kline_db,
+                    token_ca=row["token_ca"],
+                    reason=str(exc),
+                    script="candidate_shadow_observer",
+                )
+                try:
+                    kline_conn.close()
+                except Exception:
+                    pass
+                kline_conn = None
+                fetched_count, fetch_reason = 0, "kline_db_error"
             kline_fallback_fetches += 1
             kline_fallback_bars += fetched_count
             record_kline_fetch_attempt(
@@ -1396,8 +1458,13 @@ def run_once(args):
                 bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit)
         kline_features = compute_kline_features(bars, signal_ts, observed_at)
         signal_features = extract_signal_features(row, kline_features)
-        written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
-        virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
+        try:
+            written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
+            virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
+        except sqlite3.Error as exc:
+            raise RuntimeError(
+                f"out_db_write_error path={args.out_db} signal_id={signal_features.get('signal_id')}: {exc}"
+            ) from exc
         total_rows += written
         total_matched += matched
         virtual_rows += virtual_summary["virtual_rows"]
