@@ -12962,3 +12962,146 @@ MAIN_DEPLOYED_EE983069 | PAPER_TRADER_ENV_EXPLICITLY_PASSED
 WORKER_RESTARTED_FROM_SIGNAL_GT_44149 | FILE_STILL_MISSING_BECAUSE_NO_POST_RESTART_EMIT_YET
 WAIT_FOR_SIGNAL_GT_44149_THEN_INGEST_OR_PATCH_PYTHON_FALLBACK
 ```
+
+---
+
+## §15.42 STATUS — Goal 19: Python-side default runtime-final evidence path and first live evidence row (2026-06-23)
+
+After §15.41, a new post-`ee983069` signal did arrive, but the paper-trader process still emitted:
+
+```text
+2026-06-23T00:49:55Z runtime_final_evidence_log_not_configured
+2026-06-23T00:50:30Z runtime_final_evidence_log_not_configured
+```
+
+The signal was after the `ee983069` restart, so this falsified the "no new signal yet" explanation. The remaining bug was
+that shell-level env propagation was still not reliable enough for the Python writer.
+
+### Runtime-side change
+
+Commit on `main`:
+
+```text
+c06cac39 Default runtime evidence log in Python writer
+```
+
+Change:
+
+```text
+scripts/runtime_final_evidence.py
+  - adds a Python-side default:
+      /app/data/runtime_final_evidence.jsonl
+  - uses explicit path first, then env, then the Python default
+```
+
+This is still only an observability/data-export fix:
+
+```text
+NO strategy threshold change
+NO entry/exit/size change
+NO mode promotion
+NO live execution enablement
+```
+
+Validation before push:
+
+```text
+python3 -m py_compile scripts/runtime_final_evidence.py scripts/gmgn_policy.py   OK
+python3 -m pytest -q test_runtime_final_evidence.py                              5/5 OK
+```
+
+### Live deployment check
+
+Health confirmed the deployed commit:
+
+```text
+commit = c06cac3994c27bcd5159fcc184090c911a2638e7
+```
+
+The paper-trader worker restarted after the commit:
+
+```text
+[paper-trader] 2026-06-23T00:54:30Z starting
+2026-06-23 00:54:36 [INFO] === Paper Trade Monitor Started ===
+2026-06-23 00:54:37 [INFO] premium_signals latest: 2026-06-23 00:51:38 UTC (sample=44152)
+2026-06-23 00:54:49 [INFO] Starting from signal ID > 44152 (latest_source_snapshot)
+```
+
+After the Python fallback deployed, `/health` reported:
+
+```text
+runtime_final_evidence:
+  available=true
+  configured=true
+  status=ok
+  path=/app/data/runtime_final_evidence.jsonl
+  size_bytes=755
+  mtime=2026-06-23T01:03:15.920Z
+```
+
+The dashboard log endpoint also returned HTTP 200:
+
+```text
+/api/logs/runtime-final-evidence?lines=20
+status=200
+```
+
+The first captured runtime-final evidence row is:
+
+```text
+schema_version = runtime_final_evidence_raw.v1
+module_group = gmgn_policy
+token_ca = 4FM6WkZy9P4B2dNf2SgZ1sXTuw2LXC6QZLrX8zm2pump
+premium_signal_id = 44147
+signal_ts = 1782174245
+evidence_ts = 1782176595
+gmgn_policy_decision = boost
+gmgn_policy_reason = gmgn_clean_structure_boost
+gmgn_policy_source = gmgn_policy.evaluate_gmgn_lotto_policy
+gmgn_policy_version = gmgn_paper_policy.v1
+```
+
+The row was copied into the research evidence pack:
+
+```text
+sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl
+rows = 1
+bytes = 755
+```
+
+### Interpretation
+
+Goal 19 fixes the runtime evidence file creation path. The prior two blockers are now closed:
+
+```text
+1. Node health/log route existed but file was missing.
+2. Shell env propagation to Python was not reliable.
+3. Python writer now has an explicit production default path.
+4. Runtime-final evidence is now observable through health + dashboard endpoint + copied research artifact.
+```
+
+This does not prove edge and does not change any trading behavior. It only means the runtime-final evidence channel is now
+alive and can feed the research join layer.
+
+### Next verification gate
+
+The next step is to run the runtime-final ingest/join path against the copied JSONL and the matching fullnet row window.
+Expected result for the current artifact is intentionally small:
+
+```text
+runtime_final_evidence rows >= 1
+gmgn_policy can move from FINAL-blocked to evidence-present for matched rows only
+all unmatched rows remain fail-closed
+EV remains null unless entered + fill + ledger + exit + friction exist
+```
+
+If the one captured row does not match the current fullnet window, do not force-join it. Record it as a valid runtime
+evidence row outside the chosen research window and wait for the next aligned fullnet pack.
+
+```text
+GOAL_19_STATUS (§15.42)
+MAIN_DEPLOYED_C06CAC39 | PYTHON_DEFAULT_RUNTIME_EVIDENCE_PATH
+HEALTH_RUNTIME_FINAL_AVAILABLE_TRUE | DASHBOARD_LOG_ENDPOINT_200
+FIRST_RUNTIME_FINAL_ROW_CAPTURED_GMGN_POLICY | COPIED_TO_RESEARCH_RUNTIME_INGEST
+NEXT_RUN_RUNTIME_FINAL_JOIN_WITH_WINDOW_MATCHING_ONLY
+```
