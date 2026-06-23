@@ -1025,7 +1025,7 @@ function startCandidateShadowObserver(config) {
   const dataDir = runtimeDataDir();
   const paperDb = runtimePaperDbPath();
   const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
-  const klineDb = process.env.KLINE_DB || join(dataDir, 'kline_cache.db');
+  const klineDb = process.env.CANDIDATE_SHADOW_KLINE_DB || join(dataDir, 'candidate_shadow_kline_cache.db');
 
   return [
     startPythonSidecar({
