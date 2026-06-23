@@ -12582,3 +12582,52 @@ GOAL_14_COMPLETE (§15.37)
 RUNTIME_FINAL_EVIDENCE_LOG_DEFAULTED | ZEABUR_CHILD_PROCESSES_INHERIT_ENV
 NO_STRATEGY_CHANGE | NO_LIVE_EXECUTION_CHANGE | NEXT_RERUN_AND_INGEST
 ```
+
+---
+
+## §15.38 STATUS — Goal 15: expose runtime final evidence log through dashboard tail endpoint (2026-06-23)
+
+Goal 14 makes the runtime write `/app/data/runtime_final_evidence.jsonl`, but local preflight found no Zeabur CLI and no
+local `DASHBOARD_TOKEN`. To make the next ingest step cheap, add one read-only dashboard log endpoint.
+
+### Code change
+
+```text
+sentiment-arbitrage-system/src/web/dashboard-server.js
+  resolveDashboardLogPath now maps:
+    /api/logs/runtime-final-evidence
+  to:
+    RUNTIME_FINAL_EVIDENCE_LOG or /app/data/runtime_final_evidence.jsonl
+```
+
+This reuses the existing authenticated log-tail handler. It does not add a new downloader or new storage system.
+
+### Deployment status
+
+```text
+main:
+  2d9e0baa Expose runtime final evidence log
+  93dae68c Emit runtime final evidence for audit blockers
+  712defa4 Enable runtime final evidence log by default
+
+feature/a-class-p0-shadow-discovery:
+  fa724374 Expose runtime final evidence log
+```
+
+### How to fetch after deploy
+
+```bash
+curl -fSL \
+  "https://sentiment-arbitrage.zeabur.app/api/logs/runtime-final-evidence?lines=5000&token=$DASHBOARD_TOKEN" \
+  -o /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl
+```
+
+Then rerun §15.35 Goal 13 export + join.
+
+### Acceptance status
+
+```text
+GOAL_15_COMPLETE (§15.38)
+READ_ONLY_LOG_ENDPOINT | AUTH_REUSES_EXISTING_LOG_HANDLER | NO_STRATEGY_CHANGE
+NEXT_FETCH_RUNTIME_FINAL_EVIDENCE_WITH_DASHBOARD_TOKEN
+```
