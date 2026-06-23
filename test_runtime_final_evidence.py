@@ -95,6 +95,24 @@ def test_gmgn_policy_evidence_emits_only_with_identity(tmp_path):
     assert row["gmgn_policy_decision"] == "allow"
 
 
+def test_gmgn_policy_evidence_diagnostic_logs_skip_reason(monkeypatch, capsys):
+    monkeypatch.delenv("RUNTIME_FINAL_EVIDENCE_LOG", raising=False)
+    monkeypatch.setenv("RUNTIME_FINAL_EVIDENCE_DIAGNOSTIC_LOG_ENABLED", "true")
+
+    result = emit_gmgn_policy_evidence(
+        {"action": "allow", "reason": "gmgn_policy_allow"},
+        {"token_ca": "TokenAddress123456789", "signal_ts": 1500, "premium_signal_id": 7},
+        source="unit",
+    )
+
+    assert result["emitted"] is False
+    assert result["reason"] == "runtime_final_evidence_log_not_configured"
+    captured = capsys.readouterr()
+    assert "gmgn_policy emit skipped" in captured.err
+    assert "runtime_final_evidence_log_not_configured" in captured.err
+    assert "TokenA...6789" in captured.err
+
+
 def test_source_resonance_upsert_emits_runtime_final_evidence(tmp_path, monkeypatch):
     log = tmp_path / "runtime-final.jsonl"
     monkeypatch.setenv("RUNTIME_FINAL_EVIDENCE_LOG", str(log))

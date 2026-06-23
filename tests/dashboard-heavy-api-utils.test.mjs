@@ -44,6 +44,7 @@ import {
   readPaperDbRuntimeHealth,
   readPaperFastLaneHealth,
   readPaperReviewSnapshotHealth,
+  readRuntimeFinalEvidenceHealth,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   LOG_REDACTION_PATTERN_SET,
@@ -203,6 +204,32 @@ test('paper db runtime health detects invalid sqlite header without opening db',
   assert.equal(health.available, true);
   assert.equal(health.status, 'paper_db_invalid_sqlite_header');
   assert.equal(health.reason, 'paper_trades_db_header_not_sqlite');
+});
+
+test('runtime final evidence health reports missing and existing evidence log', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'runtime-final-evidence-health-'));
+  const evidencePath = join(dir, 'runtime_final_evidence.jsonl');
+
+  const missing = readRuntimeFinalEvidenceHealth({
+    evidencePath,
+    env: { RUNTIME_FINAL_EVIDENCE_LOG: evidencePath },
+  });
+
+  assert.equal(missing.available, false);
+  assert.equal(missing.configured, true);
+  assert.equal(missing.status, 'runtime_final_evidence_missing');
+  assert.equal(missing.parent_exists, true);
+
+  fs.writeFileSync(evidencePath, '{"module_group":"gmgn_policy"}\n');
+  const existing = readRuntimeFinalEvidenceHealth({
+    evidencePath,
+    env: { RUNTIME_FINAL_EVIDENCE_LOG: evidencePath },
+  });
+
+  assert.equal(existing.available, true);
+  assert.equal(existing.status, 'ok');
+  assert.equal(existing.size_bytes > 0, true);
+  assert.match(existing.mtime, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test('incident artifact snapshot lists allowed evidence and blocks path escape', () => {

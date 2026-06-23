@@ -7,6 +7,7 @@ kept separate from gmgn_readonly so the data adapter remains non-opinionated.
 """
 
 import os
+import sys
 
 from runtime_final_evidence import emit_runtime_final_evidence
 from scout_quality import evaluate_scout_quality
@@ -169,12 +170,37 @@ def _noop(reason):
     }
 
 
+def _runtime_evidence_diagnostic_enabled():
+    return os.environ.get("RUNTIME_FINAL_EVIDENCE_DIAGNOSTIC_LOG_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+
+
+def _short_token(value):
+    text = str(value or "")
+    if len(text) <= 12:
+        return text or "unknown"
+    return f"{text[:6]}...{text[-4:]}"
+
+
+def _log_runtime_evidence_emit_failure(result, identity, source):
+    if not _runtime_evidence_diagnostic_enabled():
+        return
+    reason = (result or {}).get("reason") or "unknown"
+    print(
+        "[RUNTIME_FINAL_EVIDENCE] gmgn_policy emit skipped "
+        f"reason={reason} token={_short_token((identity or {}).get('token_ca'))} "
+        f"signal_ts={(identity or {}).get('signal_ts') or 'unknown'} source={source}",
+        file=sys.stderr,
+    )
+
+
 def emit_gmgn_policy_evidence(policy, identity=None, *, source="gmgn_policy.evaluate_gmgn_lotto_policy"):
     identity = identity or {}
     if not identity.get("token_ca") or not identity.get("signal_ts"):
-        return {"emitted": False, "reason": "missing_gmgn_policy_evidence_identity"}
+        result = {"emitted": False, "reason": "missing_gmgn_policy_evidence_identity"}
+        _log_runtime_evidence_emit_failure(result, identity, source)
+        return result
     policy = policy or {}
-    return emit_runtime_final_evidence(
+    result = emit_runtime_final_evidence(
         "gmgn_policy",
         identity,
         {
@@ -185,6 +211,9 @@ def emit_gmgn_policy_evidence(policy, identity=None, *, source="gmgn_policy.eval
         },
         source=source,
     )
+    if not result.get("emitted"):
+        _log_runtime_evidence_emit_failure(result, identity, source)
+    return result
 
 
 def evaluate_gmgn_lotto_policy(gmgn, lotto_detail=None, lifecycle=None, entry_mode=None, evidence_identity=None):

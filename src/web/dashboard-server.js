@@ -3961,6 +3961,41 @@ function signalSourceFreshnessHealthPath(env = process.env) {
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
 }
 
+function runtimeFinalEvidencePath(env = process.env) {
+  const raw = env.RUNTIME_FINAL_EVIDENCE_LOG || '/app/data/runtime_final_evidence.jsonl';
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+export function readRuntimeFinalEvidenceHealth(options = {}) {
+  const env = options.env || process.env;
+  const evidencePath = options.evidencePath || runtimeFinalEvidencePath(env);
+  const configured = Boolean(env.RUNTIME_FINAL_EVIDENCE_LOG);
+  const parent = dirname(evidencePath);
+  const health = {
+    available: false,
+    configured,
+    path: evidencePath,
+    parent_exists: false,
+    status: 'runtime_final_evidence_missing',
+  };
+  try {
+    health.parent_exists = fs.existsSync(parent);
+    if (!fs.existsSync(evidencePath)) return health;
+    const stats = fs.statSync(evidencePath);
+    health.available = true;
+    health.status = 'ok';
+    health.size_bytes = stats.size;
+    health.mtime = stats.mtime.toISOString();
+    return health;
+  } catch (error) {
+    return {
+      ...health,
+      status: 'runtime_final_evidence_stat_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
 export function readSignalSourceFreshnessHealth(options = {}) {
   const healthPath = options.healthPath || signalSourceFreshnessHealthPath(options.env || process.env);
   try {
@@ -9916,6 +9951,7 @@ const server = http.createServer(async (req, res) => {
     const paperDbHealth = readPaperDbRuntimeHealth();
     const paperReviewSnapshotHealth = readPaperReviewSnapshotHealth();
     const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
+    const runtimeFinalEvidenceHealth = readRuntimeFinalEvidenceHealth();
     const degraded = Boolean(
       global.__startupError
       || !paperDbHealthIsUsable(paperDbHealth)
@@ -9945,6 +9981,7 @@ const server = http.createServer(async (req, res) => {
       paper_fast_lane_health: paperFastLaneHealth,
       paper_review_snapshot_health: paperReviewSnapshotHealth,
       paper_db_health: paperDbHealth,
+      runtime_final_evidence: runtimeFinalEvidenceHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
       raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
       raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || null,
