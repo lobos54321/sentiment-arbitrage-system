@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Research-only runtime evidence writer for final fullnet blockers.
 
-Best-effort append-only JSONL. Disabled unless RUNTIME_FINAL_EVIDENCE_LOG is set.
+Best-effort append-only JSONL. Defaults to the Zeabur data volume when the
+shell env is not propagated into a Python worker.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ FINAL_MODULES = (
     "holdout_negative_controls",
     "assumptions_false_negative_budget",
 )
+
+DEFAULT_RUNTIME_FINAL_EVIDENCE_LOG = "/app/data/runtime_final_evidence.jsonl"
 
 REQUIRED_FIELDS = {
     "gmgn_policy": ("gmgn_policy_decision", "gmgn_policy_reason", "gmgn_policy_source", "gmgn_policy_version"),
@@ -81,7 +84,7 @@ def build_runtime_final_evidence_row(module_group, identity, payload, *, source=
 
 def emit_runtime_final_evidence(module_group, identity, payload, *, source="runtime", evidence_ts=None, path=None, fatal=False):
     """Append evidence if configured. Trading path safe: returns status instead of throwing by default."""
-    out_path = path or os.environ.get("RUNTIME_FINAL_EVIDENCE_LOG")
+    out_path = path or os.environ.get("RUNTIME_FINAL_EVIDENCE_LOG") or DEFAULT_RUNTIME_FINAL_EVIDENCE_LOG
     if not out_path:
         return {"emitted": False, "reason": "runtime_final_evidence_log_not_configured"}
     try:

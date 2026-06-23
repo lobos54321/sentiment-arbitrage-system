@@ -4,6 +4,7 @@ import sys
 
 sys.path.insert(0, "scripts")
 
+import runtime_final_evidence as rfe  # noqa: E402
 from runtime_final_evidence import (  # noqa: E402
     build_runtime_final_evidence_row,
     emit_runtime_final_evidence,
@@ -64,8 +65,11 @@ def test_runtime_final_evidence_rejects_missing_fields():
         raise AssertionError("missing fields should fail")
 
 
-def test_gmgn_policy_evidence_emits_only_with_identity(tmp_path):
+def test_gmgn_policy_evidence_emits_only_with_identity(tmp_path, monkeypatch):
     log = tmp_path / "runtime-final.jsonl"
+    default_log = tmp_path / "runtime-final-default.jsonl"
+    monkeypatch.delenv("RUNTIME_FINAL_EVIDENCE_LOG", raising=False)
+    monkeypatch.setattr(rfe, "DEFAULT_RUNTIME_FINAL_EVIDENCE_LOG", str(default_log))
     policy = {"action": "allow", "reason": "gmgn_policy_allow"}
 
     missing = emit_gmgn_policy_evidence(policy, {}, source="unit")
@@ -76,7 +80,8 @@ def test_gmgn_policy_evidence_emits_only_with_identity(tmp_path):
         {"token_ca": "T", "signal_ts": 1500, "premium_signal_id": 7},
         source="unit",
     )
-    assert result["emitted"] is False  # no env/path configured
+    assert result["emitted"] is True
+    assert result["path"] == str(default_log)
 
     result = emit_runtime_final_evidence(
         "gmgn_policy",
@@ -97,6 +102,7 @@ def test_gmgn_policy_evidence_emits_only_with_identity(tmp_path):
 
 def test_gmgn_policy_evidence_diagnostic_logs_skip_reason(monkeypatch, capsys):
     monkeypatch.delenv("RUNTIME_FINAL_EVIDENCE_LOG", raising=False)
+    monkeypatch.setattr(rfe, "DEFAULT_RUNTIME_FINAL_EVIDENCE_LOG", "")
     monkeypatch.setenv("RUNTIME_FINAL_EVIDENCE_DIAGNOSTIC_LOG_ENABLED", "true")
 
     result = emit_gmgn_policy_evidence(
