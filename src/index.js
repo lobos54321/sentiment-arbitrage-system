@@ -100,6 +100,8 @@ function runtimeDataDir() {
   return process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || '/app/data';
 }
 
+process.env.RUNTIME_FINAL_EVIDENCE_LOG ??= join(runtimeDataDir(), 'runtime_final_evidence.jsonl');
+
 function runtimePaperDbPath() {
   return process.env.PAPER_DB || join(runtimeDataDir(), 'paper_trades.db');
 }
