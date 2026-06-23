@@ -12374,6 +12374,146 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/candidate-shadow-summary') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 12,
+        maxHours: 24,
+        defaultLimit: 1000,
+        maxLimit: 1000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 10000, 1000, 60000) });
+      const tables = new Set(paperDb.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+      if (!tables.has('candidate_shadow_observations') || !tables.has('candidate_shadow_virtual_trades')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'candidate_shadow_tables_not_found',
+          has_observations: tables.has('candidate_shadow_observations'),
+          has_virtual_trades: tables.has('candidate_shadow_virtual_trades'),
+        }, null, 2));
+        return;
+      }
+      const since = liveGuard.since_ts;
+      const coverage = paperDb.prepare(`
+        SELECT
+          COUNT(DISTINCT signal_id) AS signals,
+          COUNT(*) AS observation_rows,
+          COUNT(DISTINCT candidate_id) AS candidate_ids,
+          ROUND(COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT signal_id), 0), 2) AS rows_per_signal
+        FROM candidate_shadow_observations
+        WHERE observed_at >= @since
+      `).get({ since });
+      const badSignals = paperDb.prepare(`
+        SELECT signal_id, COUNT(*) AS n
+        FROM candidate_shadow_observations
+        WHERE observed_at >= @since
+        GROUP BY signal_id
+        HAVING n != 84
+        ORDER BY n ASC, signal_id DESC
+        LIMIT 50
+      `).all({ since });
+      const observationRows = paperDb.prepare(`
+        SELECT
+          candidate_id,
+          family,
+          COUNT(*) AS observation_rows,
+          SUM(CASE WHEN matched THEN 1 ELSE 0 END) AS matched_observations,
+          COUNT(DISTINCT token_ca) AS unique_observation_tokens
+        FROM candidate_shadow_observations
+        WHERE observed_at >= @since
+        GROUP BY candidate_id, family
+      `).all({ since });
+      const byCandidate = new Map(observationRows.map((row) => [row.candidate_id, row]));
+      const candidates = paperDb.prepare(`
+        SELECT
+          candidate_id,
+          family,
+          COUNT(*) AS virtual_rows,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' THEN 1 ELSE 0 END) AS closed_n,
+          SUM(CASE WHEN status = 'VIRTUAL_OPEN' THEN 1 ELSE 0 END) AS open_n,
+          SUM(CASE WHEN status NOT IN ('VIRTUAL_CLOSED', 'VIRTUAL_OPEN') THEN 1 ELSE 0 END) AS waiting_n,
+          COUNT(DISTINCT token_ca) AS unique_tokens,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+          AVG(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS avg_net_pnl_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct ELSE 0 END) AS total_net_pnl_pct,
+          MIN(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS worst_net_pnl_pct,
+          MAX(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS best_net_pnl_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct > 0 THEN net_pnl_pct ELSE 0 END) AS gross_win_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct < 0 THEN -net_pnl_pct ELSE 0 END) AS gross_loss_pct,
+          AVG(CASE WHEN status = 'VIRTUAL_CLOSED' AND exit_ts IS NOT NULL AND entry_ts IS NOT NULL THEN (exit_ts - entry_ts) / 60.0 END) AS avg_hold_minutes
+        FROM candidate_shadow_virtual_trades
+        WHERE observed_at >= @since
+        GROUP BY candidate_id, family
+        ORDER BY closed_n DESC, avg_net_pnl_pct DESC
+      `).all({ since }).map((row) => {
+        const obs = byCandidate.get(row.candidate_id) || {};
+        const closedN = Number(row.closed_n || 0);
+        const virtualRows = Number(row.virtual_rows || 0);
+        const grossLoss = Number(row.gross_loss_pct || 0);
+        return {
+          candidate_id: row.candidate_id,
+          family: row.family,
+          observation_rows: Number(obs.observation_rows || 0),
+          matched_observations: Number(obs.matched_observations || 0),
+          match_rate_pct: obs.observation_rows ? roundNumber(Number(obs.matched_observations || 0) / Number(obs.observation_rows) * 100, 2) : null,
+          unique_observation_tokens: Number(obs.unique_observation_tokens || 0),
+          virtual_rows: virtualRows,
+          closed_n: closedN,
+          open_n: Number(row.open_n || 0),
+          waiting_n: Number(row.waiting_n || 0),
+          waiting_rate_pct: virtualRows ? roundNumber(Number(row.waiting_n || 0) / virtualRows * 100, 2) : null,
+          unique_tokens: Number(row.unique_tokens || 0),
+          wins: Number(row.wins || 0),
+          win_rate_pct: closedN ? roundNumber(Number(row.wins || 0) / closedN * 100, 2) : null,
+          avg_net_pnl_pct: roundNullableNumber(row.avg_net_pnl_pct, 4),
+          total_net_pnl_pct: roundNullableNumber(row.total_net_pnl_pct, 4),
+          worst_net_pnl_pct: roundNullableNumber(row.worst_net_pnl_pct, 4),
+          best_net_pnl_pct: roundNullableNumber(row.best_net_pnl_pct, 4),
+          profit_factor: grossLoss > 0 ? roundNumber(Number(row.gross_win_pct || 0) / grossLoss, 4) : null,
+          avg_hold_minutes: roundNullableNumber(row.avg_hold_minutes, 2),
+        };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        schema_version: 'candidate_shadow_summary.v1',
+        generated_at: new Date().toISOString(),
+        window_hours: liveGuard.window_hours,
+        since_ts: since,
+        since_iso: new Date(since * 1000).toISOString(),
+        coverage: {
+          ...coverage,
+          rows_per_signal_ok: Number(coverage?.rows_per_signal || 0) === 84,
+          candidate_count_ok: Number(coverage?.candidate_ids || 0) === 84,
+          bad_signal_count: badSignals.length,
+          bad_signal_sample: badSignals,
+        },
+        candidates,
+        query_ms: Date.now() - startedAt,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
