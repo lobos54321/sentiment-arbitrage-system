@@ -12514,6 +12514,157 @@ const server = http.createServer(async (req, res) => {
       try { if (paperDb) paperDb.close(); } catch {}
     }
     return;
+  } else if (url.pathname === '/api/paper/candidate-shadow-cross-summary') {
+    if (!checkAuth(req, url, res)) return;
+    const paperDbPath = getPaperDbPath();
+    if (!fs.existsSync(paperDbPath)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Paper trades database not found' }));
+      return;
+    }
+    const dim = url.searchParams.get('dimension') || 'signal_type';
+    const dimSql = {
+      signal_type: "COALESCE(json_extract(o.payload_json, '$.signal_type'), 'UNKNOWN')",
+      hard_gate_status: "COALESCE(json_extract(o.payload_json, '$.hard_gate_status'), 'UNKNOWN')",
+      not_ath: "CASE WHEN COALESCE(json_extract(o.payload_json, '$.is_not_ath_new_trending'), 0) THEN 'NOT_ATH_NEW_TRENDING' ELSE 'OTHER' END",
+      fbr_time_legal: "CASE WHEN COALESCE(json_extract(o.payload_json, '$.fbr_time_legal'), 0) THEN 'true' ELSE 'false' END",
+      fbr_lookahead_warning: "CASE WHEN COALESCE(json_extract(o.payload_json, '$.fbr_lookahead_warning'), 0) THEN 'true' ELSE 'false' END",
+      entry_bar_color: "CASE WHEN COALESCE(json_extract(o.payload_json, '$.entry_bar_green'), 0) THEN 'green' WHEN COALESCE(json_extract(o.payload_json, '$.entry_bar_red'), 0) THEN 'red' ELSE 'unknown' END",
+      candle_pattern: "COALESCE(json_extract(o.payload_json, '$.candle_pattern'), 'UNKNOWN')",
+      volume_profile: "COALESCE(json_extract(o.payload_json, '$.volume_profile'), 'UNKNOWN')",
+      market_cap_bucket: `
+        CASE
+          WHEN json_extract(o.payload_json, '$.market_cap') IS NULL THEN 'unknown'
+          WHEN CAST(json_extract(o.payload_json, '$.market_cap') AS REAL) < 5000 THEN '<5k'
+          WHEN CAST(json_extract(o.payload_json, '$.market_cap') AS REAL) < 10000 THEN '5k-10k'
+          WHEN CAST(json_extract(o.payload_json, '$.market_cap') AS REAL) < 30000 THEN '10k-30k'
+          WHEN CAST(json_extract(o.payload_json, '$.market_cap') AS REAL) < 100000 THEN '30k-100k'
+          ELSE '>=100k'
+        END`,
+      fbr_bucket: `
+        CASE
+          WHEN NOT COALESCE(json_extract(o.payload_json, '$.fbr_time_legal'), 0) THEN 'not_time_legal'
+          WHEN json_extract(o.payload_json, '$.first_bar_return_pct') IS NULL THEN 'unknown'
+          WHEN CAST(json_extract(o.payload_json, '$.first_bar_return_pct') AS REAL) < 0 THEN '<0'
+          WHEN CAST(json_extract(o.payload_json, '$.first_bar_return_pct') AS REAL) < 1 THEN '0-1'
+          WHEN CAST(json_extract(o.payload_json, '$.first_bar_return_pct') AS REAL) < 2 THEN '1-2'
+          WHEN CAST(json_extract(o.payload_json, '$.first_bar_return_pct') AS REAL) < 5 THEN '2-5'
+          ELSE '>=5'
+        END`,
+      first3_mom_bucket: `
+        CASE
+          WHEN json_extract(o.payload_json, '$.first3_momentum_pct') IS NULL THEN 'unknown'
+          WHEN CAST(json_extract(o.payload_json, '$.first3_momentum_pct') AS REAL) < -10 THEN '<-10'
+          WHEN CAST(json_extract(o.payload_json, '$.first3_momentum_pct') AS REAL) < 0 THEN '-10-0'
+          WHEN CAST(json_extract(o.payload_json, '$.first3_momentum_pct') AS REAL) < 20 THEN '0-20'
+          WHEN CAST(json_extract(o.payload_json, '$.first3_momentum_pct') AS REAL) < 50 THEN '20-50'
+          ELSE '>=50'
+        END`,
+    }[dim];
+    if (!dimSql) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unsupported_dimension', supported_dimensions: [
+        'signal_type', 'hard_gate_status', 'not_ath', 'fbr_time_legal',
+        'fbr_lookahead_warning', 'entry_bar_color', 'candle_pattern',
+        'volume_profile', 'market_cap_bucket', 'fbr_bucket', 'first3_mom_bucket',
+      ] }));
+      return;
+    }
+    let paperDb;
+    let releasePaperReport;
+    try {
+      const liveGuard = livePaperQueryGuard(url, url.pathname, {
+        defaultHours: 12,
+        maxHours: 24,
+        defaultLimit: 500,
+        maxLimit: 2000,
+      });
+      if (!liveGuard.allowed) {
+        rejectLivePaperQuery(res, liveGuard);
+        return;
+      }
+      releasePaperReport = beginLivePaperReport(res, url.pathname);
+      if (!releasePaperReport) return;
+      const startedAt = Date.now();
+      const minClosed = boundedIntParam(url, 'min_closed', 20, 0, 1000);
+      paperDb = new Database(paperDbPath, { readonly: true, timeout: boundedIntParam(url, 'paper_db_timeout_ms', 10000, 1000, 60000) });
+      const rows = paperDb.prepare(`
+        WITH joined AS (
+          SELECT
+            v.candidate_id,
+            v.family,
+            v.token_ca,
+            v.status,
+            v.net_pnl_pct,
+            v.entry_ts,
+            v.exit_ts,
+            ${dimSql} AS slice_value
+          FROM candidate_shadow_virtual_trades v
+          JOIN candidate_shadow_observations o
+            ON o.signal_id = v.signal_id AND o.candidate_id = v.candidate_id
+          WHERE v.observed_at >= @since AND o.observed_at >= @since
+        )
+        SELECT
+          candidate_id,
+          family,
+          CAST(slice_value AS TEXT) AS slice_value,
+          COUNT(*) AS virtual_rows,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' THEN 1 ELSE 0 END) AS closed_n,
+          COUNT(DISTINCT token_ca) AS unique_tokens,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct > 0 THEN 1 ELSE 0 END) AS wins,
+          AVG(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS avg_net_pnl_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct ELSE 0 END) AS total_net_pnl_pct,
+          MIN(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS worst_net_pnl_pct,
+          MAX(CASE WHEN status = 'VIRTUAL_CLOSED' THEN net_pnl_pct END) AS best_net_pnl_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct > 0 THEN net_pnl_pct ELSE 0 END) AS gross_win_pct,
+          SUM(CASE WHEN status = 'VIRTUAL_CLOSED' AND net_pnl_pct < 0 THEN -net_pnl_pct ELSE 0 END) AS gross_loss_pct,
+          AVG(CASE WHEN status = 'VIRTUAL_CLOSED' AND exit_ts IS NOT NULL AND entry_ts IS NOT NULL THEN (exit_ts - entry_ts) / 60.0 END) AS avg_hold_minutes
+        FROM joined
+        GROUP BY candidate_id, family, CAST(slice_value AS TEXT)
+        HAVING closed_n >= @minClosed
+        ORDER BY avg_net_pnl_pct DESC
+        LIMIT @limit
+      `).all({ since: liveGuard.since_ts, minClosed, limit: liveGuard.limit }).map((row) => {
+        const closedN = Number(row.closed_n || 0);
+        const grossLoss = Number(row.gross_loss_pct || 0);
+        return {
+          candidate_id: row.candidate_id,
+          family: row.family,
+          dimension: dim,
+          slice_value: row.slice_value,
+          virtual_rows: Number(row.virtual_rows || 0),
+          closed_n: closedN,
+          unique_tokens: Number(row.unique_tokens || 0),
+          wins: Number(row.wins || 0),
+          win_rate_pct: closedN ? roundNumber(Number(row.wins || 0) / closedN * 100, 2) : null,
+          avg_net_pnl_pct: roundNullableNumber(row.avg_net_pnl_pct, 4),
+          total_net_pnl_pct: roundNullableNumber(row.total_net_pnl_pct, 4),
+          worst_net_pnl_pct: roundNullableNumber(row.worst_net_pnl_pct, 4),
+          best_net_pnl_pct: roundNullableNumber(row.best_net_pnl_pct, 4),
+          profit_factor: grossLoss > 0 ? roundNumber(Number(row.gross_win_pct || 0) / grossLoss, 4) : null,
+          avg_hold_minutes: roundNullableNumber(row.avg_hold_minutes, 2),
+        };
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        schema_version: 'candidate_shadow_cross_summary.v1',
+        generated_at: new Date().toISOString(),
+        window_hours: liveGuard.window_hours,
+        since_ts: liveGuard.since_ts,
+        since_iso: new Date(liveGuard.since_ts * 1000).toISOString(),
+        dimension: dim,
+        min_closed: minClosed,
+        rows,
+        query_ms: Date.now() - startedAt,
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    } finally {
+      try { if (releasePaperReport) releasePaperReport(); } catch {}
+      try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
   } else if (url.pathname === '/api/paper/entry-mode-performance') {
     if (!checkAuth(req, url, res)) return;
     const paperDbPath = getPaperDbPath();
