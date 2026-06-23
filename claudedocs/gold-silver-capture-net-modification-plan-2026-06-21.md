@@ -13224,3 +13224,232 @@ RAW_RUNTIME_FINAL_ROWS_1 | EXPORT_ROWS_0 | JOINED_ROWS_0
 RUNTIME_CHANNEL_ALIVE | SAME_WINDOW_FULLNET_COHORT_MISSING
 NEXT_BUILD_OR_PULL_2026_06_23_FULLNET_PACK_THEN_RERUN_JOIN
 ```
+
+---
+
+## §15.44 STATUS — Goal 20: build same-window 2026-06-23 fullnet pack and join first runtime-final evidence row (2026-06-23)
+
+After §15.43, the remaining blocker was not the runtime evidence channel. It was the lack of a same-window fullnet cohort
+for the 2026-06-23 runtime row.
+
+### Fresh 24h fullnet pack
+
+A fresh 24h research-only fullnet pull was started:
+
+```text
+script = scripts/run-fullnet-daily-audit.sh
+hours = 24
+canonical_limit = 500
+out = sas-data-room/fullnet-evidence-pack-fresh-20260623T010749Z
+```
+
+The runner pulled:
+
+```text
+a-class events pages = 21 full pages + final empty page
+events_n = 10500
+canonical_trade_ledger = 0
+paper_trades = 0
+paper_decision_events = 500
+a_class_decision_events = 500
+paper_missed_signal_attribution = 500
+snapshots:
+  lifecycle_tracks.snapshot.db = 2.8M
+  raw_signal_outcomes.snapshot.db = 126M
+  sentiment_arb.snapshot.db = 117M
+```
+
+The runner exited after snapshot download before the source/raw build step. Manual checks showed all three SQLite snapshots
+were valid:
+
+```text
+lifecycle_tracks        PRAGMA integrity_check = ok
+raw_signal_outcomes     PRAGMA integrity_check = ok
+sentiment_arb           PRAGMA integrity_check = ok
+```
+
+Therefore the pack was continued manually from the already-downloaded artifacts.
+
+### Manual continuation
+
+Window derived from the pulled a-class events:
+
+```text
+from_ts = 1782089692 (2026-06-22T00:54:52Z)
+to_ts   = 1782176092 (2026-06-23T00:54:52Z)
+```
+
+Source/raw projection:
+
+```text
+source_row_n = 675
+unique_signal_n = 461
+formal_eligible_n = 189
+formal_sustained_dog_n = 37
+raw_tier:
+  gold = 22
+  silver = 15
+  bronze = 36
+  sub25 = 116
+  not_evaluable = 272
+```
+
+Fullnet v1 aligned output:
+
+```text
+path = sas-data-room/fullnet-evidence-pack-fresh-20260623T010749Z/fullnet-aligned-current/
+total_signals = 461
+dog_n = 37
+dog_would_enter_n = 9
+entered_n = 0
+ledger_n = 0
+phase5_verdict = ENTRY_BRIDGE_GAP
+actual EV = null / fail-closed
+```
+
+The runtime evidence signal is present in this fresh cohort:
+
+```text
+row = 457
+token_ca = 4FM6WkZy9P4B2dNf2SgZ1sXTuw2LXC6QZLrX8zm2pump
+source_id / premium_signal_id = 44147
+signal_ts = 1782174245
+class = pending
+raw_tier = not_evaluable
+has_decision = true
+matrix_profile = LOTTO
+entry_mode = a_grade_resonance_fastlane
+quote_clean = true
+executable_quote_clean = false
+would_enter = false
+source_gate_terminal_status = LOTTO_OBSERVE_LOW_MC_VOL
+hard_blockers = liquidity_unknown
+readiness_blocker = route_or_quote_not_executable
+```
+
+### Runtime-final join rerun
+
+The runtime evidence row was emitted after the latest pulled a-class event:
+
+```text
+signal_ts   = 1782174245 (2026-06-23T00:24:05Z)
+event_to_ts = 1782176092 (2026-06-23T00:54:52Z)
+evidence_ts = 1782176595 (2026-06-23T01:03:15Z)
+```
+
+Therefore the runtime-final audit window was extended to cover the signal cohort plus runtime emit latency:
+
+```text
+window_start_ts = 1782089692
+window_end_ts = 1782180000
+```
+
+Commands:
+
+```bash
+/usr/bin/python3 /Users/boliu/sentiment-arbitrage-system/scripts/runtime_final_evidence.py export \
+  --raw-log /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl \
+  --fullnet-row /Users/boliu/sas-data-room/fullnet-evidence-pack-fresh-20260623T010749Z/fullnet-aligned-current/live-fullnet-row.jsonl \
+  --window-start-ts 1782089692 \
+  --window-end-ts 1782180000 \
+  --out /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime-final-export-20260623.jsonl
+
+node scripts/export-runtime-final-emitters-window.js \
+  --window-start-ts 1782089692 \
+  --window-end-ts 1782180000 \
+  --fullnet-row /Users/boliu/sas-data-room/fullnet-evidence-pack-fresh-20260623T010749Z/fullnet-aligned-current/live-fullnet-row.jsonl \
+  --runtime-final-export /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime-final-export-20260623.jsonl \
+  --out-dir /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-final-emitter-window-20260623
+```
+
+Result:
+
+```text
+runtime_final_raw_rows = 1
+runtime_final_exported_rows = 1
+joined_rows = 1
+unjoined_rows = 0
+covered_modules = [gmgn_policy]
+still_blocked_modules =
+  source_resonance
+  worker_health
+  training_manifest
+  holdout_negative_controls
+  assumptions_false_negative_budget
+```
+
+Joined proof row:
+
+```text
+schema_version = runtime_final_emitter_window.v1
+module_group = gmgn_policy
+emitter_status = COVERED_WITH_SAME_WINDOW_PROOF
+join_confidence = HIGH
+gmgn_policy_decision = boost
+gmgn_policy_reason = gmgn_clean_structure_boost
+gmgn_policy_source = gmgn_policy.evaluate_gmgn_lotto_policy
+gmgn_policy_version = gmgn_paper_policy.v1
+```
+
+Validation:
+
+```text
+node --check scripts/export-runtime-final-emitters-window.js     OK
+node --test tests/export-runtime-final-emitters-window.test.mjs  3/3 OK
+```
+
+### Interpretation
+
+Goal 20 proves the runtime-final path is now alive end-to-end for at least one same-window signal:
+
+```text
+runtime emitter -> dashboard log endpoint -> copied raw JSONL -> runtime_final_evidence.py export
+-> export-runtime-final-emitters-window.js -> gmgn_policy covered with HIGH proof
+```
+
+This is still not a trading edge result:
+
+```text
+entered = 0
+ledger = 0
+actual EV = null
+```
+
+The matched row itself did not enter because:
+
+```text
+source gate = LOTTO_OBSERVE_LOW_MC_VOL
+executable_quote_clean = false
+hard_blocker = liquidity_unknown
+would_enter = false
+```
+
+So the correct conclusion is:
+
+```text
+gmgn_policy evidence pipeline works.
+This specific signal remained blocked before entry.
+No EV / promotion / strategy claim is allowed.
+```
+
+### Next required goal
+
+The next useful work is not another runtime-final plumbing patch. It is one of:
+
+```text
+1. Keep collecting runtime_final_evidence rows during the current 24h window.
+2. Pull another fresh fullnet pack after more rows accumulate.
+3. Rerun the same join and measure:
+     joined runtime-final rows
+     module movement
+     still_blocked_modules
+     entered/ledger/friction counts
+4. If entered remains 0, the next repair owner is execution bridge / paper execution enablement, not EV analysis.
+```
+
+```text
+GOAL_20_STATUS (§15.44)
+FRESH_20260623_FULLNET_PACK_BUILT | RUNTIME_ROW_FOUND_IN_COHORT
+RUNTIME_FINAL_EXPORT_ROWS_1 | JOINED_ROWS_1 | GMGN_POLICY_COVERED_WITH_HIGH_PROOF
+ENTERED_0_LEDGER_0_EV_NULL | NO_STRATEGY_CHANGE | NEXT_ACCUMULATE_MORE_RUNTIME_ROWS_AND_RERUN
+```
