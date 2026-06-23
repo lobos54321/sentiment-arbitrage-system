@@ -12631,3 +12631,103 @@ GOAL_15_COMPLETE (§15.38)
 READ_ONLY_LOG_ENDPOINT | AUTH_REUSES_EXISTING_LOG_HANDLER | NO_STRATEGY_CHANGE
 NEXT_FETCH_RUNTIME_FINAL_EVIDENCE_WITH_DASHBOARD_TOKEN
 ```
+
+---
+
+## §15.39 STATUS — Goal 16: actual Zeabur entrypoint patched, endpoint reachable, evidence file pending first emit (2026-06-23)
+
+Follow-up check found that the deployed Zeabur service is not using `scripts/run_zeabur_services.sh` as the top-level
+entrypoint. Health reports:
+
+```text
+entrypoint_file = /app/src/index.js
+runtime_role    = index_dashboard_supervisor
+```
+
+Therefore Goal 14's shell-wrapper default was not sufficient by itself.
+
+### Runtime-side fix
+
+`sentiment-arbitrage-system/src/index.js` now defaults the env var in the actual supervisor process:
+
+```text
+process.env.RUNTIME_FINAL_EVIDENCE_LOG ??= /app/data/runtime_final_evidence.jsonl
+```
+
+Deployment commits now on `main`:
+
+```text
+0c15101a Default runtime evidence log in node supervisor
+2d9e0baa Expose runtime final evidence log
+93dae68c Emit runtime final evidence for audit blockers
+712defa4 Enable runtime final evidence log by default
+```
+
+### Live check
+
+```text
+health commit:
+  0c15101af010e0352fc2ef9ede402bfeb54da2ce
+
+runtime worker:
+  running=true
+  command=/usr/local/bin/node src/index.js --premium
+
+dashboard auth:
+  DASHBOARD_TOKEN verified with /api/logs/paper-trader
+
+runtime-final endpoint:
+  /api/logs/runtime-final-evidence
+  status=404
+  body={"error":"log not found at /app/data/runtime_final_evidence.jsonl"}
+```
+
+### Interpretation
+
+This 404 is no longer an auth/deploy problem. It means the append-only evidence file has not yet been created.
+
+Observed current runtime behavior:
+
+```text
+paper-trader is running and emitting A_CLASS_CANDIDATE / HARD_BLOCK logs.
+source shadow workers are disabled by SOURCE_SHADOW_WORKERS_ENABLED=false.
+source_resonance emitter therefore will not fire until that worker is enabled.
+gmgn_policy evidence only fires when evaluate_gmgn_lotto_policy runs with evidence_identity.
+```
+
+So the next wait condition is not "endpoint deployed"; that is done. The next condition is:
+
+```text
+first runtime-final evidence row emitted
+```
+
+### Next action
+
+Poll:
+
+```bash
+curl -fSL \
+  "https://sentiment-arbitrage.zeabur.app/api/logs/runtime-final-evidence?lines=5000&token=$DASHBOARD_TOKEN" \
+  -o /Users/boliu/sas-data-room/fullnet-evidence-pack-overnight/runtime-ingest/runtime_final_evidence.jsonl
+```
+
+If it remains 404 after a meaningful fresh signal window, choose one:
+
+```text
+Option A:
+  enable SOURCE_SHADOW_WORKERS_ENABLED=true if source_resonance evidence is required.
+
+Option B:
+  add runtime_final_evidence emission to the active A_CLASS candidate/readiness path.
+
+Option C:
+  wait for a LOTTO path that actually calls evaluate_gmgn_lotto_policy with evidence_identity.
+```
+
+No EV / entry-mode effectiveness analysis is allowed until rows exist and join.
+
+```text
+GOAL_16_STATUS (§15.39)
+ACTUAL_ENTRYPOINT_PATCHED | MAIN_DEPLOYED_0C15101A | DASHBOARD_TOKEN_VERIFIED
+RUNTIME_FINAL_ENDPOINT_REACHABLE | FILE_NOT_CREATED_YET | WAIT_FOR_FIRST_EMIT
+```
