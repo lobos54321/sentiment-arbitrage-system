@@ -24,6 +24,22 @@ KEY_DIMENSIONS = (
     "volume_profile",
     "market_cap_bucket",
 )
+PROFILES = {
+    "strict": KEY_DIMENSIONS,
+    "kline": (
+        "candidate_id",
+        "candle_pattern",
+        "volume_profile",
+        "market_cap_bucket",
+    ),
+    "runtime": (
+        "candidate_id",
+        "lifecycle_profile",
+        "source_component",
+        "source_resonance_state",
+        "source_quote_clean",
+    ),
+}
 
 
 def bucket(row):
@@ -52,16 +68,17 @@ def bucket(row):
     return "red"
 
 
-def key_for(row, payload):
+def key_for(row, payload, dimensions):
     values = {"candidate_id": row["candidate_id"]}
-    for name in KEY_DIMENSIONS:
+    for name in dimensions:
         if name == "candidate_id":
             continue
         values[name] = dim_value(payload, name)
-    return tuple(values[name] for name in KEY_DIMENSIONS), values
+    return tuple(values[name] for name in dimensions), values
 
 
-def build(db_path, hours, min_closed, limit):
+def build(db_path, hours, min_closed, limit, profile):
+    dimensions = PROFILES[profile]
     since = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
@@ -84,7 +101,7 @@ def build(db_path, hours, min_closed, limit):
     meta = {}
     for row in rows:
         payload = jloads(row["payload_json"])
-        key, values = key_for(row, payload)
+        key, values = key_for(row, payload, dimensions)
         groups[key].append(row)
         meta[key] = values
 
@@ -109,7 +126,8 @@ def build(db_path, hours, min_closed, limit):
         "db": db_path,
         "hours": hours,
         "since_ts": since,
-        "key_dimensions": list(KEY_DIMENSIONS),
+        "profile": profile,
+        "key_dimensions": list(dimensions),
         "thresholds": {
             "min_closed_to_emit": min_closed,
             "green_closed_min": 50,
@@ -156,10 +174,11 @@ def self_test():
             db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)", (i, f"CA{i}", "cand", "base", "VIRTUAL_CLOSED", pnl, now))
         db.commit()
         db.close()
-        out = build(str(path), 1, 20, 10)
+        out = build(str(path), 1, 20, 10, "kline")
         assert out["coverage"]["closed_virtual_rows"] == len(pnls)
         assert out["buckets"][0]["bucket"] == "green"
         assert out["buckets"][0]["candidate_id"] == "cand"
+        assert out["profile"] == "kline"
     print("SELF_TEST_PASS candidate_virtual_markov")
 
 
@@ -169,13 +188,14 @@ def main():
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--min-closed", type=int, default=20)
     parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--profile", choices=sorted(PROFILES), default="strict")
     parser.add_argument("--out", default="data/candidate_virtual_markov.json")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
-    result = build(args.db, args.hours, args.min_closed, args.limit)
+    result = build(args.db, args.hours, args.min_closed, args.limit, args.profile)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"out": args.out, "coverage": result["coverage"]}, sort_keys=True))
