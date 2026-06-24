@@ -484,6 +484,184 @@ def load_source_resonance_features(conn, token_ca, signal_ts_sec):
     }
 
 
+def safe_json(raw):
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def nested_get(payload, *paths):
+    for path in paths:
+        cur = payload
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                cur = None
+                break
+            cur = cur[key]
+        if cur not in (None, ""):
+            return cur
+    return None
+
+
+def extract_markov_bucket(payload):
+    value = nested_get(
+        payload,
+        ("gate", "markov_bucket"),
+        ("markov_reclaim_gate", "markov_bucket"),
+        ("markovReclaimGate", "markov_bucket"),
+        ("markov_reclaim_forecast", "gate", "markov_bucket"),
+        ("markovReclaimForecast", "gate", "markov_bucket"),
+        ("lotto_markov_reclaim_forecast", "gate", "markov_bucket"),
+        ("revival_canary", "markov_reclaim_gate", "markov_bucket"),
+        ("revival_canary", "markov_reclaim_forecast", "gate", "markov_bucket"),
+        ("revival_canary", "markov_bucket"),
+        ("learning_bypass", "markov_bucket"),
+        ("markov_bucket",),
+    )
+    if value in (None, "", "null"):
+        return None
+    return str(value).lower()
+
+
+def extract_matrix_bucket(payload):
+    if not isinstance(payload, dict) or not payload:
+        return None
+    grade = payload.get("matrix_grade") or payload.get("grade")
+    if grade not in (None, ""):
+        return str(grade).lower()
+    try:
+        green = int(payload.get("green_count") or 0)
+        yellow = int(payload.get("yellow_count") or 0)
+        red = int(payload.get("red_count") or 0)
+        hard_red = int(payload.get("hard_red_dimensions") or 0)
+    except (TypeError, ValueError):
+        return None
+    if hard_red > 0 or red > green:
+        return "red"
+    if green >= 2 and red == 0:
+        return "green"
+    if green > 0 or yellow > 0:
+        return "yellow"
+    return None
+
+
+def load_global_runtime_features(conn, token_ca, signal_ts_sec):
+    features = {
+        "markov_available": False,
+        "markov_missing_reason": "missing_markov_bucket_readmodel",
+    }
+    if not conn or not token_ca or not signal_ts_sec:
+        return features
+    lo = int(signal_ts_sec) - 600
+    hi = int(signal_ts_sec) + 600
+
+    if get_columns(conn, "paper_decision_events"):
+        try:
+            rows = conn.execute(
+                """
+                SELECT event_ts, lifecycle_state, entry_bias, payload_json
+                FROM paper_decision_events
+                WHERE event_ts BETWEEN ? AND ? AND token_ca = ?
+                ORDER BY ABS(event_ts - ?) ASC
+                LIMIT 25
+                """,
+                (lo, hi, token_ca, int(signal_ts_sec)),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            payload = safe_json(row["payload_json"])
+            bucket = extract_markov_bucket(payload)
+            if bucket:
+                features.update(
+                    {
+                        "markov_available": True,
+                        "markov_bucket": bucket,
+                        "markov_missing_reason": None,
+                    }
+                )
+                break
+        for row in rows:
+            payload = safe_json(row["payload_json"])
+            state = row["lifecycle_state"] or payload.get("lifecycle_state") or nested_get(payload, ("lifecycle", "state"))
+            bias = row["entry_bias"] or payload.get("entry_bias") or nested_get(payload, ("lifecycle", "entry_bias"))
+            if state and "lifecycle_state" not in features:
+                features["lifecycle_state"] = str(state)
+            if bias and "entry_bias" not in features:
+                features["entry_bias"] = str(bias)
+            if state or bias:
+                features["lifecycle_profile"] = ":".join(str(x) for x in (state, bias) if x not in (None, ""))
+                break
+
+    if get_columns(conn, "a_class_decision_events"):
+        try:
+            rows = conn.execute(
+                """
+                SELECT event_ts, source_component, source_reason, quote_clean, quote_executable,
+                       matrix_json, risk_json
+                FROM a_class_decision_events
+                WHERE event_ts BETWEEN ? AND ? AND token_ca = ?
+                ORDER BY ABS(event_ts - ?) ASC
+                LIMIT 25
+                """,
+                (lo, hi, token_ca, int(signal_ts_sec)),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            risk = safe_json(row["risk_json"])
+            matrix = extract_matrix_bucket(safe_json(row["matrix_json"]))
+            quote_clean = safe_bool(row["quote_clean"]) or safe_bool(risk.get("quote_clean_verified"))
+            quote_executable = safe_bool(row["quote_executable"]) or quote_clean
+            component = row["source_component"] or "a_class_decision_events"
+            reason = row["source_reason"]
+            features.update(
+                {
+                    "matrix_bucket": matrix or features.get("matrix_bucket"),
+                    "source_component": component,
+                    "source_resonance_state": ":".join(str(x) for x in (component, reason) if x not in (None, "")),
+                    "source_quote_clean": quote_clean,
+                    "source_quote_clean_seen": quote_clean,
+                    "source_quote_executable": quote_executable,
+                    "source_quote_executable_proxy": quote_executable,
+                }
+            )
+            break
+
+    if "source_component" not in features and get_columns(conn, "opportunity_events"):
+        try:
+            row = conn.execute(
+                """
+                SELECT event_ts, source_component, source_reason, source_type, quote_clean, quote_executable
+                FROM opportunity_events
+                WHERE event_ts BETWEEN ? AND ? AND token_ca = ?
+                ORDER BY ABS(event_ts - ?) ASC
+                LIMIT 1
+                """,
+                (lo, hi, token_ca, int(signal_ts_sec)),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row:
+            component = row["source_component"] or row["source_type"] or "opportunity_events"
+            reason = row["source_reason"]
+            quote_clean = safe_bool(row["quote_clean"])
+            quote_executable = safe_bool(row["quote_executable"]) or quote_clean
+            features.update(
+                {
+                    "source_component": component,
+                    "source_resonance_state": ":".join(str(x) for x in (component, reason) if x not in (None, "")),
+                    "source_quote_clean": quote_clean,
+                    "source_quote_clean_seen": quote_clean,
+                    "source_quote_executable": quote_executable,
+                    "source_quote_executable_proxy": quote_executable,
+                }
+            )
+    return features
+
+
 def json_get(url, timeout=12):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "candidate-shadow-observer/1.0"})
@@ -807,7 +985,8 @@ def eval_base_candidate(candidate_id, features):
         ok = bool(features.get("is_not_ath_new_trending") and features.get("signal_price_positive"))
         return ok, "signal_price_positive_proxy" if ok else "missing_quote_clean_proxy"
     if candidate_id == "notath_executable_quote_clean":
-        return False, "missing_runtime_executable_quote_clean"
+        ok = bool(features.get("is_not_ath_new_trending") and features.get("source_quote_executable"))
+        return ok, "runtime_executable_quote_clean" if ok else "missing_runtime_executable_quote_clean"
     if candidate_id == "notath_mc_lt_30k":
         mc = features.get("market_cap")
         ok = bool(features.get("is_not_ath_new_trending") and mc is not None and mc < 30_000)
@@ -817,7 +996,9 @@ def eval_base_candidate(candidate_id, features):
         ok = bool(features.get("is_not_ath_new_trending") and mc is not None and 5_000 <= mc < 30_000)
         return ok, "notath_mc_5k_30k" if ok else "not_notath_or_mc_not_5k_30k"
     if candidate_id == "markov_yellow_or_green":
-        return False, "missing_markov_bucket_readmodel"
+        bucket = str(features.get("markov_bucket") or "").lower()
+        ok = bucket in {"yellow", "green"}
+        return ok, f"markov_{bucket}" if ok else str(features.get("markov_missing_reason") or "markov_not_yellow_or_green")
     if candidate_id == "lotto_not_ath_reclaim_proxy":
         ok = bool(features.get("is_not_ath_new_trending") and features.get("status_has_reclaim"))
         return ok, "notath_reclaim_status_proxy" if ok else "missing_notath_reclaim_status"
@@ -1043,11 +1224,21 @@ def payload_for(features, candidate, matched, reason):
         "source_resonance_cohort",
         "source_resonance_level",
         "source_resonance_score",
+        "source_component",
         "gmgn_pre_seen",
         "gmgn_lead_time_sec",
+        "source_quote_clean",
         "source_quote_clean_seen",
+        "source_quote_executable",
         "source_quote_executable_proxy",
         "source_entry_quote_fail_seen",
+        "matrix_bucket",
+        "markov_available",
+        "markov_bucket",
+        "markov_missing_reason",
+        "lifecycle_state",
+        "entry_bias",
+        "lifecycle_profile",
         "kline_projection_available",
         "kline_bar_count",
         "entry_bar_open_ts",
@@ -1523,6 +1714,7 @@ def run_once(args):
                 bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit)
         kline_features = compute_kline_features(bars, signal_ts, observed_at)
         source_features = load_source_resonance_features(out_conn, row["token_ca"], signal_ts)
+        source_features.update(load_global_runtime_features(out_conn, row["token_ca"], signal_ts))
         signal_features = extract_signal_features(row, kline_features, source_features)
         try:
             written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
@@ -1654,6 +1846,50 @@ def self_test():
         kl.commit()
         kl.close()
 
+        paper = sqlite3.connect(out_db)
+        paper.execute(
+            """
+            CREATE TABLE paper_decision_events (
+              event_ts REAL,
+              token_ca TEXT,
+              lifecycle_state TEXT,
+              entry_bias TEXT,
+              payload_json TEXT
+            )
+            """
+        )
+        paper.execute(
+            """
+            CREATE TABLE a_class_decision_events (
+              event_ts REAL,
+              token_ca TEXT,
+              source_component TEXT,
+              source_reason TEXT,
+              quote_clean INTEGER,
+              quote_executable INTEGER,
+              matrix_json TEXT,
+              risk_json TEXT
+            )
+            """
+        )
+        paper.execute(
+            "INSERT INTO paper_decision_events VALUES (?, 'TESTCA', 'NEWBORN_LAUNCH', 'OBSERVE', ?)",
+            (
+                signal_ts,
+                json.dumps({"markov_reclaim_forecast": {"gate": {"markov_bucket": "green"}}}),
+            ),
+        )
+        paper.execute(
+            "INSERT INTO a_class_decision_events VALUES (?, 'TESTCA', 'pre_pass_resonance_probe', 'gmgn_pre_seen_required', 1, 1, ?, ?)",
+            (
+                signal_ts,
+                json.dumps({"green_count": 3, "red_count": 0}),
+                json.dumps({"quote_clean_verified": True}),
+            ),
+        )
+        paper.commit()
+        paper.close()
+
         args = argparse.Namespace(
             registry=str(registry_path),
             signal_db=str(signal_db),
@@ -1684,6 +1920,10 @@ def self_test():
         active = out.execute(
             "SELECT matched FROM candidate_shadow_observations WHERE candidate_id='kline:active_mom30_first3'"
         ).fetchone()[0]
+        markov = out.execute(
+            "SELECT matched, payload_json FROM candidate_shadow_observations WHERE candidate_id='markov_yellow_or_green'"
+        ).fetchone()
+        payload = json.loads(markov[1])
         out.close()
         assert summary["candidate_count"] == EXPECTED_CANDIDATE_COUNT
         assert total == EXPECTED_CANDIDATE_COUNT
@@ -1691,6 +1931,12 @@ def self_test():
         assert closed_total > 0
         assert old_filter == 1
         assert active == 1
+        assert markov[0] == 1
+        assert payload["markov_bucket"] == "green"
+        assert payload["matrix_bucket"] == "green"
+        assert payload["source_quote_clean"] is True
+        assert payload["source_quote_executable"] is True
+        assert payload["lifecycle_state"] == "NEWBORN_LAUNCH"
     print("SELF_TEST_PASS candidate_shadow_observer")
 
 
