@@ -33,6 +33,8 @@ DIMENSIONS = (
     "candle_pattern",
     "volume_profile",
 )
+CAPPED_LOSS_PCT = -10.0
+CAPPED_WIN_PCT = 100.0
 
 
 def jloads(raw):
@@ -88,16 +90,19 @@ def stats(rows):
             "best_win_pct": None,
             "total_net_pnl_pct": 0.0,
             "drop_largest_winner_total_pct": 0.0,
+            "capped_avg_net_pnl_pct": None,
         }
     wins = [p for p in pnls if p > 0]
     losses = [-p for p in pnls if p < 0]
     total = sum(pnls)
     largest_win = max(wins) if wins else 0.0
+    capped = [max(CAPPED_LOSS_PCT, min(CAPPED_WIN_PCT, p)) for p in pnls]
     return {
         "closed_n": closed,
         "unique_tokens": len(tokens),
         "win_rate_pct": round(len(wins) / closed * 100, 2),
         "avg_net_pnl_pct": round(total / closed, 4),
+        "capped_avg_net_pnl_pct": round(sum(capped) / closed, 4),
         "median_net_pnl_pct": round(statistics.median(pnls), 4),
         "profit_factor": round(sum(wins) / sum(losses), 4) if losses else None,
         "worst_loss_pct": round(min(pnls), 4),
@@ -111,6 +116,7 @@ def judge(row, *, is_slice):
     closed = row.get("closed_n") or 0
     unique = row.get("unique_tokens") or 0
     avg = row.get("avg_net_pnl_pct")
+    capped_avg = row.get("capped_avg_net_pnl_pct")
     median = row.get("median_net_pnl_pct")
     pf = row.get("profit_factor")
     lift = row.get("avg_lift_pp", 0 if not is_slice else None)
@@ -123,8 +129,10 @@ def judge(row, *, is_slice):
         and unique >= 30
         and avg is not None
         and median is not None
+        and capped_avg is not None
         and pf is not None
         and avg > 0
+        and capped_avg > 0
         and median > 0
         and pf > 1.2
         and lift is not None
@@ -136,8 +144,12 @@ def judge(row, *, is_slice):
     if (
         closed >= 20
         and avg is not None
+        and capped_avg is not None
+        and median is not None
         and pf is not None
         and avg > 0
+        and capped_avg > 0
+        and median > 0
         and pf > 1
         and (not is_slice or (lift is not None and lift > 0))
         and ex_max is not None
@@ -206,6 +218,10 @@ def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slic
                 row["avg_lift_pp"] = round(row["avg_net_pnl_pct"] - base["avg_net_pnl_pct"], 4)
             else:
                 row["avg_lift_pp"] = None
+            if row["capped_avg_net_pnl_pct"] is not None and base["capped_avg_net_pnl_pct"] is not None:
+                row["capped_avg_lift_pp"] = round(row["capped_avg_net_pnl_pct"] - base["capped_avg_net_pnl_pct"], 4)
+            else:
+                row["capped_avg_lift_pp"] = None
             if row["win_rate_pct"] is not None and base["win_rate_pct"] is not None:
                 row["wr_lift_pp"] = round(row["win_rate_pct"] - base["win_rate_pct"], 2)
             else:
@@ -216,14 +232,17 @@ def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slic
                 else None
             )
             row["baseline_avg_net_pnl_pct"] = base["avg_net_pnl_pct"]
+            row["baseline_capped_avg_net_pnl_pct"] = base["capped_avg_net_pnl_pct"]
+            row["baseline_median_net_pnl_pct"] = base["median_net_pnl_pct"]
             row["baseline_win_rate_pct"] = base["win_rate_pct"]
             row["judgment"] = judge(row, is_slice=True)
             crosses.append(row)
     crosses.sort(
         key=lambda r: (
             {"PROMISING": 3, "WATCH": 2, "TOO_SMALL": 1, "REJECT": 0}[r["judgment"]],
-            r.get("avg_lift_pp") if r.get("avg_lift_pp") is not None else -999,
-            r.get("avg_net_pnl_pct") if r.get("avg_net_pnl_pct") is not None else -999,
+            r.get("capped_avg_lift_pp") if r.get("capped_avg_lift_pp") is not None else -999,
+            r.get("median_net_pnl_pct") if r.get("median_net_pnl_pct") is not None else -999,
+            r.get("capped_avg_net_pnl_pct") if r.get("capped_avg_net_pnl_pct") is not None else -999,
         ),
         reverse=True,
     )
@@ -238,6 +257,8 @@ def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slic
             "baseline_closed_min": min_baseline_closed,
             "baseline_unique_min": min_baseline_unique,
             "slice_closed_min": min_slice_closed,
+            "capped_loss_pct": CAPPED_LOSS_PCT,
+            "capped_win_pct": CAPPED_WIN_PCT,
         },
         "coverage": {
             "closed_virtual_rows": len(rows),
@@ -273,11 +294,18 @@ def self_test():
             payload = {"source_quote_clean": i <= 4, "market_cap": 8000 if i <= 4 else 50000}
             db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?)", (i, f"CA{i}", "cand", "base", json.dumps(payload)))
             db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)", (i, f"CA{i}", "cand", "base", "VIRTUAL_CLOSED", pnl, now))
+        for i, pnl in enumerate([1000] + [-6.5] * 19, 101):
+            payload = {"source_quote_clean": True, "market_cap": 8000}
+            db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?)", (i, f"TAIL{i}", "tail", "base", json.dumps(payload)))
+            db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)", (i, f"TAIL{i}", "tail", "base", "VIRTUAL_CLOSED", pnl, now))
         db.commit()
         db.close()
         out = summarize(str(p), 1, 1, 1, 1, 50)
-        assert out["coverage"]["candidate_ids"] == 1
-        assert out["baseline"][0]["median_net_pnl_pct"] == 1.5
+        assert out["coverage"]["candidate_ids"] == 2
+        cand = next(r for r in out["baseline"] if r["candidate_id"] == "cand")
+        assert cand["median_net_pnl_pct"] == 1.5
+        assert cand["capped_avg_net_pnl_pct"] == 1.1667
+        assert next(r for r in out["baseline"] if r["candidate_id"] == "tail")["judgment"] == "REJECT"
         assert any(r["dimension"] == "source_quote_clean" and r["slice_value"] == "true" for r in out["crosses"])
     print("SELF_TEST_PASS offline_candidate_cross_eval")
 
