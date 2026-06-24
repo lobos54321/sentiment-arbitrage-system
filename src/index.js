@@ -888,6 +888,9 @@ function startIndexRuntimeSupervisor() {
 function startPythonSidecar({ name, args, env = {}, logPath }) {
   let child = null;
   let stopped = false;
+  let maxRuntimeTimer = null;
+  let forceKillTimer = null;
+  const maxRuntimeSec = Number.parseInt(String(env.SIDECAR_MAX_RUNTIME_SEC || '0'), 10) || 0;
   const status = {
     name,
     running: false,
@@ -944,7 +947,29 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
     status.pid = child.pid || null;
     child.stdout.pipe(logStream, { end: false });
     child.stderr.pipe(logStream, { end: false });
+    if (maxRuntimeSec > 0) {
+      maxRuntimeTimer = setTimeout(() => {
+        if (!child || child.killed) return;
+        logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} max_runtime_sec=${maxRuntimeSec}; sending SIGTERM\n`);
+        child.kill('SIGTERM');
+        forceKillTimer = setTimeout(() => {
+          if (!child || child.killed) return;
+          logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} still running after SIGTERM; sending SIGKILL\n`);
+          child.kill('SIGKILL');
+        }, 10000);
+        forceKillTimer.unref?.();
+      }, maxRuntimeSec * 1000);
+      maxRuntimeTimer.unref?.();
+    }
     child.on('exit', (code, signal) => {
+      if (maxRuntimeTimer) {
+        clearTimeout(maxRuntimeTimer);
+        maxRuntimeTimer = null;
+      }
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+        forceKillTimer = null;
+      }
       status.running = false;
       status.pid = null;
       status.last_exit_at = new Date().toISOString();
@@ -989,6 +1014,8 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
     stop() {
       stopped = true;
       status.running = false;
+      if (maxRuntimeTimer) clearTimeout(maxRuntimeTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       try { if (child && !child.killed) child.kill('SIGTERM'); } catch {}
       try { logStream.end(`[node-supervisor] ${new Date().toISOString()} stopping ${name}\n`); } catch {}
     },
@@ -1035,10 +1062,10 @@ function startCandidateShadowObserver(config) {
         'scripts/candidate_shadow_observer.py',
         '--loop',
         '--interval', process.env.CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC || '60',
-        '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '30',
+        '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '10',
         '--kline-limit', process.env.CANDIDATE_SHADOW_KLINE_LIMIT || '125',
         '--kline-fallback-enabled',
-        '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '5',
+        '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '2',
         '--kline-fallback-cooldown-sec', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC || '900',
       ],
       env: {
@@ -1046,6 +1073,7 @@ function startCandidateShadowObserver(config) {
         SENTIMENT_DB: signalDb,
         DB_PATH: signalDb,
         KLINE_DB: klineDb,
+        SIDECAR_MAX_RUNTIME_SEC: process.env.CANDIDATE_SHADOW_OBSERVER_CHILD_MAX_RUNTIME_SEC || '300',
       },
     }),
   ];

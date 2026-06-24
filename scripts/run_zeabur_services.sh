@@ -257,9 +257,9 @@ if [ "${CANDIDATE_SHADOW_OBSERVER_ENABLED:-false}" = "true" ]; then
       python3 scripts/candidate_shadow_observer.py \
         --loop \
         --interval "${CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC:-60}" \
-        --limit "${CANDIDATE_SHADOW_OBSERVER_LIMIT:-30}" \
+        --limit "${CANDIDATE_SHADOW_OBSERVER_LIMIT:-10}" \
         --kline-limit "${CANDIDATE_SHADOW_KLINE_LIMIT:-125}" \
-        --kline-fallback-max-fetches "${CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES:-5}" \
+        --kline-fallback-max-fetches "${CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES:-2}" \
         --kline-fallback-cooldown-sec "${CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC:-900}" 2>&1 | tee -a /app/data/candidate-shadow-observer.log
       echo "[candidate-shadow-observer] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited, restarting in 15s" | tee -a /app/data/candidate-shadow-observer.log
       sleep 15
