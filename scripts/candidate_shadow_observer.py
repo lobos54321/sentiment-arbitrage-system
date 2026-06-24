@@ -301,6 +301,11 @@ def ensure_schema(conn):
 
 
 def ensure_kline_schema(conn):
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kline_1m'"
+    ).fetchone()
+    if exists:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS kline_1m (
