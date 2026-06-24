@@ -34,6 +34,8 @@ DEFAULT_VIRTUAL_STOP_LOSS_PCT = -3.0
 DEFAULT_VIRTUAL_TRAIL_START_PCT = 3.0
 DEFAULT_VIRTUAL_TRAIL_FACTOR = 0.95
 DEFAULT_VIRTUAL_TIMEOUT_BARS = 120
+_PAPER_TRADE_MONITOR = None
+_PAPER_TRADE_MONITOR_IMPORT_ERROR = None
 
 
 BASE_CANDIDATES = [
@@ -528,6 +530,128 @@ def extract_markov_bucket(payload):
     if value in (None, "", "null"):
         return None
     return str(value).lower()
+
+
+def load_paper_trade_monitor_module():
+    global _PAPER_TRADE_MONITOR, _PAPER_TRADE_MONITOR_IMPORT_ERROR
+    if _PAPER_TRADE_MONITOR is not None:
+        return _PAPER_TRADE_MONITOR
+    if _PAPER_TRADE_MONITOR_IMPORT_ERROR is not None:
+        return None
+    script_dir = str(Path(__file__).resolve().parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    try:
+        import paper_trade_monitor  # type: ignore
+    except Exception as exc:
+        _PAPER_TRADE_MONITOR_IMPORT_ERROR = f"{type(exc).__name__}:{exc}"
+        return None
+    _PAPER_TRADE_MONITOR = paper_trade_monitor
+    return _PAPER_TRADE_MONITOR
+
+
+def choose_shadow_markov_entry_mode(features, monitor_module):
+    notath_mode = getattr(
+        monitor_module,
+        "LOTTO_NOT_ATH_RECLAIM_TINY_PROBE_MODE",
+        "lotto_not_ath_reclaim_tiny_probe",
+    )
+    micro_mode = getattr(
+        monitor_module,
+        "LOTTO_MICRO_RECLAIM_TINY_PROBE_MODE",
+        "lotto_micro_reclaim_tiny_probe",
+    )
+    text = " ".join(
+        str(features.get(key) or "").lower()
+        for key in ("hard_gate_status", "source_component", "source_resonance_state")
+    )
+    if "micro" in text or "dead_cat" in text or "runner_watch" in text:
+        return micro_mode
+    return notath_mode
+
+
+def build_shadow_markov_features(conn, features, now_ts):
+    if features.get("markov_bucket"):
+        return {}
+    monitor_module = load_paper_trade_monitor_module()
+    if monitor_module is None:
+        return {
+            "markov_available": False,
+            "markov_missing_reason": _PAPER_TRADE_MONITOR_IMPORT_ERROR or "paper_trade_monitor_import_failed",
+            "markov_source": "shadow_lotto_reclaim_forecast_unavailable",
+        }
+    forecast_fn = getattr(monitor_module, "build_lotto_reclaim_markov_forecast", None)
+    if not callable(forecast_fn):
+        return {
+            "markov_available": False,
+            "markov_missing_reason": "paper_trade_monitor_markov_forecast_missing",
+            "markov_source": "shadow_lotto_reclaim_forecast_unavailable",
+        }
+    entry_mode = choose_shadow_markov_entry_mode(features, monitor_module)
+    quote_clean = bool(
+        features.get("source_quote_clean")
+        or features.get("source_quote_executable")
+        or features.get("signal_price_positive")
+    )
+    markov_payload = {
+        "quote_clean": quote_clean,
+        "quote_clean_seen": quote_clean,
+        "quote_executable": bool(features.get("source_quote_executable") or quote_clean),
+        "pc_m5": features.get("first5_return_pct"),
+        "price_change_m5": features.get("first5_return_pct"),
+        "entry_branch": features.get("source_resonance_state") or features.get("hard_gate_status"),
+        "source_reject_reason": features.get("hard_gate_status"),
+    }
+    pending = {
+        "token_ca": features.get("token_ca"),
+        "symbol": features.get("symbol"),
+        "entry_mode": entry_mode,
+        "scout_mode": entry_mode,
+        "entry_branch": markov_payload["entry_branch"],
+        "source_reject_reason": markov_payload["source_reject_reason"],
+        "markov_features": markov_payload,
+    }
+    lifecycle = {
+        "lifecycle_state": features.get("lifecycle_state"),
+        "entry_bias": features.get("entry_bias"),
+    }
+    try:
+        forecast = forecast_fn(
+            conn,
+            entry_mode=entry_mode,
+            pending=pending,
+            lifecycle=lifecycle,
+            now_ts=now_ts,
+        )
+    except Exception as exc:
+        return {
+            "markov_available": False,
+            "markov_missing_reason": f"shadow_markov_forecast_error:{type(exc).__name__}",
+            "markov_source": "shadow_lotto_reclaim_forecast_error",
+        }
+    gate = (forecast or {}).get("gate") if isinstance(forecast, dict) else None
+    if not isinstance(gate, dict) or not gate.get("markov_bucket"):
+        return {
+            "markov_available": False,
+            "markov_missing_reason": "shadow_markov_forecast_no_bucket",
+            "markov_source": "shadow_lotto_reclaim_forecast_empty",
+        }
+    return {
+        "markov_available": True,
+        "markov_bucket": str(gate.get("markov_bucket")).lower(),
+        "markov_missing_reason": None,
+        "markov_source": "shadow_lotto_reclaim_forecast",
+        "markov_entry_mode": entry_mode,
+        "markov_gate_reason": gate.get("reason"),
+        "markov_pass": safe_bool(gate.get("pass")),
+        "markov_sample_n": gate.get("sample_n"),
+        "markov_p_absorb_peak30": gate.get("p_absorb_peak30"),
+        "markov_p_absorb_stop_before_peak": gate.get("p_absorb_stop_before_peak"),
+        "markov_edge_peak30_minus_stop": gate.get("edge_peak30_minus_stop"),
+        "markov_model_family": (forecast or {}).get("model_family"),
+        "markov_cohort_key": (forecast or {}).get("cohort_key"),
+        "markov_event_count": (forecast or {}).get("event_count"),
+    }
 
 
 def extract_matrix_bucket(payload):
@@ -1241,6 +1365,17 @@ def payload_for(features, candidate, matched, reason):
         "markov_available",
         "markov_bucket",
         "markov_missing_reason",
+        "markov_source",
+        "markov_entry_mode",
+        "markov_gate_reason",
+        "markov_pass",
+        "markov_sample_n",
+        "markov_p_absorb_peak30",
+        "markov_p_absorb_stop_before_peak",
+        "markov_edge_peak30_minus_stop",
+        "markov_model_family",
+        "markov_cohort_key",
+        "markov_event_count",
         "lifecycle_state",
         "entry_bias",
         "lifecycle_profile",
@@ -1721,6 +1856,7 @@ def run_once(args):
         source_features = load_source_resonance_features(out_conn, row["token_ca"], signal_ts)
         source_features.update(load_global_runtime_features(out_conn, row["token_ca"], signal_ts))
         signal_features = extract_signal_features(row, kline_features, source_features)
+        signal_features.update(build_shadow_markov_features(out_conn, signal_features, observed_at))
         try:
             written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
             virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
@@ -1929,6 +2065,23 @@ def self_test():
             "SELECT matched, payload_json FROM candidate_shadow_observations WHERE candidate_id='markov_yellow_or_green'"
         ).fetchone()
         payload = json.loads(markov[1])
+        shadow_markov = build_shadow_markov_features(
+            out,
+            {
+                "token_ca": "TESTCA2",
+                "symbol": "TEST2",
+                "source_quote_clean": True,
+                "source_quote_executable": True,
+                "signal_price_positive": True,
+                "first5_return_pct": 5.0,
+                "hard_gate_status": "PASS",
+                "source_component": "pre_pass_resonance_probe",
+                "source_resonance_state": "pre_pass_resonance_probe:test",
+                "lifecycle_state": "NEWBORN_LAUNCH",
+                "entry_bias": "PROBE",
+            },
+            signal_ts,
+        )
         out.close()
         assert summary["candidate_count"] == EXPECTED_CANDIDATE_COUNT
         assert total == EXPECTED_CANDIDATE_COUNT
@@ -1942,6 +2095,9 @@ def self_test():
         assert payload["source_quote_clean"] is True
         assert payload["source_quote_executable"] is True
         assert payload["lifecycle_state"] == "NEWBORN_LAUNCH"
+        assert shadow_markov["markov_available"] is True
+        assert shadow_markov["markov_source"] == "shadow_lotto_reclaim_forecast"
+        assert shadow_markov["markov_bucket"] in {"insufficient", "green", "yellow", "red"}
     print("SELF_TEST_PASS candidate_shadow_observer")
 
 
