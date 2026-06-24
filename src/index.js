@@ -1017,7 +1017,7 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
 }
 
 function startCandidateShadowObserver(config) {
-  if (!envFlag('CANDIDATE_SHADOW_OBSERVER_ENABLED', false)) {
+  if (!envFlag('CANDIDATE_SHADOW_OBSERVER_ENABLED', true)) {
     console.log('[CandidateShadow] disabled by CANDIDATE_SHADOW_OBSERVER_ENABLED=false');
     return [];
   }
@@ -1035,10 +1035,10 @@ function startCandidateShadowObserver(config) {
         'scripts/candidate_shadow_observer.py',
         '--loop',
         '--interval', process.env.CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC || '60',
-        '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '300',
+        '--limit', process.env.CANDIDATE_SHADOW_OBSERVER_LIMIT || '30',
         '--kline-limit', process.env.CANDIDATE_SHADOW_KLINE_LIMIT || '125',
         '--kline-fallback-enabled',
-        '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '20',
+        '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '5',
         '--kline-fallback-cooldown-sec', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC || '900',
       ],
       env: {
