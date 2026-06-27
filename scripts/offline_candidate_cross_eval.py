@@ -249,6 +249,17 @@ def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slic
 
     return {
         "schema_version": "offline_candidate_cross_eval.v1",
+        "report_type": "pnl_cross_eval",
+        "evidence_level": "discovery_same_window",
+        "evidence_role": "secondary_pnl_after_match",
+        "primary_question": "matched candidate virtual trade profitability",
+        "does_not_answer": [
+            "gold_silver_capture_recall",
+            "gold_silver_capture_precision",
+            "missed_gold_silver_denominator",
+        ],
+        "can_promote_live": False,
+        "judgment_scope": "pnl_only",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "db": db_path,
         "hours": hours,

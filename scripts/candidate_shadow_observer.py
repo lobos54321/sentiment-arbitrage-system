@@ -29,6 +29,7 @@ from pathlib import Path
 
 
 CANDIDATE_VERSION = "candidate-shadow-v1"
+CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_CANDIDATE_COUNT = 84
 DEFAULT_VIRTUAL_STOP_LOSS_PCT = -3.0
 DEFAULT_VIRTUAL_TRAIL_START_PCT = 3.0
@@ -473,8 +474,8 @@ def load_source_resonance_features(conn, token_ca, signal_ts_sec):
     quote_clean = bool(
         safe_bool(row["quote_clean_seen"])
         or safe_bool(row["two_quote_clean_snapshots"])
-        or safe_bool(row["entry_quote_success_seen"])
     )
+    quote_executable = safe_bool(row["entry_quote_success_seen"])
     cohort = row["cohort"]
     level = first_number(row["resonance_level"])
     return {
@@ -485,8 +486,10 @@ def load_source_resonance_features(conn, token_ca, signal_ts_sec):
         "source_resonance_score": first_number(row["resonance_score"]),
         "gmgn_pre_seen": safe_bool(row["gmgn_pre_seen"]),
         "gmgn_lead_time_sec": first_number(row["gmgn_lead_time_sec"]),
+        "source_quote_clean": quote_clean,
         "source_quote_clean_seen": quote_clean,
-        "source_quote_executable_proxy": quote_clean,
+        "source_quote_executable": quote_executable,
+        "source_quote_executable_proxy": quote_executable,
         "source_entry_quote_fail_seen": safe_bool(row["entry_quote_fail_seen"]),
     }
 
@@ -588,15 +591,23 @@ def build_shadow_markov_features(conn, features, now_ts):
             "markov_source": "shadow_lotto_reclaim_forecast_unavailable",
         }
     entry_mode = choose_shadow_markov_entry_mode(features, monitor_module)
-    quote_clean = bool(
-        features.get("source_quote_clean")
-        or features.get("source_quote_executable")
-        or features.get("signal_price_positive")
+    source_quote_clean = bool(
+        safe_bool(features.get("source_quote_clean"))
+        or safe_bool(features.get("source_quote_clean_seen"))
     )
+    source_quote_executable = bool(
+        safe_bool(features.get("source_quote_executable"))
+    )
+    quote_clean = bool(source_quote_clean or source_quote_executable)
     markov_payload = {
+        "context_schema_version": CONTEXT_SCHEMA_VERSION,
+        "quote_clean_definition": "source_or_executable_quote_only_no_signal_price",
+        "signal_price_seen": bool(features.get("signal_price_seen") or features.get("signal_price_positive")),
+        "source_quote_clean": source_quote_clean,
+        "source_quote_executable": source_quote_executable,
         "quote_clean": quote_clean,
         "quote_clean_seen": quote_clean,
-        "quote_executable": bool(features.get("source_quote_executable") or quote_clean),
+        "quote_executable": source_quote_executable,
         "pc_m5": features.get("first5_return_pct"),
         "price_change_m5": features.get("first5_return_pct"),
         "entry_branch": features.get("source_resonance_state") or features.get("hard_gate_status"),
@@ -629,7 +640,8 @@ def build_shadow_markov_features(conn, features, now_ts):
             "markov_missing_reason": f"shadow_markov_forecast_error:{type(exc).__name__}",
             "markov_source": "shadow_lotto_reclaim_forecast_error",
         }
-    gate = (forecast or {}).get("gate") if isinstance(forecast, dict) else None
+    forecast_dict = forecast if isinstance(forecast, dict) else {}
+    gate = forecast_dict.get("gate")
     if not isinstance(gate, dict) or not gate.get("markov_bucket"):
         return {
             "markov_available": False,
@@ -648,9 +660,9 @@ def build_shadow_markov_features(conn, features, now_ts):
         "markov_p_absorb_peak30": gate.get("p_absorb_peak30"),
         "markov_p_absorb_stop_before_peak": gate.get("p_absorb_stop_before_peak"),
         "markov_edge_peak30_minus_stop": gate.get("edge_peak30_minus_stop"),
-        "markov_model_family": (forecast or {}).get("model_family"),
-        "markov_cohort_key": (forecast or {}).get("cohort_key"),
-        "markov_event_count": (forecast or {}).get("event_count"),
+        "markov_model_family": forecast_dict.get("model_family"),
+        "markov_cohort_key": forecast_dict.get("cohort_key"),
+        "markov_event_count": forecast_dict.get("event_count"),
     }
 
 
@@ -743,7 +755,7 @@ def load_global_runtime_features(conn, token_ca, signal_ts_sec):
             risk = safe_json(row["risk_json"])
             matrix = extract_matrix_bucket(safe_json(row["matrix_json"]))
             quote_clean = safe_bool(row["quote_clean"]) or safe_bool(risk.get("quote_clean_verified"))
-            quote_executable = safe_bool(row["quote_executable"]) or quote_clean
+            quote_executable = safe_bool(row["quote_executable"])
             component = row["source_component"] or "a_class_decision_events"
             reason = row["source_reason"]
             features.update(
@@ -777,7 +789,7 @@ def load_global_runtime_features(conn, token_ca, signal_ts_sec):
             component = row["source_component"] or row["source_type"] or "opportunity_events"
             reason = row["source_reason"]
             quote_clean = safe_bool(row["quote_clean"])
-            quote_executable = safe_bool(row["quote_executable"]) or quote_clean
+            quote_executable = safe_bool(row["quote_executable"])
             features.update(
                 {
                     "source_component": component,
@@ -1072,6 +1084,7 @@ def extract_signal_features(row, kline_features, source_features=None):
         "ai_narrative_tier": row["ai_narrative_tier"],
         "narrative_score": narrative_score,
         "signal_price": signal_price,
+        "signal_price_seen": bool(signal_price and signal_price > 0),
         "signal_price_positive": bool(signal_price and signal_price > 0),
         "super_index": super_index,
         "status_has_reclaim": "RECLAIM" in status,
@@ -1111,8 +1124,12 @@ def eval_base_candidate(candidate_id, features):
         ok = bool(features.get("is_not_ath_new_trending") and features.get("hard_gate_status"))
         return ok, "notath_status_present" if ok else "missing_notath_or_status"
     if candidate_id == "notath_quote_clean":
-        ok = bool(features.get("is_not_ath_new_trending") and features.get("signal_price_positive"))
-        return ok, "signal_price_positive_proxy" if ok else "missing_quote_clean_proxy"
+        quote_clean = bool(
+            safe_bool(features.get("source_quote_clean"))
+            or safe_bool(features.get("source_quote_clean_seen"))
+        )
+        ok = bool(features.get("is_not_ath_new_trending") and quote_clean)
+        return ok, "runtime_source_quote_clean" if ok else "missing_runtime_source_quote_clean"
     if candidate_id == "notath_executable_quote_clean":
         ok = bool(features.get("is_not_ath_new_trending") and features.get("source_quote_executable"))
         return ok, "runtime_executable_quote_clean" if ok else "missing_runtime_executable_quote_clean"
@@ -1347,6 +1364,8 @@ def payload_for(features, candidate, matched, reason):
         "ai_confidence",
         "narrative_score",
         "super_index",
+        "signal_price",
+        "signal_price_seen",
         "signal_price_positive",
         "source_resonance_seen",
         "source_resonance_state",
@@ -1414,6 +1433,9 @@ def payload_for(features, candidate, matched, reason):
     payload.update(
         {
             "candidate_version": CANDIDATE_VERSION,
+            "context_schema_version": CONTEXT_SCHEMA_VERSION,
+            "quote_clean_definition": "source_or_executable_quote_only_no_signal_price",
+            "legacy_signal_price_positive_deprecated": features.get("signal_price_positive"),
             "candidate_count": EXPECTED_CANDIDATE_COUNT,
             "candidate_id": candidate["candidate_id"],
             "candidate_family": candidate["family"],
@@ -1811,10 +1833,11 @@ def run_once(args):
                 reason=str(exc),
                 script="candidate_shadow_observer",
             )
-            try:
-                kline_conn.close()
-            except Exception:
-                pass
+            if kline_conn:
+                try:
+                    kline_conn.close()
+                except Exception:
+                    pass
             kline_conn = None
             bars = []
         if (
@@ -1910,6 +1933,29 @@ def run_once(args):
 
 
 def self_test():
+    proxy_match, proxy_reason = eval_base_candidate(
+        "notath_quote_clean",
+        {
+            "is_not_ath_new_trending": True,
+            "signal_price_seen": True,
+            "signal_price_positive": True,
+            "source_quote_clean": False,
+            "source_quote_clean_seen": False,
+        },
+    )
+    assert proxy_match is False
+    assert proxy_reason == "missing_runtime_source_quote_clean"
+    clean_match, clean_reason = eval_base_candidate(
+        "notath_quote_clean",
+        {
+            "is_not_ath_new_trending": True,
+            "signal_price_seen": False,
+            "signal_price_positive": False,
+            "source_quote_clean": True,
+        },
+    )
+    assert clean_match is True
+    assert clean_reason == "runtime_source_quote_clean"
     registry = {
         "modes": {f"mode_{idx:02d}": {"tier": "shadow_watch_only", "route": "MIXED", "family": "primary"} for idx in range(35)}
     }

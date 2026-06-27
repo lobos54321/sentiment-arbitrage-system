@@ -163,13 +163,14 @@ def load_source(db, since):
         token = r["token_ca"]
         if not token or row_ts is None:
             continue
-        quote_clean = boolish(r["quote_clean_seen"]) or boolish(r["two_quote_clean_snapshots"]) or boolish(r["entry_quote_success_seen"])
+        quote_clean = boolish(r["quote_clean_seen"]) or boolish(r["two_quote_clean_snapshots"])
+        quote_executable = boolish(r["entry_quote_success_seen"])
         state = r["cohort"] or ("level_%s" % r["resonance_level"] if r["resonance_level"] is not None else "seen")
         out[token].append((row_ts, {
             "source_component": "source_resonance_candidates",
             "source_resonance_state": state,
             "source_quote_clean": "true" if quote_clean else "false",
-            "source_quote_executable_proxy": "true" if quote_clean else "false",
+            "source_quote_executable_proxy": "true" if quote_executable else "false",
         }))
 
     if table_exists(db, "a_class_decision_events"):
