@@ -1083,8 +1083,8 @@ function startCandidateShadowObserver(config) {
 }
 
 function startAgentCaptureDiscoveryLoop(config) {
-  if (!envFlag('AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED', false)) {
-    console.log('[AgentCaptureDiscovery] disabled by AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED=false');
+  if (!envFlag('AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE', false)) {
+    console.log('[AgentCaptureDiscovery] disabled; set AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE=true only for a dedicated worker/container');
     return [];
   }
 
