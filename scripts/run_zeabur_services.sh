@@ -272,7 +272,7 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
-if [ "${AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED:-true}" = "true" ]; then
+if [ "${AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE:-false}" = "true" ]; then
   echo "[STARTUP] Starting gold/silver capture discovery agent loop..."
   (
     while true; do
@@ -296,8 +296,9 @@ if [ "${AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED:-true}" = "true" ]; then
         --handoff-dir "${AGENT_CAPTURE_HANDOFFS_DIR:-/app/data/agent_handoffs}" \
         --registry "${AGENT_CAPTURE_HYPOTHESIS_REGISTRY:-/app/data/hypothesis_registry.json}" \
         --markov-profiles "${AGENT_CAPTURE_MARKOV_PROFILES:-runtime,kline}" \
-        --report-timeout-sec "${AGENT_CAPTURE_REPORT_TIMEOUT_SEC:-900}" \
+        --report-timeout-sec "${AGENT_CAPTURE_REPORT_TIMEOUT_SEC:-30}" \
         --test-timeout-sec "${AGENT_CAPTURE_TEST_TIMEOUT_SEC:-180}" \
+        --max-scan-rows "${AGENT_CAPTURE_MAX_SCAN_ROWS:-250000}" \
         --max-runs 1 \
         --interval-sec 1 2>&1 | tee -a /app/data/agent-capture-discovery.log
       EXIT_CODE=${PIPESTATUS[0]}
@@ -308,7 +309,7 @@ if [ "${AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED:-true}" = "true" ]; then
   ) &
   AGENT_CAPTURE_PID=$!
 else
-  echo "[STARTUP] Gold/silver capture discovery agent loop disabled."
+  echo "[STARTUP] Gold/silver capture discovery agent loop disabled; set AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE=true only for a dedicated worker/container."
 fi
 
 if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
