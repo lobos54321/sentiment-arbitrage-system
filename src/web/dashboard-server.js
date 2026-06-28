@@ -2029,6 +2029,7 @@ function getHypothesisRegistryPath() {
 
 function agentCaptureArtifactPaths() {
   const latestDir = join(getAgentRunsRoot(), 'latest');
+  const agentLog = process.env.AGENT_CAPTURE_DISCOVERY_LOG || join(dirname(getPaperDbPath()), 'agent-capture-discovery.log');
   return {
     verdict: join(latestDir, 'reviewer_verdict.json'),
     summary: join(latestDir, 'run_summary.md'),
@@ -2039,6 +2040,7 @@ function agentCaptureArtifactPaths() {
     markov_runtime: join(latestDir, 'candidate_virtual_markov_runtime_24h.json'),
     markov_kline: join(latestDir, 'candidate_virtual_markov_kline_24h.json'),
     tests: join(latestDir, 'tests.json'),
+    log: agentLog,
   };
 }
 
@@ -10732,6 +10734,7 @@ const server = http.createServer(async (req, res) => {
       markov_runtime: 'markov_runtime',
       markov_kline: 'markov_kline',
       self_tests: 'tests',
+      agent_log: 'log',
     };
     const requested = String(url.searchParams.get('artifact') || 'verdict').trim();
     const artifact = aliases[requested] || requested;
@@ -10758,7 +10761,7 @@ const server = http.createServer(async (req, res) => {
     streamDownloadFile(
       res,
       artifactPath,
-      `agent-capture-discovery-${artifact}${artifactPath.endsWith('.md') ? '.md' : '.json'}`,
+      `agent-capture-discovery-${artifact}${artifactPath.endsWith('.md') ? '.md' : artifactPath.endsWith('.log') ? '.log' : '.json'}`,
       null,
       {
         'Content-Type': agentArtifactContentType(artifactPath),
