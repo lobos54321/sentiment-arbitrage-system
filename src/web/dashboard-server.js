@@ -3139,7 +3139,13 @@ function rawOutcomeEligibleSql() {
   `;
 }
 
-export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, coverageTargetPct = 80 } = {}) {
+export function readRawSignalOutcomeRollingSummary({
+  hours = 24,
+  limit = 50,
+  coverageTargetPct = 80,
+  includeRows = false,
+  rowsLimit = 50000,
+} = {}) {
   const rawDbPath = getRawSignalOutcomesDbPath();
   const sinceTs = Math.floor(Date.now() / 1000) - Math.max(1, Number(hours) || 24) * 3600;
   if (!fs.existsSync(rawDbPath)) {
@@ -3275,6 +3281,27 @@ export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, cov
       ORDER BY COALESCE(max_sustained_peak_pct, 0) DESC
       LIMIT @limit
     `).all({ since: sinceTs, limit });
+    const rawDogRowsLimit = Math.max(1, Math.min(Number(rowsLimit) || 50000, 50000));
+    const rawDogRows = includeRows ? db.prepare(`
+      SELECT
+        signal_id, symbol, token_ca, signal_ts, raw_primary_tier, raw_sustained_tier,
+        max_sustained_peak_pct, max_wick_peak_pct, time_to_sustained_peak_sec,
+        baseline_confidence, coverage_reason, did_enter, held_to_silver,
+        held_to_gold, raw_dog_entered, raw_dog_realized, sold_before_silver,
+        sold_before_gold, exit_reason, first_bar_ts, first_bar_lag_sec,
+        early_15m_bar_count, early_15m_expected_minutes, early_15m_bar_coverage_pct,
+        early_15m_complete, source_kind, source_family, path_source_kind,
+        path_source_family, path_provider, path_pool_address, baseline_source,
+        baseline_provider, baseline_pool_address
+      FROM raw_signal_outcomes
+      WHERE signal_ts >= @since
+        AND ${eligibleSql}
+        AND raw_primary_tier IN ('gold', 'silver')
+        AND token_ca IS NOT NULL
+        AND token_ca != ''
+      ORDER BY signal_ts ASC, token_ca ASC, signal_id ASC
+      LIMIT @limit
+    `).all({ since: sinceTs, limit: rawDogRowsLimit }) : [];
     const missedRawDogs = topRawDogs.filter((row) => !row.raw_dog_realized);
     const decisionEvidence = readRawDogDecisionRecordsFromPaperDb({
       paperDbPath: getPaperDbPath(),
@@ -3324,6 +3351,15 @@ export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, cov
       decision_evidence: decisionEvidence.diagnostics,
       top_raw_dogs: topRawDogs,
       missed_raw_dogs: missedRawDogs.slice(0, limit),
+      raw_dogs: rawDogRows,
+      raw_dog_rows: {
+        included: Boolean(includeRows),
+        limit: includeRows ? rawDogRowsLimit : 0,
+        loaded_event_rows: rawDogRows.length,
+        rows_complete_against_summary: includeRows
+          ? rawDogRows.length >= Number(summary.raw_sustained_gold_silver_event_rows || 0)
+          : null,
+      },
       notes: {
         capture_definition: 'raw_dog_entered is separate from raw_dog_realized; the goal capture metric must use raw_dog_realized.',
         source: 'durable raw_signal_outcomes DB, not paper_trades.db; this survives paper DB quarantine/reset.',
@@ -3343,9 +3379,15 @@ export function readRawSignalOutcomeRollingSummary({ hours = 24, limit = 50, cov
 
 export function buildRawDogDiscoveryApiPayloadFromRollingSummary(snapshot = {}, options = {}) {
   const limit = Math.max(1, Math.min(Number(options.limit) || 50, 500));
+  const includeRows = Boolean(options.includeRows);
+  const rowsLimit = Math.max(1, Math.min(Number(options.rowsLimit) || 50000, 50000));
   const requestedHours = Math.max(1, Math.min(Number(options.hours) || 24, 168));
   const topRawDogs = Array.isArray(snapshot.top_raw_dogs) ? snapshot.top_raw_dogs.slice(0, limit) : [];
   const missedRawDogs = Array.isArray(snapshot.missed_raw_dogs) ? snapshot.missed_raw_dogs.slice(0, limit) : [];
+  const rawDogs = includeRows && Array.isArray(snapshot.raw_dogs)
+    ? snapshot.raw_dogs.slice(0, rowsLimit)
+    : [];
+  const expectedRawDogEvents = Number(snapshot.summary?.raw_sustained_gold_silver_event_rows || 0);
   return {
     schema_version: 'raw_dog_discovery_api.v1',
     generated_at: snapshot.generated_at || options.generatedAt || new Date().toISOString(),
@@ -3366,6 +3408,23 @@ export function buildRawDogDiscoveryApiPayloadFromRollingSummary(snapshot = {}, 
     coverage: snapshot.coverage || null,
     top_raw_dogs: topRawDogs,
     missed_raw_dogs: missedRawDogs,
+    raw_dogs: rawDogs,
+    raw_dog_rows: snapshot.raw_dog_rows
+      ? {
+          ...snapshot.raw_dog_rows,
+          included: includeRows,
+          returned_event_rows: rawDogs.length,
+          rows_complete_against_summary: includeRows
+            ? rawDogs.length >= expectedRawDogEvents
+            : null,
+        }
+      : {
+          included: includeRows,
+          returned_event_rows: rawDogs.length,
+          rows_complete_against_summary: includeRows
+            ? rawDogs.length >= expectedRawDogEvents
+            : null,
+        },
     coverage_gap_tokens: [],
     pending_outcomes: [],
     error: snapshot.error || null,
@@ -3396,6 +3455,8 @@ export function readRawDogDiscoveryApiSnapshot(options = {}) {
   const requestedHours = Math.max(1, Math.min(Number(options.hours) || 24, 168));
   const coverageTargetPct = Number(options.coverageTargetPct ?? 80);
   const limit = Math.max(1, Math.min(Number(options.limit) || 50, 500));
+  const includeRows = Boolean(options.includeRows);
+  const rowsLimit = Math.max(1, Math.min(Number(options.rowsLimit) || 50000, 50000));
   const snapshotPath = getRawDogDiscoveryApiSnapshotPath(options);
   const base = {
     schema_version: 'raw_dog_discovery_api.v1',
@@ -3410,6 +3471,11 @@ export function readRawDogDiscoveryApiSnapshot(options = {}) {
     coverage: null,
     top_raw_dogs: [],
     missed_raw_dogs: [],
+    raw_dogs: [],
+    raw_dog_rows: {
+      included: includeRows,
+      returned_event_rows: 0,
+    },
     coverage_gap_tokens: [],
     pending_outcomes: [],
   };
@@ -3438,6 +3504,8 @@ export function readRawDogDiscoveryApiSnapshot(options = {}) {
     const ageSec = Math.max(0, Math.floor((Date.now() - stat.mtimeMs) / 1000));
     const topRawDogs = Array.isArray(payload.top_raw_dogs) ? payload.top_raw_dogs.slice(0, limit) : [];
     const missedRawDogs = Array.isArray(payload.missed_raw_dogs) ? payload.missed_raw_dogs.slice(0, limit) : [];
+    const rawDogs = includeRows && Array.isArray(payload.raw_dogs) ? payload.raw_dogs.slice(0, rowsLimit) : [];
+    const expectedRawDogEvents = Number(payload.summary?.raw_sustained_gold_silver_event_rows || 0);
     return {
       ...base,
       ...payload,
@@ -3448,6 +3516,23 @@ export function readRawDogDiscoveryApiSnapshot(options = {}) {
       snapshot_age_sec: ageSec,
       top_raw_dogs: topRawDogs,
       missed_raw_dogs: missedRawDogs,
+      raw_dogs: rawDogs,
+      raw_dog_rows: payload.raw_dog_rows
+        ? {
+            ...payload.raw_dog_rows,
+            included: includeRows,
+            returned_event_rows: rawDogs.length,
+            rows_complete_against_summary: includeRows
+              ? rawDogs.length >= expectedRawDogEvents
+              : null,
+          }
+        : {
+            included: includeRows,
+            returned_event_rows: rawDogs.length,
+            rows_complete_against_summary: includeRows
+              ? rawDogs.length >= expectedRawDogEvents
+              : null,
+          },
       coverage_gap_tokens: [],
       pending_outcomes: [],
       notes: {
@@ -10985,6 +11070,9 @@ const server = http.createServer(async (req, res) => {
       const liveRequested = ['1', 'true', 'yes', 'on'].includes(String(url.searchParams.get('live') || '').toLowerCase())
         || ['0', 'false', 'no', 'off'].includes(String(url.searchParams.get('materialized') || '').toLowerCase());
       const coverageTargetPct = boundedIntParam(url, 'coverage_target_pct', 80, 0, 100);
+      const includeRows = ['1', 'true', 'yes', 'on'].includes(String(url.searchParams.get('include_rows') || '').toLowerCase())
+        || ['rows', 'raw_dogs', 'full'].includes(String(url.searchParams.get('include') || '').toLowerCase());
+      const rawDogRowsLimit = boundedIntParam(url, 'rows_limit', 50000, 1, 50000);
       if (!liveRequested) {
         const requestedHours = parseWindowHoursParam(url.searchParams.get('window'))
           || boundedIntParam(url, 'hours', 24, 1, 168);
@@ -11019,6 +11107,8 @@ const server = http.createServer(async (req, res) => {
         const snapshot = readRawDogDiscoveryApiSnapshot({
           hours: requestedHours,
           limit: materializedLimit,
+          includeRows,
+          rowsLimit: rawDogRowsLimit,
           coverageTargetPct,
         });
         res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
@@ -11053,6 +11143,18 @@ const server = http.createServer(async (req, res) => {
         coverageTargetPct,
         persist,
       });
+      const liveRawDogRows = includeRows
+        ? (snapshot.report?.outcomes || [])
+            .filter((row) => row
+              && (row.raw_primary_tier === 'gold' || row.raw_primary_tier === 'silver')
+              && row.observation_status === 'matured'
+              && Boolean(row.kline_covered)
+              && ['high', 'medium'].includes(String(row.baseline_confidence || ''))
+              && Boolean(row.same_source_path)
+              && !Boolean(row.outlier_flag)
+              && Boolean(row.sustained_evaluable))
+            .slice(0, rawDogRowsLimit)
+        : [];
       res.writeHead(snapshot.available ? 200 : 202, apiJsonHeaders());
       res.end(JSON.stringify({
         schema_version: 'raw_dog_discovery_api.v1',
@@ -11065,6 +11167,15 @@ const server = http.createServer(async (req, res) => {
         coverage: snapshot.report?.coverage || null,
         top_raw_dogs: snapshot.report?.top_raw_dogs || [],
         missed_raw_dogs: snapshot.report?.missed_raw_dogs || [],
+        raw_dogs: liveRawDogRows,
+        raw_dog_rows: {
+          included: includeRows,
+          limit: includeRows ? rawDogRowsLimit : 0,
+          returned_event_rows: liveRawDogRows.length,
+          rows_complete_against_summary: includeRows
+            ? liveRawDogRows.length >= Number(snapshot.report?.summary?.raw_sustained_gold_silver_event_rows || 0)
+            : null,
+        },
         coverage_gap_tokens: snapshot.report?.coverage_gap_tokens || [],
         pending_outcomes: snapshot.report?.pending_outcomes || [],
         notes: {

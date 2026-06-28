@@ -68,6 +68,21 @@ def safe_int(value):
         return None
 
 
+def signal_id_key(value):
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+        if math.isfinite(number) and number.is_integer():
+            return str(int(number))
+    except Exception:
+        pass
+    return text
+
+
 def safe_float(value):
     try:
         number = float(value)
@@ -142,7 +157,7 @@ def is_gold_silver_row(row):
 
 
 def normalize_raw_dog_row(row):
-    signal_id = safe_int(row.get("signal_id"))
+    signal_id = signal_id_key(row.get("signal_id"))
     token_ca = row.get("token_ca") or row.get("token") or row.get("ca")
     signal_ts = safe_int(row.get("signal_ts") or row.get("timestamp"))
     return {
@@ -234,6 +249,19 @@ def load_raw_dogs_from_db(db, since_ts):
         "exit_reason",
     ):
         select.append(name if name in columns else f"NULL AS {name}")
+    filters = ["COALESCE(signal_ts, 0) >= ?"]
+    if "observation_status" in columns:
+        filters.append("observation_status = 'matured'")
+    if "kline_covered" in columns:
+        filters.append("COALESCE(kline_covered, 0) = 1")
+    if "baseline_confidence" in columns:
+        filters.append("baseline_confidence IN ('high', 'medium')")
+    if "same_source_path" in columns:
+        filters.append("COALESCE(same_source_path, 0) = 1")
+    if "outlier_flag" in columns:
+        filters.append("COALESCE(outlier_flag, 0) = 0")
+    if "sustained_evaluable" in columns:
+        filters.append("COALESCE(sustained_evaluable, 0) = 1")
     tier_exprs = []
     if "raw_primary_tier" in columns:
         tier_exprs.append("raw_primary_tier IN ('gold', 'silver')")
@@ -243,13 +271,51 @@ def load_raw_dogs_from_db(db, since_ts):
         f"""
         SELECT {", ".join(select)}
         FROM raw_signal_outcomes
-        WHERE COALESCE(signal_ts, 0) >= ?
+        WHERE {' AND '.join(filters)}
           AND ({' OR '.join(tier_exprs)})
         """,
         (since_ts,),
     ).fetchall()
     out = [normalize_raw_dog_row(dict(row)) for row in rows]
-    return out, {"source": "raw_signal_outcomes", "available": True}
+    loaded_unique = len({row.get("token_ca") for row in out if row.get("token_ca")})
+    return out, {
+        "source": "raw_signal_outcomes",
+        "available": True,
+        "loaded_unique_rows": loaded_unique,
+        "loaded_event_rows": len(out),
+        "rows_complete_against_summary": True,
+        "filters": [
+            "signal_ts_window",
+            *[
+                name
+                for name, present in (
+                    ("matured", "observation_status" in columns),
+                    ("kline_covered", "kline_covered" in columns),
+                    ("baseline_confidence_high_or_medium", "baseline_confidence" in columns),
+                    ("same_source_path", "same_source_path" in columns),
+                    ("not_outlier", "outlier_flag" in columns),
+                    ("sustained_evaluable", "sustained_evaluable" in columns),
+                )
+                if present
+            ],
+        ],
+    }
+
+
+def load_raw_dogs_from_db_path(path, since_ts):
+    if not path:
+        return [], {"source": "raw_signal_outcomes_db", "available": False}
+    raw_db = sqlite3.connect(path)
+    raw_db.row_factory = sqlite3.Row
+    try:
+        rows, meta = load_raw_dogs_from_db(raw_db, since_ts)
+        return rows, {
+            **meta,
+            "source": "raw_signal_outcomes_db",
+            "path": path,
+        }
+    finally:
+        raw_db.close()
 
 
 def load_observations(db, since_ts):
@@ -267,7 +333,7 @@ def load_observations(db, since_ts):
         payload = jloads(row["payload_json"])
         out.append(
             {
-                "signal_id": int(row["signal_id"]),
+                "signal_id": signal_id_key(row["signal_id"]),
                 "token_ca": row["token_ca"],
                 "signal_ts": safe_int(row["signal_ts"]),
                 "candidate_id": row["candidate_id"],
@@ -569,13 +635,18 @@ def build_missed_attribution(raw_dogs, observations, limit):
     return out
 
 
-def summarize(db_path, raw_dog_json, hours, expected_candidates, min_slice_signals, limit, missed_limit):
+def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, min_slice_signals, limit, missed_limit):
     since_ts = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     try:
         observations = load_observations(db, since_ts)
-        raw_dogs, raw_meta = load_raw_dogs_from_json(raw_dog_json, since_ts) if raw_dog_json else load_raw_dogs_from_db(db, since_ts)
+        if raw_dog_json:
+            raw_dogs, raw_meta = load_raw_dogs_from_json(raw_dog_json, since_ts)
+        elif raw_db_path:
+            raw_dogs, raw_meta = load_raw_dogs_from_db_path(raw_db_path, since_ts)
+        else:
+            raw_dogs, raw_meta = load_raw_dogs_from_db(db, since_ts)
     finally:
         db.close()
     dog_idx = raw_dog_index(raw_dogs)
@@ -681,7 +752,7 @@ def self_test():
             json.dumps({"top_raw_dogs": [{"signal_id": 1, "token_ca": "DOG", "raw_primary_tier": "silver", "signal_ts": now - 300}]}),
             encoding="utf-8",
         )
-        out = summarize(str(db_path), str(raw_path), 1, 2, 1, 50, 10)
+        out = summarize(str(db_path), str(raw_path), None, 1, 2, 1, 50, 10)
         assert out["coverage"]["coverage_pct"] == 100.0
         assert out["raw_gold_silver_denominator"]["event_rows"] == 1
         cand_a = next(row for row in out["candidate_baseline"] if row["candidate_id"] == "cand_a")
@@ -703,9 +774,37 @@ def self_test():
             ),
             encoding="utf-8",
         )
-        truncated = summarize(str(db_path), str(raw_path), 1, 2, 1, 50, 10)
+        truncated = summarize(str(db_path), str(raw_path), None, 1, 2, 1, 50, 10)
         assert truncated["raw_gold_silver_denominator"]["rows_complete_against_summary"] is False
         assert "raw_gold_silver_denominator_rows_truncated" in truncated["report_health"]["promotion_blockers"]
+        raw_db_path = root / "raw.db"
+        raw_db = sqlite3.connect(raw_db_path)
+        raw_db.executescript(
+            """
+            CREATE TABLE raw_signal_outcomes(
+              signal_id TEXT, token_ca TEXT, symbol TEXT, signal_ts INTEGER,
+              observation_status TEXT, kline_covered INTEGER, baseline_confidence TEXT,
+              same_source_path INTEGER, outlier_flag INTEGER, sustained_evaluable INTEGER,
+              raw_primary_tier TEXT, raw_sustained_tier TEXT,
+              max_sustained_peak_pct REAL, time_to_sustained_peak_sec INTEGER,
+              raw_dog_entered INTEGER, raw_dog_realized INTEGER, did_enter INTEGER,
+              held_to_silver INTEGER, held_to_gold INTEGER, exit_reason TEXT
+            );
+            """
+        )
+        raw_db.executemany(
+            "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("1", "DOG", "DOG", now - 300, "matured", 1, "high", 1, 0, 1, "silver", "silver", 80.0, 900, 0, 0, 0, 0, 0, None),
+                ("3", "BAD", "BAD", now - 300, "matured", 0, "high", 1, 0, 1, "gold", "gold", 150.0, 600, 0, 0, 0, 0, 0, None),
+            ],
+        )
+        raw_db.commit()
+        raw_db.close()
+        raw_db_out = summarize(str(db_path), None, str(raw_db_path), 1, 2, 1, 50, 10)
+        assert raw_db_out["raw_dog_source"]["source"] == "raw_signal_outcomes_db"
+        assert raw_db_out["raw_gold_silver_denominator"]["event_rows"] == 1
+        assert raw_db_out["raw_gold_silver_denominator"]["rows_complete_against_summary"] is True
     print("SELF_TEST_PASS offline_candidate_capture_discovery")
 
 
@@ -713,6 +812,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default="data/paper_trades.db")
     ap.add_argument("--raw-dog-json", default=None)
+    ap.add_argument("--raw-db", default=None)
     ap.add_argument("--hours", type=int, default=24)
     ap.add_argument("--expected-candidates", type=int, default=EXPECTED_CANDIDATE_COUNT)
     ap.add_argument("--min-slice-signals", type=int, default=20)
@@ -727,6 +827,7 @@ def main():
     result = summarize(
         args.db,
         args.raw_dog_json,
+        args.raw_db,
         args.hours,
         args.expected_candidates,
         args.min_slice_signals,

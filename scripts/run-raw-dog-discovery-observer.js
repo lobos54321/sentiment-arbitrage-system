@@ -61,11 +61,15 @@ function main() {
       hours: windowHours,
       limit: Math.min(limit, 500),
       coverageTargetPct,
+      includeRows: true,
+      rowsLimit: limit,
     });
     const apiPayload = buildRawDogDiscoveryApiPayloadFromRollingSummary(apiSummary, {
       hours: windowHours,
       limit: Math.min(limit, 500),
       coverageTargetPct,
+      includeRows: true,
+      rowsLimit: limit,
       source: 'raw_dog_discovery_worker_snapshot',
     });
     const materializedSnapshot = writeRawDogDiscoveryApiSnapshot(apiPayload);
