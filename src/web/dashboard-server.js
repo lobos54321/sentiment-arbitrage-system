@@ -4390,6 +4390,11 @@ function paperDbHealthIsUsable(health) {
 
 export function resolveDashboardLogPath(pathname, env = process.env) {
   const logPathByEndpoint = {
+    '/api/logs/node': env.NODE_RUNTIME_LOG_PATH || '/app/data/node.log',
+    '/api/logs/dashboard': env.DASHBOARD_LOG || '/app/data/dashboard.log',
+    '/api/logs/lifecycle': env.LIFECYCLE_LOG || '/app/data/lifecycle.log',
+    '/api/logs/maintenance': env.MAINTENANCE_LOG || '/app/data/maintenance.log',
+    '/api/logs/social-service': env.SOCIAL_SERVICE_LOG || '/app/data/social-service.log',
     '/api/logs/candidate-shadow-observer': env.CANDIDATE_SHADOW_LOG || '/app/data/candidate-shadow-observer.log',
     '/api/logs/source-resonance': env.SOURCE_RESONANCE_LOG || '/app/data/source-resonance.log',
     '/api/logs/gmgn-scout': env.GMGN_SCOUT_LOG || '/app/data/gmgn-scout.log',
