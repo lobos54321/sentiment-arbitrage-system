@@ -33,6 +33,26 @@ Each successful loop attempt writes:
 The verdict is same-window discovery evidence only. `promotion_allowed` remains
 false unless a future out-of-sample gate explicitly passes.
 
+## Read-Only Dashboard Access
+
+After deployment, use these authenticated read-only endpoints to verify and
+download the latest materialized artifacts:
+
+```text
+/api/agent/capture-discovery/latest
+/api/data/download/agent-capture-discovery?artifact=verdict
+/api/data/download/agent-capture-discovery?artifact=summary
+/api/data/download/agent-capture-discovery?artifact=handoff
+/api/data/download/agent-capture-discovery?artifact=registry
+/api/data/download/agent-capture-discovery?artifact=capture
+/api/data/download/agent-capture-discovery?artifact=pnl
+/api/data/download/agent-capture-discovery?artifact=markov_runtime
+/api/data/download/agent-capture-discovery?artifact=markov_kline
+```
+
+These endpoints only read files from the agent artifact directories. They do
+not run the loop and do not change trading policy.
+
 ## Verdict Inputs
 
 The loop materializes:

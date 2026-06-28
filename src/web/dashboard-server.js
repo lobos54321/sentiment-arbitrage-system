@@ -2012,6 +2012,137 @@ function getRawSignalOutcomesDbPath() {
   return isAbsolute(rawDbPath) ? rawDbPath : join(projectRoot, rawDbPath);
 }
 
+function getAgentRunsRoot() {
+  const raw = process.env.AGENT_RUNS_DIR || join(dirname(getPaperDbPath()), 'agent_runs');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function getAgentHandoffsDir() {
+  const raw = process.env.AGENT_HANDOFFS_DIR || join(dirname(getPaperDbPath()), 'agent_handoffs');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function getHypothesisRegistryPath() {
+  const raw = process.env.HYPOTHESIS_REGISTRY_PATH || join(dirname(getPaperDbPath()), 'hypothesis_registry.json');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function agentCaptureArtifactPaths() {
+  const latestDir = join(getAgentRunsRoot(), 'latest');
+  return {
+    verdict: join(latestDir, 'reviewer_verdict.json'),
+    summary: join(latestDir, 'run_summary.md'),
+    handoff: join(getAgentHandoffsDir(), 'latest_codex_handoff.md'),
+    registry: getHypothesisRegistryPath(),
+    capture: join(latestDir, 'candidate_capture_discovery_24h.json'),
+    pnl: join(latestDir, 'candidate_pnl_cross_24h.json'),
+    markov_runtime: join(latestDir, 'candidate_virtual_markov_runtime_24h.json'),
+    markov_kline: join(latestDir, 'candidate_virtual_markov_kline_24h.json'),
+    tests: join(latestDir, 'tests.json'),
+  };
+}
+
+function agentArtifactContentType(filePath) {
+  if (String(filePath || '').endsWith('.json')) return 'application/json; charset=utf-8';
+  if (String(filePath || '').endsWith('.md')) return 'text/markdown; charset=utf-8';
+  return 'text/plain; charset=utf-8';
+}
+
+function safeReadAgentJson(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    return { error_code: 'agent_artifact_json_parse_failed', error: error.message };
+  }
+}
+
+function agentArtifactStat(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return {
+      available: stat.isFile(),
+      path: filePath,
+      size_bytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    };
+  } catch (error) {
+    return {
+      available: false,
+      path: filePath,
+      error_code: error?.code === 'ENOENT' ? 'agent_artifact_not_found' : 'agent_artifact_stat_failed',
+      error: error?.message,
+    };
+  }
+}
+
+function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
+  const includeReports = Boolean(options.includeReports);
+  const paths = agentCaptureArtifactPaths();
+  const artifacts = {};
+  for (const [name, filePath] of Object.entries(paths)) {
+    artifacts[name] = agentArtifactStat(filePath);
+  }
+  const verdict = safeReadAgentJson(paths.verdict);
+  const registry = safeReadAgentJson(paths.registry);
+  const tests = safeReadAgentJson(paths.tests);
+  const required = ['verdict', 'summary', 'handoff', 'registry'];
+  const missingRequired = required.filter((name) => !artifacts[name]?.available);
+  const payload = {
+    schema_version: 'agent_capture_discovery_latest.v1',
+    generated_at: new Date().toISOString(),
+    phase: 'discovery_mesh',
+    latest_dir: join(getAgentRunsRoot(), 'latest'),
+    handoff_dir: getAgentHandoffsDir(),
+    required_artifacts_complete: missingRequired.length === 0,
+    missing_required_artifacts: missingRequired,
+    artifacts,
+    verdict_summary: verdict ? {
+      available: !verdict.error_code,
+      classification: verdict.classification,
+      promotion_allowed: Boolean(verdict.promotion_allowed),
+      blockers: verdict.blockers || [],
+      candidate_count_expected: verdict.candidate_count_expected,
+      candidate_count_observed: verdict.candidate_count_observed,
+      observation_coverage_pct: verdict.observation_coverage_pct,
+      raw_dog_rows_complete: Boolean(verdict.raw_dog_rows_complete),
+      signal_id_join_rate: verdict.signal_id_join_rate,
+      H1_status: verdict.H1_capture_metrics?.status,
+      H2_status: verdict.H2_capture_metrics?.status,
+      PnL_cross_secondary_status: verdict.PnL_cross_secondary_status?.status,
+      virtual_Markov_discovery_status: verdict.virtual_Markov_discovery_status?.status,
+    } : { available: false },
+    registry_summary: registry ? {
+      available: !registry.error_code,
+      updated_at: registry.updated_at,
+      promotion_allowed: Boolean(registry.promotion_allowed),
+      hypothesis_keys: Object.keys(registry.hypotheses || {}),
+      recent_run_count: Array.isArray(registry.recent_runs) ? registry.recent_runs.length : 0,
+    } : { available: false },
+    tests_summary: tests ? {
+      available: !tests.error_code,
+      passed: Boolean(tests.passed),
+      result_count: Array.isArray(tests.results) ? tests.results.length : 0,
+    } : { available: false },
+    notes: {
+      read_only: true,
+      discovery_only: 'This endpoint only exposes materialized discovery artifacts. It does not run the loop or change trading policy.',
+    },
+  };
+  if (includeReports) {
+    payload.reports = {
+      verdict,
+      registry,
+      tests,
+      capture: safeReadAgentJson(paths.capture),
+      pnl: safeReadAgentJson(paths.pnl),
+      markov_runtime: safeReadAgentJson(paths.markov_runtime),
+      markov_kline: safeReadAgentJson(paths.markov_kline),
+    };
+  }
+  return payload;
+}
+
 export function getRawDogDiscoveryApiSnapshotPath(options = {}) {
   const raw = options.snapshotPath
     || process.env.RAW_DOG_DISCOVERY_API_SNAPSHOT_PATH
@@ -10582,6 +10713,59 @@ const server = http.createServer(async (req, res) => {
       : join(projectRoot, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db');
     await downloadSqliteDatabase(req, res, url, lifecycleDbPath, 'lifecycle_tracks.db', 'Lifecycle tracks database', 'lifecycle_tracks_download');
     return;
+  } else if (url.pathname === '/api/agent/capture-discovery/latest') {
+    if (!checkAuth(req, url, res)) return;
+    const includeReports = ['1', 'true', 'yes', 'on'].includes(String(url.searchParams.get('include_reports') || '').toLowerCase());
+    const snapshot = buildAgentCaptureDiscoveryLatestSnapshot({ includeReports });
+    res.writeHead(snapshot.required_artifacts_complete ? 200 : 202, apiJsonHeaders());
+    res.end(JSON.stringify(snapshot, null, 2));
+    return;
+  } else if (url.pathname === '/api/data/download/agent-capture-discovery') {
+    if (!checkAuth(req, url, res)) return;
+    const aliases = {
+      reviewer_verdict: 'verdict',
+      run_summary: 'summary',
+      latest_handoff: 'handoff',
+      hypothesis_registry: 'registry',
+      capture_report: 'capture',
+      pnl_cross: 'pnl',
+      markov_runtime: 'markov_runtime',
+      markov_kline: 'markov_kline',
+      self_tests: 'tests',
+    };
+    const requested = String(url.searchParams.get('artifact') || 'verdict').trim();
+    const artifact = aliases[requested] || requested;
+    const paths = agentCaptureArtifactPaths();
+    const artifactPath = paths[artifact];
+    if (!artifactPath) {
+      res.writeHead(400, apiJsonHeaders());
+      res.end(JSON.stringify({
+        error: 'unsupported_agent_capture_discovery_artifact',
+        supported_artifacts: Object.keys(paths).sort(),
+        supported_aliases: Object.keys(aliases).sort(),
+      }, null, 2));
+      return;
+    }
+    if (!fs.existsSync(artifactPath)) {
+      res.writeHead(404, apiJsonHeaders());
+      res.end(JSON.stringify({
+        error: 'agent_capture_discovery_artifact_not_found',
+        artifact,
+        path: artifactPath,
+      }, null, 2));
+      return;
+    }
+    streamDownloadFile(
+      res,
+      artifactPath,
+      `agent-capture-discovery-${artifact}${artifactPath.endsWith('.md') ? '.md' : '.json'}`,
+      null,
+      {
+        'Content-Type': agentArtifactContentType(artifactPath),
+        'Cache-Control': 'no-store',
+      },
+    );
+    return;
   } else if (url.pathname === '/api/data/download/audit-bundle') {
     if (!checkAuth(req, url, res)) return;
     const origin = `https://${req.headers.host || 'sentiment-arbitrage.zeabur.app'}`;
@@ -10597,8 +10781,17 @@ const server = http.createServer(async (req, res) => {
         kline_cache_db: `${origin}/api/data/download/kline-cache?token=${tokenHint}`,
         lifecycle_tracks_db: `${origin}/api/data/download/lifecycle-tracks?token=${tokenHint}`,
         canonical_ledger_json: `${origin}/api/data/download/canonical-ledger?token=${tokenHint}`,
+        agent_reviewer_verdict_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=verdict`,
+        agent_run_summary_md: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=summary`,
+        agent_codex_handoff_md: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=handoff`,
+        agent_hypothesis_registry_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=registry`,
+        agent_capture_report_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=capture`,
+        agent_pnl_cross_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=pnl`,
+        agent_markov_runtime_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=markov_runtime`,
+        agent_markov_kline_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=markov_kline`,
       },
       review_apis: {
+        agent_capture_discovery_latest: `${origin}/api/agent/capture-discovery/latest?token=${tokenHint}`,
         rolling_24h_goal: `${origin}/api/goal/rolling-24h?token=${tokenHint}`,
         a_class_status: `${origin}/api/a-class/status?token=${tokenHint}&hours=24`,
         a_class_events: `${origin}/api/a-class/events?token=${tokenHint}&hours=24&limit=500`,
