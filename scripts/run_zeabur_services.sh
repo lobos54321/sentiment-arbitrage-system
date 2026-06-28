@@ -64,6 +64,7 @@ shutdown() {
     "${LIFECYCLE_PID:-}" \
     "${PAPER_PID:-}" \
     "${CANDIDATE_SHADOW_PID:-}" \
+    "${AGENT_CAPTURE_PID:-}" \
     "${SCOUT_PID:-}" \
     "${RESONANCE_PID:-}" \
     "${SOCIAL_PID:-}" 2>/dev/null || true
@@ -76,6 +77,7 @@ trap shutdown TERM INT
 # Optional sidecars may be disabled by environment. Keep their PID variables
 # defined because this script runs with `set -u`.
 CANDIDATE_SHADOW_PID=""
+AGENT_CAPTURE_PID=""
 SCOUT_PID=""
 RESONANCE_PID=""
 
@@ -270,6 +272,45 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
+if [ "${AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED:-true}" = "true" ]; then
+  echo "[STARTUP] Starting gold/silver capture discovery agent loop..."
+  (
+    while true; do
+      echo "[agent-capture-discovery] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting discovery run" | tee -a /app/data/agent-capture-discovery.log
+      set +e
+      if paper_db_marked; then
+        echo "[agent-capture-discovery] paper DB integrity marker present; running quarantine preflight before discovery report" | tee -a /app/data/agent-capture-discovery.log
+        run_marker_aware_preflight "agent_capture_discovery_start_guard"
+      fi
+      PAPER_DB=/app/data/paper_trades.db \
+      RAW_SIGNAL_OUTCOMES_DB=/app/data/raw_signal_outcomes.db \
+      SENTIMENT_DB=/app/data/sentiment_arb.db \
+      KLINE_DB=/app/data/kline_cache.db \
+      PYTHONUNBUFFERED=1 \
+      python3 scripts/agent_capture_discovery_loop.py \
+        --paper-db /app/data/paper_trades.db \
+        --raw-db /app/data/raw_signal_outcomes.db \
+        --hours "${AGENT_CAPTURE_DISCOVERY_HOURS:-24}" \
+        --expected-candidates "${AGENT_CAPTURE_EXPECTED_CANDIDATES:-84}" \
+        --out-root "${AGENT_CAPTURE_RUNS_DIR:-/app/data/agent_runs}" \
+        --handoff-dir "${AGENT_CAPTURE_HANDOFFS_DIR:-/app/data/agent_handoffs}" \
+        --registry "${AGENT_CAPTURE_HYPOTHESIS_REGISTRY:-/app/data/hypothesis_registry.json}" \
+        --markov-profiles "${AGENT_CAPTURE_MARKOV_PROFILES:-runtime,kline}" \
+        --report-timeout-sec "${AGENT_CAPTURE_REPORT_TIMEOUT_SEC:-900}" \
+        --test-timeout-sec "${AGENT_CAPTURE_TEST_TIMEOUT_SEC:-180}" \
+        --max-runs 1 \
+        --interval-sec 1 2>&1 | tee -a /app/data/agent-capture-discovery.log
+      EXIT_CODE=${PIPESTATUS[0]}
+      set -e
+      echo "[agent-capture-discovery] $(date -u '+%Y-%m-%dT%H:%M:%SZ') run exited (code $EXIT_CODE); next run in ${AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC:-900}s" | tee -a /app/data/agent-capture-discovery.log
+      sleep "${AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC:-900}"
+    done
+  ) &
+  AGENT_CAPTURE_PID=$!
+else
+  echo "[STARTUP] Gold/silver capture discovery agent loop disabled."
+fi
+
 if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
   echo "[STARTUP] Starting GMGN external-alpha scout..."
   (
@@ -337,7 +378,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} agent_capture=${AGENT_CAPTURE_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -347,6 +388,9 @@ kill -0 "$LIFECYCLE_PID" 2>/dev/null || echo "WARN: LIFECYCLE dead"
 kill -0 "$PAPER_PID" 2>/dev/null || echo "WARN: PAPER dead"
 if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
   kill -0 "$CANDIDATE_SHADOW_PID" 2>/dev/null || echo "WARN: CANDIDATE_SHADOW dead"
+fi
+if [ -n "${AGENT_CAPTURE_PID:-}" ]; then
+  kill -0 "$AGENT_CAPTURE_PID" 2>/dev/null || echo "WARN: AGENT_CAPTURE dead"
 fi
 if [ -n "${SCOUT_PID:-}" ]; then
   kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"

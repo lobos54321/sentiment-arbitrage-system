@@ -19,6 +19,20 @@ python scripts/agent_capture_discovery_loop.py \
 
 Use `--max-runs N --interval-sec 300` for a bounded repeated loop.
 
+On Zeabur, `scripts/run_zeabur_services.sh` starts the loop as an independent
+discovery-only sidecar by default:
+
+```text
+AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED=true
+AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC=900
+AGENT_CAPTURE_DISCOVERY_HOURS=24
+AGENT_CAPTURE_EXPECTED_CANDIDATES=84
+```
+
+Set `AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED=false` to disable the sidecar. The
+sidecar only reads the paper/raw DBs and writes agent artifacts; it does not
+change strategy, gates, executor, canary size, wallet config, or risk settings.
+
 ## Required Artifacts
 
 Each successful loop attempt writes:
