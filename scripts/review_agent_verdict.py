@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Build a reviewer verdict for the gold/silver capture discovery loop.
+
+Read-only. This script consumes materialized discovery reports and produces a
+single audit verdict. It never changes strategy, gates, executor, or risk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+import time
+from pathlib import Path
+
+
+SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v1"
+EXPECTED_CANDIDATE_COUNT = 84
+EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
+EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
+
+H1_CANDIDATES = {
+    "kline:active_mom20_first3",
+    "kline:lowvol_active20_support",
+}
+H2_CANDIDATES = {
+    "entry_mode_registry:pullback_tiny_scout",
+    "entry_mode_registry:smart_entry_pullback_bounce",
+    "entry_mode_registry:source_resonance_tiny_probe",
+    "entry_mode_registry:hard_gate_pass_tiny_probe",
+    "entry_mode_registry:momentum_direct_entry",
+}
+JUDGMENT_ORDER = {
+    "DISCOVERY_HIT": 4,
+    "WATCH": 3,
+    "TOO_SMALL": 2,
+    "NO_SIGNAL": 1,
+    "REJECT": 0,
+}
+
+
+def utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def load_json(path):
+    if not path:
+        return None
+    with Path(path).open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def write_json(path, payload):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + f".{int(time.time() * 1000)}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(target)
+
+
+def as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def boolish(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def top_slice_key(row):
+    return (
+        JUDGMENT_ORDER.get(row.get("judgment"), -1),
+        as_float(row.get("recall_lift_vs_candidate_baseline")) or -999.0,
+        as_float(row.get("match_recall_event")) or -1.0,
+        as_float(row.get("match_precision_event")) or -1.0,
+        as_int(row.get("matched_gold_silver_events")) or 0,
+    )
+
+
+def compact_capture_row(row):
+    keys = (
+        "candidate_id",
+        "family",
+        "dimension",
+        "slice_value",
+        "judgment",
+        "signal_count",
+        "match_count",
+        "gold_silver_event_denominator",
+        "gold_silver_unique_denominator",
+        "matched_gold_silver_events",
+        "matched_gold_silver_unique",
+        "match_recall_event",
+        "match_recall_unique",
+        "match_precision_event",
+        "match_precision_unique",
+        "raw_all_gold_silver_event_denominator",
+        "matched_raw_all_gold_silver_events",
+        "business_match_recall_event",
+        "recall_lift_vs_candidate_baseline",
+        "precision_lift_vs_candidate_baseline",
+    )
+    return {key: row.get(key) for key in keys if key in row}
+
+
+def hypothesis_metrics(capture, name):
+    slices = capture.get("context_slices") or []
+    if name == "H1":
+        rows = [
+            row for row in slices
+            if row.get("candidate_id") in H1_CANDIDATES
+            and row.get("dimension") == "volume_profile"
+            and str(row.get("slice_value")).lower() == "building"
+        ]
+        definition = {
+            "name": "building_volume_active_microstructure",
+            "candidate_ids": sorted(H1_CANDIDATES),
+            "required_slice": "volume_profile=building",
+        }
+    else:
+        rows = [
+            row for row in slices
+            if (
+                row.get("candidate_id") in H2_CANDIDATES
+                and row.get("dimension") == "lifecycle_profile"
+                and row.get("slice_value") == "ATH_SHALLOW_PULLBACK:OBSERVE"
+            )
+            or (
+                row.get("candidate_id") in H2_CANDIDATES
+                and row.get("dimension") == "source_component"
+                and "matrix_evaluator" in str(row.get("slice_value") or "")
+            )
+        ]
+        definition = {
+            "name": "shallow_pullback_matrix_evaluator",
+            "candidate_ids": sorted(H2_CANDIDATES),
+            "required_context": [
+                "lifecycle_profile=ATH_SHALLOW_PULLBACK:OBSERVE",
+                "source_component contains matrix_evaluator",
+            ],
+        }
+    rows = sorted(rows, key=top_slice_key, reverse=True)
+    return {
+        "definition": definition,
+        "rows_found": len(rows),
+        "best_slice": compact_capture_row(rows[0]) if rows else None,
+        "slices": [compact_capture_row(row) for row in rows[:10]],
+        "status": "not_observed" if not rows else rows[0].get("judgment", "NO_SIGNAL"),
+    }
+
+
+def pnl_status(pnl):
+    if not pnl:
+        return {
+            "available": False,
+            "status": "missing",
+            "evidence_role": "secondary_pnl_after_match",
+        }
+    counts = pnl.get("judgment_counts") or {}
+    status = "secondary_only"
+    if (counts.get("PROMISING") or 0) > 0:
+        status = "pnl_promising_secondary_only"
+    elif (counts.get("WATCH") or 0) > 0:
+        status = "pnl_watch_secondary_only"
+    return {
+        "available": True,
+        "status": status,
+        "report_type": pnl.get("report_type"),
+        "evidence_role": pnl.get("evidence_role"),
+        "can_promote_live": boolish(pnl.get("can_promote_live")),
+        "coverage": pnl.get("coverage") or {},
+        "judgment_counts": counts,
+    }
+
+
+def markov_status(markov_reports):
+    out = {
+        "available": bool(markov_reports),
+        "status": "missing" if not markov_reports else "discovery_only",
+        "can_promote_live": False,
+        "profiles": {},
+    }
+    green = 0
+    yellow = 0
+    for name, report in sorted(markov_reports.items()):
+        coverage = report.get("coverage") or {}
+        counts = coverage.get("bucket_counts") or {}
+        green += int(counts.get("green") or 0)
+        yellow += int(counts.get("yellow") or 0)
+        out["profiles"][name] = {
+            "profile": report.get("profile") or name,
+            "coverage": coverage,
+            "bucket_counts": counts,
+            "schema_version": report.get("schema_version"),
+        }
+    if green:
+        out["status"] = "green_bucket_discovery_only"
+    elif yellow:
+        out["status"] = "yellow_bucket_discovery_only"
+    return out
+
+
+def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gate_passed=False):
+    markov_reports = markov_reports or {}
+    tests = tests or {}
+    coverage = capture.get("coverage") or {}
+    context = capture.get("context_health") or {}
+    denominator = capture.get("raw_gold_silver_denominator") or {}
+    raw_join = capture.get("raw_dog_observation_join") or {}
+    report_health = capture.get("report_health") or {}
+    blockers = list(report_health.get("promotion_blockers") or [])
+
+    candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
+    candidate_observed = coverage.get("candidate_count_observed")
+    observation_coverage_pct = coverage.get("coverage_pct")
+    raw_rows_complete = denominator.get("rows_complete_against_summary")
+    signal_join_rate = raw_join.get("join_rate")
+    schema_counts = context.get("context_schema_version_counts") or context.get("context_schema_versions") or {}
+    quote_definition = {
+        "expected": context.get("expected_quote_clean_definition") or EXPECTED_QUOTE_CLEAN_DEFINITION,
+        "counts": context.get("quote_clean_definition_counts") or {},
+        "coverage_pct": context.get("expected_quote_clean_definition_coverage_pct"),
+        "quote_sensitive_slices_evaluable": boolish(context.get("quote_sensitive_slices_evaluable")),
+    }
+
+    if candidate_expected != EXPECTED_CANDIDATE_COUNT:
+        blockers.append("candidate_count_expected_not_84")
+    if candidate_observed != EXPECTED_CANDIDATE_COUNT:
+        blockers.append("candidate_count_observed_not_84")
+    if observation_coverage_pct is None or observation_coverage_pct < 99:
+        blockers.append("observation_coverage_below_99pct")
+    if raw_rows_complete is not True:
+        blockers.append("raw_dog_rows_incomplete")
+    if signal_join_rate is None or signal_join_rate < 0.99:
+        blockers.append("signal_id_join_rate_below_99pct")
+    if not quote_definition["quote_sensitive_slices_evaluable"]:
+        blockers.append("schema_mixed_quote_sensitive_slices_blocked")
+    if tests and not tests.get("passed", False):
+        blockers.append("tests_failed")
+
+    blockers = sorted(set(blockers))
+    capture_counts = capture.get("judgment_counts") or {}
+    if blockers:
+        classification = "BLOCKED_DATA"
+    elif (capture_counts.get("DISCOVERY_HIT") or 0) > 0:
+        classification = "CAPTURE_DISCOVERY_HIT"
+    elif (capture_counts.get("WATCH") or 0) > 0:
+        classification = "DISCOVERY_WATCH"
+    else:
+        classification = "DISCOVERY_NO_SIGNAL"
+
+    promotion_allowed = bool(oos_gate_passed) and classification == "PROMOTION_CANDIDATE_PENDING_OOS"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "phase": "discovery_mesh",
+        "classification": classification,
+        "promotion_allowed": promotion_allowed,
+        "canary_increase_allowed": False,
+        "strategy_change_allowed": False,
+        "hard_gate_change_allowed": False,
+        "exit_gate_change_allowed": False,
+        "blockers": blockers,
+        "candidate_count_expected": candidate_expected,
+        "candidate_count_observed": candidate_observed,
+        "observation_coverage_pct": observation_coverage_pct,
+        "raw_dog_rows_complete": raw_rows_complete is True,
+        "signal_id_join_rate": signal_join_rate,
+        "context_schema_version_counts": schema_counts,
+        "quote_clean_definition": quote_definition,
+        "denominator_audit": capture.get("denominator_audit") or {},
+        "raw_dog_observation_join": raw_join,
+        "raw_all_dog_observation_join": capture.get("raw_all_dog_observation_join") or {},
+        "H1_capture_metrics": hypothesis_metrics(capture, "H1"),
+        "H2_capture_metrics": hypothesis_metrics(capture, "H2"),
+        "PnL_cross_secondary_status": pnl_status(pnl),
+        "virtual_Markov_discovery_status": markov_status(markov_reports),
+        "capture_judgment_counts": capture_counts,
+        "tests": tests,
+        "notes": [
+            "Same-window discovery verdict only; no promotion without future out-of-sample validation.",
+            "PnL cross and virtual Markov are secondary discovery evidence.",
+        ],
+    }
+
+
+def self_test():
+    capture = {
+        "candidate_count_expected": 84,
+        "coverage": {
+            "candidate_count_expected": 84,
+            "candidate_count_observed": 84,
+            "coverage_pct": 100.0,
+        },
+        "raw_gold_silver_denominator": {
+            "rows_complete_against_summary": True,
+        },
+        "raw_dog_observation_join": {
+            "join_rate": 1.0,
+        },
+        "context_health": {
+            "context_schema_version_counts": {EXPECTED_CONTEXT_SCHEMA_VERSION: 10},
+            "quote_clean_definition_counts": {EXPECTED_QUOTE_CLEAN_DEFINITION: 10},
+            "expected_quote_clean_definition_coverage_pct": 100.0,
+            "quote_sensitive_slices_evaluable": True,
+        },
+        "judgment_counts": {"DISCOVERY_HIT": 0, "WATCH": 1, "TOO_SMALL": 0, "NO_SIGNAL": 0},
+        "context_slices": [
+            {
+                "candidate_id": "kline:active_mom20_first3",
+                "family": "kline",
+                "dimension": "volume_profile",
+                "slice_value": "building",
+                "judgment": "WATCH",
+                "match_recall_event": 0.5,
+                "match_precision_event": 0.2,
+                "recall_lift_vs_candidate_baseline": 0.1,
+            }
+        ],
+        "report_health": {"promotion_blockers": []},
+    }
+    verdict = build_verdict(capture, tests={"passed": True})
+    assert verdict["classification"] == "DISCOVERY_WATCH"
+    assert verdict["promotion_allowed"] is False
+    assert verdict["candidate_count_observed"] == 84
+    assert verdict["H1_capture_metrics"]["rows_found"] == 1
+    blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
+    assert blocked["classification"] == "BLOCKED_DATA"
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "verdict.json"
+        write_json(path, verdict)
+        loaded = load_json(path)
+        assert loaded is not None
+        assert loaded["schema_version"] == SCHEMA_VERSION
+    print("SELF_TEST_PASS review_agent_verdict")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--capture", required=False)
+    parser.add_argument("--pnl", default=None)
+    parser.add_argument("--markov", action="append", default=[], help="profile:path")
+    parser.add_argument("--tests", default=None)
+    parser.add_argument("--out", default="data/agent_runs/latest/reviewer_verdict.json")
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    if not args.capture:
+        raise SystemExit("--capture is required unless --self-test is used")
+    markov_reports = {}
+    for item in args.markov:
+        if ":" not in item:
+            raise SystemExit(f"invalid --markov value {item!r}; expected profile:path")
+        name, path = item.split(":", 1)
+        markov_reports[name] = load_json(path)
+    tests = load_json(args.tests) if args.tests else {}
+    verdict = build_verdict(load_json(args.capture), load_json(args.pnl) if args.pnl else None, markov_reports, tests=tests)
+    write_json(args.out, verdict)
+    print(json.dumps({"out": args.out, "classification": verdict["classification"], "blockers": verdict["blockers"]}, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
