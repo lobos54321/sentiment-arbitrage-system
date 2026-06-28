@@ -19,6 +19,8 @@ from pathlib import Path
 
 
 EXPECTED_CANDIDATE_COUNT = 84
+EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
+EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
 SCHEMA_VERSION = "offline_candidate_capture_discovery.v1"
 EVIDENCE_LEVEL = "discovery_same_window"
 
@@ -210,12 +212,25 @@ def load_raw_dogs_from_json(path, since_ts):
         "source": "raw_dog_json",
         "available": True,
         "path": path,
+        "_raw_all_dogs": out,
         "summary": summary or None,
         "expected_unique_from_summary": expected_unique,
         "expected_event_rows_from_summary": expected_events,
         "loaded_unique_rows": loaded_unique,
         "loaded_event_rows": loaded_events,
         "rows_complete_against_summary": rows_complete,
+        "denominator_audit": {
+            "mode": "json_rows_vs_summary",
+            "raw_all_gold_silver_event_rows": expected_events if expected_events is not None else loaded_events,
+            "raw_all_gold_silver_unique_tokens": expected_unique if expected_unique is not None else loaded_unique,
+            "evaluable_gold_silver_event_rows": loaded_events,
+            "evaluable_gold_silver_unique_tokens": loaded_unique,
+            "filtered_out_event_rows": None,
+            "filter_drop_breakdown_non_exclusive": {},
+            "eligibility_filters_applied": [],
+            "business_denominator": "raw_all_gold_silver_from_summary",
+            "primary_report_denominator": "loaded_raw_dog_rows",
+        },
         "note": payload.get("note"),
     }
     return out, meta
@@ -237,6 +252,12 @@ def load_raw_dogs_from_db(db, since_ts):
         "token_ca",
         "symbol",
         "signal_ts",
+        "observation_status",
+        "kline_covered",
+        "baseline_confidence",
+        "same_source_path",
+        "outlier_flag",
+        "sustained_evaluable",
         "raw_primary_tier",
         "raw_sustained_tier",
         "max_sustained_peak_pct",
@@ -250,23 +271,39 @@ def load_raw_dogs_from_db(db, since_ts):
     ):
         select.append(name if name in columns else f"NULL AS {name}")
     filters = ["COALESCE(signal_ts, 0) >= ?"]
+    eligibility_filter_names = []
     if "observation_status" in columns:
         filters.append("observation_status = 'matured'")
+        eligibility_filter_names.append("matured")
     if "kline_covered" in columns:
         filters.append("COALESCE(kline_covered, 0) = 1")
+        eligibility_filter_names.append("kline_covered")
     if "baseline_confidence" in columns:
         filters.append("baseline_confidence IN ('high', 'medium')")
+        eligibility_filter_names.append("baseline_confidence_high_or_medium")
     if "same_source_path" in columns:
         filters.append("COALESCE(same_source_path, 0) = 1")
+        eligibility_filter_names.append("same_source_path")
     if "outlier_flag" in columns:
         filters.append("COALESCE(outlier_flag, 0) = 0")
+        eligibility_filter_names.append("not_outlier")
     if "sustained_evaluable" in columns:
         filters.append("COALESCE(sustained_evaluable, 0) = 1")
+        eligibility_filter_names.append("sustained_evaluable")
     tier_exprs = []
     if "raw_primary_tier" in columns:
         tier_exprs.append("raw_primary_tier IN ('gold', 'silver')")
     if "raw_sustained_tier" in columns:
         tier_exprs.append("raw_sustained_tier IN ('gold', 'silver')")
+    all_rows = db.execute(
+        f"""
+        SELECT {", ".join(select)}
+        FROM raw_signal_outcomes
+        WHERE COALESCE(signal_ts, 0) >= ?
+          AND ({' OR '.join(tier_exprs)})
+        """,
+        (since_ts,),
+    ).fetchall()
     rows = db.execute(
         f"""
         SELECT {", ".join(select)}
@@ -276,29 +313,57 @@ def load_raw_dogs_from_db(db, since_ts):
         """,
         (since_ts,),
     ).fetchall()
+    all_out = [normalize_raw_dog_row(dict(row)) for row in all_rows]
     out = [normalize_raw_dog_row(dict(row)) for row in rows]
+    all_unique = len({row.get("token_ca") for row in all_out if row.get("token_ca")})
     loaded_unique = len({row.get("token_ca") for row in out if row.get("token_ca")})
+    def fails(row, reason):
+        if reason == "dropped_not_matured":
+            return "observation_status" in columns and row["observation_status"] != "matured"
+        if reason == "dropped_kline_uncovered":
+            return "kline_covered" in columns and not safe_bool(row["kline_covered"])
+        if reason == "dropped_low_confidence":
+            return "baseline_confidence" in columns and row["baseline_confidence"] not in ("high", "medium")
+        if reason == "dropped_not_same_source_path":
+            return "same_source_path" in columns and not safe_bool(row["same_source_path"])
+        if reason == "dropped_outlier":
+            return "outlier_flag" in columns and safe_bool(row["outlier_flag"])
+        if reason == "dropped_not_sustained_evaluable":
+            return "sustained_evaluable" in columns and not safe_bool(row["sustained_evaluable"])
+        return False
+    drop_reasons = (
+        "dropped_not_matured",
+        "dropped_kline_uncovered",
+        "dropped_low_confidence",
+        "dropped_not_same_source_path",
+        "dropped_outlier",
+        "dropped_not_sustained_evaluable",
+    )
+    drop_breakdown = {
+        reason: sum(1 for row in all_rows if fails(row, reason))
+        for reason in drop_reasons
+    }
     return out, {
         "source": "raw_signal_outcomes",
         "available": True,
+        "_raw_all_dogs": all_out,
         "loaded_unique_rows": loaded_unique,
         "loaded_event_rows": len(out),
         "rows_complete_against_summary": True,
-        "filters": [
-            "signal_ts_window",
-            *[
-                name
-                for name, present in (
-                    ("matured", "observation_status" in columns),
-                    ("kline_covered", "kline_covered" in columns),
-                    ("baseline_confidence_high_or_medium", "baseline_confidence" in columns),
-                    ("same_source_path", "same_source_path" in columns),
-                    ("not_outlier", "outlier_flag" in columns),
-                    ("sustained_evaluable", "sustained_evaluable" in columns),
-                )
-                if present
-            ],
-        ],
+        "filters": ["signal_ts_window", *eligibility_filter_names],
+        "denominator_audit": {
+            "mode": "raw_all_vs_evaluable",
+            "raw_all_gold_silver_event_rows": len(all_out),
+            "raw_all_gold_silver_unique_tokens": all_unique,
+            "evaluable_gold_silver_event_rows": len(out),
+            "evaluable_gold_silver_unique_tokens": loaded_unique,
+            "filtered_out_event_rows": max(0, len(all_out) - len(out)),
+            "filter_drop_breakdown_non_exclusive": drop_breakdown,
+            "eligibility_filters_applied": eligibility_filter_names,
+            "business_denominator": "raw_all_gold_silver",
+            "primary_report_denominator": "evaluable_gold_silver",
+            "note": "Drop breakdown is non-exclusive; one row can fail multiple eligibility filters.",
+        },
     }
 
 
@@ -372,15 +437,20 @@ def obs_is_raw_dog(obs, dog_idx):
     return False
 
 
-def summarize_group(rows, dog_idx):
+def summarize_group(rows, dog_idx, raw_all_dog_idx=None):
+    raw_all_dog_idx = raw_all_dog_idx or dog_idx
     signals = {row["signal_id"] for row in rows}
     tokens = {row["token_ca"] for row in rows if row["token_ca"]}
     matched = [row for row in rows if row["matched"]]
     dog_rows = [row for row in rows if obs_is_raw_dog(row, dog_idx)]
     matched_dogs = [row for row in matched if obs_is_raw_dog(row, dog_idx)]
+    raw_all_dog_rows = [row for row in rows if obs_is_raw_dog(row, raw_all_dog_idx)]
+    matched_raw_all_dogs = [row for row in matched if obs_is_raw_dog(row, raw_all_dog_idx)]
     matched_dog_tokens = {row["token_ca"] for row in matched_dogs if row["token_ca"]}
+    matched_raw_all_dog_tokens = {row["token_ca"] for row in matched_raw_all_dogs if row["token_ca"]}
     matched_tokens = {row["token_ca"] for row in matched if row["token_ca"]}
     dog_tokens = {row["token_ca"] for row in dog_rows if row["token_ca"]}
+    raw_all_dog_tokens = {row["token_ca"] for row in raw_all_dog_rows if row["token_ca"]}
     return {
         "observation_rows": len(rows),
         "signal_count": len(signals),
@@ -394,6 +464,12 @@ def summarize_group(rows, dog_idx):
         "matched_gold_silver_unique": len(matched_dog_tokens),
         "match_recall_event": rate(len(matched_dogs), len(dog_rows)),
         "match_recall_unique": rate(len(matched_dog_tokens), len(dog_tokens)),
+        "raw_all_gold_silver_event_denominator": len(raw_all_dog_rows),
+        "raw_all_gold_silver_unique_denominator": len(raw_all_dog_tokens),
+        "matched_raw_all_gold_silver_events": len(matched_raw_all_dogs),
+        "matched_raw_all_gold_silver_unique": len(matched_raw_all_dog_tokens),
+        "business_match_recall_event": rate(len(matched_raw_all_dogs), len(raw_all_dog_rows)),
+        "business_match_recall_unique": rate(len(matched_raw_all_dog_tokens), len(raw_all_dog_tokens)),
         "match_precision_event": rate(len(matched_dogs), len(matched)),
         "match_precision_unique": rate(len(matched_dog_tokens), len(matched_tokens)),
         "match_rate": rate(len(matched), len(rows)),
@@ -473,6 +549,7 @@ def build_context_health(observations):
         "signal_price_seen",
         "signal_price_positive",
         "context_schema_version",
+        "quote_clean_definition",
     )
     field_coverage = {}
     for field in fields:
@@ -499,8 +576,14 @@ def build_context_health(observations):
         and not safe_bool(payload.get("source_quote_executable") or payload.get("source_quote_executable_proxy"))
     )
     schema_versions = defaultdict(int)
+    quote_clean_definitions = defaultdict(int)
     for payload in rows:
         schema_versions[str(payload.get("context_schema_version") or "legacy_or_missing")] += 1
+        quote_clean_definitions[str(payload.get("quote_clean_definition") or "legacy_or_missing")] += 1
+    expected_schema_rows = schema_versions.get(EXPECTED_CONTEXT_SCHEMA_VERSION, 0)
+    expected_quote_definition_rows = quote_clean_definitions.get(EXPECTED_QUOTE_CLEAN_DEFINITION, 0)
+    expected_schema_coverage_pct = pct(expected_schema_rows, signal_count)
+    expected_quote_definition_coverage_pct = pct(expected_quote_definition_rows, signal_count)
     gaps = []
     for field in ("source_quote_clean", "source_quote_executable", "lifecycle_profile", "markov_bucket", "volume_profile"):
         coverage = field_coverage[field]["coverage_pct"]
@@ -508,6 +591,10 @@ def build_context_health(observations):
             gaps.append(f"{field}_coverage_below_80pct")
     if signal_price_only:
         gaps.append("signal_price_seen_without_quote_context_present")
+    if expected_schema_coverage_pct is not None and expected_schema_coverage_pct < 95:
+        gaps.append("context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked")
+    if expected_quote_definition_coverage_pct is not None and expected_quote_definition_coverage_pct < 95:
+        gaps.append("quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked")
     return {
         "signal_count": signal_count,
         "field_coverage": field_coverage,
@@ -517,17 +604,29 @@ def build_context_health(observations):
             "signal_price_seen_without_quote_context_signals": signal_price_only,
         },
         "context_schema_versions": dict(sorted(schema_versions.items())),
+        "context_schema_version_counts": dict(sorted(schema_versions.items())),
+        "expected_context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,
+        "expected_context_schema_version_rows": expected_schema_rows,
+        "expected_context_schema_version_coverage_pct": expected_schema_coverage_pct,
+        "quote_clean_definition_counts": dict(sorted(quote_clean_definitions.items())),
+        "expected_quote_clean_definition": EXPECTED_QUOTE_CLEAN_DEFINITION,
+        "expected_quote_clean_definition_rows": expected_quote_definition_rows,
+        "expected_quote_clean_definition_coverage_pct": expected_quote_definition_coverage_pct,
+        "quote_sensitive_slices_evaluable": (
+            (expected_schema_coverage_pct is not None and expected_schema_coverage_pct >= 95)
+            and (expected_quote_definition_coverage_pct is not None and expected_quote_definition_coverage_pct >= 95)
+        ),
         "gaps": gaps,
     }
 
 
-def build_candidate_baseline(observations, dog_idx):
+def build_candidate_baseline(observations, dog_idx, raw_all_dog_idx=None):
     groups = defaultdict(list)
     for row in observations:
         groups[row["candidate_id"]].append(row)
     out = []
     for candidate_id, rows in groups.items():
-        summary = summarize_group(rows, dog_idx)
+        summary = summarize_group(rows, dog_idx, raw_all_dog_idx)
         out.append({"candidate_id": candidate_id, "family": rows[0]["family"], **summary})
     out.sort(
         key=lambda row: (
@@ -540,7 +639,7 @@ def build_candidate_baseline(observations, dog_idx):
     return out
 
 
-def build_context_slices(observations, dog_idx, baseline_by_candidate, min_slice_signals):
+def build_context_slices(observations, dog_idx, raw_all_dog_idx, baseline_by_candidate, min_slice_signals):
     buckets = defaultdict(list)
     for row in observations:
         payload = row["payload"]
@@ -550,7 +649,7 @@ def build_context_slices(observations, dog_idx, baseline_by_candidate, min_slice
     for (candidate_id, family, dimension, slice_value), rows in buckets.items():
         if len({row["signal_id"] for row in rows}) < min_slice_signals:
             continue
-        summary = summarize_group(rows, dog_idx)
+        summary = summarize_group(rows, dog_idx, raw_all_dog_idx)
         base = baseline_by_candidate.get(candidate_id, {})
         recall = summary.get("match_recall_event")
         precision = summary.get("match_precision_event")
@@ -635,6 +734,34 @@ def build_missed_attribution(raw_dogs, observations, limit):
     return out
 
 
+def build_raw_dog_observation_join(raw_dogs, observations):
+    obs_signal_ids = {row["signal_id"] for row in observations if row.get("signal_id")}
+    obs_tokens = {row["token_ca"] for row in observations if row.get("token_ca")}
+    joined_by_signal = 0
+    joined_by_token_fallback = 0
+    missing = []
+    for dog in raw_dogs:
+        signal_id = dog.get("signal_id")
+        token = dog.get("token_ca")
+        if signal_id and signal_id in obs_signal_ids:
+            joined_by_signal += 1
+        elif token and token in obs_tokens:
+            joined_by_token_fallback += 1
+        else:
+            missing.append(dog)
+    total = len(raw_dogs)
+    joined = joined_by_signal + joined_by_token_fallback
+    return {
+        "raw_dog_event_rows": total,
+        "joined_event_rows": joined,
+        "joined_by_signal_id": joined_by_signal,
+        "joined_by_token_fallback": joined_by_token_fallback,
+        "missing_observation_event_rows": len(missing),
+        "join_rate": rate(joined, total),
+        "missing_sample": missing[:25],
+    }
+
+
 def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, min_slice_signals, limit, missed_limit):
     since_ts = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
@@ -649,13 +776,18 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
             raw_dogs, raw_meta = load_raw_dogs_from_db(db, since_ts)
     finally:
         db.close()
+    raw_all_dogs = raw_meta.get("_raw_all_dogs") or raw_dogs
+    raw_meta_report = {key: value for key, value in raw_meta.items() if key != "_raw_all_dogs"}
     dog_idx = raw_dog_index(raw_dogs)
+    raw_all_dog_idx = raw_dog_index(raw_all_dogs)
     coverage = build_coverage(observations, expected_candidates)
     context_health = build_context_health(observations)
-    baseline = build_candidate_baseline(observations, dog_idx)
+    baseline = build_candidate_baseline(observations, dog_idx, raw_all_dog_idx)
     baseline_by_candidate = {row["candidate_id"]: row for row in baseline}
-    slices = build_context_slices(observations, dog_idx, baseline_by_candidate, min_slice_signals)
+    slices = build_context_slices(observations, dog_idx, raw_all_dog_idx, baseline_by_candidate, min_slice_signals)
     missed = build_missed_attribution(raw_dogs, observations, missed_limit)
+    raw_dog_observation_join = build_raw_dog_observation_join(raw_dogs, observations)
+    raw_all_observation_join = build_raw_dog_observation_join(raw_all_dogs, observations)
     promotion_blockers = []
     if coverage["candidate_count_observed"] != expected_candidates:
         promotion_blockers.append("candidate_count_mismatch")
@@ -663,8 +795,12 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
         promotion_blockers.append("per_signal_candidate_coverage_incomplete")
     if not raw_dogs:
         promotion_blockers.append("raw_gold_silver_denominator_unavailable")
-    if raw_meta.get("rows_complete_against_summary") is False:
+    if raw_meta_report.get("rows_complete_against_summary") is False:
         promotion_blockers.append("raw_gold_silver_denominator_rows_truncated")
+    if raw_dog_observation_join["missing_observation_event_rows"]:
+        promotion_blockers.append("raw_dog_candidate_observation_join_incomplete")
+    if raw_all_observation_join["missing_observation_event_rows"]:
+        promotion_blockers.append("raw_all_dog_candidate_observation_join_incomplete")
     promotion_blockers.extend(context_health["gaps"])
     return {
         "schema_version": SCHEMA_VERSION,
@@ -674,7 +810,7 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
         "can_promote_live": False,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "db": db_path,
-        "raw_dog_source": raw_meta,
+        "raw_dog_source": raw_meta_report,
         "hours": hours,
         "since_ts": since_ts,
         "candidate_count_expected": expected_candidates,
@@ -686,6 +822,8 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
             "primary_table": "candidate_shadow_observations",
             "non_match_rows_counted": True,
             "capture_recall": "matched_gold_silver / raw_gold_silver_denominator",
+            "business_capture_recall": "matched_raw_all_gold_silver / raw_all_gold_silver_denominator",
+            "evaluable_capture_recall": "matched_gold_silver / evaluable_gold_silver_denominator",
             "capture_precision": "matched_gold_silver / candidate_matches",
             "pnl_is_secondary": True,
         },
@@ -693,14 +831,24 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
         "context_health": context_health,
         "raw_gold_silver_denominator": {
             "available": bool(raw_dogs),
+            "mode": "evaluable_gold_silver",
             "unique_tokens": dog_idx["unique_count"],
             "event_rows": dog_idx["event_count"],
-            "expected_unique_from_summary": raw_meta.get("expected_unique_from_summary"),
-            "expected_event_rows_from_summary": raw_meta.get("expected_event_rows_from_summary"),
-            "rows_complete_against_summary": raw_meta.get("rows_complete_against_summary"),
+            "expected_unique_from_summary": raw_meta_report.get("expected_unique_from_summary"),
+            "expected_event_rows_from_summary": raw_meta_report.get("expected_event_rows_from_summary"),
+            "rows_complete_against_summary": raw_meta_report.get("rows_complete_against_summary"),
             "signal_id_denominator_available": bool(dog_idx["signal_ids"]),
             "note": None if raw_dogs else "raw_dog_denominator_unavailable",
         },
+        "denominator_audit": raw_meta_report.get("denominator_audit") or {
+            "mode": "unavailable",
+            "raw_all_gold_silver_event_rows": raw_all_dog_idx["event_count"],
+            "raw_all_gold_silver_unique_tokens": raw_all_dog_idx["unique_count"],
+            "evaluable_gold_silver_event_rows": dog_idx["event_count"],
+            "evaluable_gold_silver_unique_tokens": dog_idx["unique_count"],
+        },
+        "raw_dog_observation_join": raw_dog_observation_join,
+        "raw_all_dog_observation_join": raw_all_observation_join,
         "candidate_baseline": baseline[:limit],
         "context_slices": slices[:limit],
         "judgment_counts": {
@@ -805,6 +953,12 @@ def self_test():
         assert raw_db_out["raw_dog_source"]["source"] == "raw_signal_outcomes_db"
         assert raw_db_out["raw_gold_silver_denominator"]["event_rows"] == 1
         assert raw_db_out["raw_gold_silver_denominator"]["rows_complete_against_summary"] is True
+        assert raw_db_out["denominator_audit"]["raw_all_gold_silver_event_rows"] == 2
+        assert raw_db_out["denominator_audit"]["evaluable_gold_silver_event_rows"] == 1
+        assert raw_db_out["denominator_audit"]["filter_drop_breakdown_non_exclusive"]["dropped_kline_uncovered"] == 1
+        assert raw_db_out["context_health"]["quote_clean_definition_counts"]["legacy_or_missing"] == 2
+        assert "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked" in raw_db_out["report_health"]["promotion_blockers"]
+        assert "raw_all_dog_candidate_observation_join_incomplete" in raw_db_out["report_health"]["promotion_blockers"]
     print("SELF_TEST_PASS offline_candidate_capture_discovery")
 
 
