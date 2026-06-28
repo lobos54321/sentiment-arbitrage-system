@@ -833,6 +833,8 @@ def summarize(
     raw_dog_observation_join = build_raw_dog_observation_join(raw_dogs, observations)
     raw_all_observation_join = build_raw_dog_observation_join(raw_all_dogs, observations)
     promotion_blockers = []
+    if observation_scan.get("may_be_rowid_truncated"):
+        promotion_blockers.append("observation_scan_rowid_truncated")
     if coverage["candidate_count_observed"] != expected_candidates:
         promotion_blockers.append("candidate_count_mismatch")
     if coverage["bad_signal_count"]:
