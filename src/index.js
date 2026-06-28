@@ -1083,7 +1083,7 @@ function startCandidateShadowObserver(config) {
 }
 
 function startAgentCaptureDiscoveryLoop(config) {
-  if (!envFlag('AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED', false)) {
+  if (!envFlag('AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED', true)) {
     console.log('[AgentCaptureDiscovery] disabled by AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED=false');
     return [];
   }
@@ -1108,10 +1108,11 @@ function startAgentCaptureDiscoveryLoop(config) {
         '--handoff-dir', process.env.AGENT_CAPTURE_HANDOFFS_DIR || join(dataDir, 'agent_handoffs'),
         '--registry', process.env.AGENT_CAPTURE_HYPOTHESIS_REGISTRY || join(dataDir, 'hypothesis_registry.json'),
         '--markov-profiles', process.env.AGENT_CAPTURE_MARKOV_PROFILES || 'runtime,kline',
-        '--report-timeout-sec', process.env.AGENT_CAPTURE_REPORT_TIMEOUT_SEC || '900',
+        '--report-timeout-sec', process.env.AGENT_CAPTURE_REPORT_TIMEOUT_SEC || '30',
         '--test-timeout-sec', process.env.AGENT_CAPTURE_TEST_TIMEOUT_SEC || '180',
         '--max-runs', process.env.AGENT_CAPTURE_MAX_RUNS || '1000000',
         '--interval-sec', process.env.AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC || '900',
+        '--initial-delay-sec', process.env.AGENT_CAPTURE_DISCOVERY_INITIAL_DELAY_SEC || '120',
       ],
       env: {
         PAPER_DB: paperDb,

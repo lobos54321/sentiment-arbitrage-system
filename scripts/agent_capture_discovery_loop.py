@@ -60,6 +60,16 @@ def write_text(path, text):
     tmp.replace(target)
 
 
+def log_event(event, **fields):
+    payload = {
+        "schema_version": "agent_capture_discovery_loop_event.v1",
+        "event": event,
+        "at": utc_now(),
+        **fields,
+    }
+    print(json.dumps(payload, sort_keys=True), flush=True)
+
+
 def file_available(path):
     return bool(path) and Path(path).exists() and Path(path).is_file()
 
@@ -78,6 +88,7 @@ def sqlite_has_table(path, table):
 def command_result(name, args, *, timeout):
     started = time.time()
     cmd = [sys.executable, *args]
+    log_event("command_start", name=name, timeout_sec=timeout, cmd=cmd)
     try:
         proc = subprocess.run(
             cmd,
@@ -87,7 +98,7 @@ def command_result(name, args, *, timeout):
             capture_output=True,
             timeout=timeout,
         )
-        return {
+        result = {
             "name": name,
             "cmd": cmd,
             "ok": proc.returncode == 0,
@@ -96,8 +107,10 @@ def command_result(name, args, *, timeout):
             "stdout_tail": proc.stdout[-4000:],
             "stderr_tail": proc.stderr[-4000:],
         }
+        log_event("command_end", name=name, ok=result["ok"], returncode=proc.returncode, duration_sec=result["duration_sec"])
+        return result
     except subprocess.TimeoutExpired as exc:
-        return {
+        result = {
             "name": name,
             "cmd": cmd,
             "ok": False,
@@ -107,6 +120,8 @@ def command_result(name, args, *, timeout):
             "stderr_tail": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
             "error": f"timeout_after_{timeout}s",
         }
+        log_event("command_timeout", name=name, timeout_sec=timeout, duration_sec=result["duration_sec"])
+        return result
 
 
 def run_self_tests(timeout):
@@ -337,37 +352,55 @@ def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, ha
     shutil.copy2(verdict_path, latest_dir / "reviewer_verdict.json")
     shutil.copy2(summary_path, latest_dir / "run_summary.md")
     for report in run_dir.glob("*.json"):
-        if report.name not in {"reviewer_verdict.json", "tests.json"}:
+        if report.name != "reviewer_verdict.json":
             shutil.copy2(report, latest_dir / report.name)
     handoff_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(handoff_path, handoff_dir / "latest_codex_handoff.md")
 
 
-def run_once(args):
-    rid = run_id()
-    out_root = Path(args.out_root)
-    run_dir = out_root / rid
-    latest_dir = out_root / "latest"
-    handoff_dir = Path(args.handoff_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    tests = run_self_tests(args.test_timeout_sec)
+def write_materialized_artifacts(
+    args,
+    *,
+    rid,
+    run_dir,
+    latest_dir,
+    handoff_dir,
+    capture_path,
+    pnl_path=None,
+    markov_paths=None,
+    diagnostics=None,
+    tests=None,
+    state="final",
+):
+    diagnostics = diagnostics or []
+    markov_paths = markov_paths or {}
+    tests = tests or {
+        "schema_version": "agent_capture_discovery_tests.v1",
+        "generated_at": utc_now(),
+        "passed": False,
+        "status": "pending",
+        "results": [],
+    }
     tests_path = run_dir / "tests.json"
     write_json(tests_path, tests)
 
-    capture_path, pnl_path, markov_paths, diagnostics = run_reports(run_dir, args)
     capture = load_json(capture_path)
     pnl = load_json(pnl_path) if pnl_path and Path(pnl_path).exists() else None
     markov_reports = {name: load_json(path) for name, path in markov_paths.items() if Path(path).exists()}
-    verdict = build_verdict(capture, pnl, markov_reports, tests=tests)
+    verdict = build_verdict(capture, pnl, markov_reports, tests=tests if tests.get("status") != "pending" else {})
     if any(not row.get("ok") for row in diagnostics):
         verdict["blockers"] = sorted(set((verdict.get("blockers") or []) + ["report_generation_failed"]))
+        verdict["classification"] = "BLOCKED_DATA"
+        verdict["promotion_allowed"] = False
+    if state != "final":
+        verdict["blockers"] = sorted(set((verdict.get("blockers") or []) + [state]))
         verdict["classification"] = "BLOCKED_DATA"
         verdict["promotion_allowed"] = False
     verdict["loop"] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": rid,
         "run_dir": str(run_dir),
+        "state": state,
         "report_diagnostics": diagnostics,
     }
 
@@ -396,6 +429,57 @@ def run_once(args):
     summary_path = run_dir / "run_summary.md"
     write_text(summary_path, summary)
     sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path)
+    return verdict, registry, verdict_path, summary_path, handoff_path, tests_path
+
+
+def run_once(args):
+    rid = run_id()
+    out_root = Path(args.out_root)
+    run_dir = out_root / rid
+    latest_dir = out_root / "latest"
+    handoff_dir = Path(args.handoff_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_event("run_start", run_id=rid, run_dir=str(run_dir), hours=args.hours)
+
+    capture_path = run_dir / f"candidate_capture_discovery_{int(args.hours)}h.json"
+    initial_capture = blocked_capture_report(
+        "agent_run_started",
+        args.paper_db,
+        args.raw_db,
+        int(args.hours),
+        args.expected_candidates,
+    )
+    write_json(capture_path, initial_capture)
+    write_materialized_artifacts(
+        args,
+        rid=rid,
+        run_dir=run_dir,
+        latest_dir=latest_dir,
+        handoff_dir=handoff_dir,
+        capture_path=capture_path,
+        state="agent_run_started",
+    )
+
+    tests = run_self_tests(args.test_timeout_sec)
+    tests_path = run_dir / "tests.json"
+    write_json(tests_path, tests)
+    log_event("self_tests_done", run_id=rid, passed=tests.get("passed"))
+
+    capture_path, pnl_path, markov_paths, diagnostics = run_reports(run_dir, args)
+    verdict, registry, verdict_path, summary_path, handoff_path, _tests_path = write_materialized_artifacts(
+        args,
+        rid=rid,
+        run_dir=run_dir,
+        latest_dir=latest_dir,
+        handoff_dir=handoff_dir,
+        capture_path=capture_path,
+        pnl_path=pnl_path,
+        markov_paths=markov_paths,
+        diagnostics=diagnostics,
+        tests=tests,
+        state="final",
+    )
+    log_event("run_end", run_id=rid, classification=verdict.get("classification"), blockers=verdict.get("blockers") or [])
 
     return {
         "run_id": rid,
@@ -514,6 +598,7 @@ def main():
     parser.add_argument("--test-timeout-sec", type=int, default=120)
     parser.add_argument("--max-runs", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=300)
+    parser.add_argument("--initial-delay-sec", type=int, default=0)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -521,6 +606,11 @@ def main():
         return
     outputs = []
     runs = max(1, args.max_runs)
+    initial_delay = max(0, args.initial_delay_sec)
+    if initial_delay:
+        log_event("initial_delay_start", delay_sec=initial_delay)
+        time.sleep(initial_delay)
+        log_event("initial_delay_done", delay_sec=initial_delay)
     for index in range(runs):
         outputs.append(run_once(args))
         if index + 1 < runs:
