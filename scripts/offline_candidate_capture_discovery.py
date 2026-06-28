@@ -23,6 +23,7 @@ EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_q
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
 SCHEMA_VERSION = "offline_candidate_capture_discovery.v1"
 EVIDENCE_LEVEL = "discovery_same_window"
+DEFAULT_MAX_SCAN_ROWS = 2_000_000
 
 DIMENSIONS = (
     "source_quote_clean",
@@ -107,6 +108,19 @@ def rate(numerator, denominator):
 
 def table_exists(db, name):
     return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
+def recent_rowid_floor(db, table, max_scan_rows):
+    if not max_scan_rows or max_scan_rows <= 0:
+        return None
+    try:
+        row = db.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()
+        max_rowid = int(row[0] or 0) if row else 0
+    except Exception:
+        return None
+    if max_rowid <= 0:
+        return None
+    return max(1, max_rowid - int(max_scan_rows) + 1)
 
 
 def cols(db, table):
@@ -383,15 +397,21 @@ def load_raw_dogs_from_db_path(path, since_ts):
         raw_db.close()
 
 
-def load_observations(db, since_ts):
+def load_observations(db, since_ts, max_scan_rows=DEFAULT_MAX_SCAN_ROWS):
+    rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
+    filters = ["observed_at >= ?"]
+    params = [since_ts]
+    if rowid_floor is not None:
+        filters.append("rowid >= ?")
+        params.append(rowid_floor)
     rows = db.execute(
-        """
+        f"""
         SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched, reason,
                observed_at, payload_json
         FROM candidate_shadow_observations
-        WHERE observed_at >= ?
+        WHERE {' AND '.join(filters)}
         """,
-        (since_ts,),
+        tuple(params),
     ).fetchall()
     out = []
     for row in rows:
@@ -409,7 +429,21 @@ def load_observations(db, since_ts):
                 "payload": payload,
             }
         )
-    return out
+    observed_values = [row["observed_at"] for row in out if row.get("observed_at")]
+    scan_meta = {
+        "table": "candidate_shadow_observations",
+        "max_scan_rows": max_scan_rows,
+        "rowid_floor": rowid_floor,
+        "loaded_rows": len(out),
+        "earliest_observed_at": min(observed_values) if observed_values else None,
+        "latest_observed_at": max(observed_values) if observed_values else None,
+        "may_be_rowid_truncated": bool(
+            rowid_floor is not None
+            and observed_values
+            and min(observed_values) > since_ts + 300
+        ),
+    }
+    return out, scan_meta
 
 
 def raw_dog_index(raw_dogs):
@@ -762,12 +796,22 @@ def build_raw_dog_observation_join(raw_dogs, observations):
     }
 
 
-def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, min_slice_signals, limit, missed_limit):
+def summarize(
+    db_path,
+    raw_dog_json,
+    raw_db_path,
+    hours,
+    expected_candidates,
+    min_slice_signals,
+    limit,
+    missed_limit,
+    max_scan_rows=DEFAULT_MAX_SCAN_ROWS,
+):
     since_ts = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     try:
-        observations = load_observations(db, since_ts)
+        observations, observation_scan = load_observations(db, since_ts, max_scan_rows=max_scan_rows)
         if raw_dog_json:
             raw_dogs, raw_meta = load_raw_dogs_from_json(raw_dog_json, since_ts)
         elif raw_db_path:
@@ -814,6 +858,7 @@ def summarize(db_path, raw_dog_json, raw_db_path, hours, expected_candidates, mi
         "hours": hours,
         "since_ts": since_ts,
         "candidate_count_expected": expected_candidates,
+        "observation_scan": observation_scan,
         "report_health": {
             "promotion_allowed": False,
             "promotion_blockers": promotion_blockers or ["discovery_same_window_not_promotion_evidence"],
@@ -972,6 +1017,7 @@ def main():
     ap.add_argument("--min-slice-signals", type=int, default=20)
     ap.add_argument("--limit", type=int, default=300)
     ap.add_argument("--missed-limit", type=int, default=100)
+    ap.add_argument("--max-scan-rows", type=int, default=DEFAULT_MAX_SCAN_ROWS)
     ap.add_argument("--out", default="data/offline_candidate_capture_discovery.json")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
@@ -987,6 +1033,7 @@ def main():
         args.min_slice_signals,
         args.limit,
         args.missed_limit,
+        args.max_scan_rows,
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")

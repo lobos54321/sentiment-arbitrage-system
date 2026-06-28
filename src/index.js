@@ -1110,6 +1110,7 @@ function startAgentCaptureDiscoveryLoop(config) {
         '--markov-profiles', process.env.AGENT_CAPTURE_MARKOV_PROFILES || 'runtime,kline',
         '--report-timeout-sec', process.env.AGENT_CAPTURE_REPORT_TIMEOUT_SEC || '30',
         '--test-timeout-sec', process.env.AGENT_CAPTURE_TEST_TIMEOUT_SEC || '180',
+        '--max-scan-rows', process.env.AGENT_CAPTURE_MAX_SCAN_ROWS || '2000000',
         '--max-runs', process.env.AGENT_CAPTURE_MAX_RUNS || '1000000',
         '--interval-sec', process.env.AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC || '900',
         '--initial-delay-sec', process.env.AGENT_CAPTURE_DISCOVERY_INITIAL_DELAY_SEC || '120',

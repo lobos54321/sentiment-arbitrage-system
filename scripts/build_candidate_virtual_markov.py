@@ -11,7 +11,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from offline_candidate_cross_eval import dim_value, jloads, stats
+from offline_candidate_cross_eval import DEFAULT_MAX_SCAN_ROWS, dim_value, jloads, recent_rowid_floor, stats
 
 
 KEY_DIMENSIONS = (
@@ -77,13 +77,23 @@ def key_for(row, payload, dimensions):
     return tuple(values[name] for name in dimensions), values
 
 
-def build(db_path, hours, min_closed, limit, profile):
+def build(db_path, hours, min_closed, limit, profile, max_scan_rows=DEFAULT_MAX_SCAN_ROWS):
     dimensions = PROFILES[profile]
     since = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
+    v_rowid_floor = recent_rowid_floor(db, "candidate_shadow_virtual_trades", max_scan_rows)
+    o_rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
+    filters = ["v.observed_at >= ?"]
+    params = [since]
+    if v_rowid_floor is not None:
+        filters.append("v.rowid >= ?")
+        params.append(v_rowid_floor)
+    if o_rowid_floor is not None:
+        filters.append("o.rowid >= ?")
+        params.append(o_rowid_floor)
     rows = db.execute(
-        """
+        f"""
         SELECT v.signal_id, v.token_ca, v.candidate_id, v.family, v.net_pnl_pct,
                v.observed_at, o.payload_json
         FROM candidate_shadow_virtual_trades v
@@ -91,11 +101,11 @@ def build(db_path, hours, min_closed, limit, profile):
           ON o.signal_id = v.signal_id
          AND o.candidate_id = v.candidate_id
          AND o.observed_at = v.observed_at
-        WHERE v.observed_at >= ?
+        WHERE {' AND '.join(filters)}
           AND v.status = 'VIRTUAL_CLOSED'
           AND v.net_pnl_pct IS NOT NULL
         """,
-        (since,),
+        tuple(params),
     ).fetchall()
     groups = defaultdict(list)
     meta = {}
@@ -138,6 +148,11 @@ def build(db_path, hours, min_closed, limit, profile):
             "closed_virtual_rows": len(rows),
             "keys_emitted": len(buckets),
             "bucket_counts": dict(Counter(row["bucket"] for row in buckets)),
+            "scan": {
+                "max_scan_rows": max_scan_rows,
+                "virtual_trades_rowid_floor": v_rowid_floor,
+                "observations_rowid_floor": o_rowid_floor,
+            },
         },
         "buckets": buckets[:limit],
     }
@@ -189,13 +204,14 @@ def main():
     parser.add_argument("--min-closed", type=int, default=20)
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--profile", choices=sorted(PROFILES), default="strict")
+    parser.add_argument("--max-scan-rows", type=int, default=DEFAULT_MAX_SCAN_ROWS)
     parser.add_argument("--out", default="data/candidate_virtual_markov.json")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return
-    result = build(args.db, args.hours, args.min_closed, args.limit, args.profile)
+    result = build(args.db, args.hours, args.min_closed, args.limit, args.profile, args.max_scan_rows)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"out": args.out, "coverage": result["coverage"]}, sort_keys=True))

@@ -225,6 +225,7 @@ def run_reports(run_dir, args):
             "--raw-db", args.raw_db,
             "--hours", str(primary_hours),
             "--expected-candidates", str(args.expected_candidates),
+            "--max-scan-rows", str(args.max_scan_rows),
             "--out", str(capture_path),
         ],
         capture_path,
@@ -236,6 +237,7 @@ def run_reports(run_dir, args):
             "scripts/offline_candidate_cross_eval.py",
             "--db", args.paper_db,
             "--hours", str(primary_hours),
+            "--max-scan-rows", str(args.max_scan_rows),
             "--out", str(pnl_path),
         ],
         pnl_path,
@@ -250,6 +252,7 @@ def run_reports(run_dir, args):
                 "--db", args.paper_db,
                 "--hours", str(primary_hours),
                 "--profile", profile,
+                "--max-scan-rows", str(args.max_scan_rows),
                 "--out", str(path),
             ],
             path,
@@ -572,6 +575,7 @@ def self_test():
             markov_profiles="runtime,kline",
             report_timeout_sec=60,
             test_timeout_sec=60,
+            max_scan_rows=2_000_000,
         )
         result = run_once(args)
         assert Path(result["latest_verdict"]).exists()
@@ -596,6 +600,7 @@ def main():
     parser.add_argument("--markov-profiles", default="runtime,kline")
     parser.add_argument("--report-timeout-sec", type=int, default=600)
     parser.add_argument("--test-timeout-sec", type=int, default=120)
+    parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
     parser.add_argument("--max-runs", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=300)
     parser.add_argument("--initial-delay-sec", type=int, default=0)

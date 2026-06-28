@@ -35,6 +35,7 @@ DIMENSIONS = (
 )
 CAPPED_LOSS_PCT = -10.0
 CAPPED_WIN_PCT = 100.0
+DEFAULT_MAX_SCAN_ROWS = 2_000_000
 
 
 def jloads(raw):
@@ -43,6 +44,19 @@ def jloads(raw):
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
+
+
+def recent_rowid_floor(db, table, max_scan_rows):
+    if not max_scan_rows or max_scan_rows <= 0:
+        return None
+    try:
+        row = db.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()
+        max_rowid = int(row[0] or 0) if row else 0
+    except Exception:
+        return None
+    if max_rowid <= 0:
+        return None
+    return max(1, max_rowid - int(max_scan_rows) + 1)
 
 
 def bucket_market_cap(value):
@@ -159,22 +173,33 @@ def judge(row, *, is_slice):
     return "REJECT"
 
 
-def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slice_closed, limit):
+def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slice_closed, limit, max_scan_rows=DEFAULT_MAX_SCAN_ROWS):
     since = int(time.time()) - hours * 3600
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
+    v_rowid_floor = recent_rowid_floor(db, "candidate_shadow_virtual_trades", max_scan_rows)
+    o_rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
+    filters = ["v.observed_at >= ?"]
+    params = [since]
+    if v_rowid_floor is not None:
+        filters.append("v.rowid >= ?")
+        params.append(v_rowid_floor)
+    if o_rowid_floor is not None:
+        filters.append("o.rowid >= ?")
+        params.append(o_rowid_floor)
     rows = db.execute(
-        """
+        f"""
         SELECT v.signal_id, v.token_ca, v.candidate_id, v.family, v.status,
                v.net_pnl_pct, v.observed_at, o.payload_json
         FROM candidate_shadow_virtual_trades v
         JOIN candidate_shadow_observations o
           ON o.signal_id = v.signal_id AND o.candidate_id = v.candidate_id
-        WHERE v.observed_at >= ?
+         AND o.observed_at = v.observed_at
+        WHERE {' AND '.join(filters)}
           AND v.status = 'VIRTUAL_CLOSED'
           AND v.net_pnl_pct IS NOT NULL
         """,
-        (since,),
+        tuple(params),
     ).fetchall()
     by_candidate = defaultdict(list)
     for r in rows:
@@ -264,6 +289,11 @@ def summarize(db_path, hours, min_baseline_closed, min_baseline_unique, min_slic
         "db": db_path,
         "hours": hours,
         "since_ts": since,
+        "scan": {
+            "max_scan_rows": max_scan_rows,
+            "virtual_trades_rowid_floor": v_rowid_floor,
+            "observations_rowid_floor": o_rowid_floor,
+        },
         "thresholds": {
             "baseline_closed_min": min_baseline_closed,
             "baseline_unique_min": min_baseline_unique,
@@ -293,7 +323,7 @@ def self_test():
         db.executescript(
             """
             CREATE TABLE candidate_shadow_observations(
-              signal_id INTEGER, token_ca TEXT, candidate_id TEXT, family TEXT, payload_json TEXT
+              signal_id INTEGER, token_ca TEXT, candidate_id TEXT, family TEXT, observed_at INTEGER, payload_json TEXT
             );
             CREATE TABLE candidate_shadow_virtual_trades(
               signal_id INTEGER, token_ca TEXT, candidate_id TEXT, family TEXT,
@@ -303,11 +333,11 @@ def self_test():
         )
         for i, pnl in enumerate([1, 2, -1, 3, 4, -2], 1):
             payload = {"source_quote_clean": i <= 4, "market_cap": 8000 if i <= 4 else 50000}
-            db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?)", (i, f"CA{i}", "cand", "base", json.dumps(payload)))
+            db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?)", (i, f"CA{i}", "cand", "base", now, json.dumps(payload)))
             db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)", (i, f"CA{i}", "cand", "base", "VIRTUAL_CLOSED", pnl, now))
         for i, pnl in enumerate([1000] + [-6.5] * 19, 101):
             payload = {"source_quote_clean": True, "market_cap": 8000}
-            db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?)", (i, f"TAIL{i}", "tail", "base", json.dumps(payload)))
+            db.execute("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?)", (i, f"TAIL{i}", "tail", "base", now, json.dumps(payload)))
             db.execute("INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)", (i, f"TAIL{i}", "tail", "base", "VIRTUAL_CLOSED", pnl, now))
         db.commit()
         db.close()
@@ -329,6 +359,7 @@ def main():
     ap.add_argument("--min-baseline-unique", type=int, default=20)
     ap.add_argument("--min-slice-closed", type=int, default=20)
     ap.add_argument("--limit", type=int, default=300)
+    ap.add_argument("--max-scan-rows", type=int, default=DEFAULT_MAX_SCAN_ROWS)
     ap.add_argument("--out", default="data/offline_candidate_cross_eval.json")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
@@ -342,6 +373,7 @@ def main():
         args.min_baseline_unique,
         args.min_slice_closed,
         args.limit,
+        args.max_scan_rows,
     )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
