@@ -876,7 +876,10 @@ function startIndexRuntimeSupervisor() {
   process.env.DASHBOARD_RUNTIME_ROLE ||= 'index_dashboard_supervisor';
   startDashboardOnce();
   startRuntimeMaintenanceLoop();
-  global.__shadowDataSidecars = startCandidateShadowObserver({});
+  global.__shadowDataSidecars = [
+    ...startCandidateShadowObserver({}),
+    ...startAgentCaptureDiscoveryLoop({}),
+  ];
   startRawPathObserverSupervisor();
   startRawDogDiscoverySupervisor();
   updateIndexRuntimeStatus();
@@ -1074,6 +1077,49 @@ function startCandidateShadowObserver(config) {
         DB_PATH: signalDb,
         KLINE_DB: klineDb,
         SIDECAR_MAX_RUNTIME_SEC: process.env.CANDIDATE_SHADOW_OBSERVER_CHILD_MAX_RUNTIME_SEC || '300',
+      },
+    }),
+  ];
+}
+
+function startAgentCaptureDiscoveryLoop(config) {
+  if (!envFlag('AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED', true)) {
+    console.log('[AgentCaptureDiscovery] disabled by AGENT_CAPTURE_DISCOVERY_LOOP_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = runtimeDataDir();
+  const paperDb = runtimePaperDbPath();
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
+  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
+  const klineDb = process.env.KLINE_DB || process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(dataDir, 'kline_cache.db');
+
+  return [
+    startPythonSidecar({
+      name: 'agent-capture-discovery',
+      logPath: process.env.AGENT_CAPTURE_DISCOVERY_LOG || join(dataDir, 'agent-capture-discovery.log'),
+      args: [
+        'scripts/agent_capture_discovery_loop.py',
+        '--paper-db', paperDb,
+        '--raw-db', rawDb,
+        '--hours', process.env.AGENT_CAPTURE_DISCOVERY_HOURS || '24',
+        '--expected-candidates', process.env.AGENT_CAPTURE_EXPECTED_CANDIDATES || '84',
+        '--out-root', process.env.AGENT_CAPTURE_RUNS_DIR || join(dataDir, 'agent_runs'),
+        '--handoff-dir', process.env.AGENT_CAPTURE_HANDOFFS_DIR || join(dataDir, 'agent_handoffs'),
+        '--registry', process.env.AGENT_CAPTURE_HYPOTHESIS_REGISTRY || join(dataDir, 'hypothesis_registry.json'),
+        '--markov-profiles', process.env.AGENT_CAPTURE_MARKOV_PROFILES || 'runtime,kline',
+        '--report-timeout-sec', process.env.AGENT_CAPTURE_REPORT_TIMEOUT_SEC || '900',
+        '--test-timeout-sec', process.env.AGENT_CAPTURE_TEST_TIMEOUT_SEC || '180',
+        '--max-runs', process.env.AGENT_CAPTURE_MAX_RUNS || '1000000',
+        '--interval-sec', process.env.AGENT_CAPTURE_DISCOVERY_INTERVAL_SEC || '900',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        RAW_SIGNAL_OUTCOMES_DB: rawDb,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+        KLINE_DB: klineDb,
+        SIDECAR_MAX_RUNTIME_SEC: process.env.AGENT_CAPTURE_DISCOVERY_CHILD_MAX_RUNTIME_SEC || '0',
       },
     }),
   ];
