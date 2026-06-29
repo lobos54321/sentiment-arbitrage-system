@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v3"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v4"
 FIXABLE_BLOCKER_HINTS = {
     "raw_dog_rows_incomplete": "Fix raw dog row materialization or report input wiring before judging capture recall.",
     "raw_gold_silver_denominator_rows_truncated": "Ensure the raw dog JSON/API includes complete event rows or use --raw-db.",
@@ -64,9 +64,13 @@ def build_handoff(verdict):
         "",
         f"- schema_version: `{SCHEMA_VERSION}`",
         f"- generated_at: `{utc_now()}`",
+        f"- current_commit: `{verdict.get('current_commit')}`",
+        f"- deployment_commit: `{verdict.get('deployment_commit')}`",
         f"- verdict: `{verdict.get('classification')}`",
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
+        f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
+        f"- next_highest_priority_blocker: `{verdict.get('next_highest_priority_blocker')}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
         f"- handoff_needed: `{str(needed).lower()}`",
@@ -210,6 +214,24 @@ def build_handoff(verdict):
             "",
         ])
     lines.extend([
+        "## Readiness Summaries",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
+                "kline_coverage": verdict.get("kline_coverage") or {},
+                "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
+                "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
+                "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
+                "Markov_effectiveness_summary": verdict.get("Markov_effectiveness_summary") or {},
+                "two_d_cross_validity_summary": verdict.get("two_d_cross_validity_summary") or {},
+            },
+            indent=2,
+            sort_keys=True,
+        )[:12000],
+        "```",
+        "",
         "## H1 / H2",
         "",
         "### H1",
@@ -254,8 +276,19 @@ def self_test():
         "context_schema_version_counts": {"v": 1},
         "quote_clean_definition": {"counts": {"q": 1}},
         "blocked_subtype": "QUOTE_CONTEXT_COVERAGE",
+        "current_commit": "abc",
+        "deployment_commit": "abc",
+        "human_action_required": False,
+        "next_highest_priority_blocker": "source_quote_clean_coverage_below_80pct",
         "non_quote_sensitive_capture_discovery_allowed": True,
         "quote_sensitive_slices_blocked": True,
+        "volume_profile_coverage": {"coverage_rate": 1.0},
+        "kline_coverage": {"coverage_rate": 1.0},
+        "A_CLASS_mode_status": {"final_entry_status": "READINESS_AUDIT_ONLY"},
+        "final_entry_contract_blocker_breakdown": {},
+        "per_candidate_effectiveness_summary": {"candidate_count": 84},
+        "Markov_effectiveness_summary": {"status": "insufficient_or_uninformative"},
+        "two_d_cross_validity_summary": {"valid_cross_count": 0},
         "quote_context_coverage": {
             "coverage_denominator_type": "signal_context_carrier_rows",
             "coverage_denominator_rows": 10,
@@ -279,6 +312,7 @@ def self_test():
     assert "raw_dog_rows_incomplete" in text
     assert "Quote Context Coverage" in text
     assert "Quote Missing Root Cause" in text
+    assert "Readiness Summaries" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text

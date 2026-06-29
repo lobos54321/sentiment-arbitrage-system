@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -193,10 +194,320 @@ def run_report(name, args, out_path, *, timeout):
     return result
 
 
+def git_commit():
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip() or None
+    except Exception:
+        return None
+    return None
+
+
+def safe_rate(num, den):
+    try:
+        den = float(den or 0)
+        if den <= 0:
+            return None
+        return round(float(num or 0) / den, 6)
+    except Exception:
+        return None
+
+
+def pct_to_rate(value):
+    try:
+        if value is None:
+            return None
+        return round(float(value) / 100.0, 6)
+    except Exception:
+        return None
+
+
+def write_derived_report(path, payload):
+    payload = {
+        "generated_at": utc_now(),
+        "can_promote_live": False,
+        "evidence_level": "discovery_same_window",
+        **payload,
+    }
+    write_json(path, payload)
+    return path
+
+
+def build_context_coverage_report(capture):
+    context = capture.get("context_health") or {}
+    field_coverage = context.get("field_coverage") or {}
+    denominator = capture.get("denominator_audit") or {}
+    raw_all = denominator.get("raw_all_gold_silver_event_rows") or 0
+    dropped_kline = (denominator.get("filter_drop_breakdown_non_exclusive") or {}).get("dropped_kline_uncovered", 0)
+    kline_rate = None if not raw_all else round(max(0.0, 1.0 - float(dropped_kline or 0) / float(raw_all)), 6)
+    volume_pct = (field_coverage.get("volume_profile") or {}).get("coverage_pct")
+    candle_pct = (field_coverage.get("candle_pattern") or {}).get("coverage_pct")
+    fbr_pct = (field_coverage.get("fbr_time_legal") or {}).get("coverage_pct")
+    blockers = []
+    blockers.extend(context.get("gaps") or [])
+    if kline_rate is not None and kline_rate < 0.8:
+        blockers.append("kline_coverage_below_80pct")
+    return {
+        "schema_version": "context_coverage_audit.v1",
+        "report_type": "context_coverage_audit",
+        "quote_context_coverage": capture.get("quote_context_coverage") or context.get("quote_context_coverage") or {},
+        "quote_missing_root_cause": capture.get("quote_missing_root_cause") or context.get("quote_missing_root_cause") or {},
+        "volume_profile_coverage": {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_pct": volume_pct,
+            "coverage_rate": pct_to_rate(volume_pct),
+            "blocker": "volume_profile_coverage_below_80pct" if volume_pct is None or volume_pct < 80 else None,
+        },
+        "kline_coverage": {
+            "coverage_denominator_type": "raw_all_gold_silver",
+            "raw_all_gold_silver_event_rows": raw_all,
+            "dropped_kline_uncovered": dropped_kline,
+            "coverage_rate": kline_rate,
+            "candle_pattern_coverage_pct": candle_pct,
+            "fbr_time_legal_coverage_pct": fbr_pct,
+            "blocker": "kline_coverage_below_80pct" if kline_rate is not None and kline_rate < 0.8 else None,
+        },
+        "context_schema_version_counts": context.get("context_schema_version_counts") or {},
+        "quote_clean_definition_counts": context.get("quote_clean_definition_counts") or {},
+        "blockers": sorted(set(blockers)),
+    }
+
+
+def build_candidate_effectiveness_report(capture):
+    rows = list(capture.get("candidate_baseline") or [])
+    classified = []
+    counts = {"true_detector": 0, "low_precision_broad_detector": 0, "potential_entry_hypothesis": 0, "no_signal": 0}
+    for row in rows:
+        recall = row.get("business_match_recall_event")
+        if recall is None:
+            recall = row.get("match_recall_event")
+        precision = row.get("match_precision_event")
+        match_count = row.get("match_count") or 0
+        matched_gs = row.get("matched_raw_all_gold_silver_events")
+        if matched_gs is None:
+            matched_gs = row.get("matched_gold_silver_events") or 0
+        if recall is not None and recall >= 0.35 and (precision or 0) < 0.05:
+            label = "low_precision_broad_detector"
+        elif recall is not None and recall > 0 and (precision or 0) >= 0.15 and matched_gs >= 3:
+            label = "potential_entry_hypothesis"
+        elif recall is not None and recall > 0 and matched_gs > 0:
+            label = "true_detector"
+        else:
+            label = "no_signal"
+        counts[label] += 1
+        classified.append({
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "classification": label,
+            "match_count": match_count,
+            "matched_raw_all_gold_silver_events": matched_gs,
+            "business_match_recall_event": recall,
+            "match_precision_event": precision,
+        })
+    order = {
+        "potential_entry_hypothesis": 3,
+        "true_detector": 2,
+        "low_precision_broad_detector": 1,
+        "no_signal": 0,
+    }
+    classified.sort(
+        key=lambda row: (
+            order.get(row["classification"], 0),
+            row.get("business_match_recall_event") or 0,
+            row.get("match_precision_event") or 0,
+            row.get("matched_raw_all_gold_silver_events") or 0,
+        ),
+        reverse=True,
+    )
+    return {
+        "schema_version": "candidate_effectiveness_report.v1",
+        "report_type": "candidate_effectiveness_24h",
+        "candidate_count": len(rows),
+        "classification_counts": counts,
+        "top_candidates": classified[:50],
+        "notes": [
+            "Capture-first classifications are discovery-only and do not imply entry promotion.",
+            "PnL is intentionally not used as the primary candidate-effectiveness criterion.",
+        ],
+    }
+
+
+def build_markov_effectiveness_report(markov_reports, capture):
+    profiles = {}
+    total_green = 0
+    total_yellow = 0
+    total_insufficient = 0
+    for name, report in sorted(markov_reports.items()):
+        coverage = report.get("coverage") or {}
+        counts = coverage.get("bucket_counts") or {}
+        total_green += int(counts.get("green") or 0)
+        total_yellow += int(counts.get("yellow") or 0)
+        total_insufficient += int(counts.get("insufficient") or 0)
+        profiles[name] = {
+            "schema_version": report.get("schema_version"),
+            "profile": report.get("profile") or name,
+            "bucket_counts": counts,
+            "coverage": coverage,
+            "usage": report.get("usage") or "discovery_only",
+        }
+    status = "informative_discovery_only" if total_green or total_yellow else "insufficient_or_uninformative"
+    return {
+        "schema_version": "markov_effectiveness_report.v1",
+        "report_type": "markov_effectiveness_24h",
+        "status": status,
+        "markov_used_for_promotion": False,
+        "total_green_buckets": total_green,
+        "total_yellow_buckets": total_yellow,
+        "total_insufficient_buckets": total_insufficient,
+        "profiles": profiles,
+        "context_blockers": [
+            blocker for blocker in ((capture.get("report_health") or {}).get("promotion_blockers") or [])
+            if "coverage" in str(blocker) or "schema" in str(blocker)
+        ],
+    }
+
+
+def build_capture_cross_validity_report(capture, context_report):
+    quote_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_clean_present_rate") or 0)
+    quote_exec_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_executable_present_rate") or 0)
+    volume_rate = ((context_report.get("volume_profile_coverage") or {}).get("coverage_rate") or 0)
+    kline_rate = ((context_report.get("kline_coverage") or {}).get("coverage_rate") or 0)
+    valid = []
+    invalid = []
+    for row in capture.get("context_slices") or []:
+        dim = row.get("dimension")
+        reasons = []
+        if dim in {"source_quote_clean", "source_quote_executable", "source_quote_executable_proxy"} and (quote_rate < 0.8 or quote_exec_rate < 0.8):
+            reasons.append("quote_context_coverage_below_80pct")
+        if dim == "volume_profile" and volume_rate < 0.8:
+            reasons.append("volume_profile_coverage_below_80pct")
+        if dim in {"candle_pattern", "fbr_time_legal", "fbr_lookahead_warning"} and kline_rate < 0.8:
+            reasons.append("kline_coverage_below_80pct")
+        item = {
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": dim,
+            "slice_value": row.get("slice_value"),
+            "judgment": row.get("judgment"),
+            "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+            "match_recall_event": row.get("match_recall_event"),
+            "match_precision_event": row.get("match_precision_event"),
+            "recall_lift_vs_candidate_baseline": row.get("recall_lift_vs_candidate_baseline"),
+            "valid": not reasons,
+            "invalid_reasons": reasons,
+        }
+        (valid if not reasons else invalid).append(item)
+    return {
+        "schema_version": "capture_cross_validity_report.v1",
+        "report_type": "capture_cross_validity_24h",
+        "valid_cross_count": len(valid),
+        "invalid_cross_count": len(invalid),
+        "valid_top_crosses": valid[:50],
+        "invalid_reason_counts": {
+            reason: sum(1 for row in invalid for reason in row["invalid_reasons"])
+            for reason in sorted({reason for row in invalid for reason in row["invalid_reasons"]})
+        },
+        "invalid_sample": invalid[:50],
+        "criteria": {
+            "quote_sensitive_requires_present_rate_gte": 0.8,
+            "volume_sensitive_requires_present_rate_gte": 0.8,
+            "kline_sensitive_requires_coverage_rate_gte": 0.8,
+            "pnl_is_secondary": True,
+        },
+    }
+
+
+def build_a_class_fastlane_mode_audit(raw_funnel, context_report):
+    summary = raw_funnel.get("summary") or {}
+    entry_bridge = summary.get("entry_bridge_layer") or {}
+    final_contract = entry_bridge.get("final_entry_contract") or {}
+    hard_blockers = final_contract.get("hard_blockers") or {}
+    mode_status = final_contract.get("mode_status") or {}
+    context_blockers = context_report.get("blockers") or []
+    mode_disabled_count = int(hard_blockers.get("mode_disabled") or 0)
+    clean_windows_passed = not any(
+        blocker for blocker in context_blockers
+        if blocker in {
+            "source_quote_clean_coverage_below_80pct",
+            "source_quote_executable_coverage_below_80pct",
+            "volume_profile_coverage_below_80pct",
+            "kline_coverage_below_80pct",
+        }
+    )
+    if mode_disabled_count and clean_windows_passed:
+        final_entry_status = "FUNNEL_BLOCKED_STUCK"
+        human_action_required = True
+        reason = "final_entry_contract_mode_disabled_after_clean_windows"
+    elif mode_disabled_count:
+        final_entry_status = "FUNNEL_BLOCKED_EXPECTED"
+        human_action_required = False
+        reason = "final_entry_contract_mode_disabled_while_context_blockers_remain"
+    else:
+        final_entry_status = "READINESS_AUDIT_ONLY"
+        human_action_required = False
+        reason = "no_final_entry_mode_disabled_blocker_detected"
+    return {
+        "schema_version": "a_class_fastlane_mode_audit.v1",
+        "report_type": "a_class_fastlane_mode_audit_24h",
+        "A_CLASS_mode_status": mode_status,
+        "final_entry_status": final_entry_status,
+        "reason": reason,
+        "human_action_required": human_action_required,
+        "raw_gold_silver_entered_events": (summary.get("raw_denominator") or {}).get("entered_events"),
+        "decision_layer": summary.get("decision_layer") or {},
+        "entry_bridge_layer_summary": {
+            "paper_trades_entry_ts_window_count": entry_bridge.get("paper_trades_entry_ts_window_count"),
+            "raw_signals_with_final_entry_contract": entry_bridge.get("raw_signals_with_final_entry_contract"),
+            "paper_evidence_log": entry_bridge.get("paper_evidence_log"),
+        },
+        "final_entry_contract_blocker_breakdown": hard_blockers,
+        "final_entry_contract": final_contract,
+    }
+
+
+def first_blocker_priority(blockers):
+    priority = [
+        "candidate_count_mismatch",
+        "candidate_count_observed_not_84",
+        "observation_coverage_below_99pct",
+        "raw_dog_rows_incomplete",
+        "signal_id_join_rate_below_99pct",
+        "source_quote_clean_coverage_below_80pct",
+        "source_quote_executable_coverage_below_80pct",
+        "volume_profile_coverage_below_80pct",
+        "kline_coverage_below_80pct",
+        "markov_bucket_coverage_below_80pct",
+        "report_generation_failed",
+    ]
+    for item in priority:
+        if item in blockers:
+            return item
+    return blockers[0] if blockers else None
+
+
 def run_reports(run_dir, args):
     primary_hours = int(args.hours)
-    capture_path = run_dir / f"candidate_capture_discovery_{primary_hours}h.json"
-    pnl_path = run_dir / f"candidate_pnl_cross_{primary_hours}h.json"
+    capture_path = run_dir / f"capture_discovery_{primary_hours}h.json"
+    capture_hours = sorted({primary_hours, 24, 48, 72})
+    capture_paths = {
+        hours: run_dir / f"capture_discovery_{hours}h.json"
+        for hours in capture_hours
+    }
+    pnl_path = run_dir / f"pnl_cross_secondary_{primary_hours}h.json"
+    raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{primary_hours}h.json"
+    context_coverage_path = run_dir / f"context_coverage_audit_{primary_hours}h.json"
+    candidate_effectiveness_path = run_dir / f"candidate_effectiveness_{primary_hours}h.json"
+    markov_effectiveness_path = run_dir / f"markov_effectiveness_{primary_hours}h.json"
+    capture_cross_validity_path = run_dir / f"capture_cross_validity_{primary_hours}h.json"
+    a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -210,25 +521,42 @@ def run_reports(run_dir, args):
         capture = blocked_capture_report("paper_db_unavailable_or_missing_candidate_shadow_observations", args.paper_db, args.raw_db, primary_hours, args.expected_candidates)
         write_json(capture_path, capture)
         diagnostics.append({"name": "db_guard", "ok": False, "reason": "paper_db_unavailable_or_missing_candidate_shadow_observations"})
-        return capture_path, None, {}, diagnostics
+        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": {}, "diagnostics": diagnostics}
     if not raw_ready:
         capture = blocked_capture_report("raw_signal_outcomes_db_unavailable", args.paper_db, args.raw_db, primary_hours, args.expected_candidates)
         write_json(capture_path, capture)
         diagnostics.append({"name": "db_guard", "ok": False, "reason": "raw_signal_outcomes_db_unavailable"})
-        return capture_path, None, {}, diagnostics
+        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": {}, "diagnostics": diagnostics}
+
+    for hours, path in capture_paths.items():
+        diagnostics.append(run_report(
+            f"capture_discovery_{hours}h",
+            [
+                "scripts/offline_candidate_capture_discovery.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--hours", str(hours),
+                "--expected-candidates", str(args.expected_candidates),
+                "--max-scan-rows", str(args.max_scan_rows),
+                "--out", str(path),
+            ],
+            path,
+            timeout=args.report_timeout_sec,
+        ))
+    if primary_hours in capture_paths:
+        capture_path = capture_paths[primary_hours]
 
     diagnostics.append(run_report(
-        "capture_discovery",
+        "raw_gold_silver_funnel_audit",
         [
-            "scripts/offline_candidate_capture_discovery.py",
+            "scripts/offline_raw_gold_silver_funnel_audit.py",
             "--db", args.paper_db,
             "--raw-db", args.raw_db,
             "--hours", str(primary_hours),
             "--expected-candidates", str(args.expected_candidates),
-            "--max-scan-rows", str(args.max_scan_rows),
-            "--out", str(capture_path),
+            "--out", str(raw_funnel_path),
         ],
-        capture_path,
+        raw_funnel_path,
         timeout=args.report_timeout_sec,
     ))
     diagnostics.append(run_report(
@@ -260,7 +588,44 @@ def run_reports(run_dir, args):
         ))
         if path.exists():
             successful_markov[profile] = path
-    return capture_path, pnl_path if pnl_path.exists() else None, successful_markov, diagnostics
+    readiness_paths = {}
+    try:
+        capture = load_json(capture_path)
+        context_report = build_context_coverage_report(capture)
+        write_derived_report(context_coverage_path, context_report)
+        readiness_paths["context_coverage"] = context_coverage_path
+        write_derived_report(candidate_effectiveness_path, build_candidate_effectiveness_report(capture))
+        readiness_paths["candidate_effectiveness"] = candidate_effectiveness_path
+        markov_reports = {name: load_json(path) for name, path in successful_markov.items() if Path(path).exists()}
+        write_derived_report(markov_effectiveness_path, build_markov_effectiveness_report(markov_reports, capture))
+        readiness_paths["markov_effectiveness"] = markov_effectiveness_path
+        write_derived_report(capture_cross_validity_path, build_capture_cross_validity_report(capture, context_report))
+        readiness_paths["capture_cross_validity"] = capture_cross_validity_path
+        if raw_funnel_path.exists():
+            raw_funnel = load_json(raw_funnel_path)
+        else:
+            raw_funnel = {}
+        write_derived_report(a_class_fastlane_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
+        readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
+        # Backward-compatible alias for older readers.
+        legacy_capture = run_dir / f"candidate_capture_discovery_{primary_hours}h.json"
+        if capture_path.exists() and legacy_capture != capture_path:
+            shutil.copy2(capture_path, legacy_capture)
+            readiness_paths["legacy_candidate_capture"] = legacy_capture
+    except Exception as exc:
+        diagnostics.append({"name": "derived_readiness_reports", "ok": False, "error": repr(exc), "duration_sec": None})
+    for hours, path in capture_paths.items():
+        if path.exists():
+            readiness_paths[f"capture_{hours}h"] = path
+    if raw_funnel_path.exists():
+        readiness_paths["raw_gold_silver_funnel_audit"] = raw_funnel_path
+    return {
+        "capture_primary": capture_path,
+        "pnl": pnl_path if pnl_path.exists() else None,
+        "markov": successful_markov,
+        "readiness": readiness_paths,
+        "diagnostics": diagnostics,
+    }
 
 
 def compact_hypothesis(metrics):
@@ -311,9 +676,12 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         "",
         f"- generated_at: `{utc_now()}`",
         f"- phase: `discovery_mesh`",
+        f"- current_commit: `{verdict.get('current_commit')}`",
+        f"- deployment_commit: `{verdict.get('deployment_commit')}`",
         f"- verdict: `{verdict.get('classification')}`",
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
+        f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
         f"- strategy_change_allowed: `{str(bool(verdict.get('strategy_change_allowed'))).lower()}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
@@ -410,6 +778,48 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         ),
         "```",
         "",
+        "## Volume / Kline Coverage",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
+                "kline_coverage": verdict.get("kline_coverage") or {},
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
+        "## A_CLASS / Final Entry",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
+                "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
+                "human_action_required": verdict.get("human_action_required"),
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
+        "## Candidate / Markov / Cross Readiness",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
+                "Markov_effectiveness_summary": verdict.get("Markov_effectiveness_summary") or {},
+                "two_d_cross_validity_summary": verdict.get("two_d_cross_validity_summary") or {},
+                "next_highest_priority_blocker": verdict.get("next_highest_priority_blocker"),
+            },
+            indent=2,
+            sort_keys=True,
+        )[:12000],
+        "```",
+        "",
         "## H1/H2",
         "",
         f"- H1 status: `{(verdict.get('H1_capture_metrics') or {}).get('status')}`",
@@ -457,6 +867,7 @@ def write_materialized_artifacts(
     capture_path,
     pnl_path=None,
     markov_paths=None,
+    readiness_paths=None,
     diagnostics=None,
     tests=None,
     state="final",
@@ -464,6 +875,7 @@ def write_materialized_artifacts(
 ):
     diagnostics = diagnostics or []
     markov_paths = markov_paths or {}
+    readiness_paths = readiness_paths or {}
     tests = tests or {
         "schema_version": "agent_capture_discovery_tests.v1",
         "generated_at": utc_now(),
@@ -477,7 +889,34 @@ def write_materialized_artifacts(
     capture = load_json(capture_path)
     pnl = load_json(pnl_path) if pnl_path and Path(pnl_path).exists() else None
     markov_reports = {name: load_json(path) for name, path in markov_paths.items() if Path(path).exists()}
-    verdict = build_verdict(capture, pnl, markov_reports, tests=tests if tests.get("status") != "pending" else {})
+    readiness_reports = {}
+    for key, path in readiness_paths.items():
+        if path and Path(path).exists():
+            try:
+                readiness_reports[key] = load_json(path)
+            except Exception:
+                pass
+    context_report = readiness_reports.get("context_coverage") or {}
+    readiness_reports["current_commit"] = git_commit()
+    readiness_reports["deployment_commit"] = (
+        os.environ.get("ZEABUR_GIT_COMMIT")
+        or os.environ.get("COMMIT_SHA")
+        or os.environ.get("GIT_COMMIT")
+        or readiness_reports["current_commit"]
+    )
+    readiness_reports["volume_profile_coverage"] = context_report.get("volume_profile_coverage") or {}
+    readiness_reports["kline_coverage"] = context_report.get("kline_coverage") or {}
+    readiness_reports["next_highest_priority_blocker"] = first_blocker_priority(
+        list((capture.get("report_health") or {}).get("promotion_blockers") or [])
+        + list(context_report.get("blockers") or [])
+    )
+    verdict = build_verdict(
+        capture,
+        pnl,
+        markov_reports,
+        tests=tests if tests.get("status") != "pending" else {},
+        readiness_reports=readiness_reports,
+    )
     if any(not row.get("ok") for row in diagnostics):
         verdict["blockers"] = sorted(set((verdict.get("blockers") or []) + ["report_generation_failed"]))
         verdict["classification"] = "BLOCKED_DATA"
@@ -515,6 +954,8 @@ def write_materialized_artifacts(
     }
     for profile, path in sorted(markov_paths.items()):
         artifact_paths[f"markov_{profile}"] = str(path)
+    for name, path in sorted(readiness_paths.items()):
+        artifact_paths[name] = str(path)
     summary = build_run_summary(verdict, artifact_paths, diagnostics, tests)
     summary_path = run_dir / "run_summary.md"
     write_text(summary_path, summary)
@@ -557,7 +998,12 @@ def run_once(args):
     write_json(tests_path, tests)
     log_event("self_tests_done", run_id=rid, passed=tests.get("passed"))
 
-    capture_path, pnl_path, markov_paths, diagnostics = run_reports(run_dir, args)
+    report_bundle = run_reports(run_dir, args)
+    capture_path = report_bundle["capture_primary"]
+    pnl_path = report_bundle["pnl"]
+    markov_paths = report_bundle["markov"]
+    readiness_paths = report_bundle["readiness"]
+    diagnostics = report_bundle["diagnostics"]
     verdict, registry, verdict_path, summary_path, handoff_path, _tests_path = write_materialized_artifacts(
         args,
         rid=rid,
@@ -567,6 +1013,7 @@ def run_once(args):
         capture_path=capture_path,
         pnl_path=pnl_path,
         markov_paths=markov_paths,
+        readiness_paths=readiness_paths,
         diagnostics=diagnostics,
         tests=tests,
         state="final",
@@ -656,7 +1103,7 @@ def self_test():
         args = argparse.Namespace(
             paper_db=str(paper),
             raw_db=str(raw),
-            hours=1,
+            hours=24,
             expected_candidates=2,
             out_root=str(root / "agent_runs"),
             handoff_dir=str(root / "agent_handoffs"),
@@ -674,6 +1121,44 @@ def self_test():
         verdict = load_json(result["latest_verdict"])
         assert verdict["candidate_count_expected"] == 2
         assert verdict["promotion_allowed"] is False
+        required_verdict_fields = [
+            "current_commit",
+            "deployment_commit",
+            "candidate_count_expected",
+            "candidate_count_observed",
+            "observation_coverage_pct",
+            "raw_dog_rows_complete",
+            "raw_all_signal_id_join_rate",
+            "mesh_eligible_signal_id_join_rate",
+            "quote_context_coverage",
+            "volume_profile_coverage",
+            "kline_coverage",
+            "A_CLASS_mode_status",
+            "final_entry_contract_blocker_breakdown",
+            "per_candidate_effectiveness_summary",
+            "Markov_effectiveness_summary",
+            "two_d_cross_validity_summary",
+            "promotion_allowed",
+            "human_action_required",
+            "tests_passed",
+        ]
+        missing = [field for field in required_verdict_fields if field not in verdict]
+        assert not missing, missing
+        latest_dir = Path(result["latest_verdict"]).parent
+        required_artifacts = [
+            "capture_discovery_24h.json",
+            "capture_discovery_48h.json",
+            "capture_discovery_72h.json",
+            "raw_gold_silver_funnel_audit_24h.json",
+            "a_class_fastlane_mode_audit_24h.json",
+            "candidate_effectiveness_24h.json",
+            "markov_effectiveness_24h.json",
+            "capture_cross_validity_24h.json",
+            "pnl_cross_secondary_24h.json",
+            "context_coverage_audit_24h.json",
+        ]
+        missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
+        assert not missing_artifacts, missing_artifacts
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
 

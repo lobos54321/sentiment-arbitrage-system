@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v4"
+SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v5"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
@@ -215,8 +215,9 @@ def markov_status(markov_reports):
     return out
 
 
-def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gate_passed=False):
+def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gate_passed=False, readiness_reports=None):
     markov_reports = markov_reports or {}
+    readiness_reports = readiness_reports or {}
     tests = tests or {}
     coverage = capture.get("coverage") or {}
     context = capture.get("context_health") or {}
@@ -299,9 +300,37 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         any(blocker in quote_coverage_blockers for blocker in blockers)
         or not quote_definition["quote_sensitive_slices_evaluable"]
     )
+    data_blockers = {
+        "candidate_count_expected_not_84",
+        "candidate_count_observed_not_84",
+        "observation_coverage_below_99pct",
+        "raw_dog_rows_incomplete",
+        "signal_id_join_rate_below_99pct",
+        "raw_all_unjoined_not_fully_attributed",
+        "tests_failed",
+        "report_generation_failed",
+    }
+    context_blockers = {
+        "source_quote_clean_coverage_below_80pct",
+        "source_quote_executable_coverage_below_80pct",
+        "volume_profile_coverage_below_80pct",
+        "kline_coverage_below_80pct",
+        "schema_mixed_quote_sensitive_slices_blocked",
+        "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+        "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+        "markov_bucket_coverage_below_80pct",
+    }
+    final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
+    final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
-    if blockers:
+    if any(blocker in data_blockers for blocker in blockers):
         classification = "BLOCKED_DATA"
+    elif any(blocker in context_blockers for blocker in blockers):
+        classification = "BLOCKED_CONTEXT_COVERAGE"
+    elif final_entry_status == "FUNNEL_BLOCKED_STUCK":
+        classification = "FUNNEL_BLOCKED_STUCK"
+    elif final_entry_status == "FUNNEL_BLOCKED_EXPECTED":
+        classification = "FUNNEL_BLOCKED_EXPECTED"
     elif (capture_counts.get("DISCOVERY_HIT") or 0) > 0:
         classification = "CAPTURE_DISCOVERY_HIT"
     elif (capture_counts.get("WATCH") or 0) > 0:
@@ -309,14 +338,20 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     else:
         classification = "DISCOVERY_NO_SIGNAL"
 
-    promotion_allowed = bool(oos_gate_passed) and classification == "PROMOTION_CANDIDATE_PENDING_OOS"
+    human_action_required = classification == "HUMAN_APPROVAL_REQUIRED" or bool(
+        final_entry.get("human_action_required")
+    )
+    promotion_allowed = False
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "phase": "discovery_mesh",
+        "current_commit": readiness_reports.get("current_commit"),
+        "deployment_commit": readiness_reports.get("deployment_commit"),
         "classification": classification,
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
+        "human_action_required": human_action_required,
         "non_quote_sensitive_capture_discovery_allowed": non_quote_sensitive_capture_discovery_allowed,
         "quote_sensitive_slices_blocked": quote_sensitive_slices_blocked,
         "canary_increase_allowed": False,
@@ -340,6 +375,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "quote_clean_definition": quote_definition,
         "quote_context_coverage": quote_context_coverage,
         "quote_missing_root_cause": quote_missing_root_cause,
+        "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
+        "kline_coverage": readiness_reports.get("kline_coverage") or {},
+        "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
+        "final_entry_contract_blocker_breakdown": (
+            (readiness_reports.get("a_class_fastlane_mode_audit") or {}).get("final_entry_contract_blocker_breakdown")
+            or {}
+        ),
+        "per_candidate_effectiveness_summary": readiness_reports.get("candidate_effectiveness") or {},
+        "Markov_effectiveness_summary": readiness_reports.get("markov_effectiveness") or {},
+        "two_d_cross_validity_summary": readiness_reports.get("capture_cross_validity") or {},
+        "next_highest_priority_blocker": readiness_reports.get("next_highest_priority_blocker"),
         "denominator_audit": capture.get("denominator_audit") or {},
         "raw_dog_observation_join": raw_join,
         "raw_all_dog_observation_join": capture.get("raw_all_dog_observation_join") or {},
@@ -348,6 +394,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "PnL_cross_secondary_status": pnl_status(pnl),
         "virtual_Markov_discovery_status": markov_status(markov_reports),
         "capture_judgment_counts": capture_counts,
+        "tests_passed": boolish(tests.get("passed")) if tests else None,
         "tests": tests,
         "notes": [
             "Same-window discovery verdict only; no promotion without future out-of-sample validation.",
@@ -464,7 +511,7 @@ def self_test():
         },
         "report_health": {"promotion_blockers": []},
     }, tests={"passed": True})
-    assert quote_blocked["classification"] == "BLOCKED_DATA"
+    assert quote_blocked["classification"] == "BLOCKED_CONTEXT_COVERAGE"
     assert quote_blocked["blocked_subtype"] == "NEEDS_DATA_WRITER_FIX"
     assert quote_blocked["non_quote_sensitive_capture_discovery_allowed"] is True
     assert quote_blocked["quote_sensitive_slices_blocked"] is True
@@ -487,6 +534,7 @@ def self_test():
         "report_health": {"promotion_blockers": []},
     }, tests={"passed": True})
     assert legacy_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
+    assert legacy_quote_blocked["classification"] == "BLOCKED_CONTEXT_COVERAGE"
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},
