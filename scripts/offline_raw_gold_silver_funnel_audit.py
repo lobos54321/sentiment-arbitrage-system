@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v3"
+SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v4"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 
@@ -524,44 +524,17 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
     if not raw_signal_ids or not table_exists(paper_db, "paper_decision_events"):
         return result
 
-    rows = []
-    int_ids = []
-    text_ids = []
-    for value in raw_signal_ids:
-        try:
-            number = int(value)
-            if str(number) == str(value):
-                int_ids.append(number)
-            else:
-                text_ids.append(value)
-        except Exception:
-            text_ids.append(value)
-    for chunk in chunks(int_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        rows.extend(
-            paper_db.execute(
-                f"""
-                SELECT signal_id, component, event_type, decision, reason
-                FROM paper_decision_events
-                WHERE event_ts >= ? AND event_ts <= ?
-                  AND signal_id IN ({placeholders})
-                """,
-                [since_ts - 60, until_ts + 900, *chunk],
-            ).fetchall()
-        )
-    for chunk in chunks(text_ids):
-        placeholders = ",".join("?" for _ in chunk)
-        rows.extend(
-            paper_db.execute(
-                f"""
-                SELECT signal_id, component, event_type, decision, reason
-                FROM paper_decision_events
-                WHERE event_ts >= ? AND event_ts <= ?
-                  AND CAST(signal_id AS TEXT) IN ({placeholders})
-                """,
-                [since_ts - 60, until_ts + 900, *chunk],
-            ).fetchall()
-        )
+    raw_id_set = set(raw_signal_ids or [])
+    window_rows = paper_db.execute(
+        """
+        SELECT signal_id, component, event_type, decision, reason
+        FROM paper_decision_events
+        WHERE event_ts >= ? AND event_ts <= ?
+          AND signal_id IS NOT NULL
+        """,
+        [since_ts - 60, until_ts + 900],
+    ).fetchall()
+    rows = [row for row in window_rows if signal_id_key(row["signal_id"]) in raw_id_set]
 
     by_signal = defaultdict(list)
     grouped = Counter()
@@ -572,7 +545,6 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
         by_signal[key].append(row)
         grouped[(row["component"], row["event_type"], row["decision"], row["reason"])] += 1
 
-    raw_id_set = set(raw_signal_ids or [])
     with_decision = set(by_signal)
     pass_allow = set()
     pending = set()
