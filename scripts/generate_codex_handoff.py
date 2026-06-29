@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v1"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v2"
 FIXABLE_BLOCKER_HINTS = {
     "raw_dog_rows_incomplete": "Fix raw dog row materialization or report input wiring before judging capture recall.",
     "raw_gold_silver_denominator_rows_truncated": "Ensure the raw dog JSON/API includes complete event rows or use --raw-db.",
@@ -24,6 +24,8 @@ FIXABLE_BLOCKER_HINTS = {
     "schema_mixed_quote_sensitive_slices_blocked": "Wait for clean v2 rows or split report by context_schema_version before judging quote-sensitive slices.",
     "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked": "Do not judge quote-sensitive candidates until v2 schema coverage is at least 95%.",
     "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked": "Do not judge quote-sensitive candidates until quote_clean_definition v2 coverage is at least 95%.",
+    "source_quote_clean_coverage_below_80pct": "Inspect quote context coverage audit and writer/source breakdowns; fix data/report wiring only, not entry policy.",
+    "source_quote_executable_coverage_below_80pct": "Inspect executable quote context coverage audit and writer/source breakdowns; fix data/report wiring only, not gates or executor.",
     "candidate_count_observed_not_84": "Inspect candidate shadow observer coverage and catalog consistency.",
     "candidate_count_mismatch": "Inspect candidate shadow observer expected/observed candidate counts.",
     "observation_coverage_below_99pct": "Inspect per-signal observation coverage and missing candidate rows.",
@@ -63,7 +65,10 @@ def build_handoff(verdict):
         f"- schema_version: `{SCHEMA_VERSION}`",
         f"- generated_at: `{utc_now()}`",
         f"- verdict: `{verdict.get('classification')}`",
+        f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
+        f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
+        f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
         f"- handoff_needed: `{str(needed).lower()}`",
         "",
         "## Guardrails",
@@ -135,6 +140,48 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    quote_context = verdict.get("quote_context_coverage") or {}
+    if quote_context:
+        compact_quote_context = {
+            key: quote_context.get(key)
+            for key in (
+                "coverage_denominator_type",
+                "coverage_denominator_rows",
+                "context_carrier_candidate_ids",
+                "source_quote_clean_present_rate",
+                "source_quote_executable_present_rate",
+                "source_quote_clean_true_rate",
+                "source_quote_clean_false_rate",
+                "source_quote_clean_missing_rate",
+                "source_quote_clean_unknown_rate",
+                "source_quote_clean_not_applicable_rate",
+                "source_quote_executable_true_rate",
+                "source_quote_executable_false_rate",
+                "source_quote_executable_missing_rate",
+                "source_quote_executable_unknown_rate",
+                "source_quote_executable_not_applicable_rate",
+            )
+        }
+        compact_quote_context["breakdowns"] = {
+            key: quote_context.get("breakdowns", {}).get(key)
+            for key in (
+                "by_context_schema_version",
+                "by_source_component",
+                "by_signal_type",
+                "by_writer_path",
+                "by_candidate_family",
+                "by_lifecycle_profile",
+                "by_context_carrier_candidate_id",
+            )
+        }
+        lines.extend([
+            "## Quote Context Coverage",
+            "",
+            "```json",
+            json.dumps(compact_quote_context, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     lines.extend([
         "## H1 / H2",
         "",
@@ -179,12 +226,23 @@ def self_test():
         "signal_id_join_rate": 1.0,
         "context_schema_version_counts": {"v": 1},
         "quote_clean_definition": {"counts": {"q": 1}},
+        "blocked_subtype": "QUOTE_CONTEXT_COVERAGE",
+        "non_quote_sensitive_capture_discovery_allowed": True,
+        "quote_sensitive_slices_blocked": True,
+        "quote_context_coverage": {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_denominator_rows": 10,
+            "context_carrier_candidate_ids": ["current_all"],
+            "source_quote_clean_present_rate": 0.7,
+            "source_quote_executable_present_rate": 0.6,
+        },
         "H1_capture_metrics": {"status": "WATCH"},
         "H2_capture_metrics": {"status": "not_observed"},
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
     assert "raw_dog_rows_incomplete" in text
+    assert "Quote Context Coverage" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text

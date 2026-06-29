@@ -21,9 +21,13 @@ from pathlib import Path
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
-SCHEMA_VERSION = "offline_candidate_capture_discovery.v2"
+SCHEMA_VERSION = "offline_candidate_capture_discovery.v3"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_MAX_SCAN_ROWS = 2_000_000
+QUOTE_CLEAN_KEYS = ("source_quote_clean", "source_quote_clean_seen")
+QUOTE_EXECUTABLE_KEYS = ("source_quote_executable", "source_quote_executable_proxy")
+QUOTE_UNKNOWN_VALUES = {"unknown", "unk", "null", "none", "unavailable"}
+QUOTE_NOT_APPLICABLE_VALUES = {"not_applicable", "not-applicable", "n/a", "na", "not applicable"}
 
 DIMENSIONS = (
     "source_quote_clean",
@@ -104,6 +108,29 @@ def rate(numerator, denominator):
     if not denominator:
         return None
     return round(float(numerator) / float(denominator), 6)
+
+
+def compact_rate_counts(prefix, counts, denominator):
+    true_n = int(counts.get("true") or 0)
+    false_n = int(counts.get("false") or 0)
+    missing_n = int(counts.get("missing") or 0)
+    unknown_n = int(counts.get("unknown") or 0)
+    not_applicable_n = int(counts.get("not_applicable") or 0)
+    present_n = true_n + false_n + not_applicable_n
+    return {
+        f"{prefix}_present_rows": present_n,
+        f"{prefix}_true_rows": true_n,
+        f"{prefix}_false_rows": false_n,
+        f"{prefix}_missing_rows": missing_n,
+        f"{prefix}_unknown_rows": unknown_n,
+        f"{prefix}_not_applicable_rows": not_applicable_n,
+        f"{prefix}_present_rate": rate(present_n, denominator),
+        f"{prefix}_true_rate": rate(true_n, denominator),
+        f"{prefix}_false_rate": rate(false_n, denominator),
+        f"{prefix}_missing_rate": rate(missing_n, denominator),
+        f"{prefix}_unknown_rate": rate(unknown_n, denominator),
+        f"{prefix}_not_applicable_rate": rate(not_applicable_n, denominator),
+    }
 
 
 def table_exists(db, name):
@@ -590,12 +617,168 @@ def build_coverage(observations, expected_count):
     }
 
 
-def build_context_health(observations):
-    signal_payloads = {}
+def quote_context_status(payload, keys):
+    for applicable_key in ("quote_context_applicable", "source_quote_context_applicable"):
+        if applicable_key in payload:
+            value = payload.get(applicable_key)
+            if isinstance(value, bool) and value is False:
+                return "not_applicable"
+            if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "n", "off"}:
+                return "not_applicable"
+    for key in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if value == "":
+            continue
+        if value is None:
+            return "unknown"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return "true" if value != 0 else "false"
+        text = str(value).strip().lower()
+        if text in QUOTE_NOT_APPLICABLE_VALUES:
+            return "not_applicable"
+        if text in QUOTE_UNKNOWN_VALUES:
+            return "unknown"
+        if text in {"1", "true", "yes", "y", "on"}:
+            return "true"
+        if text in {"0", "false", "no", "n", "off"}:
+            return "false"
+        return "unknown"
+    return "missing"
+
+
+def context_carrier_score(row):
+    payload = row["payload"]
+    candidate_id = row.get("candidate_id") or ""
+    priority = {
+        "current_all": 10_000,
+        "current_would_enter_all": 9_000,
+    }.get(candidate_id, 0)
+    context_fields = (
+        "context_schema_version",
+        "quote_clean_definition",
+        "source_quote_clean",
+        "source_quote_clean_seen",
+        "source_quote_executable",
+        "source_quote_executable_proxy",
+        "source_component",
+        "source_resonance_state",
+        "signal_type",
+        "lifecycle_profile",
+        "lifecycle_state",
+        "markov_bucket",
+        "volume_profile",
+        "candle_pattern",
+    )
+    populated = sum(1 for field in context_fields if payload.get(field) not in (None, ""))
+    return (priority + populated, populated, safe_int(row.get("observed_at")) or 0)
+
+
+def select_context_carrier_rows(observations):
+    by_signal = defaultdict(list)
     for row in observations:
-        signal_payloads.setdefault(row["signal_id"], row["payload"])
-    rows = list(signal_payloads.values())
+        by_signal[row["signal_id"]].append(row)
+    carriers = []
+    for rows in by_signal.values():
+        carriers.append(max(rows, key=context_carrier_score))
+    return carriers
+
+
+def writer_path(payload):
+    for key in (
+        "quote_context_writer_path",
+        "context_writer_path",
+        "writer_path",
+        "writer",
+        "context_source",
+        "source_writer_path",
+    ):
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return "candidate_shadow_observer:inferred"
+
+
+def quote_group_key(row, dimension):
+    payload = row["payload"]
+    if dimension == "by_context_schema_version":
+        return str(payload.get("context_schema_version") or "legacy_or_missing")
+    if dimension == "by_source_component":
+        return str(payload.get("source_component") or "UNKNOWN")
+    if dimension == "by_signal_type":
+        return str(payload.get("signal_type") or "UNKNOWN")
+    if dimension == "by_writer_path":
+        return writer_path(payload)
+    if dimension == "by_candidate_family":
+        return str(row.get("family") or "UNKNOWN")
+    if dimension == "by_lifecycle_profile":
+        return str(payload.get("lifecycle_profile") or payload.get("lifecycle_state") or "UNKNOWN")
+    if dimension == "by_context_carrier_candidate_id":
+        return str(row.get("candidate_id") or "UNKNOWN")
+    return "UNKNOWN"
+
+
+def quote_coverage_summary(rows):
+    denominator = len(rows)
+    clean_counts = defaultdict(int)
+    executable_counts = defaultdict(int)
+    for row in rows:
+        payload = row["payload"]
+        clean_counts[quote_context_status(payload, QUOTE_CLEAN_KEYS)] += 1
+        executable_counts[quote_context_status(payload, QUOTE_EXECUTABLE_KEYS)] += 1
+    return {
+        "coverage_denominator_rows": denominator,
+        **compact_rate_counts("source_quote_clean", clean_counts, denominator),
+        **compact_rate_counts("source_quote_executable", executable_counts, denominator),
+    }
+
+
+def build_quote_context_coverage_audit(observations):
+    carriers = select_context_carrier_rows(observations)
+    breakdowns = {}
+    for dimension in (
+        "by_context_schema_version",
+        "by_source_component",
+        "by_signal_type",
+        "by_writer_path",
+        "by_candidate_family",
+        "by_lifecycle_profile",
+        "by_context_carrier_candidate_id",
+    ):
+        grouped = defaultdict(list)
+        for row in carriers:
+            grouped[quote_group_key(row, dimension)].append(row)
+        breakdowns[dimension] = {
+            key: quote_coverage_summary(rows)
+            for key, rows in sorted(grouped.items(), key=lambda item: str(item[0]))
+        }
+    top = quote_coverage_summary(carriers)
+    top.update(
+        {
+            "schema_version": "quote_context_coverage_audit.v1",
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "context_carrier_candidate_ids": sorted({row.get("candidate_id") for row in carriers if row.get("candidate_id")}),
+            "breakdowns": breakdowns,
+            "definitions": {
+                "present_rate": "true + false + not_applicable over signal_context_carrier_rows; unknown and missing are not treated as known coverage.",
+                "false_is_present": True,
+                "not_applicable_is_present": True,
+                "coverage_is_signal_level": True,
+                "all_84_candidate_rows_used_as_denominator": False,
+            },
+        }
+    )
+    return top
+
+
+def build_context_health(observations):
+    carrier_rows = select_context_carrier_rows(observations)
+    rows = [row["payload"] for row in carrier_rows]
     signal_count = len(rows)
+    quote_context_coverage = build_quote_context_coverage_audit(observations)
     fields = (
         "source_quote_clean",
         "source_quote_clean_seen",
@@ -650,7 +833,13 @@ def build_context_health(observations):
     expected_schema_coverage_pct = pct(expected_schema_rows, signal_count)
     expected_quote_definition_coverage_pct = pct(expected_quote_definition_rows, signal_count)
     gaps = []
-    for field in ("source_quote_clean", "source_quote_executable", "lifecycle_profile", "markov_bucket", "volume_profile"):
+    quote_clean_present_rate = quote_context_coverage.get("source_quote_clean_present_rate")
+    quote_executable_present_rate = quote_context_coverage.get("source_quote_executable_present_rate")
+    if quote_clean_present_rate is None or quote_clean_present_rate < 0.8:
+        gaps.append("source_quote_clean_coverage_below_80pct")
+    if quote_executable_present_rate is None or quote_executable_present_rate < 0.8:
+        gaps.append("source_quote_executable_coverage_below_80pct")
+    for field in ("lifecycle_profile", "markov_bucket", "volume_profile"):
         coverage = field_coverage[field]["coverage_pct"]
         if coverage is None or coverage < 80:
             gaps.append(f"{field}_coverage_below_80pct")
@@ -668,6 +857,7 @@ def build_context_health(observations):
             "source_quote_executable_signals": quote_executable,
             "signal_price_seen_without_quote_context_signals": signal_price_only,
         },
+        "quote_context_coverage": quote_context_coverage,
         "context_schema_versions": dict(sorted(schema_versions.items())),
         "context_schema_version_counts": dict(sorted(schema_versions.items())),
         "expected_context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,
@@ -1218,6 +1408,7 @@ def summarize(
         },
         "coverage": coverage,
         "context_health": context_health,
+        "quote_context_coverage": context_health.get("quote_context_coverage"),
         "raw_gold_silver_denominator": {
             "available": bool(raw_dogs),
             "mode": "evaluable_gold_silver",

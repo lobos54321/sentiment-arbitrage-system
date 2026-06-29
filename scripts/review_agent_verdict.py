@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v2"
+SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v3"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
@@ -225,6 +225,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     signal_reconciliation = capture.get("signal_identity_reconciliation") or {}
     denominator_split = capture.get("denominator_split") or signal_reconciliation.get("denominator_split") or {}
     report_health = capture.get("report_health") or {}
+    quote_context_coverage = capture.get("quote_context_coverage") or context.get("quote_context_coverage") or {}
     blockers = list(report_health.get("promotion_blockers") or [])
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
@@ -258,10 +259,35 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         blockers.append("raw_all_unjoined_not_fully_attributed")
     if not quote_definition["quote_sensitive_slices_evaluable"]:
         blockers.append("schema_mixed_quote_sensitive_slices_blocked")
+    clean_present_rate = quote_context_coverage.get("source_quote_clean_present_rate")
+    executable_present_rate = quote_context_coverage.get("source_quote_executable_present_rate")
+    if clean_present_rate is not None and clean_present_rate < 0.8:
+        blockers.append("source_quote_clean_coverage_below_80pct")
+    if executable_present_rate is not None and executable_present_rate < 0.8:
+        blockers.append("source_quote_executable_coverage_below_80pct")
     if tests and not tests.get("passed", False):
         blockers.append("tests_failed")
 
     blockers = sorted(set(blockers))
+    quote_coverage_blockers = {
+        "source_quote_clean_coverage_below_80pct",
+        "source_quote_executable_coverage_below_80pct",
+    }
+    blocked_subtype = "QUOTE_CONTEXT_COVERAGE" if any(blocker in quote_coverage_blockers for blocker in blockers) else None
+    candidate_integrity_ok = (
+        candidate_expected == EXPECTED_CANDIDATE_COUNT
+        and candidate_observed == EXPECTED_CANDIDATE_COUNT
+        and observation_coverage_pct is not None
+        and observation_coverage_pct >= 99
+        and raw_rows_complete is True
+        and (signal_join_rate is not None and signal_join_rate >= 0.99 or unknown_unjoined == 0)
+    )
+    tests_ok = not tests or boolish(tests.get("passed", False))
+    non_quote_sensitive_capture_discovery_allowed = bool(candidate_integrity_ok and tests_ok)
+    quote_sensitive_slices_blocked = (
+        any(blocker in quote_coverage_blockers for blocker in blockers)
+        or not quote_definition["quote_sensitive_slices_evaluable"]
+    )
     capture_counts = capture.get("judgment_counts") or {}
     if blockers:
         classification = "BLOCKED_DATA"
@@ -278,7 +304,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "generated_at": utc_now(),
         "phase": "discovery_mesh",
         "classification": classification,
+        "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
+        "non_quote_sensitive_capture_discovery_allowed": non_quote_sensitive_capture_discovery_allowed,
+        "quote_sensitive_slices_blocked": quote_sensitive_slices_blocked,
         "canary_increase_allowed": False,
         "strategy_change_allowed": False,
         "hard_gate_change_allowed": False,
@@ -298,6 +327,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         ) or signal_reconciliation.get("v4_funnel_scope_vs_autoloop_scope_reconciliation"),
         "context_schema_version_counts": schema_counts,
         "quote_clean_definition": quote_definition,
+        "quote_context_coverage": quote_context_coverage,
         "denominator_audit": capture.get("denominator_audit") or {},
         "raw_dog_observation_join": raw_join,
         "raw_all_dog_observation_join": capture.get("raw_all_dog_observation_join") or {},
@@ -349,6 +379,23 @@ def self_test():
             "expected_quote_clean_definition_coverage_pct": 100.0,
             "quote_sensitive_slices_evaluable": True,
         },
+        "quote_context_coverage": {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_denominator_rows": 10,
+            "context_carrier_candidate_ids": ["current_all"],
+            "source_quote_clean_present_rate": 1.0,
+            "source_quote_executable_present_rate": 1.0,
+            "source_quote_clean_true_rate": 0.5,
+            "source_quote_clean_false_rate": 0.5,
+            "source_quote_clean_missing_rate": 0.0,
+            "source_quote_clean_unknown_rate": 0.0,
+            "source_quote_clean_not_applicable_rate": 0.0,
+            "source_quote_executable_true_rate": 0.4,
+            "source_quote_executable_false_rate": 0.6,
+            "source_quote_executable_missing_rate": 0.0,
+            "source_quote_executable_unknown_rate": 0.0,
+            "source_quote_executable_not_applicable_rate": 0.0,
+        },
         "judgment_counts": {"DISCOVERY_HIT": 0, "WATCH": 1, "TOO_SMALL": 0, "NO_SIGNAL": 0},
         "context_slices": [
             {
@@ -369,8 +416,29 @@ def self_test():
     assert verdict["promotion_allowed"] is False
     assert verdict["candidate_count_observed"] == 84
     assert verdict["H1_capture_metrics"]["rows_found"] == 1
+    assert verdict["blocked_subtype"] is None
+    assert verdict["non_quote_sensitive_capture_discovery_allowed"] is True
+    assert verdict["quote_sensitive_slices_blocked"] is False
+    assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
+    quote_blocked = build_verdict({
+        **capture,
+        "quote_context_coverage": {
+            **capture["quote_context_coverage"],
+            "source_quote_clean_present_rate": 0.7,
+            "source_quote_executable_present_rate": 1.0,
+            "source_quote_clean_false_rate": 0.3,
+            "source_quote_clean_missing_rate": 0.2,
+            "source_quote_clean_unknown_rate": 0.1,
+            "source_quote_clean_not_applicable_rate": 0.1,
+        },
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True})
+    assert quote_blocked["classification"] == "BLOCKED_DATA"
+    assert quote_blocked["blocked_subtype"] == "QUOTE_CONTEXT_COVERAGE"
+    assert quote_blocked["non_quote_sensitive_capture_discovery_allowed"] is True
+    assert quote_blocked["quote_sensitive_slices_blocked"] is True
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},
