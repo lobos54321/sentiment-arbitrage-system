@@ -21,7 +21,7 @@ from pathlib import Path
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
-SCHEMA_VERSION = "offline_candidate_capture_discovery.v3"
+SCHEMA_VERSION = "offline_candidate_capture_discovery.v4"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_MAX_SCAN_ROWS = 2_000_000
 QUOTE_CLEAN_KEYS = ("source_quote_clean", "source_quote_clean_seen")
@@ -736,6 +736,161 @@ def quote_coverage_summary(rows):
     }
 
 
+def payload_key_presence_signature(payload):
+    keys = (
+        "source_quote_clean",
+        "source_quote_clean_seen",
+        "source_quote_executable",
+        "source_quote_executable_proxy",
+        "quote_context_applicable",
+        "source_quote_context_applicable",
+        "context_schema_version",
+        "quote_clean_definition",
+        "source_component",
+        "signal_type",
+        "lifecycle_profile",
+    )
+    present = [key for key in keys if payload.get(key) not in (None, "")]
+    missing = [key for key in keys if payload.get(key) in (None, "")]
+    return "present=" + ",".join(present or ["none"]) + "|missing=" + ",".join(missing or ["none"])
+
+
+def row_should_be_quote_not_applicable(row):
+    payload = row["payload"]
+    for key in ("quote_context_applicable", "source_quote_context_applicable"):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return value is False
+        if isinstance(value, str) and value.strip().lower() in {"0", "false", "no", "n", "off", *QUOTE_NOT_APPLICABLE_VALUES}:
+            return True
+    signal_type = str(payload.get("signal_type") or "").strip().lower()
+    source_component = str(payload.get("source_component") or "").strip().lower()
+    writer = writer_path(payload).lower()
+    text = " ".join([signal_type, source_component, writer])
+    not_applicable_markers = (
+        "watch_only",
+        "observer_only",
+        "no_quote_required",
+        "quote_not_applicable",
+        "not_applicable",
+    )
+    return any(marker in text for marker in not_applicable_markers)
+
+
+def increment_breakdown(target, key):
+    target[str(key or "UNKNOWN")] += 1
+
+
+def build_quote_missing_root_cause_audit(observations):
+    carriers = select_context_carrier_rows(observations)
+    missing_rows = []
+    for row in carriers:
+        payload = row["payload"]
+        clean_status = quote_context_status(payload, QUOTE_CLEAN_KEYS)
+        executable_status = quote_context_status(payload, QUOTE_EXECUTABLE_KEYS)
+        if clean_status == "missing" or executable_status == "missing":
+            missing_rows.append((row, clean_status, executable_status))
+
+    by_schema = defaultdict(int)
+    by_source_component = defaultdict(int)
+    by_signal_type = defaultdict(int)
+    by_writer_path = defaultdict(int)
+    by_lifecycle = defaultdict(int)
+    by_payload_presence = defaultdict(int)
+    legacy_count = 0
+    writer_path_count = 0
+    should_be_not_applicable_count = 0
+    unknown_count = 0
+    samples = []
+
+    for row, clean_status, executable_status in missing_rows:
+        payload = row["payload"]
+        schema = str(payload.get("context_schema_version") or "legacy_or_missing")
+        writer = writer_path(payload)
+        source_component = str(payload.get("source_component") or "UNKNOWN")
+        signal_type = str(payload.get("signal_type") or "UNKNOWN")
+        lifecycle = str(payload.get("lifecycle_profile") or payload.get("lifecycle_state") or "UNKNOWN")
+        signature = payload_key_presence_signature(payload)
+        increment_breakdown(by_schema, schema)
+        increment_breakdown(by_source_component, source_component)
+        increment_breakdown(by_signal_type, signal_type)
+        increment_breakdown(by_writer_path, writer)
+        increment_breakdown(by_lifecycle, lifecycle)
+        increment_breakdown(by_payload_presence, signature)
+
+        if schema != EXPECTED_CONTEXT_SCHEMA_VERSION:
+            legacy_count += 1
+            reason = "legacy_schema"
+        elif row_should_be_quote_not_applicable(row):
+            should_be_not_applicable_count += 1
+            reason = "should_be_not_applicable"
+        elif writer:
+            writer_path_count += 1
+            reason = "v2_writer_path_missing_quote_fields"
+        else:
+            unknown_count += 1
+            reason = "unknown"
+        if len(samples) < 25:
+            samples.append(
+                {
+                    "signal_id": row.get("signal_id"),
+                    "token_ca": row.get("token_ca"),
+                    "candidate_id": row.get("candidate_id"),
+                    "family": row.get("family"),
+                    "signal_ts": row.get("signal_ts"),
+                    "observed_at": row.get("observed_at"),
+                    "context_schema_version": schema,
+                    "source_component": source_component,
+                    "signal_type": signal_type,
+                    "writer_path": writer,
+                    "lifecycle_profile": lifecycle,
+                    "source_quote_clean_status": clean_status,
+                    "source_quote_executable_status": executable_status,
+                    "payload_key_presence": signature,
+                    "root_cause": reason,
+                }
+            )
+
+    total = len(missing_rows)
+    if total <= 0:
+        dominant_root_cause = "none"
+    elif legacy_count / total >= 0.5:
+        dominant_root_cause = "legacy_schema"
+    elif should_be_not_applicable_count / total >= 0.5:
+        dominant_root_cause = "should_be_not_applicable"
+    elif writer_path_count / total >= 0.5:
+        dominant_root_cause = "v2_writer_path_missing_quote_fields"
+    elif unknown_count:
+        dominant_root_cause = "unknown"
+    else:
+        dominant_root_cause = "mixed"
+    return {
+        "schema_version": "quote_missing_root_cause_audit.v1",
+        "coverage_denominator_type": "signal_context_carrier_rows",
+        "coverage_denominator_rows": len(carriers),
+        "quote_missing_rows_total": total,
+        "missing_by_context_schema_version": dict(sorted(by_schema.items())),
+        "missing_by_source_component": dict(sorted(by_source_component.items())),
+        "missing_by_signal_type": dict(sorted(by_signal_type.items())),
+        "missing_by_writer_path": dict(sorted(by_writer_path.items())),
+        "missing_by_lifecycle_profile": dict(sorted(by_lifecycle.items())),
+        "missing_by_payload_key_presence": dict(sorted(by_payload_presence.items())),
+        "missing_due_to_legacy_schema_count": legacy_count,
+        "missing_due_to_writer_path_count": writer_path_count,
+        "missing_should_be_not_applicable_count": should_be_not_applicable_count,
+        "missing_unknown_count": unknown_count,
+        "dominant_root_cause": dominant_root_cause,
+        "samples": samples,
+        "notes": [
+            "Read-only audit; it classifies missing quote context fields but does not alter entry policy or runtime behavior.",
+            "source_quote_clean=false and source_quote_executable=false are not counted as missing.",
+            "not_applicable is not counted as missing when explicitly encoded.",
+        ],
+    }
+
+
 def build_quote_context_coverage_audit(observations):
     carriers = select_context_carrier_rows(observations)
     breakdowns = {}
@@ -779,6 +934,7 @@ def build_context_health(observations):
     rows = [row["payload"] for row in carrier_rows]
     signal_count = len(rows)
     quote_context_coverage = build_quote_context_coverage_audit(observations)
+    quote_missing_root_cause = build_quote_missing_root_cause_audit(observations)
     fields = (
         "source_quote_clean",
         "source_quote_clean_seen",
@@ -858,6 +1014,7 @@ def build_context_health(observations):
             "signal_price_seen_without_quote_context_signals": signal_price_only,
         },
         "quote_context_coverage": quote_context_coverage,
+        "quote_missing_root_cause": quote_missing_root_cause,
         "context_schema_versions": dict(sorted(schema_versions.items())),
         "context_schema_version_counts": dict(sorted(schema_versions.items())),
         "expected_context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,
@@ -1409,6 +1566,7 @@ def summarize(
         "coverage": coverage,
         "context_health": context_health,
         "quote_context_coverage": context_health.get("quote_context_coverage"),
+        "quote_missing_root_cause": context_health.get("quote_missing_root_cause"),
         "raw_gold_silver_denominator": {
             "available": bool(raw_dogs),
             "mode": "evaluable_gold_silver",

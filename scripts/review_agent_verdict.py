@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v3"
+SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v4"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
@@ -226,6 +226,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     denominator_split = capture.get("denominator_split") or signal_reconciliation.get("denominator_split") or {}
     report_health = capture.get("report_health") or {}
     quote_context_coverage = capture.get("quote_context_coverage") or context.get("quote_context_coverage") or {}
+    quote_missing_root_cause = capture.get("quote_missing_root_cause") or context.get("quote_missing_root_cause") or {}
     blockers = list(report_health.get("promotion_blockers") or [])
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
@@ -273,7 +274,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "source_quote_clean_coverage_below_80pct",
         "source_quote_executable_coverage_below_80pct",
     }
-    blocked_subtype = "QUOTE_CONTEXT_COVERAGE" if any(blocker in quote_coverage_blockers for blocker in blockers) else None
+    blocked_subtype = None
+    if any(blocker in quote_coverage_blockers for blocker in blockers):
+        dominant_quote_missing = quote_missing_root_cause.get("dominant_root_cause")
+        if dominant_quote_missing == "legacy_schema":
+            blocked_subtype = "CLEAN_V2_WINDOW_PENDING"
+        elif dominant_quote_missing == "v2_writer_path_missing_quote_fields":
+            blocked_subtype = "NEEDS_DATA_WRITER_FIX"
+        elif dominant_quote_missing == "should_be_not_applicable":
+            blocked_subtype = "NEEDS_NOT_APPLICABLE_CLASSIFICATION"
+        else:
+            blocked_subtype = "QUOTE_CONTEXT_COVERAGE"
     candidate_integrity_ok = (
         candidate_expected == EXPECTED_CANDIDATE_COUNT
         and candidate_observed == EXPECTED_CANDIDATE_COUNT
@@ -328,6 +339,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "context_schema_version_counts": schema_counts,
         "quote_clean_definition": quote_definition,
         "quote_context_coverage": quote_context_coverage,
+        "quote_missing_root_cause": quote_missing_root_cause,
         "denominator_audit": capture.get("denominator_audit") or {},
         "raw_dog_observation_join": raw_join,
         "raw_all_dog_observation_join": capture.get("raw_all_dog_observation_join") or {},
@@ -396,6 +408,15 @@ def self_test():
             "source_quote_executable_unknown_rate": 0.0,
             "source_quote_executable_not_applicable_rate": 0.0,
         },
+        "quote_missing_root_cause": {
+            "schema_version": "quote_missing_root_cause_audit.v1",
+            "quote_missing_rows_total": 0,
+            "missing_due_to_legacy_schema_count": 0,
+            "missing_due_to_writer_path_count": 0,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "none",
+        },
         "judgment_counts": {"DISCOVERY_HIT": 0, "WATCH": 1, "TOO_SMALL": 0, "NO_SIGNAL": 0},
         "context_slices": [
             {
@@ -433,12 +454,39 @@ def self_test():
             "source_quote_clean_unknown_rate": 0.1,
             "source_quote_clean_not_applicable_rate": 0.1,
         },
+        "quote_missing_root_cause": {
+            "quote_missing_rows_total": 3,
+            "missing_due_to_legacy_schema_count": 0,
+            "missing_due_to_writer_path_count": 3,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "v2_writer_path_missing_quote_fields",
+        },
         "report_health": {"promotion_blockers": []},
     }, tests={"passed": True})
     assert quote_blocked["classification"] == "BLOCKED_DATA"
-    assert quote_blocked["blocked_subtype"] == "QUOTE_CONTEXT_COVERAGE"
+    assert quote_blocked["blocked_subtype"] == "NEEDS_DATA_WRITER_FIX"
     assert quote_blocked["non_quote_sensitive_capture_discovery_allowed"] is True
     assert quote_blocked["quote_sensitive_slices_blocked"] is True
+    assert quote_blocked["quote_missing_root_cause"]["missing_due_to_writer_path_count"] == 3
+    legacy_quote_blocked = build_verdict({
+        **capture,
+        "quote_context_coverage": {
+            **capture["quote_context_coverage"],
+            "source_quote_clean_present_rate": 0.6,
+            "source_quote_executable_present_rate": 0.6,
+        },
+        "quote_missing_root_cause": {
+            "quote_missing_rows_total": 4,
+            "missing_due_to_legacy_schema_count": 4,
+            "missing_due_to_writer_path_count": 0,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "legacy_schema",
+        },
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True})
+    assert legacy_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},

@@ -384,6 +384,32 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         ),
         "```",
         "",
+        "## Quote Missing Root Cause",
+        "",
+        "```json",
+        json.dumps(
+            {
+                key: (verdict.get("quote_missing_root_cause") or {}).get(key)
+                for key in (
+                    "quote_missing_rows_total",
+                    "missing_by_context_schema_version",
+                    "missing_by_source_component",
+                    "missing_by_signal_type",
+                    "missing_by_writer_path",
+                    "missing_by_lifecycle_profile",
+                    "missing_by_payload_key_presence",
+                    "missing_due_to_legacy_schema_count",
+                    "missing_due_to_writer_path_count",
+                    "missing_should_be_not_applicable_count",
+                    "missing_unknown_count",
+                    "dominant_root_cause",
+                )
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
         "## H1/H2",
         "",
         f"- H1 status: `{(verdict.get('H1_capture_metrics') or {}).get('status')}`",

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v2"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v3"
 FIXABLE_BLOCKER_HINTS = {
     "raw_dog_rows_incomplete": "Fix raw dog row materialization or report input wiring before judging capture recall.",
     "raw_gold_silver_denominator_rows_truncated": "Ensure the raw dog JSON/API includes complete event rows or use --raw-db.",
@@ -182,6 +182,33 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    quote_missing = verdict.get("quote_missing_root_cause") or {}
+    if quote_missing:
+        compact_quote_missing = {
+            key: quote_missing.get(key)
+            for key in (
+                "quote_missing_rows_total",
+                "missing_by_context_schema_version",
+                "missing_by_source_component",
+                "missing_by_signal_type",
+                "missing_by_writer_path",
+                "missing_by_lifecycle_profile",
+                "missing_by_payload_key_presence",
+                "missing_due_to_legacy_schema_count",
+                "missing_due_to_writer_path_count",
+                "missing_should_be_not_applicable_count",
+                "missing_unknown_count",
+                "dominant_root_cause",
+            )
+        }
+        lines.extend([
+            "## Quote Missing Root Cause",
+            "",
+            "```json",
+            json.dumps(compact_quote_missing, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     lines.extend([
         "## H1 / H2",
         "",
@@ -236,6 +263,14 @@ def self_test():
             "source_quote_clean_present_rate": 0.7,
             "source_quote_executable_present_rate": 0.6,
         },
+        "quote_missing_root_cause": {
+            "quote_missing_rows_total": 4,
+            "missing_due_to_legacy_schema_count": 0,
+            "missing_due_to_writer_path_count": 4,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "v2_writer_path_missing_quote_fields",
+        },
         "H1_capture_metrics": {"status": "WATCH"},
         "H2_capture_metrics": {"status": "not_observed"},
     }
@@ -243,6 +278,7 @@ def self_test():
     assert "handoff_needed: `true`" in text
     assert "raw_dog_rows_incomplete" in text
     assert "Quote Context Coverage" in text
+    assert "Quote Missing Root Cause" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text
