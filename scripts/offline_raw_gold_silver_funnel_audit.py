@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v2"
+SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v3"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 
@@ -509,7 +509,114 @@ def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
     return result
 
 
-def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts):
+def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts):
+    result = {
+        "raw_signal_ids": len(raw_signal_ids or []),
+        "decision_records_by_signal_id": 0,
+        "raw_signals_with_decision_record": 0,
+        "raw_signals_without_decision_record": len(raw_signal_ids or []),
+        "raw_signals_with_pass_or_allow": 0,
+        "raw_signals_with_pending_entry": 0,
+        "raw_signals_with_final_entry_contract": 0,
+        "raw_signals_with_final_entry_block": 0,
+        "component_decision_reason_counts": [],
+    }
+    if not raw_signal_ids or not table_exists(paper_db, "paper_decision_events"):
+        return result
+
+    rows = []
+    int_ids = []
+    text_ids = []
+    for value in raw_signal_ids:
+        try:
+            number = int(value)
+            if str(number) == str(value):
+                int_ids.append(number)
+            else:
+                text_ids.append(value)
+        except Exception:
+            text_ids.append(value)
+    for chunk in chunks(int_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            paper_db.execute(
+                f"""
+                SELECT signal_id, component, event_type, decision, reason
+                FROM paper_decision_events
+                WHERE event_ts >= ? AND event_ts <= ?
+                  AND signal_id IN ({placeholders})
+                """,
+                [since_ts - 60, until_ts + 900, *chunk],
+            ).fetchall()
+        )
+    for chunk in chunks(text_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            paper_db.execute(
+                f"""
+                SELECT signal_id, component, event_type, decision, reason
+                FROM paper_decision_events
+                WHERE event_ts >= ? AND event_ts <= ?
+                  AND CAST(signal_id AS TEXT) IN ({placeholders})
+                """,
+                [since_ts - 60, until_ts + 900, *chunk],
+            ).fetchall()
+        )
+
+    by_signal = defaultdict(list)
+    grouped = Counter()
+    for row in rows:
+        key = signal_id_key(row["signal_id"])
+        if key is None:
+            continue
+        by_signal[key].append(row)
+        grouped[(row["component"], row["event_type"], row["decision"], row["reason"])] += 1
+
+    raw_id_set = set(raw_signal_ids or [])
+    with_decision = set(by_signal)
+    pass_allow = set()
+    pending = set()
+    final_contract = set()
+    final_block = set()
+    for signal_id, signal_rows in by_signal.items():
+        for row in signal_rows:
+            event_type = str(row["event_type"] or "").lower()
+            decision = str(row["decision"] or "").upper()
+            component = str(row["component"] or "")
+            if decision in {"PASS", "ALLOW", "WOULD_ENTER", "ENTER"} or event_type in {"would_enter", "enter"}:
+                pass_allow.add(signal_id)
+            if event_type == "pending_entry":
+                pending.add(signal_id)
+            if component == "final_entry_contract":
+                final_contract.add(signal_id)
+                if event_type == "entry_block" or decision == "BLOCK":
+                    final_block.add(signal_id)
+
+    result.update(
+        {
+            "decision_records_by_signal_id": len(rows),
+            "raw_signals_with_decision_record": len(with_decision & raw_id_set),
+            "raw_signals_without_decision_record": len(raw_id_set - with_decision),
+            "raw_signals_with_pass_or_allow": len(pass_allow & raw_id_set),
+            "raw_signals_with_pending_entry": len(pending & raw_id_set),
+            "raw_signals_with_final_entry_contract": len(final_contract & raw_id_set),
+            "raw_signals_with_final_entry_block": len(final_block & raw_id_set),
+            "component_decision_reason_counts": [
+                {
+                    "component": key[0],
+                    "event_type": key[1],
+                    "decision": key[2],
+                    "reason": key[3],
+                    "count": count,
+                }
+                for key, count in grouped.most_common(30)
+            ],
+        }
+    )
+    return result
+
+
+def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts, raw_signal_ids=None):
     """Lightweight operational entry bridge audit.
 
     This intentionally queries indexed fixed components over the report window
@@ -519,6 +626,9 @@ def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts):
     """
     summary = {
         "paper_decision_events_available": table_exists(paper_db, "paper_decision_events"),
+        "raw_signal_decision_bridge": load_raw_signal_decision_bridge(
+            paper_db, raw_signal_ids or [], since_ts, until_ts
+        ),
         "components": {},
         "terminal_event_type_counts_in_decision_events": {},
         "final_entry_contract": {
@@ -984,7 +1094,7 @@ def build_report(args):
         until_ts = max([row.get("signal_ts_norm") or since_ts for row in raw_rows] + [now_ts])
         decisions = [] if args.skip_decisions else load_paper_decisions(paper_db, tokens, since_ts, until_ts)
         trades = [] if args.skip_trades else load_paper_trades(paper_db, tokens, since_ts, until_ts)
-        entry_bridge = load_entry_bridge_summary(paper_db, args.db, since_ts, now_ts)
+        entry_bridge = load_entry_bridge_summary(paper_db, args.db, since_ts, now_ts, signal_ids)
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
         summary = summarize(audits, raw_rows, observations, decisions, trades, args.expected_candidates, entry_bridge)
         blockers = []
