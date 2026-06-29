@@ -862,7 +862,6 @@ def raw_event_mesh_eligible(dog):
 
 def load_identity_observation_rows(db, raw_dogs, since_ts, expected_candidates):
     signal_ids = sorted({dog.get("signal_id") for dog in raw_dogs if dog.get("signal_id")})
-    tokens = sorted({dog.get("token_ca") for dog in raw_dogs if dog.get("token_ca")})
     rows = []
     int_ids = []
     text_ids = []
@@ -897,28 +896,10 @@ def load_identity_observation_rows(db, raw_dogs, since_ts, expected_candidates):
                 ).fetchall()
             )
 
-    token_rows = []
-    for chunk in [tokens[i : i + 200] for i in range(0, len(tokens), 200)]:
-        if not chunk:
-            continue
-        placeholders = ",".join("?" for _ in chunk)
-        token_rows.extend(
-            db.execute(
-                f"""
-                SELECT signal_id, token_ca, signal_ts, candidate_id, observed_at,
-                       CASE WHEN candidate_id = 'current_all' THEN payload_json ELSE NULL END AS payload_json
-                FROM candidate_shadow_observations
-                WHERE observed_at >= ?
-                  AND token_ca IN ({placeholders})
-                """,
-                [since_ts - 3600, *chunk],
-            ).fetchall()
-        )
-
     by_signal = defaultdict(list)
     by_token = defaultdict(list)
     lifecycle_to_signal = defaultdict(set)
-    for row in [*rows, *token_rows]:
+    for row in rows:
         item = {
             "signal_id": signal_id_key(row["signal_id"]),
             "token_ca": row["token_ca"],

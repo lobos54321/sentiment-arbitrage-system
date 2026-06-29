@@ -402,6 +402,7 @@ def write_materialized_artifacts(
     diagnostics=None,
     tests=None,
     state="final",
+    publish_latest=True,
 ):
     diagnostics = diagnostics or []
     markov_paths = markov_paths or {}
@@ -459,7 +460,8 @@ def write_materialized_artifacts(
     summary = build_run_summary(verdict, artifact_paths, diagnostics, tests)
     summary_path = run_dir / "run_summary.md"
     write_text(summary_path, summary)
-    sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path)
+    if publish_latest:
+        sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path)
     return verdict, registry, verdict_path, summary_path, handoff_path, tests_path
 
 
@@ -489,6 +491,7 @@ def run_once(args):
         handoff_dir=handoff_dir,
         capture_path=capture_path,
         state="agent_run_started",
+        publish_latest=False,
     )
 
     tests = run_self_tests(args.test_timeout_sec)
