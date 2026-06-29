@@ -195,6 +195,21 @@ def run_report(name, args, out_path, *, timeout):
 
 
 def git_commit():
+    for key in (
+        "ZEABUR_GIT_COMMIT_SHA",
+        "ZEABUR_GIT_COMMIT",
+        "ZEABUR_COMMIT_SHA",
+        "GIT_COMMIT",
+        "COMMIT_SHA",
+        "SOURCE_VERSION",
+        "RAILWAY_GIT_COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
+        "RENDER_GIT_COMMIT",
+        "GITHUB_SHA",
+    ):
+        value = os.environ.get(key)
+        if value:
+            return value
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -899,11 +914,19 @@ def write_materialized_artifacts(
     context_report = readiness_reports.get("context_coverage") or {}
     readiness_reports["current_commit"] = git_commit()
     readiness_reports["deployment_commit"] = (
-        os.environ.get("ZEABUR_GIT_COMMIT")
+        os.environ.get("ZEABUR_GIT_COMMIT_SHA")
+        or os.environ.get("ZEABUR_GIT_COMMIT")
+        or os.environ.get("ZEABUR_COMMIT_SHA")
         or os.environ.get("COMMIT_SHA")
         or os.environ.get("GIT_COMMIT")
+        or os.environ.get("SOURCE_VERSION")
+        or os.environ.get("GITHUB_SHA")
         or readiness_reports["current_commit"]
     )
+    if not readiness_reports["current_commit"]:
+        readiness_reports["current_commit"] = readiness_reports["deployment_commit"]
+    if not readiness_reports["deployment_commit"]:
+        readiness_reports["deployment_commit"] = readiness_reports["current_commit"]
     readiness_reports["volume_profile_coverage"] = context_report.get("volume_profile_coverage") or {}
     readiness_reports["kline_coverage"] = context_report.get("kline_coverage") or {}
     readiness_reports["next_highest_priority_blocker"] = first_blocker_priority(
