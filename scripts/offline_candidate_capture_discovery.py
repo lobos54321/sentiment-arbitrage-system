@@ -21,7 +21,7 @@ from pathlib import Path
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
-SCHEMA_VERSION = "offline_candidate_capture_discovery.v1"
+SCHEMA_VERSION = "offline_candidate_capture_discovery.v2"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_MAX_SCAN_ROWS = 2_000_000
 
@@ -173,14 +173,37 @@ def is_gold_silver_row(row):
 
 
 def normalize_raw_dog_row(row):
+    payload = jloads(row.get("payload_json"))
     signal_id = signal_id_key(row.get("signal_id"))
     token_ca = row.get("token_ca") or row.get("token") or row.get("ca")
     signal_ts = safe_int(row.get("signal_ts") or row.get("timestamp"))
+    alias_ids = []
+    for key in ("premium_signal_id", "source_signal_id", "raw_signal_id", "signal_id"):
+        value = payload.get(key)
+        normalized = signal_id_key(value)
+        if normalized and normalized != signal_id:
+            alias_ids.append(normalized)
     return {
+        "raw_event_id": row.get("id"),
+        "raw_signal_id_raw": row.get("signal_id"),
         "signal_id": signal_id,
+        "signal_alias_ids": sorted(set(alias_ids)),
         "token_ca": str(token_ca) if token_ca not in (None, "") else None,
         "symbol": row.get("symbol"),
         "signal_ts": signal_ts,
+        "signal_type": row.get("signal_type"),
+        "route": row.get("route"),
+        "hard_gate_status": row.get("hard_gate_status"),
+        "source": row.get("source"),
+        "source_kind": row.get("source_kind"),
+        "source_family": row.get("source_family"),
+        "observation_status": row.get("observation_status"),
+        "kline_covered": row.get("kline_covered"),
+        "baseline_confidence": row.get("baseline_confidence"),
+        "same_source_path": row.get("same_source_path"),
+        "outlier_flag": row.get("outlier_flag"),
+        "sustained_evaluable": row.get("sustained_evaluable"),
+        "lifecycle_id": row.get("lifecycle_id") or payload.get("lifecycle_id"),
         "tier": dog_tier(row),
         "max_sustained_peak_pct": safe_float(row.get("max_sustained_peak_pct")),
         "time_to_sustained_peak_sec": safe_float(row.get("time_to_sustained_peak_sec")),
@@ -262,10 +285,15 @@ def load_raw_dogs_from_db(db, since_ts):
         }
     select = []
     for name in (
+        "id",
         "signal_id",
         "token_ca",
         "symbol",
         "signal_ts",
+        "signal_type",
+        "route",
+        "hard_gate_status",
+        "source",
         "observation_status",
         "kline_covered",
         "baseline_confidence",
@@ -282,6 +310,9 @@ def load_raw_dogs_from_db(db, since_ts):
         "held_to_silver",
         "held_to_gold",
         "exit_reason",
+        "payload_json",
+        "source_kind",
+        "source_family",
     ):
         select.append(name if name in columns else f"NULL AS {name}")
     filters = ["COALESCE(signal_ts, 0) >= ?"]
@@ -796,6 +827,322 @@ def build_raw_dog_observation_join(raw_dogs, observations):
     }
 
 
+def signal_namespace(value):
+    if value in (None, ""):
+        return "missing"
+    text = str(value).strip()
+    if not text:
+        return "missing"
+    try:
+        number = float(text)
+        if math.isfinite(number) and number.is_integer():
+            return "numeric"
+    except Exception:
+        pass
+    return "string"
+
+
+def raw_event_identity_key(dog):
+    return (
+        dog.get("signal_id"),
+        dog.get("token_ca"),
+        dog.get("signal_ts"),
+        dog.get("tier"),
+    )
+
+
+def raw_event_mesh_eligible(dog):
+    if not dog.get("signal_id") or not dog.get("token_ca") or not dog.get("signal_ts"):
+        return False
+    source = str(dog.get("source") or "").strip().lower()
+    if source and source not in {"premium_signals", "premium_channel", "local"}:
+        return False
+    return True
+
+
+def load_identity_observation_rows(db, raw_dogs, since_ts, expected_candidates):
+    signal_ids = sorted({dog.get("signal_id") for dog in raw_dogs if dog.get("signal_id")})
+    tokens = sorted({dog.get("token_ca") for dog in raw_dogs if dog.get("token_ca")})
+    rows = []
+    int_ids = []
+    text_ids = []
+    for value in signal_ids:
+        try:
+            number = int(value)
+            if str(number) == str(value):
+                int_ids.append(number)
+            else:
+                text_ids.append(value)
+        except Exception:
+            text_ids.append(value)
+    for chunk_values in (int_ids, text_ids):
+        for chunk in [chunk_values[i : i + 400] for i in range(0, len(chunk_values), 400)]:
+            if not chunk:
+                continue
+            placeholders = ",".join("?" for _ in chunk)
+            if chunk_values is int_ids:
+                where = f"signal_id IN ({placeholders})"
+            else:
+                where = f"CAST(signal_id AS TEXT) IN ({placeholders})"
+            rows.extend(
+                db.execute(
+                    f"""
+                    SELECT signal_id, token_ca, signal_ts, candidate_id, observed_at,
+                           CASE WHEN candidate_id = 'current_all' THEN payload_json ELSE NULL END AS payload_json
+                    FROM candidate_shadow_observations
+                    WHERE observed_at >= ?
+                      AND {where}
+                    """,
+                    [since_ts - 3600, *chunk],
+                ).fetchall()
+            )
+
+    token_rows = []
+    for chunk in [tokens[i : i + 200] for i in range(0, len(tokens), 200)]:
+        if not chunk:
+            continue
+        placeholders = ",".join("?" for _ in chunk)
+        token_rows.extend(
+            db.execute(
+                f"""
+                SELECT signal_id, token_ca, signal_ts, candidate_id, observed_at,
+                       CASE WHEN candidate_id = 'current_all' THEN payload_json ELSE NULL END AS payload_json
+                FROM candidate_shadow_observations
+                WHERE observed_at >= ?
+                  AND token_ca IN ({placeholders})
+                """,
+                [since_ts - 3600, *chunk],
+            ).fetchall()
+        )
+
+    by_signal = defaultdict(list)
+    by_token = defaultdict(list)
+    lifecycle_to_signal = defaultdict(set)
+    for row in [*rows, *token_rows]:
+        item = {
+            "signal_id": signal_id_key(row["signal_id"]),
+            "token_ca": row["token_ca"],
+            "signal_ts": safe_int(row["signal_ts"]),
+            "candidate_id": row["candidate_id"],
+            "observed_at": safe_int(row["observed_at"]),
+            "payload": jloads(row["payload_json"]) if row["payload_json"] else {},
+        }
+        if item["signal_id"]:
+            by_signal[item["signal_id"]].append(item)
+        if item["token_ca"]:
+            by_token[item["token_ca"]].append(item)
+        lifecycle_id = item["payload"].get("lifecycle_id")
+        if lifecycle_id and item["signal_id"]:
+            lifecycle_to_signal[str(lifecycle_id)].add(item["signal_id"])
+
+    signal_candidate_counts = {
+        signal_id: len({row["candidate_id"] for row in signal_rows})
+        for signal_id, signal_rows in by_signal.items()
+    }
+    full_coverage_signals = {
+        signal_id
+        for signal_id, count in signal_candidate_counts.items()
+        if count == expected_candidates
+    }
+    return {
+        "by_signal": by_signal,
+        "by_token": by_token,
+        "lifecycle_to_signal": lifecycle_to_signal,
+        "signal_candidate_counts": signal_candidate_counts,
+        "full_coverage_signals": full_coverage_signals,
+    }
+
+
+def classify_signal_identity(dog, loaded_obs_by_signal, identity_lookup, seen_keys, expected_candidates):
+    key = raw_event_identity_key(dog)
+    if key in seen_keys:
+        return "raw_event_duplicate", None
+    seen_keys.add(key)
+    if not dog.get("signal_id"):
+        return "raw_event_derived_no_signal", None
+    if not raw_event_mesh_eligible(dog):
+        return "not_mesh_eligible", None
+    signal_id = dog.get("signal_id")
+    if signal_id in loaded_obs_by_signal:
+        return "joined_exact_signal_id", signal_id
+    if signal_id in identity_lookup["by_signal"]:
+        return "outside_candidate_observer_window", signal_id
+    for alias_id in dog.get("signal_alias_ids") or []:
+        if alias_id in loaded_obs_by_signal or alias_id in identity_lookup["by_signal"]:
+            return "joined_by_signal_alias", alias_id
+    lifecycle_id = dog.get("lifecycle_id")
+    if lifecycle_id:
+        signals = identity_lookup["lifecycle_to_signal"].get(str(lifecycle_id)) or set()
+        if signals:
+            return "joined_by_lifecycle_id", sorted(signals)[0]
+    token = dog.get("token_ca")
+    signal_ts = dog.get("signal_ts")
+    if token and signal_ts:
+        best = None
+        best_dt = None
+        for obs in identity_lookup["by_token"].get(token, []):
+            obs_ts = obs.get("signal_ts")
+            obs_signal_id = obs.get("signal_id")
+            if not obs_ts or not obs_signal_id:
+                continue
+            dt = abs(int(obs_ts) - int(signal_ts))
+            if dt <= 900 and obs_signal_id in identity_lookup["full_coverage_signals"]:
+                if best_dt is None or dt < best_dt:
+                    best = obs_signal_id
+                    best_dt = dt
+        if best:
+            return "joined_by_token_time_high_confidence", best
+    if signal_id not in identity_lookup["by_signal"]:
+        return "missing_candidate_observation", None
+    return "unknown_unjoined", None
+
+
+def build_signal_identity_reconciliation(db, raw_all_dogs, evaluable_dogs, observations, since_ts, expected_candidates, observation_scan):
+    loaded_obs_by_signal = defaultdict(list)
+    for obs in observations:
+        if obs.get("signal_id"):
+            loaded_obs_by_signal[obs["signal_id"]].append(obs)
+    identity_lookup = load_identity_observation_rows(db, raw_all_dogs, since_ts, expected_candidates)
+
+    counts = defaultdict(int)
+    samples = defaultdict(list)
+    seen_keys = set()
+    row_results = []
+    for dog in raw_all_dogs:
+        category, resolved_signal_id = classify_signal_identity(
+            dog,
+            loaded_obs_by_signal,
+            identity_lookup,
+            seen_keys,
+            expected_candidates,
+        )
+        counts[category] += 1
+        result = {
+            "category": category,
+            "resolved_signal_id": resolved_signal_id,
+            "signal_id": dog.get("signal_id"),
+            "raw_signal_id_raw": dog.get("raw_signal_id_raw"),
+            "token_ca": dog.get("token_ca"),
+            "symbol": dog.get("symbol"),
+            "signal_ts": dog.get("signal_ts"),
+            "tier": dog.get("tier"),
+            "source": dog.get("source"),
+            "observation_status": dog.get("observation_status"),
+            "evaluable": dog in evaluable_dogs,
+        }
+        row_results.append(result)
+        if len(samples[category]) < 10:
+            samples[category].append(result)
+
+    joined_categories = {
+        "joined_exact_signal_id",
+        "joined_by_signal_alias",
+        "joined_by_lifecycle_id",
+        "joined_by_token_time_high_confidence",
+        "outside_candidate_observer_window",
+    }
+    unjoined_categories = {
+        "missing_candidate_observation",
+        "unknown_unjoined",
+    }
+    deterministic_non_mesh = {
+        "not_mesh_eligible",
+        "raw_event_duplicate",
+        "raw_event_derived_no_signal",
+    }
+    raw_all_count = len(raw_all_dogs)
+    mesh_eligible_count = sum(
+        count
+        for category, count in counts.items()
+        if category not in deterministic_non_mesh
+    )
+    reconciled_joined = sum(counts[category] for category in joined_categories)
+    loaded_exact_joined = counts["joined_exact_signal_id"]
+    unjoined = sum(counts[category] for category in unjoined_categories)
+
+    raw_namespaces = defaultdict(int)
+    for dog in raw_all_dogs:
+        raw_namespaces[signal_namespace(dog.get("raw_signal_id_raw") or dog.get("signal_id"))] += 1
+    obs_namespaces = defaultdict(int)
+    for obs in observations:
+        obs_namespaces[signal_namespace(obs.get("signal_id"))] += 1
+
+    denominator_split = {
+        "raw_all_gold_silver": {
+            "event_rows": raw_all_count,
+            "unique_tokens": len({dog.get("token_ca") for dog in raw_all_dogs if dog.get("token_ca")}),
+        },
+        "evaluable_gold_silver": {
+            "event_rows": len(evaluable_dogs),
+            "unique_tokens": len({dog.get("token_ca") for dog in evaluable_dogs if dog.get("token_ca")}),
+        },
+        "mesh_eligible_gold_silver": {
+            "event_rows": mesh_eligible_count,
+            "unique_tokens": len({
+                row.get("token_ca")
+                for row in row_results
+                if row["category"] not in deterministic_non_mesh and row.get("token_ca")
+            }),
+        },
+        "joined_gold_silver": {
+            "event_rows": reconciled_joined,
+            "unique_tokens": len({
+                row.get("token_ca")
+                for row in row_results
+                if row["category"] in joined_categories and row.get("token_ca")
+            }),
+        },
+        "unjoined_gold_silver": {
+            "event_rows": unjoined,
+            "unique_tokens": len({
+                row.get("token_ca")
+                for row in row_results
+                if row["category"] in unjoined_categories and row.get("token_ca")
+            }),
+            "by_reason": {category: counts[category] for category in sorted(unjoined_categories)},
+        },
+    }
+    raw_all_signal_id_join_rate = rate(loaded_exact_joined, raw_all_count)
+    mesh_eligible_signal_id_join_rate = rate(reconciled_joined, mesh_eligible_count)
+    return {
+        "schema_version": "signal_identity_reconciliation.v1",
+        "joined_exact_signal_id": counts["joined_exact_signal_id"],
+        "joined_by_signal_alias": counts["joined_by_signal_alias"],
+        "joined_by_lifecycle_id": counts["joined_by_lifecycle_id"],
+        "joined_by_token_time_high_confidence": counts["joined_by_token_time_high_confidence"],
+        "outside_candidate_observer_window": counts["outside_candidate_observer_window"],
+        "not_mesh_eligible": counts["not_mesh_eligible"],
+        "missing_candidate_observation": counts["missing_candidate_observation"],
+        "raw_event_duplicate": counts["raw_event_duplicate"],
+        "raw_event_derived_no_signal": counts["raw_event_derived_no_signal"],
+        "unknown_unjoined": counts["unknown_unjoined"],
+        "raw_all_signal_id_join_rate": raw_all_signal_id_join_rate,
+        "mesh_eligible_signal_id_join_rate": mesh_eligible_signal_id_join_rate,
+        "reconciled_joined_event_rows": reconciled_joined,
+        "mesh_eligible_event_rows": mesh_eligible_count,
+        "signal_id_namespace_report": {
+            "raw_signal_id_namespaces": dict(sorted(raw_namespaces.items())),
+            "loaded_observation_signal_id_namespaces": dict(sorted(obs_namespaces.items())),
+            "full_observation_exact_signal_count": len(identity_lookup["by_signal"]),
+            "full_observation_full_coverage_signal_count": len(identity_lookup["full_coverage_signals"]),
+            "loaded_observation_signal_count": len(loaded_obs_by_signal),
+        },
+        "denominator_split": denominator_split,
+        "samples_by_reason": {category: rows for category, rows in sorted(samples.items())},
+        "raw_all_unjoined_fully_attributed": counts["unknown_unjoined"] == 0,
+        "v4_funnel_scope_vs_autoloop_scope_reconciliation": {
+            "v4_funnel_scope": "raw dog scoped query: exact raw signal_id IN (...) against candidate_shadow_observations with no rowid scan cap",
+            "autoloop_capture_scope": "global candidate_shadow_observations scan constrained by observed_at and max_scan_rows/rowid_floor",
+            "difference": "A raw dog can have complete 84-row candidate observations in the DB while being absent from the AutoLoop loaded scan when rowid_floor truncates older observations.",
+            "observation_scan_rowid_truncated": bool(observation_scan.get("may_be_rowid_truncated")),
+            "observation_scan_rowid_floor": observation_scan.get("rowid_floor"),
+            "outside_candidate_observer_window_count": counts["outside_candidate_observer_window"],
+            "raw_all_signal_id_join_rate_before_reconciliation": raw_all_signal_id_join_rate,
+            "mesh_eligible_signal_id_join_rate_after_reconciliation": mesh_eligible_signal_id_join_rate,
+        },
+    }
+
+
 def summarize(
     db_path,
     raw_dog_json,
@@ -818,9 +1165,18 @@ def summarize(
             raw_dogs, raw_meta = load_raw_dogs_from_db_path(raw_db_path, since_ts)
         else:
             raw_dogs, raw_meta = load_raw_dogs_from_db(db, since_ts)
+        raw_all_dogs = raw_meta.get("_raw_all_dogs") or raw_dogs
+        signal_identity_reconciliation = build_signal_identity_reconciliation(
+            db,
+            raw_all_dogs,
+            raw_dogs,
+            observations,
+            since_ts,
+            expected_candidates,
+            observation_scan,
+        )
     finally:
         db.close()
-    raw_all_dogs = raw_meta.get("_raw_all_dogs") or raw_dogs
     raw_meta_report = {key: value for key, value in raw_meta.items() if key != "_raw_all_dogs"}
     dog_idx = raw_dog_index(raw_dogs)
     raw_all_dog_idx = raw_dog_index(raw_all_dogs)
@@ -833,7 +1189,12 @@ def summarize(
     raw_dog_observation_join = build_raw_dog_observation_join(raw_dogs, observations)
     raw_all_observation_join = build_raw_dog_observation_join(raw_all_dogs, observations)
     promotion_blockers = []
-    if observation_scan.get("may_be_rowid_truncated"):
+    reconciliation_resolves_join = (
+        (signal_identity_reconciliation.get("mesh_eligible_signal_id_join_rate") or 0) >= 0.99
+        or signal_identity_reconciliation.get("unknown_unjoined", 0) == 0
+    )
+    raw_all_reconciled = signal_identity_reconciliation.get("raw_all_unjoined_fully_attributed") is True
+    if observation_scan.get("may_be_rowid_truncated") and not reconciliation_resolves_join:
         promotion_blockers.append("observation_scan_rowid_truncated")
     if coverage["candidate_count_observed"] != expected_candidates:
         promotion_blockers.append("candidate_count_mismatch")
@@ -843,9 +1204,9 @@ def summarize(
         promotion_blockers.append("raw_gold_silver_denominator_unavailable")
     if raw_meta_report.get("rows_complete_against_summary") is False:
         promotion_blockers.append("raw_gold_silver_denominator_rows_truncated")
-    if raw_dog_observation_join["missing_observation_event_rows"]:
+    if raw_dog_observation_join["missing_observation_event_rows"] and not reconciliation_resolves_join:
         promotion_blockers.append("raw_dog_candidate_observation_join_incomplete")
-    if raw_all_observation_join["missing_observation_event_rows"]:
+    if raw_all_observation_join["missing_observation_event_rows"] and not raw_all_reconciled:
         promotion_blockers.append("raw_all_dog_candidate_observation_join_incomplete")
     promotion_blockers.extend(context_health["gaps"])
     return {
@@ -894,6 +1255,11 @@ def summarize(
             "evaluable_gold_silver_event_rows": dog_idx["event_count"],
             "evaluable_gold_silver_unique_tokens": dog_idx["unique_count"],
         },
+        "denominator_split": signal_identity_reconciliation.get("denominator_split"),
+        "signal_identity_reconciliation": signal_identity_reconciliation,
+        "v4_funnel_scope_vs_autoloop_scope_reconciliation": signal_identity_reconciliation.get(
+            "v4_funnel_scope_vs_autoloop_scope_reconciliation"
+        ),
         "raw_dog_observation_join": raw_dog_observation_join,
         "raw_all_dog_observation_join": raw_all_observation_join,
         "candidate_baseline": baseline[:limit],
@@ -1005,7 +1371,11 @@ def self_test():
         assert raw_db_out["denominator_audit"]["filter_drop_breakdown_non_exclusive"]["dropped_kline_uncovered"] == 1
         assert raw_db_out["context_health"]["quote_clean_definition_counts"]["legacy_or_missing"] == 2
         assert "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked" in raw_db_out["report_health"]["promotion_blockers"]
-        assert "raw_all_dog_candidate_observation_join_incomplete" in raw_db_out["report_health"]["promotion_blockers"]
+        assert raw_db_out["signal_identity_reconciliation"]["joined_exact_signal_id"] == 1
+        assert raw_db_out["signal_identity_reconciliation"]["missing_candidate_observation"] == 1
+        assert raw_db_out["signal_identity_reconciliation"]["unknown_unjoined"] == 0
+        assert raw_db_out["signal_identity_reconciliation"]["raw_all_unjoined_fully_attributed"] is True
+        assert "raw_all_dog_candidate_observation_join_incomplete" not in raw_db_out["report_health"]["promotion_blockers"]
     print("SELF_TEST_PASS offline_candidate_capture_discovery")
 
 

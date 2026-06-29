@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v1"
+SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v2"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
@@ -222,6 +222,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context = capture.get("context_health") or {}
     denominator = capture.get("raw_gold_silver_denominator") or {}
     raw_join = capture.get("raw_dog_observation_join") or {}
+    signal_reconciliation = capture.get("signal_identity_reconciliation") or {}
+    denominator_split = capture.get("denominator_split") or signal_reconciliation.get("denominator_split") or {}
     report_health = capture.get("report_health") or {}
     blockers = list(report_health.get("promotion_blockers") or [])
 
@@ -229,7 +231,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     candidate_observed = coverage.get("candidate_count_observed")
     observation_coverage_pct = coverage.get("coverage_pct")
     raw_rows_complete = denominator.get("rows_complete_against_summary")
-    signal_join_rate = raw_join.get("join_rate")
+    raw_all_signal_id_join_rate = signal_reconciliation.get("raw_all_signal_id_join_rate")
+    mesh_eligible_signal_id_join_rate = signal_reconciliation.get("mesh_eligible_signal_id_join_rate")
+    signal_join_rate = mesh_eligible_signal_id_join_rate if mesh_eligible_signal_id_join_rate is not None else raw_join.get("join_rate")
     schema_counts = context.get("context_schema_version_counts") or context.get("context_schema_versions") or {}
     quote_definition = {
         "expected": context.get("expected_quote_clean_definition") or EXPECTED_QUOTE_CLEAN_DEFINITION,
@@ -246,8 +250,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         blockers.append("observation_coverage_below_99pct")
     if raw_rows_complete is not True:
         blockers.append("raw_dog_rows_incomplete")
-    if signal_join_rate is None or signal_join_rate < 0.99:
+    unknown_unjoined = int(signal_reconciliation.get("unknown_unjoined") or 0)
+    raw_all_unjoined_attributed = signal_reconciliation.get("raw_all_unjoined_fully_attributed") is True
+    if (signal_join_rate is None or signal_join_rate < 0.99) and unknown_unjoined > 0:
         blockers.append("signal_id_join_rate_below_99pct")
+    if signal_reconciliation and not raw_all_unjoined_attributed:
+        blockers.append("raw_all_unjoined_not_fully_attributed")
     if not quote_definition["quote_sensitive_slices_evaluable"]:
         blockers.append("schema_mixed_quote_sensitive_slices_blocked")
     if tests and not tests.get("passed", False):
@@ -281,6 +289,13 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "observation_coverage_pct": observation_coverage_pct,
         "raw_dog_rows_complete": raw_rows_complete is True,
         "signal_id_join_rate": signal_join_rate,
+        "raw_all_signal_id_join_rate": raw_all_signal_id_join_rate,
+        "mesh_eligible_signal_id_join_rate": mesh_eligible_signal_id_join_rate,
+        "signal_identity_reconciliation": signal_reconciliation,
+        "denominator_split": denominator_split,
+        "v4_funnel_scope_vs_autoloop_scope_reconciliation": capture.get(
+            "v4_funnel_scope_vs_autoloop_scope_reconciliation"
+        ) or signal_reconciliation.get("v4_funnel_scope_vs_autoloop_scope_reconciliation"),
         "context_schema_version_counts": schema_counts,
         "quote_clean_definition": quote_definition,
         "denominator_audit": capture.get("denominator_audit") or {},
@@ -313,6 +328,21 @@ def self_test():
         "raw_dog_observation_join": {
             "join_rate": 1.0,
         },
+        "signal_identity_reconciliation": {
+            "joined_exact_signal_id": 1,
+            "joined_by_signal_alias": 0,
+            "joined_by_lifecycle_id": 0,
+            "joined_by_token_time_high_confidence": 0,
+            "outside_candidate_observer_window": 0,
+            "not_mesh_eligible": 0,
+            "missing_candidate_observation": 0,
+            "raw_event_duplicate": 0,
+            "raw_event_derived_no_signal": 0,
+            "unknown_unjoined": 0,
+            "raw_all_signal_id_join_rate": 1.0,
+            "mesh_eligible_signal_id_join_rate": 1.0,
+            "raw_all_unjoined_fully_attributed": True,
+        },
         "context_health": {
             "context_schema_version_counts": {EXPECTED_CONTEXT_SCHEMA_VERSION: 10},
             "quote_clean_definition_counts": {EXPECTED_QUOTE_CLEAN_DEFINITION: 10},
@@ -341,6 +371,22 @@ def self_test():
     assert verdict["H1_capture_metrics"]["rows_found"] == 1
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
+    reconciled = {
+        **capture,
+        "raw_dog_observation_join": {"join_rate": 0.5},
+        "signal_identity_reconciliation": {
+            "joined_exact_signal_id": 1,
+            "missing_candidate_observation": 1,
+            "unknown_unjoined": 0,
+            "raw_all_signal_id_join_rate": 0.5,
+            "mesh_eligible_signal_id_join_rate": 0.5,
+            "raw_all_unjoined_fully_attributed": True,
+        },
+    }
+    verdict_reconciled = build_verdict(reconciled, tests={"passed": True})
+    assert "signal_id_join_rate_below_99pct" not in verdict_reconciled["blockers"]
+    assert verdict_reconciled["signal_id_join_rate"] == 0.5
+    assert verdict_reconciled["promotion_allowed"] is False
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "verdict.json"
         write_json(path, verdict)

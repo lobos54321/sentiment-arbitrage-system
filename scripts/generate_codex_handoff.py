@@ -79,6 +79,8 @@ def build_handoff(verdict):
         f"- observation_coverage_pct: `{verdict.get('observation_coverage_pct')}`",
         f"- raw_dog_rows_complete: `{str(bool(verdict.get('raw_dog_rows_complete'))).lower()}`",
         f"- signal_id_join_rate: `{verdict.get('signal_id_join_rate')}`",
+        f"- raw_all_signal_id_join_rate: `{verdict.get('raw_all_signal_id_join_rate')}`",
+        f"- mesh_eligible_signal_id_join_rate: `{verdict.get('mesh_eligible_signal_id_join_rate')}`",
         "",
     ]
     quote = verdict.get("quote_clean_definition") or {}
@@ -103,6 +105,36 @@ def build_handoff(verdict):
             if hint:
                 lines.append(f"- `{blocker}`: {hint}")
         lines.append("")
+    reconciliation = verdict.get("signal_identity_reconciliation") or {}
+    if reconciliation:
+        lines.extend([
+            "## Signal Identity Reconciliation",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    key: reconciliation.get(key)
+                    for key in (
+                        "joined_exact_signal_id",
+                        "joined_by_signal_alias",
+                        "joined_by_lifecycle_id",
+                        "joined_by_token_time_high_confidence",
+                        "outside_candidate_observer_window",
+                        "not_mesh_eligible",
+                        "missing_candidate_observation",
+                        "raw_event_duplicate",
+                        "raw_event_derived_no_signal",
+                        "unknown_unjoined",
+                        "raw_all_signal_id_join_rate",
+                        "mesh_eligible_signal_id_join_rate",
+                    )
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            "```",
+            "",
+        ])
     lines.extend([
         "## H1 / H2",
         "",
