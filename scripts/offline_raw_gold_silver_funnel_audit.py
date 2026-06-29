@@ -10,6 +10,7 @@ full-scanning the candidate shadow mesh.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import math
 import sqlite3
@@ -18,7 +19,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v1"
+SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v2"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 
@@ -117,6 +118,19 @@ def raw_tier(row):
 
 def is_gold_silver(row):
     return raw_tier(row) in {"gold", "silver"}
+
+
+def compact_grouped_counts(rows):
+    return [
+        {
+            "component": row["component"],
+            "event_type": row["event_type"],
+            "decision": row["decision"],
+            "reason": row["reason"],
+            "count": row["n"],
+        }
+        for row in rows
+    ]
 
 
 def raw_eligibility(row):
@@ -398,6 +412,270 @@ def load_paper_trades(paper_db, tokens, since_ts, until_ts):
     return out
 
 
+ENTRY_BRIDGE_COMPONENTS = (
+    "a_class_live_enqueue",
+    "entry_execution_eligibility",
+    "v27_runtime_mode_gate",
+    "entry_decision_contract",
+    "final_entry_contract",
+    "execution_api",
+    "paper_fast_lane",
+)
+
+ENTRY_TERMINAL_EVENT_TYPES = (
+    "paper_trade_entry_intent",
+    "paper_trade_entry_committed",
+    "entry_quote",
+    "filled_paper",
+)
+
+
+def _extract_hard_blockers(payload):
+    blockers = payload.get("hard_blockers")
+    if blockers is None and isinstance(payload.get("final_entry_contract"), dict):
+        blockers = payload.get("final_entry_contract", {}).get("hard_blockers")
+    if isinstance(blockers, str):
+        try:
+            decoded = json.loads(blockers)
+            blockers = decoded
+        except Exception:
+            blockers = [blockers]
+    if isinstance(blockers, (list, tuple, set)):
+        return [str(item) for item in blockers if item is not None and str(item)]
+    return []
+
+
+def _mode_state(payload):
+    state = payload.get("mode_state")
+    if state is None and isinstance(payload.get("final_entry_contract"), dict):
+        state = payload.get("final_entry_contract", {}).get("mode_state")
+    return state if isinstance(state, dict) else {}
+
+
+def _payload_counter_value(value):
+    if value is None or value == "":
+        return "UNKNOWN"
+    return str(value)
+
+
+def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
+    """Summarize JSONL evidence events without loading payloads into memory."""
+    log_dir = Path(db_path).parent / "paper_evidence_log"
+    result = {
+        "available": log_dir.exists(),
+        "log_dir": str(log_dir),
+        "files_checked": 0,
+        "events_in_window": 0,
+        "parse_errors": 0,
+        "event_type_counts": {},
+        "source_event_type_counts": [],
+    }
+    if not log_dir.exists():
+        return result
+
+    source_event_counts = Counter()
+    event_counts = Counter()
+    start_day = _dt.datetime.fromtimestamp(float(since_ts), tz=_dt.timezone.utc).date()
+    end_day = _dt.datetime.fromtimestamp(float(until_ts), tz=_dt.timezone.utc).date()
+    day = start_day
+    while day <= end_day:
+        path = log_dir / f"paper-events-{day.strftime('%Y%m%d')}.jsonl"
+        if path.exists():
+            result["files_checked"] += 1
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            record = json.loads(line)
+                        except Exception:
+                            result["parse_errors"] += 1
+                            continue
+                        ts = safe_float(record.get("event_ts"))
+                        if ts is None or ts < since_ts or ts > until_ts:
+                            continue
+                        event_type = str(record.get("event_type") or "unknown")
+                        source = str(record.get("source") or "unknown")
+                        event_counts[event_type] += 1
+                        source_event_counts[(source, event_type)] += 1
+                        result["events_in_window"] += 1
+            except Exception:
+                result["parse_errors"] += 1
+        day = day + _dt.timedelta(days=1)
+    result["event_type_counts"] = dict(event_counts)
+    result["source_event_type_counts"] = [
+        {"source": key[0], "event_type": key[1], "count": count}
+        for key, count in source_event_counts.most_common(30)
+    ]
+    return result
+
+
+def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts):
+    """Lightweight operational entry bridge audit.
+
+    This intentionally queries indexed fixed components over the report window
+    instead of loading every decision record for every token. It answers whether
+    raw dogs reached pending enqueue, execution eligibility, final contract, and
+    paper-entry evidence.
+    """
+    summary = {
+        "paper_decision_events_available": table_exists(paper_db, "paper_decision_events"),
+        "components": {},
+        "terminal_event_type_counts_in_decision_events": {},
+        "final_entry_contract": {
+            "rows": 0,
+            "event_type_decision_reason_counts": [],
+            "hard_blockers": {},
+            "normalized_modes": {},
+            "mode_status": {},
+            "mode_action": {},
+            "mode_reason": {},
+            "enforced_counts": {},
+            "quote_success_counts": {},
+            "sample_blocks": [],
+        },
+        "paper_evidence_log": load_paper_evidence_event_counts(db_path, since_ts, until_ts),
+        "paper_trades_entry_ts_window_count": 0,
+    }
+    if table_exists(paper_db, "paper_trades"):
+        try:
+            summary["paper_trades_entry_ts_window_count"] = paper_db.execute(
+                "SELECT COUNT(*) FROM paper_trades WHERE entry_ts >= ? AND entry_ts <= ?",
+                (since_ts, until_ts),
+            ).fetchone()[0]
+        except Exception:
+            summary["paper_trades_entry_ts_window_count"] = None
+
+    if not summary["paper_decision_events_available"]:
+        return summary
+
+    placeholders = ",".join("?" for _ in ENTRY_BRIDGE_COMPONENTS)
+    rows = paper_db.execute(
+        f"""
+        SELECT component, event_type, decision, reason, COUNT(*) AS n
+        FROM paper_decision_events
+        WHERE event_ts >= ? AND event_ts <= ?
+          AND component IN ({placeholders})
+        GROUP BY component, event_type, decision, reason
+        ORDER BY component ASC, n DESC
+        """,
+        [since_ts, until_ts, *ENTRY_BRIDGE_COMPONENTS],
+    ).fetchall()
+    grouped_by_component = defaultdict(list)
+    for row in rows:
+        grouped_by_component[row["component"]].append(row)
+    summary["components"] = {
+        component: compact_grouped_counts(grouped_by_component.get(component, []))
+        for component in ENTRY_BRIDGE_COMPONENTS
+    }
+
+    event_placeholders = ",".join("?" for _ in ENTRY_TERMINAL_EVENT_TYPES)
+    event_rows = paper_db.execute(
+        f"""
+        SELECT event_type, decision, reason, component, COUNT(*) AS n
+        FROM paper_decision_events
+        WHERE event_ts >= ? AND event_ts <= ?
+          AND event_type IN ({event_placeholders})
+        GROUP BY event_type, decision, reason, component
+        ORDER BY n DESC
+        """,
+        [since_ts, until_ts, *ENTRY_TERMINAL_EVENT_TYPES],
+    ).fetchall()
+    summary["terminal_event_type_counts_in_decision_events"] = [
+        {
+            "event_type": row["event_type"],
+            "component": row["component"],
+            "decision": row["decision"],
+            "reason": row["reason"],
+            "count": row["n"],
+        }
+        for row in event_rows
+    ]
+
+    final_rows = paper_db.execute(
+        """
+        SELECT event_ts, signal_id, token_ca, symbol, lifecycle_id, event_type,
+               decision, reason, payload_json
+        FROM paper_decision_events
+        WHERE event_ts >= ? AND event_ts <= ?
+          AND component = 'final_entry_contract'
+        ORDER BY event_ts DESC
+        """,
+        (since_ts, until_ts),
+    ).fetchall()
+    hard_blockers = Counter()
+    normalized_modes = Counter()
+    mode_status = Counter()
+    mode_action = Counter()
+    mode_reason = Counter()
+    enforced_counts = Counter()
+    quote_success = Counter()
+    final_group_counts = Counter()
+    samples = []
+    for row in final_rows:
+        payload = jloads(row["payload_json"])
+        final_group_counts[(row["event_type"], row["decision"], row["reason"])] += 1
+        for blocker in _extract_hard_blockers(payload):
+            hard_blockers[blocker] += 1
+        normalized_modes[_payload_counter_value(payload.get("normalized_mode"))] += 1
+        state = _mode_state(payload)
+        mode_status[_payload_counter_value(state.get("status"))] += 1
+        mode_action[_payload_counter_value(state.get("action"))] += 1
+        mode_reason[_payload_counter_value(state.get("reason"))] += 1
+        enforced_counts[_payload_counter_value(payload.get("enforced"))] += 1
+        quote_detail = payload.get("quote_detail") if isinstance(payload.get("quote_detail"), dict) else {}
+        quote_success[_payload_counter_value(quote_detail.get("success"))] += 1
+        if len(samples) < 10 and row["event_type"] == "entry_block":
+            samples.append(
+                {
+                    "event_ts": row["event_ts"],
+                    "signal_id": signal_id_key(row["signal_id"]),
+                    "token_ca": row["token_ca"],
+                    "symbol": row["symbol"],
+                    "lifecycle_id": row["lifecycle_id"],
+                    "decision": row["decision"],
+                    "reason": row["reason"],
+                    "hard_blockers": _extract_hard_blockers(payload),
+                    "normalized_mode": payload.get("normalized_mode"),
+                    "route_bucket": payload.get("route_bucket"),
+                    "expected_rr": payload.get("expected_rr"),
+                    "spread_pct": payload.get("spread_pct"),
+                    "mode_state": {
+                        "status": state.get("status"),
+                        "action": state.get("action"),
+                        "reason": state.get("reason"),
+                        "circuit_broken": state.get("circuit_broken"),
+                    },
+                    "quote_detail": {
+                        "success": quote_detail.get("success"),
+                        "quote_clean": quote_detail.get("quote_clean"),
+                        "route_available": quote_detail.get("route_available"),
+                        "hard_blockers": quote_detail.get("hard_blockers"),
+                    },
+                }
+            )
+    summary["final_entry_contract"] = {
+        "rows": len(final_rows),
+        "event_type_decision_reason_counts": [
+            {
+                "event_type": key[0],
+                "decision": key[1],
+                "reason": key[2],
+                "count": count,
+            }
+            for key, count in final_group_counts.most_common(30)
+        ],
+        "hard_blockers": dict(hard_blockers),
+        "normalized_modes": dict(normalized_modes),
+        "mode_status": dict(mode_status),
+        "mode_action": dict(mode_action),
+        "mode_reason": dict(mode_reason),
+        "enforced_counts": dict(enforced_counts),
+        "quote_success_counts": dict(quote_success),
+        "sample_blocks": samples,
+    }
+    return summary
+
+
 def decision_would_enter(row):
     action = str(row.get("action") or "").upper()
     would_action = str(row.get("would_action") or "").upper()
@@ -568,7 +846,7 @@ def attach_records(raw_rows, observations, decisions, trades, expected_candidate
     return audits
 
 
-def summarize(audits, raw_rows, observations, decisions, trades, expected_candidates):
+def summarize(audits, raw_rows, observations, decisions, trades, expected_candidates, entry_bridge):
     raw_all = raw_rows
     evaluable = [row for row in raw_rows if row.get("evaluable")]
     terminal_counts = Counter(row["terminal_bucket"] for row in audits)
@@ -688,6 +966,7 @@ def summarize(audits, raw_rows, observations, decisions, trades, expected_candid
             "paper_trades_loaded": len(trades),
             "terminal_bucket_counts": dict(terminal_counts),
         },
+        "entry_bridge_layer": entry_bridge,
     }
 
 
@@ -705,8 +984,9 @@ def build_report(args):
         until_ts = max([row.get("signal_ts_norm") or since_ts for row in raw_rows] + [now_ts])
         decisions = [] if args.skip_decisions else load_paper_decisions(paper_db, tokens, since_ts, until_ts)
         trades = [] if args.skip_trades else load_paper_trades(paper_db, tokens, since_ts, until_ts)
+        entry_bridge = load_entry_bridge_summary(paper_db, args.db, since_ts, now_ts)
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
-        summary = summarize(audits, raw_rows, observations, decisions, trades, args.expected_candidates)
+        summary = summarize(audits, raw_rows, observations, decisions, trades, args.expected_candidates, entry_bridge)
         blockers = []
         if not raw_rows:
             blockers.append("raw_gold_silver_denominator_empty")
@@ -714,8 +994,17 @@ def build_report(args):
             blockers.append("candidate_coverage_incomplete")
         if summary["raw_denominator"]["entered_events"] == 0:
             blockers.append("raw_gold_silver_entered_zero")
-        if summary["entry_layer"]["paper_trades_loaded"] == 0:
+        if (summary["entry_bridge_layer"].get("paper_trades_entry_ts_window_count") or 0) == 0:
             blockers.append("paper_trades_zero_for_raw_gold_silver_window")
+        final_contract = summary["entry_bridge_layer"].get("final_entry_contract") or {}
+        final_hard_blockers = final_contract.get("hard_blockers") or {}
+        if final_hard_blockers.get("mode_disabled", 0):
+            blockers.append("final_entry_contract_mode_disabled")
+        if final_contract.get("rows", 0) and not final_contract.get("event_type_decision_reason_counts"):
+            blockers.append("final_entry_contract_unparsed")
+        evidence_events = (summary["entry_bridge_layer"].get("paper_evidence_log") or {}).get("event_type_counts") or {}
+        if not evidence_events.get("paper_trade_entry_intent", 0):
+            blockers.append("paper_trade_entry_intent_zero")
         if summary["context_layer"]["context_schema_version_counts"].get("legacy_or_missing", 0):
             blockers.append("mixed_or_legacy_context_schema")
         if summary["raw_denominator"]["filter_drop_breakdown_non_exclusive"].get("kline_uncovered", 0):
