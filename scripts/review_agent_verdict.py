@@ -117,33 +117,45 @@ def volume_profile_blocker_state(blockers, matured_kline_recheck, matured_volume
     blockers = set(blockers or [])
     realtime_blocked = "volume_profile_coverage_below_80pct" in blockers
     recheck = (matured_kline_recheck or {}).get("recheck") or {}
+    overall = (matured_volume_cross or {}).get("overall") or {}
     matured_context = (matured_volume_cross or {}).get("matured_volume_context") or {}
     signal_reconciliation = (matured_volume_cross or {}).get("signal_id_reconciliation") or {}
     recoverable_known_rate = as_float(recheck.get("recoverable_known_rate"))
     matured_known_rate = as_float(matured_context.get("known_rate"))
+    kline_cache_available = bool(matured_context.get("kline_cache_available"))
+    overall_classification = overall.get("classification")
     allowed_unjoined_reasons = {
         "outside_candidate_observer_window_before",
         "outside_candidate_observer_window_after",
     }
     reconciliation_scopes = {}
     scope_reconciled = bool(signal_reconciliation)
+    scope_joined_99 = bool(signal_reconciliation)
     for name in ("raw_all_gold_silver", "evaluable_gold_silver"):
         recon = signal_reconciliation.get(name) or {}
         reason_counts = recon.get("unjoined_reason_counts") or {}
         reasons = set(reason_counts)
+        joined_event_rate = as_float(recon.get("joined_event_rate"))
+        unjoined_event_rows = as_int(recon.get("unjoined_event_rows"))
         if not recon:
             ok = False
         elif not reasons:
             ok = True
         else:
             ok = reasons <= allowed_unjoined_reasons
+        joined_ok = bool(recon) and (
+            (joined_event_rate is not None and joined_event_rate >= 0.99)
+            or unjoined_event_rows == 0
+        )
         reconciliation_scopes[name] = {
             "ok": ok,
-            "joined_event_rate": recon.get("joined_event_rate"),
-            "unjoined_event_rows": recon.get("unjoined_event_rows"),
+            "joined_ok": joined_ok,
+            "joined_event_rate": joined_event_rate,
+            "unjoined_event_rows": unjoined_event_rows,
             "unjoined_reason_counts": reason_counts,
         }
         scope_reconciled = scope_reconciled and ok
+        scope_joined_99 = scope_joined_99 and joined_ok
     shadow_available = bool(
         realtime_blocked
         and recoverable_known_rate is not None
@@ -152,9 +164,20 @@ def volume_profile_blocker_state(blockers, matured_kline_recheck, matured_volume
         and matured_known_rate >= 0.8
         and scope_reconciled
     )
+    coverage_pending = bool(
+        realtime_blocked
+        and overall_classification == "BLOCKED_MATURED_VOLUME_COVERAGE"
+        and kline_cache_available
+        and matured_known_rate is not None
+        and matured_known_rate < 0.8
+        and scope_joined_99
+    )
     if shadow_available:
         classification = "SHADOW_MATURED_VOLUME_PATH_AVAILABLE"
         next_action = "continue_shadow_matured_volume_validation_without_formal_volume_promotion"
+    elif coverage_pending:
+        classification = "MATURED_VOLUME_COVERAGE_PENDING"
+        next_action = "continue_matured_volume_recheck_before_evaluating_volume_slices"
     elif realtime_blocked:
         classification = "REALTIME_VOLUME_CONTEXT_BLOCKED"
         next_action = "fix_volume_context_writer_or_kline_attribution"
@@ -165,12 +188,17 @@ def volume_profile_blocker_state(blockers, matured_kline_recheck, matured_volume
         "classification": classification,
         "realtime_volume_profile_blocked": realtime_blocked,
         "shadow_matured_volume_slices_evaluable": shadow_available,
+        "matured_volume_coverage_pending": coverage_pending,
+        "volume_data_coverage_pending": coverage_pending,
         "formal_volume_slices_evaluable": not realtime_blocked,
         "formal_denominator_changed": False,
         "promotion_allowed": False,
         "recoverable_known_rate": recoverable_known_rate,
         "matured_volume_known_rate": matured_known_rate,
+        "kline_cache_available": kline_cache_available,
+        "matured_volume_cross_classification": overall_classification,
         "scope_reconciled": scope_reconciled,
+        "scope_joined_99": scope_joined_99,
         "reconciliation_scopes": reconciliation_scopes,
         "next_action": next_action,
     }
@@ -466,7 +494,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         blocker for blocker in blockers
         if not (quote_clean_window_pending and blocker in QUOTE_COVERAGE_BLOCKERS)
     ]
-    if volume_profile_state.get("shadow_matured_volume_slices_evaluable"):
+    volume_blocker_non_actionable = bool(
+        volume_profile_state.get("shadow_matured_volume_slices_evaluable")
+        or volume_profile_state.get("matured_volume_coverage_pending")
+    )
+    if volume_blocker_non_actionable:
         actionable_blockers = [
             blocker for blocker in actionable_blockers
             if blocker != "volume_profile_coverage_below_80pct"
@@ -563,7 +595,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         next_action = "resolve_data_integrity_blocker"
     elif classification == "BLOCKED_CONTEXT_COVERAGE":
         if (
-            volume_profile_state.get("shadow_matured_volume_slices_evaluable")
+            volume_blocker_non_actionable
             and not actionable_blockers
         ):
             next_action = volume_profile_state.get("next_action")
@@ -673,6 +705,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "formal_volume_sensitive_slices_blocked": "volume_profile_coverage_below_80pct" in blockers,
         "shadow_matured_volume_slices_evaluable": bool(
             volume_profile_state.get("shadow_matured_volume_slices_evaluable")
+        ),
+        "volume_data_coverage_pending": bool(
+            volume_profile_state.get("matured_volume_coverage_pending")
         ),
         "canary_increase_allowed": False,
         "strategy_change_allowed": False,
@@ -1300,6 +1335,47 @@ def self_test():
     assert quote_pending_with_matured_volume_path["volume_profile_blocker_state"]["classification"] == "SHADOW_MATURED_VOLUME_PATH_AVAILABLE"
     assert quote_pending_with_matured_volume_path["volume_profile_blocker_state"]["promotion_allowed"] is False
     assert quote_pending_with_matured_volume_path["next_action"] == "continue_shadow_matured_volume_validation_without_formal_volume_promotion"
+    matured_volume_coverage_pending = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": ["volume_profile_coverage_below_80pct"]},
+    }, tests={"passed": True}, readiness_reports={
+        "matured_volume_capture_cross_audit": {
+            "overall": {
+                "classification": "BLOCKED_MATURED_VOLUME_COVERAGE",
+                "next_action": "continue_matured_volume_recheck_before_evaluating_volume_slices",
+                "promotion_allowed": False,
+            },
+            "matured_volume_context": {
+                "kline_cache_available": True,
+                "known_rate": 0.424337,
+                "known_rows": 272,
+                "unknown_rows": 369,
+            },
+            "signal_id_reconciliation": {
+                "raw_all_gold_silver": {
+                    "joined_event_rate": 1.0,
+                    "unjoined_event_rows": 0,
+                    "unjoined_reason_counts": {},
+                },
+                "evaluable_gold_silver": {
+                    "joined_event_rate": 1.0,
+                    "unjoined_event_rows": 0,
+                    "unjoined_reason_counts": {},
+                },
+            },
+        },
+    })
+    assert matured_volume_coverage_pending["classification"] == "BLOCKED_CONTEXT_COVERAGE"
+    assert "volume_profile_coverage_below_80pct" in matured_volume_coverage_pending["blockers"]
+    assert "volume_profile_coverage_below_80pct" not in matured_volume_coverage_pending["actionable_blockers"]
+    assert matured_volume_coverage_pending["next_highest_priority_blocker"] is None
+    assert matured_volume_coverage_pending["top_actionable_blocker"] is None
+    assert matured_volume_coverage_pending["top_formal_blocker"] == "volume_profile_coverage_below_80pct"
+    assert matured_volume_coverage_pending["shadow_matured_volume_slices_evaluable"] is False
+    assert matured_volume_coverage_pending["volume_data_coverage_pending"] is True
+    assert matured_volume_coverage_pending["volume_profile_blocker_state"]["classification"] == "MATURED_VOLUME_COVERAGE_PENDING"
+    assert matured_volume_coverage_pending["volume_profile_blocker_state"]["scope_joined_99"] is True
+    assert matured_volume_coverage_pending["next_action"] == "continue_matured_volume_recheck_before_evaluating_volume_slices"
     lifecycle_reconciled = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["lifecycle_profile_coverage_below_80pct"]},
