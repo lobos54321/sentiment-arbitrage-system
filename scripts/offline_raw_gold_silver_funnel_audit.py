@@ -522,6 +522,9 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
         "raw_signals_with_final_entry_mode_disabled": 0,
         "raw_signals_with_final_entry_mode_disabled_only": 0,
         "raw_signals_with_final_entry_mode_disabled_plus_other": 0,
+        "raw_signals_pending_without_final_entry_contract": 0,
+        "pending_without_final_entry_reason_counts": [],
+        "pending_without_final_entry_examples": [],
         "raw_scoped_final_entry_hard_blockers": {},
         "component_decision_reason_counts": [],
     }
@@ -531,7 +534,7 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
     raw_id_set = set(raw_signal_ids or [])
     window_rows = paper_db.execute(
         """
-        SELECT signal_id, component, event_type, decision, reason, payload_json
+        SELECT event_ts, signal_id, component, event_type, decision, reason, payload_json
         FROM paper_decision_events
         WHERE event_ts >= ? AND event_ts <= ?
           AND signal_id IS NOT NULL
@@ -583,6 +586,59 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
                 if event_type == "entry_block" or decision == "BLOCK":
                     final_block.add(signal_id)
 
+    pending_without_final = (pending - final_contract) & raw_id_set
+    pending_without_final_reasons = Counter()
+    pending_without_final_examples = []
+    for signal_id in sorted(pending_without_final):
+        signal_rows = sorted(
+            by_signal.get(signal_id, []),
+            key=lambda row: safe_float(row["event_ts"]) or 0,
+        )
+        pending_ts_values = [
+            safe_float(row["event_ts"])
+            for row in signal_rows
+            if str(row["event_type"] or "").lower() == "pending_entry"
+        ]
+        first_pending_ts = min([ts for ts in pending_ts_values if ts is not None], default=None)
+        after_pending = [
+            row
+            for row in signal_rows
+            if first_pending_ts is None or (safe_float(row["event_ts"]) or 0) >= first_pending_ts
+        ]
+        terminal_rows = [
+            row
+            for row in after_pending
+            if str(row["event_type"] or "").lower() == "entry_block"
+            or str(row["decision"] or "").upper() in {"BLOCK", "REJECT", "WATCH_ONLY"}
+        ]
+        chosen = terminal_rows[0] if terminal_rows else (after_pending[-1] if after_pending else None)
+        if chosen is None:
+            reason_key = ("UNKNOWN", "missing_post_pending_event", "UNKNOWN", "missing_post_pending_event")
+            chosen_payload = {}
+        else:
+            reason_key = (
+                str(chosen["component"] or "UNKNOWN"),
+                str(chosen["event_type"] or "UNKNOWN"),
+                str(chosen["decision"] or "UNKNOWN"),
+                str(chosen["reason"] or "UNKNOWN"),
+            )
+            chosen_payload = jloads(chosen["payload_json"])
+        pending_without_final_reasons[reason_key] += 1
+        if len(pending_without_final_examples) < 20:
+            pending_without_final_examples.append(
+                {
+                    "signal_id": signal_id,
+                    "first_pending_ts": first_pending_ts,
+                    "attribution": {
+                        "component": reason_key[0],
+                        "event_type": reason_key[1],
+                        "decision": reason_key[2],
+                        "reason": reason_key[3],
+                        "hard_blockers": _extract_hard_blockers(chosen_payload),
+                    },
+                }
+            )
+
     result.update(
         {
             "decision_records_by_signal_id": len(rows),
@@ -595,6 +651,18 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
             "raw_signals_with_final_entry_mode_disabled": len(final_mode_disabled & raw_id_set),
             "raw_signals_with_final_entry_mode_disabled_only": len(final_mode_disabled_only & raw_id_set),
             "raw_signals_with_final_entry_mode_disabled_plus_other": len(final_mode_disabled_plus_other & raw_id_set),
+            "raw_signals_pending_without_final_entry_contract": len(pending_without_final),
+            "pending_without_final_entry_reason_counts": [
+                {
+                    "component": key[0],
+                    "event_type": key[1],
+                    "decision": key[2],
+                    "reason": key[3],
+                    "count": count,
+                }
+                for key, count in pending_without_final_reasons.most_common(20)
+            ],
+            "pending_without_final_entry_examples": pending_without_final_examples,
             "raw_scoped_final_entry_hard_blockers": dict(raw_scoped_final_blockers.most_common()),
             "component_decision_reason_counts": [
                 {

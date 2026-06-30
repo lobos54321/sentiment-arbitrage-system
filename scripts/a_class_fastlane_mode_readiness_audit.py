@@ -401,6 +401,9 @@ def raw_funnel_snapshot(raw_funnel):
         "raw_signals_with_final_entry_mode_disabled": raw_bridge.get("raw_signals_with_final_entry_mode_disabled"),
         "raw_signals_with_final_entry_mode_disabled_only": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_only"),
         "raw_signals_with_final_entry_mode_disabled_plus_other": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_plus_other"),
+        "raw_signals_pending_without_final_entry_contract": raw_bridge.get("raw_signals_pending_without_final_entry_contract"),
+        "pending_without_final_entry_reason_counts": raw_bridge.get("pending_without_final_entry_reason_counts"),
+        "pending_without_final_entry_examples": raw_bridge.get("pending_without_final_entry_examples"),
         "raw_scoped_final_entry_hard_blockers": raw_bridge.get("raw_scoped_final_entry_hard_blockers"),
     }
 
@@ -475,6 +478,17 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "pending_without_final_entry_contract": pending_without_final,
             "pending_to_final_entry_contract_rate": rate(final_entry_contract, pending),
             "pending_to_mode_adjusted_final_eligibility_rate": rate(mode_disabled_only, pending),
+            "pending_without_final_entry_contract_attributed": raw_snapshot.get(
+                "raw_signals_pending_without_final_entry_contract"
+            ),
+            "pending_without_final_entry_reason_counts": raw_snapshot.get(
+                "pending_without_final_entry_reason_counts"
+            )
+            or [],
+            "pending_without_final_entry_examples": raw_snapshot.get(
+                "pending_without_final_entry_examples"
+            )
+            or [],
         },
         "mode_disabled_adjusted_final_eligibility": {
             "status": readiness_status,
