@@ -1041,6 +1041,51 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "paper_enablement_allowed": False,
         "items": shadow_bridge_review_queue_items,
     }
+    quality_timing_shadow_review = quality_timing_audit.get("shadow_only_review") or {}
+    quality_timing_opportunities = (
+        quality_timing_shadow_review.get("top_research_opportunities") or []
+    )
+    quality_timing_review_queue_items = []
+    for row in quality_timing_opportunities[:10]:
+        if not isinstance(row, dict):
+            continue
+        quality_timing_review_queue_items.append({
+            "cluster": row.get("cluster"),
+            "event_count": row.get("event_count"),
+            "share_of_quality_timing_rejects": row.get("share_of_quality_timing_rejects"),
+            "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
+            "unique_tokens": row.get("unique_tokens"),
+            "dominant_stage": (row.get("stage_counts") or [{}])[0].get("stage"),
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+            "top_candidates": (row.get("top_candidates") or [])[:5],
+            "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:5],
+            "status": "REVIEW_QUALITY_TIMING_REJECT_CLUSTER",
+            "next_action": "track_shadow_only_quality_timing_probe_until_clean_window_then_oos",
+            "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+            "evidence_level": row.get("evidence_level") or "discovery_same_window",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    quality_timing_shadow_review_queue = {
+        "classification": (
+            "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY"
+            if quality_timing_review_queue_items
+            else "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_EMPTY"
+        ),
+        "queue_count": len(quality_timing_review_queue_items),
+        "dominant_cluster": quality_timing_shadow_review.get("dominant_cluster"),
+        "dominant_stage": quality_timing_shadow_review.get("dominant_stage"),
+        "quality_timing_false_negative_upper_bound": (
+            quality_timing_shadow_review.get("quality_timing_false_negative_upper_bound") or {}
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "items": quality_timing_review_queue_items,
+    }
     largest_upstream_gap = readiness_shortfall.get("largest_upstream_gap_category") or {}
     largest_pending_gap = readiness_shortfall.get("largest_pending_to_final_gap_category") or {}
     parallel_next_action = None
@@ -1288,6 +1333,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "automatic_bridge_to_entry_allowed": False,
             "paper_enablement_allowed": False,
         },
+        "quality_timing_shadow_review_queue": quality_timing_shadow_review_queue,
         "top_blocker": top_blocker,
         "top_actionable_blocker": top_actionable_blocker,
         "top_formal_blocker": top_formal_blocker,
@@ -1582,6 +1628,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 "automatic_runtime_change_allowed": False,
                 "paper_enablement_allowed": False,
             },
+            "review_queue": quality_timing_shadow_review_queue,
             "shadow_only_next_actions": quality_timing_audit.get("shadow_only_next_actions") or [],
             "blockers": quality_timing_audit.get("blockers") or [],
         },
@@ -2279,6 +2326,20 @@ def self_test():
                     {
                         "cluster": "score_or_quality_too_low",
                         "event_count": 4,
+                        "share_of_quality_timing_rejects": 1.0,
+                        "share_of_raw_all_gold_silver": 0.2,
+                        "unique_tokens": 3,
+                        "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 4}],
+                        "top_candidates": [
+                            {"candidate_id": "kline:active_mom20_first3", "family": "kline", "count": 3}
+                        ],
+                        "top_lifecycle_source_contexts": [
+                            {
+                                "lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE",
+                                "source_component": "matrix_evaluator",
+                                "count": 4,
+                            }
+                        ],
                         "suggested_shadow_only_action": "track_score_quality_threshold_false_negative_shadow_probe",
                         "promotion_allowed": False,
                         "strategy_change_allowed": False,
@@ -2293,6 +2354,10 @@ def self_test():
     assert qt["candidate_match_attribution"]["top_candidates"][0]["candidate_id"] == "kline:active_mom20_first3"
     assert qt["shadow_only_review"]["dominant_cluster"] == "score_or_quality_too_low"
     assert qt["shadow_only_review"]["top_research_opportunities"][0]["promotion_allowed"] is False
+    assert qt["review_queue"]["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY"
+    assert qt["review_queue"]["items"][0]["cluster"] == "score_or_quality_too_low"
+    assert qt["review_queue"]["items"][0]["automatic_runtime_change_allowed"] is False
+    assert quality_timing_verdict["quality_timing_shadow_review_queue"]["queue_count"] == 1
     quality_timing_probe_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "quality_timing_candidate_probe_validation": {
             "classification": "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW",

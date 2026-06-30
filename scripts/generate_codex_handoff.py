@@ -610,6 +610,7 @@ def build_handoff(verdict):
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
+                "quality_timing_shadow_review_queue": verdict.get("quality_timing_shadow_review_queue") or {},
                 "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
@@ -920,6 +921,25 @@ def self_test():
                 }
             ],
         },
+        "quality_timing_shadow_review_queue": {
+            "classification": "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY",
+            "queue_count": 1,
+            "dominant_cluster": "matrix_alignment_wait",
+            "promotion_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "items": [
+                {
+                    "cluster": "matrix_alignment_wait",
+                    "event_count": 4,
+                    "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                    "status": "REVIEW_QUALITY_TIMING_REJECT_CLUSTER",
+                    "promotion_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                }
+            ],
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
@@ -943,6 +963,8 @@ def self_test():
     assert "matrix_alignment_wait" in text
     assert "track_matrix_alignment_false_negative_shadow_probe" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
+    assert "quality_timing_shadow_review_queue" in text
+    assert "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY" in text
     assert "Quality / Timing Candidate Probe Validation" in text
     assert "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW" in text
     assert "REPEATED_SHADOW_PROBE" in text
