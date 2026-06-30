@@ -478,21 +478,29 @@ def load_observations(db, since_ts, max_scan_rows=DEFAULT_MAX_SCAN_ROWS):
     if rowid_floor is not None:
         filters.append("rowid >= ?")
         params.append(rowid_floor)
-    rows = db.execute(
+    cursor = db.execute(
         f"""
         SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched, reason,
-               observed_at, payload_json
+               observed_at,
+               CASE
+                 WHEN candidate_id IN ('current_all', 'current_would_enter_all') THEN payload_json
+                 ELSE NULL
+               END AS payload_json
         FROM candidate_shadow_observations
         WHERE {' AND '.join(filters)}
         """,
         tuple(params),
-    ).fetchall()
+    )
     out = []
-    for row in rows:
-        payload = jloads(row["payload_json"])
+    context_by_signal = {}
+    for row in cursor:
+        signal_id = signal_id_key(row["signal_id"])
+        payload = jloads(row["payload_json"]) if row["payload_json"] else None
+        if payload:
+            context_by_signal[signal_id] = payload
         out.append(
             {
-                "signal_id": signal_id_key(row["signal_id"]),
+                "signal_id": signal_id,
                 "token_ca": row["token_ca"],
                 "signal_ts": safe_int(row["signal_ts"]),
                 "candidate_id": row["candidate_id"],
@@ -500,15 +508,20 @@ def load_observations(db, since_ts, max_scan_rows=DEFAULT_MAX_SCAN_ROWS):
                 "matched": safe_bool(row["matched"]),
                 "reason": row["reason"],
                 "observed_at": safe_int(row["observed_at"]),
-                "payload": payload,
+                "payload": payload or {},
             }
         )
+    for item in out:
+        if not item["payload"]:
+            item["payload"] = context_by_signal.get(item["signal_id"], {})
     observed_values = [row["observed_at"] for row in out if row.get("observed_at")]
     scan_meta = {
         "table": "candidate_shadow_observations",
         "max_scan_rows": max_scan_rows,
         "rowid_floor": rowid_floor,
         "loaded_rows": len(out),
+        "payload_strategy": "parse_current_all_context_carrier_then_share_by_signal",
+        "context_carrier_payloads_loaded": len(context_by_signal),
         "earliest_observed_at": min(observed_values) if observed_values else None,
         "latest_observed_at": max(observed_values) if observed_values else None,
         "may_be_rowid_truncated": bool(
