@@ -388,6 +388,8 @@ def raw_funnel_snapshot(raw_funnel):
         "events_with_decision_record": decision.get("events_with_decision_record"),
         "would_enter_events": decision.get("would_enter_events"),
         "entered_events": decision.get("entered_events"),
+        "realized_events": decision.get("realized_events"),
+        "realized_rate": decision.get("realized_rate"),
         "paper_trades_entry_ts_window_count": bridge.get("paper_trades_entry_ts_window_count"),
         "raw_signal_ids": raw_bridge.get("raw_signal_ids"),
         "raw_signals_with_decision_record": raw_bridge.get("raw_signals_with_decision_record"),
@@ -422,6 +424,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         else 0
     )
     entered = safe_int(raw_snapshot.get("entered_events"), 0)
+    realized = safe_int(raw_snapshot.get("realized_events"), 0)
     paper_committed = safe_int(raw_snapshot.get("paper_trades_entry_ts_window_count"), 0)
     candidate_matched_any = safe_int(raw_snapshot.get("candidate_matched_any_events"), 0)
     detector_rate = raw_snapshot.get("candidate_match_any_rate")
@@ -448,6 +451,11 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         "mode_disabled_adjusted_final_eligibility_rate": mode_adjusted_rate,
         "paper_capture_rate": rate(paper_committed, raw_signals),
         "actual_entered_rate": rate(entered, raw_signals),
+        "realized_capture_rate": (
+            raw_snapshot.get("realized_rate")
+            if raw_snapshot.get("realized_rate") is not None
+            else rate(realized, raw_signals)
+        ),
         "events": {
             "candidate_matched_any": candidate_matched_any,
             "decision_records": decision_records,
@@ -458,6 +466,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "mode_disabled_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled"), 0),
             "mode_disabled_plus_other_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_plus_other"), 0),
             "entered": entered,
+            "realized": realized,
             "paper_committed": paper_committed,
         },
         "pending_to_final_entry_gap": {
@@ -682,6 +691,8 @@ def self_test():
                     "would_enter_rate": 0.5,
                     "entered_events": 0,
                     "entered_rate": 0.0,
+                    "realized_events": 0,
+                    "realized_rate": 0.0,
                 },
                 "entry_bridge_layer": {
                     "paper_trades_entry_ts_window_count": 0,
@@ -725,6 +736,7 @@ def self_test():
         assert report["final_entry_contract"]["mode_disabled_plus_other_rows"] == 1
         assert report["capture_stage_rates"]["detector_capture_rate"] == 1.0
         assert report["capture_stage_rates"]["pending_capture_rate"] == 1.0
+        assert report["capture_stage_rates"]["realized_capture_rate"] == 0.0
         assert report["pending_to_final_entry_gap"]["pending_to_final_entry_contract_rate"] == 1.0
         assert report["mode_disabled_adjusted_final_eligibility"]["mode_disabled_only_unique_signal_ids"] == 1
         assert report["mode_disabled_adjusted_final_eligibility"]["rate"] == 0.5
