@@ -1314,6 +1314,32 @@ def compact_matured_volume_hypothesis(row):
     }
 
 
+def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch):
+    watchlist_keys = []
+    for row in watchlist_hypotheses or []:
+        if not isinstance(row, dict):
+            continue
+        watchlist_keys.append(
+            row.get("hypothesis_id")
+            or row.get("id")
+            or row.get("name")
+            or json.dumps(row.get("definition") or row, sort_keys=True)
+        )
+    matured_keys = []
+    for row in matured_volume_watch or []:
+        if not isinstance(row, dict):
+            continue
+        matured_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    matured_keys = sorted(matured_keys, key=lambda item: item.get("hypothesis_id") or "")
+    return {
+        "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
+        "shadow_only_matured_volume_watch": matured_keys,
+    }
+
+
 def update_hypothesis_registry(path, verdict, capture):
     target = Path(path)
     if target.exists():
@@ -1342,16 +1368,26 @@ def update_hypothesis_registry(path, verdict, capture):
         compact_matured_volume_hypothesis(row)
         for row in matured_volume_slices[:10]
     ]
+    watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
+    new_signature = stable_hypothesis_signature(
+        watchlist_hypotheses=watchlist_hypotheses,
+        matured_volume_watch=matured_volume_watch,
+    )
+    previous_signature = registry.get("hypothesis_set_signature")
+    previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
+    hypothesis_frozen_at = previous_frozen_at if previous_signature == new_signature and previous_frozen_at else utc_now()
     registry = {
         "schema_version": "hypothesis_registry.v2",
         "updated_at": utc_now(),
+        "hypothesis_frozen_at": hypothesis_frozen_at,
+        "hypothesis_set_signature": new_signature,
         "phase": "discovery_mesh",
         "promotion_allowed": False,
         "hypotheses": {
             "H1_building_volume_active_microstructure": compact_hypothesis(verdict.get("H1_capture_metrics") or {}),
             "H2_shallow_pullback_matrix_evaluator": compact_hypothesis(verdict.get("H2_capture_metrics") or {}),
         },
-        "watchlist_hypotheses": capture.get("watchlist_hypotheses", [])[:25],
+        "watchlist_hypotheses": watchlist_hypotheses,
         "shadow_only_matured_volume_watch": matured_volume_watch,
         "recent_runs": recent[-20:],
     }

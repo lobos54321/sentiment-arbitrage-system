@@ -183,7 +183,7 @@ def validate_matured_volume_hypotheses(registry, cross):
     indexed = index_matured_volume_slices(cross)
     window = cross.get("window") or {}
     window_quality = eval_window_quality(cross)
-    registry_updated_ts = parse_time(registry.get("updated_at"))
+    registry_updated_ts = parse_time(registry.get("hypothesis_frozen_at") or registry.get("updated_at"))
     eval_since_ts = parse_time(window.get("since_ts"))
     eval_until_ts = parse_time(window.get("until_ts"))
     frozen_before_eval = (
