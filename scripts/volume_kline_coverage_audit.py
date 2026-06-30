@@ -125,6 +125,7 @@ def breakdown(rows, predicate):
         "by_context_schema_version": "context_schema_version",
         "by_source_component": "source_component",
         "by_writer_path": "quote_context_writer_path",
+        "by_volume_profile_reason": "volume_profile_reason",
         "by_lifecycle_profile": "lifecycle_profile",
         "by_signal_type": "signal_type",
         "by_candidate_family": "candidate_family",

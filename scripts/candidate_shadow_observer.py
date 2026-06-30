@@ -937,6 +937,9 @@ def compute_kline_features(bars, signal_ts_sec, now_sec):
         "kline_bar_count": len(bars),
         "fbr_time_legal": False,
         "kline_time_legal": False,
+        "candle_pattern": "unknown",
+        "volume_profile": "unknown",
+        "volume_profile_reason": "kline_bars_unavailable",
     }
     if not bars:
         features["kline_missing_reason"] = "no_signal_time_kline_bars"
@@ -966,6 +969,7 @@ def compute_kline_features(bars, signal_ts_sec, now_sec):
             "entry_body_ratio": None,
             "candle_pattern": classify_candle(first),
             "volume_profile": volume_profile(bars[:5]),
+            "volume_profile_reason": "classified_from_first_5_bars",
         }
     )
     first_range = float(first["high"]) - float(first["low"])
@@ -1437,6 +1441,7 @@ def payload_for(features, candidate, matched, reason):
         "old_red_pullback_score30",
         "candle_pattern",
         "volume_profile",
+        "volume_profile_reason",
     ]
     mode_meta = candidate.get("mode_meta") or {}
     payload = {key: features.get(key) for key in keys if key in features}
@@ -2004,6 +2009,16 @@ def self_test():
     assert inferred_payload["quote_context_applicable"] is True
     assert inferred_payload["source_quote_context_applicable"] is True
     assert inferred_payload["quote_context_writer_path"] == "candidate_shadow_observer:inferred"
+    missing_kline_features = compute_kline_features([], 1_000, 1_100)
+    missing_kline_payload = payload_for(
+        {**inferred_features, **missing_kline_features},
+        {"candidate_id": "current_all", "family": "base", "mode_meta": None},
+        True,
+        "all_signals_denominator",
+    )
+    assert missing_kline_payload["volume_profile"] == "unknown"
+    assert missing_kline_payload["volume_profile_reason"] == "kline_bars_unavailable"
+    assert missing_kline_payload["candle_pattern"] == "unknown"
     no_quote_match, no_quote_reason = eval_base_candidate("notath_quote_clean", inferred_features)
     assert no_quote_match is False
     assert no_quote_reason == "missing_runtime_source_quote_clean"
