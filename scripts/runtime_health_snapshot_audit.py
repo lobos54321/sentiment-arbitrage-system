@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -101,6 +102,106 @@ def latest_age_from_json_or_mtime(info, *fields):
         if key in info:
             return info[key]
     return info.get("mtime_age_minutes")
+
+
+def tail_lines(path, max_bytes, max_lines):
+    target = Path(path)
+    if not target.exists() or not target.is_file():
+        return []
+    size = target.stat().st_size
+    with target.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(-max_bytes, 2)
+        data = handle.read()
+    text = data.decode("utf-8", errors="replace")
+    return text.splitlines()[-max_lines:]
+
+
+def observer_log_section(data_dir, name, filename, args):
+    path = Path(data_dir) / filename
+    info = file_info(path)
+    warning_prefix = f"runtime_{name}_"
+    warnings = []
+    if not info.get("available"):
+        warnings.append(f"{warning_prefix}log_missing")
+        return {
+            "available": False,
+            "path": str(path),
+            "status": "missing",
+            "tail_lines_scanned": 0,
+            "warnings": warnings,
+        }
+    lines = tail_lines(path, args.observer_log_tail_bytes, args.observer_log_tail_lines)
+    database_locked_count = 0
+    sqlite_busy_count = 0
+    timeout_count = 0
+    spawn_error_count = 0
+    nonzero_exit_count = 0
+    last_exit_code = None
+    last_exit_signal = None
+    exit_re = re.compile(r"exited code=([^\s]+) signal=([^;\s]*)")
+    for line in lines:
+        lower = line.lower()
+        if "database is locked" in lower:
+            database_locked_count += 1
+        if "sqlite_busy" in lower or "database table is locked" in lower or "database schema is locked" in lower:
+            sqlite_busy_count += 1
+        if "timeout after" in lower or "timed out" in lower:
+            timeout_count += 1
+        if "spawn error" in lower:
+            spawn_error_count += 1
+        match = exit_re.search(line)
+        if match:
+            code = match.group(1)
+            signal = match.group(2) or None
+            last_exit_code = code
+            last_exit_signal = signal
+            if code not in {"0", "None", "null"}:
+                nonzero_exit_count += 1
+    if database_locked_count or sqlite_busy_count:
+        warnings.append(f"{warning_prefix}sqlite_lock_recent")
+    if nonzero_exit_count:
+        warnings.append(f"{warning_prefix}nonzero_exit_recent")
+    if timeout_count:
+        warnings.append(f"{warning_prefix}timeout_recent")
+    if spawn_error_count:
+        warnings.append(f"{warning_prefix}spawn_error_recent")
+    return {
+        "available": True,
+        "path": str(path),
+        "status": "warn" if warnings else "ok",
+        "size_bytes": info.get("size_bytes"),
+        "mtime": info.get("mtime"),
+        "mtime_age_minutes": info.get("mtime_age_minutes"),
+        "tail_lines_scanned": len(lines),
+        "tail_bytes_scanned": min(info.get("size_bytes") or 0, args.observer_log_tail_bytes),
+        "database_locked_count": database_locked_count,
+        "sqlite_busy_count": sqlite_busy_count,
+        "nonzero_exit_count": nonzero_exit_count,
+        "timeout_count": timeout_count,
+        "spawn_error_count": spawn_error_count,
+        "last_exit_code": last_exit_code,
+        "last_exit_signal": last_exit_signal,
+        "warnings": warnings,
+    }
+
+
+def observer_logs_section(data_dir, args):
+    raw_path = observer_log_section(data_dir, "raw_path_observer", "raw-path-observer.log", args)
+    raw_dog = observer_log_section(data_dir, "raw_dog_discovery_observer", "raw-dog-discovery-observer.log", args)
+    candidate_shadow = observer_log_section(data_dir, "candidate_shadow_observer", "candidate-shadow-observer.log", args)
+    warnings = []
+    for section in (raw_path, raw_dog, candidate_shadow):
+        warnings.extend(section.get("warnings") or [])
+    return {
+        "status": "warn" if warnings else "ok",
+        "tail_lines": args.observer_log_tail_lines,
+        "tail_bytes": args.observer_log_tail_bytes,
+        "warnings": sorted(set(warnings)),
+        "raw_path_observer": raw_path,
+        "raw_dog_discovery_observer": raw_dog,
+        "candidate_shadow_observer": candidate_shadow,
+    }
 
 
 def signal_source_section(data_dir, args):
@@ -251,6 +352,7 @@ def build_report(args):
         "paper_fast_lane_health": paper_fast_lane_section(data_dir, args),
         "paper_db": paper_db_section(data_dir),
         "runtime_final_evidence": runtime_final_evidence_section(data_dir, args),
+        "observer_logs": observer_logs_section(data_dir, args),
     }
     blockers = []
     warnings = []
@@ -318,11 +420,30 @@ def self_test():
             runtime_final_evidence_max_age_minutes=60,
             signal_warn_minutes=15,
             signal_fail_minutes=45,
+            observer_log_tail_lines=200,
+            observer_log_tail_bytes=20000,
+        )
+        (root / "raw-path-observer.log").write_text(
+            "[raw-path-observer-supervisor] exited code=1 signal=; next run in 120s\n"
+            "SqliteError: database is locked\n",
+            encoding="utf-8",
+        )
+        (root / "raw-dog-discovery-observer.log").write_text(
+            "[raw-dog-discovery-supervisor] exited code=2 signal=; next run in 300s\n",
+            encoding="utf-8",
+        )
+        (root / "candidate-shadow-observer.log").write_text(
+            "[candidate-shadow-observer] ok\n",
+            encoding="utf-8",
         )
         report = build_report(args)
         assert report["status"] == "degraded"
         assert "runtime_paper_review_snapshot_stale" in report["warnings"]
         assert "runtime_paper_fast_lane_health_stale" in report["warnings"]
+        assert "runtime_raw_path_observer_sqlite_lock_recent" in report["warnings"]
+        assert "runtime_raw_path_observer_nonzero_exit_recent" in report["warnings"]
+        assert "runtime_raw_dog_discovery_observer_nonzero_exit_recent" in report["warnings"]
+        assert report["observer_logs"]["raw_path_observer"]["database_locked_count"] == 1
         assert not report["blockers"]
         (root / "paper_trades.db.integrity_error").write_text("bad", encoding="utf-8")
         write_json(root / "v27_read_models" / "signal_source_freshness.json", {
@@ -346,6 +467,8 @@ def main():
     parser.add_argument("--runtime-final-evidence-max-age-minutes", type=float, default=60.0)
     parser.add_argument("--signal-warn-minutes", type=float, default=15.0)
     parser.add_argument("--signal-fail-minutes", type=float, default=45.0)
+    parser.add_argument("--observer-log-tail-lines", type=int, default=240)
+    parser.add_argument("--observer-log-tail-bytes", type=int, default=200000)
     parser.add_argument("--out")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()

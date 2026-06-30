@@ -1552,6 +1552,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
                 "paper_fast_lane_health": (verdict.get("runtime_health_snapshot") or {}).get("paper_fast_lane_health") or {},
                 "paper_db": (verdict.get("runtime_health_snapshot") or {}).get("paper_db") or {},
                 "runtime_final_evidence": (verdict.get("runtime_health_snapshot") or {}).get("runtime_final_evidence") or {},
+                "observer_logs": (verdict.get("runtime_health_snapshot") or {}).get("observer_logs") or {},
                 "promotion_allowed": False,
             },
             indent=2,

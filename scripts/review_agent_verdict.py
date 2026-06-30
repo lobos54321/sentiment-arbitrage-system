@@ -1160,6 +1160,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "paper_fast_lane_health": runtime_health_snapshot.get("paper_fast_lane_health") or {},
             "paper_db": runtime_health_snapshot.get("paper_db") or {},
             "runtime_final_evidence": runtime_health_snapshot.get("runtime_final_evidence") or {},
+            "observer_logs": runtime_health_snapshot.get("observer_logs") or {},
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
