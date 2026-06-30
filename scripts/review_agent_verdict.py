@@ -536,6 +536,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     upstream_gap = capture_stage_rates.get("upstream_funnel_gap") or final_entry.get("upstream_funnel_gap") or {}
     pending_to_final_gap = capture_stage_rates.get("pending_to_final_entry_gap") or final_entry.get("pending_to_final_entry_gap") or {}
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
+    readiness_shortfall = final_entry.get("readiness_shortfall_summary") or {}
+    paper_proposal_readiness = final_entry.get("paper_entry_proposal_readiness") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
     top_blocker = first_blocker_priority(blockers) if blockers else (
         final_entry.get("reason") or classification
@@ -584,7 +586,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             else capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
         ),
         "paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
+        "paper_trade_intent_rate": capture_stage_rates.get("paper_trade_intent_rate"),
         "realized_capture_rate": capture_stage_rates.get("realized_capture_rate"),
+        "readiness_shortfall_summary": readiness_shortfall,
+        "paper_entry_proposal_readiness": paper_proposal_readiness,
         "upstream_funnel_gap_summary": {
             "raw_signal_ids": upstream_gap.get("raw_signal_ids"),
             "decision_record_signal_ids": upstream_gap.get("decision_record_signal_ids"),
@@ -973,6 +978,7 @@ def self_test():
                 "pass_allow_capture_rate": 0.5,
                 "pending_capture_rate": 0.3,
                 "final_entry_contract_reach_rate": 0.02,
+                "paper_trade_intent_rate": 0.0,
                 "paper_capture_rate": 0.0,
                 "upstream_funnel_gap": {
                     "raw_signal_ids": 10,
@@ -1035,6 +1041,23 @@ def self_test():
                 "rate": 0.01,
                 "status": "CAPTURE_READINESS_BELOW_60",
             },
+            "readiness_shortfall_summary": {
+                "target_count_60pct": 6,
+                "current_mode_disabled_adjusted_final_eligibility_count": 1,
+                "shortfall_to_60_final_eligibility": 5,
+                "current_paper_trade_intent_count": 0,
+                "current_paper_committed_count": 0,
+            },
+            "paper_entry_proposal_readiness": {
+                "status": "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL",
+                "blocking_reasons": [
+                    "mode_disabled_adjusted_final_eligibility_below_60pct",
+                    "paper_trade_entry_intent_zero",
+                    "paper_trade_committed_zero",
+                ],
+                "promotion_allowed": False,
+                "paper_enablement_allowed": False,
+            },
         }
     })
     assert stage_verdict["current_capture_stage"] == "mode_disabled_clean_window_pending"
@@ -1042,7 +1065,10 @@ def self_test():
     assert stage_verdict["decision_capture_rate"] == 0.5
     assert stage_verdict["pending_capture_rate"] == 0.3
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
+    assert stage_verdict["paper_trade_intent_rate"] == 0.0
     assert stage_verdict["paper_capture_rate"] == 0.0
+    assert stage_verdict["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 5
+    assert stage_verdict["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
     assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_record_subroot_cause_counts"][0]["root_cause"] == "shadow_entry_hypotheses_matched_no_decision_bridge"

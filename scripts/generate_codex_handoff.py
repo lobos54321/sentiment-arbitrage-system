@@ -114,6 +114,10 @@ def build_handoff(verdict):
         f"- quote_writer_fix_status: `{verdict.get('quote_writer_fix_status')}`",
         f"- quote_clean_window_status: `{verdict.get('quote_clean_window_status')}`",
         f"- quote_clean_window_eta_iso: `{verdict.get('quote_clean_window_eta_iso')}`",
+        f"- current_capture_stage: `{verdict.get('current_capture_stage')}`",
+        f"- final_eligibility_capture_rate: `{verdict.get('final_eligibility_capture_rate')}`",
+        f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
+        f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
         f"- handoff_needed: `{str(needed).lower()}`",
         "",
         "## Guardrails",
@@ -349,6 +353,24 @@ def build_handoff(verdict):
             "",
         ])
     entry_gap = verdict.get("entry_funnel_gap_summary") or {}
+    readiness_shortfall = verdict.get("readiness_shortfall_summary") or {}
+    paper_proposal = verdict.get("paper_entry_proposal_readiness") or {}
+    if readiness_shortfall or paper_proposal:
+        lines.extend([
+            "## Capture Readiness Shortfall",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "readiness_shortfall_summary": readiness_shortfall,
+                    "paper_entry_proposal_readiness": paper_proposal,
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     if entry_gap:
         lines.extend([
             "## Entry Funnel Gap",

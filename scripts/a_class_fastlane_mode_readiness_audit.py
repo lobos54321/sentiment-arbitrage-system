@@ -376,6 +376,7 @@ def raw_funnel_snapshot(raw_funnel):
     decision = summary.get("decision_layer") or {}
     bridge = summary.get("entry_bridge_layer") or {}
     raw_bridge = bridge.get("raw_signal_decision_bridge") or {}
+    paper_evidence_events = (bridge.get("paper_evidence_log") or {}).get("event_type_counts") or {}
     return {
         "raw_gold_silver_events": raw.get("raw_all_gold_silver_event_rows"),
         "evaluable_gold_silver_events": raw.get("evaluable_gold_silver_event_rows"),
@@ -391,6 +392,8 @@ def raw_funnel_snapshot(raw_funnel):
         "realized_events": decision.get("realized_events"),
         "realized_rate": decision.get("realized_rate"),
         "paper_trades_entry_ts_window_count": bridge.get("paper_trades_entry_ts_window_count"),
+        "paper_evidence_event_counts": paper_evidence_events,
+        "paper_trade_entry_intent_events": safe_int(paper_evidence_events.get("paper_trade_entry_intent"), 0),
         "raw_signal_ids": raw_bridge.get("raw_signal_ids"),
         "raw_signals_with_decision_record": raw_bridge.get("raw_signals_with_decision_record"),
         "raw_signals_without_decision_record": raw_bridge.get("raw_signals_without_decision_record"),
@@ -805,6 +808,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     entered = safe_int(raw_snapshot.get("entered_events"), 0)
     realized = safe_int(raw_snapshot.get("realized_events"), 0)
     paper_committed = safe_int(raw_snapshot.get("paper_trades_entry_ts_window_count"), 0)
+    paper_intent = safe_int(raw_snapshot.get("paper_trade_entry_intent_events"), 0)
     candidate_matched_any = safe_int(raw_snapshot.get("candidate_matched_any_events"), 0)
     detector_rate = raw_snapshot.get("candidate_match_any_rate")
     if detector_rate is None:
@@ -853,6 +857,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         "final_entry_contract_reach_rate": rate(final_entry_contract, raw_signals),
         "mode_disabled_adjusted_final_eligibility_rate": mode_adjusted_rate,
         "paper_capture_rate": rate(paper_committed, raw_signals),
+        "paper_trade_intent_rate": rate(paper_intent, raw_signals),
         "actual_entered_rate": rate(entered, raw_signals),
         "realized_capture_rate": (
             raw_snapshot.get("realized_rate")
@@ -870,6 +875,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "mode_disabled_plus_other_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_plus_other"), 0),
             "entered": entered,
             "realized": realized,
+            "paper_trade_intent": paper_intent,
             "paper_committed": paper_committed,
         },
         "pending_to_final_entry_gap": {
@@ -971,6 +977,91 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     }
 
 
+def build_readiness_shortfall_summary(capture_stage_rates):
+    raw_signals = safe_int(capture_stage_rates.get("denominator_raw_signal_ids"), 0)
+    target_count = int(math.ceil(float(raw_signals) * 0.6)) if raw_signals else None
+    events = capture_stage_rates.get("events") or {}
+    mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
+    pending_gap = capture_stage_rates.get("pending_to_final_entry_gap") or {}
+    upstream_gap = capture_stage_rates.get("upstream_funnel_gap") or {}
+    readiness_priority = pending_gap.get("readiness_gap_priority") or {}
+    upstream_priority = upstream_gap.get("upstream_gap_priority") or {}
+    final_eligible = safe_int(mode_adjusted.get("mode_disabled_only_unique_signal_ids"), 0)
+    pending_count = safe_int(events.get("pending_entry"), 0)
+    paper_intent = safe_int(events.get("paper_trade_intent"), 0)
+    paper_committed = safe_int(events.get("paper_committed"), 0)
+    best_pending_to_final = (readiness_priority.get("categories_ranked_by_optimistic_readiness_gain") or [None])[0]
+    best_upstream = (upstream_priority.get("categories_ranked_by_optimistic_pending_gain") or [None])[0]
+    return {
+        "target": "mode_disabled_adjusted_final_eligibility_rate >= 0.60 while A_CLASS is SHADOW",
+        "denominator_raw_signal_ids": raw_signals,
+        "target_count_60pct": target_count,
+        "current_mode_disabled_adjusted_final_eligibility_count": final_eligible,
+        "current_mode_disabled_adjusted_final_eligibility_rate": capture_stage_rates.get(
+            "mode_disabled_adjusted_final_eligibility_rate"
+        ),
+        "current_pending_entry_count": pending_count,
+        "current_pending_capture_rate": capture_stage_rates.get("pending_capture_rate"),
+        "current_paper_trade_intent_count": paper_intent,
+        "current_paper_trade_intent_rate": capture_stage_rates.get("paper_trade_intent_rate"),
+        "current_paper_committed_count": paper_committed,
+        "current_paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
+        "shortfall_to_60_final_eligibility": (
+            None if target_count is None else max(0, target_count - final_eligible)
+        ),
+        "shortfall_to_60_pending": (
+            None if target_count is None else max(0, target_count - pending_count)
+        ),
+        "readiness_status": mode_adjusted.get("status"),
+        "largest_pending_to_final_gap_category": best_pending_to_final,
+        "largest_upstream_gap_category": best_upstream,
+        "interpretation": (
+            "Read-only readiness summary. Counts are evidence for where the funnel loses raw gold/silver; "
+            "bridging categories that require strategy, mode, gate, executor, or risk changes requires human approval."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+    }
+
+
+def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions):
+    mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
+    rate_value = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
+    events = capture_stage_rates.get("events") or {}
+    reasons = []
+    if rate_value is None or rate_value < 0.6:
+        reasons.append("mode_disabled_adjusted_final_eligibility_below_60pct")
+    if failed_conditions:
+        reasons.append("clean_window_conditions_not_passed")
+    if safe_int(events.get("paper_trade_intent"), 0) == 0:
+        reasons.append("paper_trade_entry_intent_zero")
+    if safe_int(events.get("paper_committed"), 0) == 0:
+        reasons.append("paper_trade_committed_zero")
+    final_status = classification.get("final_entry_status")
+    if final_status == "FUNNEL_BLOCKED_STUCK":
+        status = "HUMAN_REVIEW_REQUIRED_BUT_NOT_PROPOSAL_READY"
+    elif final_status == "FUNNEL_READY_FOR_PAPER_PROPOSAL" and not reasons:
+        status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+    else:
+        status = "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
+    return {
+        "status": status,
+        "final_entry_status": final_status,
+        "current_capture_stage": classification.get("current_capture_stage"),
+        "mode_disabled_adjusted_final_eligibility_rate": rate_value,
+        "mode_disabled_adjusted_final_eligibility_status": mode_adjusted.get("status"),
+        "paper_trade_intent_count": safe_int(events.get("paper_trade_intent"), 0),
+        "paper_committed_count": safe_int(events.get("paper_committed"), 0),
+        "blocking_reasons": reasons,
+        "human_action_required_before_enabling": True,
+        "promotion_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+    }
+
+
 def classify(runtime, final_contract, failed_conditions):
     state = runtime.get("mode_state") or {}
     hard_blockers = final_contract.get("hard_blockers") or {}
@@ -1029,6 +1120,12 @@ def build_report(args):
     classification = classify(runtime, final_contract, failed)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
     capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
+    readiness_shortfall = build_readiness_shortfall_summary(capture_stage_rates)
+    paper_proposal_readiness = build_paper_entry_proposal_readiness(
+        classification,
+        capture_stage_rates,
+        failed,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "a_class_fastlane_mode_audit_24h",
@@ -1059,6 +1156,8 @@ def build_report(args):
         },
         "raw_funnel_snapshot": raw_snapshot,
         "capture_stage_rates": capture_stage_rates,
+        "readiness_shortfall_summary": readiness_shortfall,
+        "paper_entry_proposal_readiness": paper_proposal_readiness,
         "upstream_funnel_gap": capture_stage_rates["upstream_funnel_gap"],
         "pending_to_final_entry_gap": capture_stage_rates["pending_to_final_entry_gap"],
         "mode_disabled_adjusted_final_eligibility": capture_stage_rates["mode_disabled_adjusted_final_eligibility"],
@@ -1100,6 +1199,8 @@ def compact_summary(report):
         "final_entry_contract_blocker_breakdown": report.get("final_entry_contract_blocker_breakdown"),
         "raw_funnel_snapshot": report.get("raw_funnel_snapshot"),
         "capture_stage_rates": report.get("capture_stage_rates"),
+        "readiness_shortfall_summary": report.get("readiness_shortfall_summary"),
+        "paper_entry_proposal_readiness": report.get("paper_entry_proposal_readiness"),
         "upstream_funnel_gap": report.get("upstream_funnel_gap"),
         "pending_to_final_entry_gap": report.get("pending_to_final_entry_gap"),
         "mode_disabled_adjusted_final_eligibility": report.get("mode_disabled_adjusted_final_eligibility"),
@@ -1178,6 +1279,11 @@ def self_test():
                 },
                 "entry_bridge_layer": {
                     "paper_trades_entry_ts_window_count": 0,
+                    "paper_evidence_log": {
+                        "event_type_counts": {
+                            "paper_trade_entry_intent": 0,
+                        }
+                    },
                     "raw_signal_decision_bridge": {
                         "raw_signal_ids": 4,
                         "raw_signals_with_decision_record": 3,
@@ -1261,6 +1367,9 @@ def self_test():
         assert report["capture_stage_rates"]["detector_capture_rate"] == 1.0
         assert report["capture_stage_rates"]["decision_record_capture_rate"] == 0.75
         assert report["capture_stage_rates"]["pending_capture_rate"] == 0.5
+        assert report["capture_stage_rates"]["paper_trade_intent_rate"] == 0.0
+        assert report["capture_stage_rates"]["events"]["paper_trade_intent"] == 0
+        assert report["capture_stage_rates"]["events"]["paper_committed"] == 0
         assert report["capture_stage_rates"]["realized_capture_rate"] == 0.0
         assert report["pending_to_final_entry_gap"]["pending_to_final_entry_contract_rate"] == 1.0
         assert report["upstream_funnel_gap"]["no_decision_record"] == 1
@@ -1274,6 +1383,14 @@ def self_test():
         assert report["mode_disabled_adjusted_final_eligibility"]["mode_disabled_only_unique_signal_ids"] == 1
         assert report["mode_disabled_adjusted_final_eligibility"]["rate"] == 0.25
         assert report["mode_disabled_adjusted_final_eligibility"]["status"] == "CAPTURE_READINESS_BELOW_60"
+        assert report["readiness_shortfall_summary"]["target_count_60pct"] == 3
+        assert report["readiness_shortfall_summary"]["current_mode_disabled_adjusted_final_eligibility_count"] == 1
+        assert report["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 2
+        assert report["readiness_shortfall_summary"]["shortfall_to_60_pending"] == 1
+        assert report["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
+        assert "mode_disabled_adjusted_final_eligibility_below_60pct" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert "paper_trade_entry_intent_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert "paper_trade_committed_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
         write_json(context_path, {"blockers": []})
         report = build_report(args)
         assert report["final_entry_status"] == "FUNNEL_BLOCKED_STUCK"
