@@ -334,6 +334,10 @@ def build_report(args):
 
         post_quote_clean = presence_stats(post_deploy_rows, "source_quote_clean")
         post_quote_exec = presence_stats(post_deploy_rows, "source_quote_executable")
+        post_lifecycle_profile = field_presence_stats(post_deploy_rows, "lifecycle_profile", ("lifecycle_state",))
+        post_source_component = field_presence_stats(post_deploy_rows, "source_component")
+        post_volume_profile = field_presence_stats(post_deploy_rows, "volume_profile")
+        post_markov_bucket = field_presence_stats(post_deploy_rows, "markov_bucket")
         rolling_quote_clean = presence_stats(rolling_rows, "source_quote_clean")
         rolling_quote_exec = presence_stats(rolling_rows, "source_quote_executable")
         post_quote_healthy = (post_quote_clean["present_rate"] or 0) >= 0.99 and (post_quote_exec["present_rate"] or 0) >= 0.99
@@ -391,6 +395,8 @@ def build_report(args):
             context_field_blockers.append("volume_profile_coverage_below_80pct")
         if (markov_bucket["effective_present_rate"] or 0) < 0.8:
             context_field_blockers.append("markov_bucket_coverage_below_80pct")
+        post_context_field_healthy = (post_lifecycle_profile["effective_present_rate"] or 0) >= 0.99
+        post_context_classification = "VERIFIED_POST_DEPLOY" if post_context_field_healthy else "NEEDS_CONTEXT_WRITER_FIX"
 
         report = {
             "schema_version": SCHEMA_VERSION,
@@ -419,7 +425,8 @@ def build_report(args):
                 "source_quote_clean_missing_rows": post_quote_clean["missing_rows"],
                 "source_quote_executable_missing_rows": post_quote_exec["missing_rows"],
                 "missing_rows": max(post_quote_clean["missing_rows"], post_quote_exec["missing_rows"]),
-                "writer_path_breakdown": dict(Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
+                "quote_context_writer_path_breakdown": dict(Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
+                "lifecycle_context_writer_path_breakdown": dict(Counter(payload_value(payload, "lifecycle_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
                 "post_deploy_quote_context_healthy": post_quote_healthy,
             },
             "task_b_clean_window_monitor": {
@@ -445,6 +452,21 @@ def build_report(args):
                     "source_quote_clean_missing_rows": rolling_quote_clean["missing_rows"],
                     "source_quote_executable_missing_rows": rolling_quote_exec["missing_rows"],
                 },
+            },
+            "task_e_post_deploy_context_field_smoke_test": {
+                "classification": post_context_classification,
+                "rows_scanned": len(post_deploy_rows),
+                "post_deploy_context_fields_healthy": post_context_field_healthy,
+                "lifecycle_profile": post_lifecycle_profile,
+                "source_component": post_source_component,
+                "volume_profile": post_volume_profile,
+                "markov_bucket": post_markov_bucket,
+                "writer_path_breakdown": dict(Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
+                "notes": [
+                    "Read-only smoke test for context carrier fields written after the supplied deploy timestamp.",
+                    "lifecycle_profile may be an explicit NO_LIFECYCLE_CONTEXT bucket when no runtime lifecycle state exists.",
+                    "volume_profile remains allowed to be blocked separately by realtime kline maturity.",
+                ],
             },
             "task_c_volume_kline_coverage_audit": {
                 "classification": "DATA_BLOCKED_VOLUME_KLINE" if h1_blocked else "VOLUME_KLINE_HEALTHY",
@@ -508,6 +530,7 @@ def build_report(args):
         report["overall_verdict"] = {
             "quote_writer_fix": quote_classification,
             "rolling24_quote_status": clean_status,
+            "context_field_writer_fix": post_context_classification,
             "h1_volume_kline_status": report["task_c_volume_kline_coverage_audit"]["classification"],
             "context_field_status": report["task_d_context_field_coverage_audit"]["classification"],
             "promotion_allowed": False,
@@ -532,6 +555,7 @@ def compact_summary(report):
     task_b = report["task_b_clean_window_monitor"]
     task_c = report["task_c_volume_kline_coverage_audit"]
     task_d = report.get("task_d_context_field_coverage_audit") or {}
+    task_e = report.get("task_e_post_deploy_context_field_smoke_test") or {}
     return {
         "overall_verdict": report.get("overall_verdict"),
         "promotion_allowed": False,
@@ -575,6 +599,14 @@ def compact_summary(report):
             "volume_profile_effective_present_rate": (task_d.get("volume_profile") or {}).get("effective_present_rate"),
             "volume_profile_mature_effective_present_rate": ((task_d.get("volume_profile") or {}).get("mature_context") or {}).get("effective_present_rate"),
         },
+        "task_e": {
+            "classification": task_e.get("classification"),
+            "rows_scanned": task_e.get("rows_scanned"),
+            "lifecycle_profile_effective_present_rate": (task_e.get("lifecycle_profile") or {}).get("effective_present_rate"),
+            "source_component_effective_present_rate": (task_e.get("source_component") or {}).get("effective_present_rate"),
+            "volume_profile_effective_present_rate": (task_e.get("volume_profile") or {}).get("effective_present_rate"),
+            "markov_bucket_effective_present_rate": (task_e.get("markov_bucket") or {}).get("effective_present_rate"),
+        },
     }
 
 
@@ -596,8 +628,8 @@ def self_test():
         )
         rows = [
             (1, "A", now - 200, "current_all", "base", 1, "x", now - 200, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH"}),
-            (2, "B", now - 50, "current_all", "base", 1, "x", now - 50, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": False, "source_quote_executable": False, "volume_profile": "building", "candle_pattern": "green"}),
-            (3, "C", now - 25, "current_all", "base", 1, "x", now - 25, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": True, "source_quote_executable": True, "volume_profile": "unknown", "fbr_time_legal": True}),
+            (2, "B", now - 50, "current_all", "base", 1, "x", now - 50, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": False, "source_quote_executable": False, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "volume_profile": "building", "candle_pattern": "green"}),
+            (3, "C", now - 25, "current_all", "base", 1, "x", now - 25, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": True, "source_quote_executable": True, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "volume_profile": "unknown", "fbr_time_legal": True}),
         ]
         db.executemany(
             "INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?,?,?,?)",
@@ -639,9 +671,13 @@ def self_test():
         assert report["task_a_post_deploy_quote_smoke_test"]["missing_rows"] == 0
         assert report["task_b_clean_window_monitor"]["classification"] == "QUOTE_CLEAN_WINDOW_PENDING"
         assert report["task_b_clean_window_monitor"]["pre_fix_rows_remaining"] == 1
+        assert report["task_e_post_deploy_context_field_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
+        assert report["task_e_post_deploy_context_field_smoke_test"]["lifecycle_profile"]["effective_present_rate"] == 1.0
         assert report["task_c_volume_kline_coverage_audit"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
         assert report["task_d_context_field_coverage_audit"]["classification"] == "DATA_BLOCKED_CONTEXT_FIELDS"
         assert "lifecycle_profile_coverage_below_80pct" in report["task_d_context_field_coverage_audit"]["blockers"]
+        summary = compact_summary(report)
+        assert summary["task_e"]["lifecycle_profile_effective_present_rate"] == 1.0
         assert report["promotion_allowed"] is False
     print("SELF_TEST_PASS context_blocker_monitor")
 

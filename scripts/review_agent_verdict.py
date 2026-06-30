@@ -349,6 +349,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_monitor_quote_smoke = context_blocker_monitor.get("task_a_post_deploy_quote_smoke_test") or {}
     context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
     context_monitor_field_audit = context_blocker_monitor.get("task_d_context_field_coverage_audit") or {}
+    context_monitor_field_smoke = context_blocker_monitor.get("task_e_post_deploy_context_field_smoke_test") or {}
     quote_writer_fix_status = (
         context_monitor_overall.get("quote_writer_fix")
         or context_monitor_quote_smoke.get("classification")
@@ -356,6 +357,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     quote_clean_window_status = (
         context_monitor_overall.get("rolling24_quote_status")
         or context_monitor_clean_window.get("classification")
+    )
+    context_field_writer_fix_status = (
+        context_monitor_overall.get("context_field_writer_fix")
+        or context_monitor_field_smoke.get("classification")
     )
     blockers = list(report_health.get("promotion_blockers") or [])
 
@@ -465,6 +470,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         actionable_blockers = [
             blocker for blocker in actionable_blockers
             if blocker != "volume_profile_coverage_below_80pct"
+        ]
+    lifecycle_clean_window_pending = (
+        "lifecycle_profile_coverage_below_80pct" in blockers
+        and context_field_writer_fix_status == "VERIFIED_POST_DEPLOY"
+    )
+    if lifecycle_clean_window_pending:
+        actionable_blockers = [
+            blocker for blocker in actionable_blockers
+            if blocker != "lifecycle_profile_coverage_below_80pct"
         ]
     next_highest_priority_blocker = first_blocker_priority(actionable_blockers)
     candidate_integrity_ok = (
@@ -702,12 +716,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "clean_window_monitor": context_monitor_clean_window,
             "volume_kline_coverage_audit": context_blocker_monitor.get("task_c_volume_kline_coverage_audit") or {},
             "context_field_coverage_audit": context_monitor_field_audit,
+            "post_deploy_context_field_smoke_test": context_monitor_field_smoke,
             "reconciled_warnings": reconciled_context_warnings,
         },
         "quote_writer_fix_status": quote_writer_fix_status,
         "quote_clean_window_status": quote_clean_window_status,
         "quote_clean_window_eta_iso": context_monitor_clean_window.get("estimated_clean_at_iso"),
         "quote_clean_window_seconds_remaining": context_monitor_clean_window.get("seconds_until_natural_clean_window"),
+        "context_field_writer_fix_status": context_field_writer_fix_status,
+        "lifecycle_clean_window_pending": lifecycle_clean_window_pending,
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
         "volume_profile_blocker_state": volume_profile_state,
@@ -1295,6 +1312,23 @@ def self_test():
     })
     assert "lifecycle_profile_coverage_below_80pct" not in lifecycle_reconciled["blockers"]
     assert "lifecycle_profile_coverage_reconciled_by_mature_context" in lifecycle_reconciled["context_blocker_monitor"]["reconciled_warnings"]
+    lifecycle_pending = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": ["lifecycle_profile_coverage_below_80pct"]},
+    }, tests={"passed": True}, readiness_reports={
+        "context_blocker_monitor": {
+            "overall_verdict": {
+                "context_field_writer_fix": "VERIFIED_POST_DEPLOY",
+            },
+            "task_e_post_deploy_context_field_smoke_test": {
+                "classification": "VERIFIED_POST_DEPLOY",
+            },
+        }
+    })
+    assert "lifecycle_profile_coverage_below_80pct" in lifecycle_pending["blockers"]
+    assert "lifecycle_profile_coverage_below_80pct" not in lifecycle_pending["actionable_blockers"]
+    assert lifecycle_pending["lifecycle_clean_window_pending"] is True
+    assert lifecycle_pending["context_field_writer_fix_status"] == "VERIFIED_POST_DEPLOY"
     matured_volume_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "matured_volume_capture_cross_audit": {
             "overall": {
