@@ -398,6 +398,9 @@ def self_test():
                     "count": 8,
                 }
             ],
+            "shadow_no_decision_entry_hypothesis_candidate_counts": [
+                {"candidate_id": "notath_quote_clean", "family": "base", "count": 8}
+            ],
             "no_decision_candidate_shadow_observed_no_decision_event": 8,
             "decision_no_pass_or_allow": 4,
             "pass_or_allow_without_pending_entry": 3,
@@ -448,6 +451,7 @@ def self_test():
     assert "NO_DECISION_RECORD" in text
     assert "candidate_shadow_observed_no_decision_event" in text
     assert "shadow_entry_hypotheses_matched_no_decision_bridge" in text
+    assert "notath_quote_clean" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text

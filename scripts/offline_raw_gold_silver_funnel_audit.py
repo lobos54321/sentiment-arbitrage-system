@@ -551,6 +551,32 @@ def _root_cause_rows(counter, descriptions, limit=20):
     ]
 
 
+def _shadow_hypothesis_family_rows(counter, limit=20):
+    return [
+        {"family": family, "count": count}
+        for family, count in counter.most_common(limit)
+    ]
+
+
+def _shadow_hypothesis_candidate_rows(counter, limit=30):
+    return [
+        {"candidate_id": key[0], "family": key[1], "count": count}
+        for key, count in counter.most_common(limit)
+    ]
+
+
+def _shadow_hypothesis_reason_rows(counter, limit=30):
+    return [
+        {
+            "candidate_id": key[0],
+            "family": key[1],
+            "reason": key[2],
+            "count": count,
+        }
+        for key, count in counter.most_common(limit)
+    ]
+
+
 def _shadow_entry_hypothesis_candidate(row):
     candidate_id = str(row.get("candidate_id") or "")
     family = str(row.get("family") or "")
@@ -679,6 +705,10 @@ def _attribute_no_decision_records(
     partial_candidate_observed = 0
     no_observation_or_decision = 0
     missing_signal_id = 0
+    shadow_no_decision_family_counts = Counter()
+    shadow_no_decision_candidate_counts = Counter()
+    shadow_no_decision_reason_counts = Counter()
+    shadow_no_decision_signal_examples = []
 
     for signal_id in sorted(missing_signal_ids or []):
         raw_row = raw_by_signal.get(signal_id) or {}
@@ -761,6 +791,32 @@ def _attribute_no_decision_records(
                     ],
                 }
             )
+        if subroot == "shadow_entry_hypotheses_matched_no_decision_bridge":
+            matched = [row for row in observations if truthy(row.get("matched"))]
+            entry_matches = [row for row in matched if _shadow_entry_hypothesis_candidate(row)]
+            for row in entry_matches:
+                candidate_id = str(row.get("candidate_id") or "UNKNOWN")
+                family = str(row.get("family") or "UNKNOWN")
+                reason = str(row.get("reason") or "UNKNOWN")
+                shadow_no_decision_family_counts[family] += 1
+                shadow_no_decision_candidate_counts[(candidate_id, family)] += 1
+                shadow_no_decision_reason_counts[(candidate_id, family, reason)] += 1
+            if len(shadow_no_decision_signal_examples) < 20:
+                shadow_no_decision_signal_examples.append(
+                    {
+                        "signal_id": signal_id,
+                        "token_ca": token or raw_row.get("token_ca"),
+                        "matched_entry_hypothesis_count": len(entry_matches),
+                        "matched_entry_hypothesis_sample": [
+                            {
+                                "candidate_id": row.get("candidate_id"),
+                                "family": row.get("family"),
+                                "reason": row.get("reason"),
+                            }
+                            for row in entry_matches[:12]
+                        ],
+                    }
+                )
 
     return {
         "no_decision_record_root_cause_counts": _root_cause_rows(
@@ -770,6 +826,16 @@ def _attribute_no_decision_records(
             subroot_counts, NO_DECISION_SUBROOT_DESCRIPTIONS
         ),
         "no_decision_record_examples": examples,
+        "shadow_no_decision_entry_hypothesis_family_counts": _shadow_hypothesis_family_rows(
+            shadow_no_decision_family_counts
+        ),
+        "shadow_no_decision_entry_hypothesis_candidate_counts": _shadow_hypothesis_candidate_rows(
+            shadow_no_decision_candidate_counts
+        ),
+        "shadow_no_decision_entry_hypothesis_reason_counts": _shadow_hypothesis_reason_rows(
+            shadow_no_decision_reason_counts
+        ),
+        "shadow_no_decision_entry_hypothesis_signal_examples": shadow_no_decision_signal_examples,
         "no_decision_token_time_decision_without_exact_signal_id": token_time_joined,
         "no_decision_candidate_shadow_observed_no_decision_event": candidate_shadow_observed,
         "no_decision_partial_candidate_observation_no_decision_event": partial_candidate_observed,
@@ -1685,6 +1751,8 @@ def compact_stdout_summary(report, out_path=None):
                 "raw_signals_with_final_entry_mode_disabled_plus_other",
                 "no_decision_record_root_cause_counts",
                 "no_decision_record_subroot_cause_counts",
+                "shadow_no_decision_entry_hypothesis_family_counts",
+                "shadow_no_decision_entry_hypothesis_candidate_counts",
                 "no_decision_token_time_decision_without_exact_signal_id",
                 "no_decision_candidate_shadow_observed_no_decision_event",
                 "no_decision_partial_candidate_observation_no_decision_event",

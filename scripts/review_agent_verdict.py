@@ -459,6 +459,18 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "no_decision_record": upstream_gap.get("no_decision_record"),
             "no_decision_record_root_cause_counts": upstream_gap.get("no_decision_record_root_cause_counts") or [],
             "no_decision_record_subroot_cause_counts": upstream_gap.get("no_decision_record_subroot_cause_counts") or [],
+            "shadow_no_decision_entry_hypothesis_family_counts": upstream_gap.get(
+                "shadow_no_decision_entry_hypothesis_family_counts"
+            )
+            or [],
+            "shadow_no_decision_entry_hypothesis_candidate_counts": upstream_gap.get(
+                "shadow_no_decision_entry_hypothesis_candidate_counts"
+            )
+            or [],
+            "shadow_no_decision_entry_hypothesis_reason_counts": upstream_gap.get(
+                "shadow_no_decision_entry_hypothesis_reason_counts"
+            )
+            or [],
             "no_decision_token_time_decision_without_exact_signal_id": upstream_gap.get(
                 "no_decision_token_time_decision_without_exact_signal_id"
             ),
@@ -834,6 +846,20 @@ def self_test():
                             "count": 1,
                         }
                     ],
+                    "shadow_no_decision_entry_hypothesis_family_counts": [
+                        {"family": "base", "count": 1}
+                    ],
+                    "shadow_no_decision_entry_hypothesis_candidate_counts": [
+                        {"candidate_id": "notath_quote_clean", "family": "base", "count": 1}
+                    ],
+                    "shadow_no_decision_entry_hypothesis_reason_counts": [
+                        {
+                            "candidate_id": "notath_quote_clean",
+                            "family": "base",
+                            "reason": "runtime_source_quote_clean",
+                            "count": 1,
+                        }
+                    ],
                     "no_decision_candidate_shadow_observed_no_decision_event": 1,
                     "decision_no_pass_or_allow": 4,
                     "pass_or_allow_without_pending_entry": 2,
@@ -872,6 +898,7 @@ def self_test():
     assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_record_subroot_cause_counts"][0]["root_cause"] == "shadow_entry_hypotheses_matched_no_decision_bridge"
+    assert stage_verdict["upstream_funnel_gap_summary"]["shadow_no_decision_entry_hypothesis_candidate_counts"][0]["candidate_id"] == "notath_quote_clean"
     assert stage_verdict["upstream_funnel_gap_summary"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 3
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"

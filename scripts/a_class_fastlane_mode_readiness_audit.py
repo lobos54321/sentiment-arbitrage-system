@@ -404,6 +404,18 @@ def raw_funnel_snapshot(raw_funnel):
         "no_decision_record_root_cause_counts": raw_bridge.get("no_decision_record_root_cause_counts"),
         "no_decision_record_subroot_cause_counts": raw_bridge.get("no_decision_record_subroot_cause_counts"),
         "no_decision_record_examples": raw_bridge.get("no_decision_record_examples"),
+        "shadow_no_decision_entry_hypothesis_family_counts": raw_bridge.get(
+            "shadow_no_decision_entry_hypothesis_family_counts"
+        ),
+        "shadow_no_decision_entry_hypothesis_candidate_counts": raw_bridge.get(
+            "shadow_no_decision_entry_hypothesis_candidate_counts"
+        ),
+        "shadow_no_decision_entry_hypothesis_reason_counts": raw_bridge.get(
+            "shadow_no_decision_entry_hypothesis_reason_counts"
+        ),
+        "shadow_no_decision_entry_hypothesis_signal_examples": raw_bridge.get(
+            "shadow_no_decision_entry_hypothesis_signal_examples"
+        ),
         "no_decision_token_time_decision_without_exact_signal_id": raw_bridge.get(
             "no_decision_token_time_decision_without_exact_signal_id"
         ),
@@ -889,6 +901,22 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "no_decision_record_root_cause_counts": raw_snapshot.get("no_decision_record_root_cause_counts") or [],
             "no_decision_record_subroot_cause_counts": raw_snapshot.get("no_decision_record_subroot_cause_counts") or [],
             "no_decision_record_examples": raw_snapshot.get("no_decision_record_examples") or [],
+            "shadow_no_decision_entry_hypothesis_family_counts": raw_snapshot.get(
+                "shadow_no_decision_entry_hypothesis_family_counts"
+            )
+            or [],
+            "shadow_no_decision_entry_hypothesis_candidate_counts": raw_snapshot.get(
+                "shadow_no_decision_entry_hypothesis_candidate_counts"
+            )
+            or [],
+            "shadow_no_decision_entry_hypothesis_reason_counts": raw_snapshot.get(
+                "shadow_no_decision_entry_hypothesis_reason_counts"
+            )
+            or [],
+            "shadow_no_decision_entry_hypothesis_signal_examples": raw_snapshot.get(
+                "shadow_no_decision_entry_hypothesis_signal_examples"
+            )
+            or [],
             "no_decision_token_time_decision_without_exact_signal_id": safe_int(
                 raw_snapshot.get("no_decision_token_time_decision_without_exact_signal_id"), 0
             ),
@@ -1168,6 +1196,20 @@ def self_test():
                                 "count": 1,
                             }
                         ],
+                        "shadow_no_decision_entry_hypothesis_family_counts": [
+                            {"family": "base", "count": 1}
+                        ],
+                        "shadow_no_decision_entry_hypothesis_candidate_counts": [
+                            {"candidate_id": "notath_quote_clean", "family": "base", "count": 1}
+                        ],
+                        "shadow_no_decision_entry_hypothesis_reason_counts": [
+                            {
+                                "candidate_id": "notath_quote_clean",
+                                "family": "base",
+                                "reason": "runtime_source_quote_clean",
+                                "count": 1,
+                            }
+                        ],
                         "no_decision_candidate_shadow_observed_no_decision_event": 1,
                         "raw_signals_with_pass_or_allow": 2,
                         "raw_signals_with_pending_entry": 2,
@@ -1224,6 +1266,7 @@ def self_test():
         assert report["upstream_funnel_gap"]["no_decision_record"] == 1
         assert report["upstream_funnel_gap"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
         assert report["upstream_funnel_gap"]["no_decision_record_subroot_cause_counts"][0]["root_cause"] == "shadow_entry_hypotheses_matched_no_decision_bridge"
+        assert report["upstream_funnel_gap"]["shadow_no_decision_entry_hypothesis_candidate_counts"][0]["candidate_id"] == "notath_quote_clean"
         assert report["upstream_funnel_gap"]["upstream_gap_category_counts"]["categories"][0]["top_reasons"]
         assert report["upstream_funnel_gap"]["decision_no_pass_or_allow"] == 1
         assert report["upstream_funnel_gap"]["total_upstream_gap"] == 2
