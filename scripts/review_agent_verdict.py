@@ -232,6 +232,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_monitor_overall = context_blocker_monitor.get("overall_verdict") or {}
     context_monitor_quote_smoke = context_blocker_monitor.get("task_a_post_deploy_quote_smoke_test") or {}
     context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
+    context_monitor_field_audit = context_blocker_monitor.get("task_d_context_field_coverage_audit") or {}
     blockers = list(report_health.get("promotion_blockers") or [])
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
@@ -273,6 +274,18 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         blockers.append("source_quote_executable_coverage_below_80pct")
     if tests and not tests.get("passed", False):
         blockers.append("tests_failed")
+
+    context_monitor_warnings = set(context_monitor_field_audit.get("warnings") or [])
+    reconciled_context_warnings = []
+    if (
+        "lifecycle_profile_coverage_below_80pct" in blockers
+        and "lifecycle_profile_rolling_below_80_mature_context_ok" in context_monitor_warnings
+    ):
+        blockers = [
+            blocker for blocker in blockers
+            if blocker != "lifecycle_profile_coverage_below_80pct"
+        ]
+        reconciled_context_warnings.append("lifecycle_profile_coverage_reconciled_by_mature_context")
 
     blockers = sorted(set(blockers))
     quote_coverage_blockers = {
@@ -448,7 +461,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_deploy_quote_smoke_test": context_monitor_quote_smoke,
             "clean_window_monitor": context_monitor_clean_window,
             "volume_kline_coverage_audit": context_blocker_monitor.get("task_c_volume_kline_coverage_audit") or {},
-            "context_field_coverage_audit": context_blocker_monitor.get("task_d_context_field_coverage_audit") or {},
+            "context_field_coverage_audit": context_monitor_field_audit,
+            "reconciled_warnings": reconciled_context_warnings,
         },
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
@@ -788,6 +802,18 @@ def self_test():
     })
     assert monitor_reconciled_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
     assert monitor_reconciled_quote_blocked["context_blocker_monitor"]["available"] is True
+    lifecycle_reconciled = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": ["lifecycle_profile_coverage_below_80pct"]},
+    }, tests={"passed": True}, readiness_reports={
+        "context_blocker_monitor": {
+            "task_d_context_field_coverage_audit": {
+                "warnings": ["lifecycle_profile_rolling_below_80_mature_context_ok"],
+            },
+        }
+    })
+    assert "lifecycle_profile_coverage_below_80pct" not in lifecycle_reconciled["blockers"]
+    assert "lifecycle_profile_coverage_reconciled_by_mature_context" in lifecycle_reconciled["context_blocker_monitor"]["reconciled_warnings"]
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},
