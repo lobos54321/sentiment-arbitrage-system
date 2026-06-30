@@ -779,6 +779,39 @@ def compact_hypothesis(metrics):
     }
 
 
+def compact_matured_volume_hypothesis(row):
+    candidate_id = row.get("candidate_id")
+    slice_value = row.get("slice_value")
+    return {
+        "hypothesis_id": f"matured_volume:{candidate_id}:{slice_value}",
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_matured_volume_context",
+        "promotion_allowed": False,
+        "definition": {
+            "candidate_id": candidate_id,
+            "dimension": row.get("dimension") or "matured_volume_profile",
+            "slice_value": slice_value,
+        },
+        "latest_metrics": {
+            key: row.get(key)
+            for key in (
+                "slice_signal_count",
+                "slice_raw_gs_count",
+                "candidate_match_count",
+                "matched_gs_count",
+                "match_recall_event",
+                "match_precision_event",
+                "candidate_baseline_recall_event",
+                "candidate_baseline_precision_event",
+                "recall_lift_vs_candidate_baseline",
+                "precision_lift_vs_candidate_baseline",
+                "verdict",
+            )
+        },
+        "next_validation": "track_same_definition_in_next_clean_window_then_oos_if_repeated",
+    }
+
+
 def update_hypothesis_registry(path, verdict, capture):
     target = Path(path)
     if target.exists():
@@ -795,8 +828,13 @@ def update_hypothesis_registry(path, verdict, capture):
         "blockers": verdict.get("blockers") or [],
         "capture_judgment_counts": verdict.get("capture_judgment_counts") or {},
     })
+    matured_volume = verdict.get("matured_volume_capture_cross_audit") or {}
+    matured_volume_watch = [
+        compact_matured_volume_hypothesis(row)
+        for row in (matured_volume.get("top_watch_slices") or [])[:10]
+    ]
     registry = {
-        "schema_version": "hypothesis_registry.v1",
+        "schema_version": "hypothesis_registry.v2",
         "updated_at": utc_now(),
         "phase": "discovery_mesh",
         "promotion_allowed": False,
@@ -805,6 +843,7 @@ def update_hypothesis_registry(path, verdict, capture):
             "H2_shallow_pullback_matrix_evaluator": compact_hypothesis(verdict.get("H2_capture_metrics") or {}),
         },
         "watchlist_hypotheses": capture.get("watchlist_hypotheses", [])[:25],
+        "shadow_only_matured_volume_watch": matured_volume_watch,
         "recent_runs": recent[-20:],
     }
     write_json(target, registry)
@@ -1326,6 +1365,42 @@ def self_test():
         missing = [field for field in required_verdict_fields if field not in verdict]
         assert not missing, missing
         latest_dir = Path(result["latest_verdict"]).parent
+        registry = load_json(result["hypothesis_registry"])
+        assert registry["schema_version"] == "hypothesis_registry.v2"
+        assert "shadow_only_matured_volume_watch" in registry
+        manual_registry_path = root / "manual_hypothesis_registry.json"
+        manual_registry = update_hypothesis_registry(
+            manual_registry_path,
+            {
+                "generated_at": utc_now(),
+                "classification": "BLOCKED_CONTEXT_COVERAGE",
+                "blockers": ["volume_profile_coverage_below_80pct"],
+                "capture_judgment_counts": {},
+                "H1_capture_metrics": {},
+                "H2_capture_metrics": {},
+                "matured_volume_capture_cross_audit": {
+                    "top_watch_slices": [
+                        {
+                            "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
+                            "dimension": "matured_volume_profile",
+                            "slice_value": "building",
+                            "slice_signal_count": 126,
+                            "slice_raw_gs_count": 10,
+                            "candidate_match_count": 62,
+                            "matched_gs_count": 5,
+                            "match_recall_event": 0.5,
+                            "match_precision_event": 0.080645,
+                            "recall_lift_vs_candidate_baseline": 0.131579,
+                            "precision_lift_vs_candidate_baseline": 0.017009,
+                            "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                        }
+                    ]
+                },
+            },
+            {"watchlist_hypotheses": []},
+        )
+        assert manual_registry["shadow_only_matured_volume_watch"][0]["hypothesis_id"] == "matured_volume:entry_mode_registry:ath_flat_structure_tiny_scout:building"
+        assert manual_registry["shadow_only_matured_volume_watch"][0]["promotion_allowed"] is False
         required_artifacts = [
             "capture_discovery_24h.json",
             "capture_discovery_48h.json",
