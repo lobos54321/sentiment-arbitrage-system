@@ -29,6 +29,8 @@ MATURE_CONTEXT_MIN_AGE_SEC = 6 * 3600
 MATURE_CONTEXT_MIN_ROWS = 50
 RECENT_WRITER_SMOKE_MAX_AGE_SEC = 3600
 RECENT_WRITER_SMOKE_MIN_ROWS = 10
+RECENT_CONTEXT_WRITER_HEALTH_ROWS = 100
+RECENT_CONTEXT_WRITER_HEALTH_TARGET_RATE = 0.99
 
 
 def utc_now_ts() -> int:
@@ -92,7 +94,7 @@ def load_context_rows(db, since_ts, carrier_candidate_id):
         return []
     rows = db.execute(
         """
-        SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched, reason, observed_at, payload_json
+        SELECT rowid AS rowid, signal_id, token_ca, signal_ts, candidate_id, family, matched, reason, observed_at, payload_json
         FROM candidate_shadow_observations
         WHERE candidate_id = ?
           AND observed_at >= ?
@@ -302,6 +304,122 @@ def missing_breakdown(rows, target_key):
     return result
 
 
+def build_recent_context_writer_health(rows, now_ts, sample_rows=RECENT_CONTEXT_WRITER_HEALTH_ROWS):
+    """Audit the newest context carrier rows without changing formal coverage.
+
+    Rolling 24h coverage can stay blocked for hours after a writer fix because
+    old incomplete rows remain in the window. This read-only audit separates
+    "writer is currently healthy but old rows remain" from "writer is still
+    degraded". It never unblocks promotion by itself.
+    """
+    sample_rows = max(1, int(sample_rows or RECENT_CONTEXT_WRITER_HEALTH_ROWS))
+    recent_rows = list(rows[-sample_rows:]) if rows else []
+    if not recent_rows:
+        return {
+            "classification": "RECENT_CONTEXT_WRITER_NO_ROWS",
+            "rows_scanned": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+
+    observed_times = [
+        int(row.get("observed_at") or 0)
+        for row, _payload in recent_rows
+        if row.get("observed_at") is not None
+    ]
+    newest_observed_at = max(observed_times) if observed_times else None
+    oldest_observed_at = min(observed_times) if observed_times else None
+    observed_span_sec = (
+        max(0, newest_observed_at - oldest_observed_at)
+        if newest_observed_at is not None and oldest_observed_at is not None
+        else None
+    )
+    newest_age_sec = max(0, int(now_ts) - int(newest_observed_at)) if newest_observed_at is not None else None
+    oldest_age_sec = max(0, int(now_ts) - int(oldest_observed_at)) if oldest_observed_at is not None else None
+    rows_per_hour = None
+    if observed_span_sec and observed_span_sec > 0 and len(recent_rows) > 1:
+        rows_per_hour = round((float(len(recent_rows) - 1) / float(observed_span_sec)) * 3600.0, 6)
+
+    fields = {
+        "source_quote_clean": field_presence_stats(recent_rows, "source_quote_clean"),
+        "source_quote_executable": field_presence_stats(recent_rows, "source_quote_executable"),
+        "lifecycle_profile": field_presence_stats(recent_rows, "lifecycle_profile", ("lifecycle_state",)),
+        "source_component": field_presence_stats(recent_rows, "source_component"),
+        "markov_bucket": field_presence_stats(recent_rows, "markov_bucket"),
+        "volume_profile": field_presence_stats(recent_rows, "volume_profile"),
+    }
+    required_fields = (
+        "source_quote_clean",
+        "source_quote_executable",
+        "lifecycle_profile",
+        "source_component",
+        "markov_bucket",
+    )
+    degraded_fields = [
+        field
+        for field in required_fields
+        if (fields[field].get("effective_present_rate") or 0) < RECENT_CONTEXT_WRITER_HEALTH_TARGET_RATE
+    ]
+    volume_known_rate = fields["volume_profile"].get("effective_present_rate")
+    recent_rows_enough = len(recent_rows) >= RECENT_WRITER_SMOKE_MIN_ROWS
+    recent_enough = newest_age_sec is not None and newest_age_sec <= RECENT_WRITER_SMOKE_MAX_AGE_SEC
+    if degraded_fields:
+        classification = "RECENT_CONTEXT_WRITER_DEGRADED"
+    elif not recent_rows_enough:
+        classification = "RECENT_CONTEXT_WRITER_HEALTHY_LOW_SAMPLE"
+    elif not recent_enough:
+        classification = "RECENT_CONTEXT_WRITER_STALE"
+    else:
+        classification = "RECENT_CONTEXT_WRITER_HEALTHY"
+
+    return {
+        "classification": classification,
+        "rows_scanned": len(recent_rows),
+        "sample_row_limit": sample_rows,
+        "context_carrier": DEFAULT_CONTEXT_CARRIER,
+        "newest_observed_at": newest_observed_at,
+        "newest_observed_at_iso": iso(newest_observed_at),
+        "newest_age_sec": newest_age_sec,
+        "oldest_observed_at": oldest_observed_at,
+        "oldest_observed_at_iso": iso(oldest_observed_at),
+        "oldest_age_sec": oldest_age_sec,
+        "observed_span_sec": observed_span_sec,
+        "estimated_rows_per_hour": rows_per_hour,
+        "target_effective_present_rate": RECENT_CONTEXT_WRITER_HEALTH_TARGET_RATE,
+        "required_fields": list(required_fields),
+        "degraded_fields": degraded_fields,
+        "volume_profile_known_rate": volume_known_rate,
+        "volume_profile_note": (
+            "Volume can remain blocked by realtime kline maturity even when quote/lifecycle/source/markov writer fields are healthy."
+        ),
+        "fields": fields,
+        "context_schema_version_counts": dict(
+            Counter(payload_value(payload, "context_schema_version") for _row, payload in recent_rows).most_common()
+        ),
+        "quote_clean_definition_counts": dict(
+            Counter(payload_value(payload, "quote_clean_definition") for _row, payload in recent_rows).most_common()
+        ),
+        "quote_context_writer_path_breakdown": dict(
+            Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in recent_rows).most_common()
+        ),
+        "lifecycle_context_writer_path_breakdown": dict(
+            Counter(payload_value(payload, "lifecycle_context_writer_path") for _row, payload in recent_rows).most_common()
+        ),
+        "source_component_value_counts": dict(
+            Counter(payload_value(payload, "source_component") for _row, payload in recent_rows).most_common(20)
+        ),
+        "lifecycle_profile_value_counts": dict(
+            Counter(payload_value(payload, "lifecycle_profile", payload_value(payload, "lifecycle_state")) for _row, payload in recent_rows).most_common(20)
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def load_raw_gold_silver_kline_coverage(raw_db, since_ts):
     result = {
         "available": False,
@@ -431,6 +549,12 @@ def build_report(args):
         mature_source_component = field_presence_stats(mature_rows, "source_component")
         mature_volume_profile = field_presence_stats(mature_rows, "volume_profile")
         mature_markov_bucket = field_presence_stats(mature_rows, "markov_bucket")
+        recent_context_writer_health = build_recent_context_writer_health(
+            rolling_rows,
+            now_ts,
+            args.recent_context_writer_rows,
+        )
+        recent_context_writer_health["context_carrier"] = args.context_carrier
         mature_enough_rows = len(mature_rows) >= int(args.min_mature_context_rows)
         context_field_blockers = []
         context_field_warnings = []
@@ -448,6 +572,40 @@ def build_report(args):
             context_field_blockers.append("volume_profile_coverage_below_80pct")
         if (markov_bucket["effective_present_rate"] or 0) < 0.8:
             context_field_blockers.append("markov_bucket_coverage_below_80pct")
+        recent_required_degraded = list(recent_context_writer_health.get("degraded_fields") or [])
+        waiting_field_map = {
+            "lifecycle_profile": "lifecycle_profile_coverage_below_80pct",
+            "source_component": "source_component_coverage_below_80pct",
+            "markov_bucket": "markov_bucket_coverage_below_80pct",
+            "volume_profile": "volume_profile_coverage_below_80pct",
+        }
+        recent_context_writer_health["rolling_context_blockers"] = list(context_field_blockers)
+        recent_context_writer_health["waiting_fields_recent_health"] = {
+            field: {
+                "rolling_blocker": blocker,
+                "is_rolling_blocked": blocker in context_field_blockers,
+                "recent_effective_present_rate": (
+                    (recent_context_writer_health.get("fields") or {}).get(field) or {}
+                ).get("effective_present_rate"),
+                "recent_rows_needed_to_80pct": (
+                    (recent_context_writer_health.get("fields") or {}).get(field) or {}
+                ).get("rows_needed_to_80pct"),
+                "recent_writer_field_healthy": field not in recent_required_degraded,
+            }
+            for field, blocker in waiting_field_map.items()
+        }
+        recent_context_writer_health["inferred_clean_window_state"] = (
+            "writer_degraded"
+            if recent_context_writer_health.get("classification") == "RECENT_CONTEXT_WRITER_DEGRADED"
+            else (
+                "writer_healthy_old_rows_remaining"
+                if any(
+                    item.get("is_rolling_blocked") and item.get("recent_writer_field_healthy")
+                    for item in (recent_context_writer_health.get("waiting_fields_recent_health") or {}).values()
+                )
+                else "writer_healthy_or_not_context_field_blocked"
+            )
+        )
         post_context_field_healthy = (
             (post_lifecycle_profile["effective_present_rate"] or 0) >= 0.99
             and (post_source_component["effective_present_rate"] or 0) >= 0.99
@@ -534,6 +692,7 @@ def build_report(args):
                     "volume_profile remains allowed to be blocked separately by realtime kline maturity.",
                 ],
             },
+            "task_f_recent_context_writer_health": recent_context_writer_health,
             "task_c_volume_kline_coverage_audit": {
                 "classification": "DATA_BLOCKED_VOLUME_KLINE" if h1_blocked else "VOLUME_KLINE_HEALTHY",
                 "rows_scanned": len(rolling_rows),
@@ -622,6 +781,7 @@ def compact_summary(report):
     task_c = report["task_c_volume_kline_coverage_audit"]
     task_d = report.get("task_d_context_field_coverage_audit") or {}
     task_e = report.get("task_e_post_deploy_context_field_smoke_test") or {}
+    task_f = report.get("task_f_recent_context_writer_health") or {}
     return {
         "overall_verdict": report.get("overall_verdict"),
         "promotion_allowed": False,
@@ -672,6 +832,19 @@ def compact_summary(report):
             "source_component_effective_present_rate": (task_e.get("source_component") or {}).get("effective_present_rate"),
             "volume_profile_effective_present_rate": (task_e.get("volume_profile") or {}).get("effective_present_rate"),
             "markov_bucket_effective_present_rate": (task_e.get("markov_bucket") or {}).get("effective_present_rate"),
+        },
+        "task_f": {
+            "classification": task_f.get("classification"),
+            "rows_scanned": task_f.get("rows_scanned"),
+            "newest_observed_at_iso": task_f.get("newest_observed_at_iso"),
+            "newest_age_sec": task_f.get("newest_age_sec"),
+            "estimated_rows_per_hour": task_f.get("estimated_rows_per_hour"),
+            "degraded_fields": task_f.get("degraded_fields"),
+            "inferred_clean_window_state": task_f.get("inferred_clean_window_state"),
+            "lifecycle_profile_effective_present_rate": ((task_f.get("fields") or {}).get("lifecycle_profile") or {}).get("effective_present_rate"),
+            "source_component_effective_present_rate": ((task_f.get("fields") or {}).get("source_component") or {}).get("effective_present_rate"),
+            "markov_bucket_effective_present_rate": ((task_f.get("fields") or {}).get("markov_bucket") or {}).get("effective_present_rate"),
+            "volume_profile_effective_present_rate": ((task_f.get("fields") or {}).get("volume_profile") or {}).get("effective_present_rate"),
         },
     }
 
@@ -759,6 +932,7 @@ def self_test():
             expected_commit=EXPECTED_COMMIT,
             mature_context_min_age_sec=MATURE_CONTEXT_MIN_AGE_SEC,
             min_mature_context_rows=MATURE_CONTEXT_MIN_ROWS,
+            recent_context_writer_rows=RECENT_WRITER_SMOKE_MIN_ROWS,
         )
         report = build_report(args)
         assert report["task_a_post_deploy_quote_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
@@ -767,11 +941,15 @@ def self_test():
         assert report["task_b_clean_window_monitor"]["pre_fix_rows_remaining"] == 4
         assert report["task_e_post_deploy_context_field_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
         assert report["task_e_post_deploy_context_field_smoke_test"]["lifecycle_profile"]["effective_present_rate"] == 1.0
+        assert report["task_f_recent_context_writer_health"]["classification"] == "RECENT_CONTEXT_WRITER_HEALTHY"
+        assert report["task_f_recent_context_writer_health"]["inferred_clean_window_state"] == "writer_healthy_old_rows_remaining"
+        assert report["task_f_recent_context_writer_health"]["fields"]["source_component"]["effective_present_rate"] == 1.0
         assert report["task_c_volume_kline_coverage_audit"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
         assert report["task_d_context_field_coverage_audit"]["classification"] == "DATA_BLOCKED_CONTEXT_FIELDS"
         assert "lifecycle_profile_coverage_below_80pct" in report["task_d_context_field_coverage_audit"]["blockers"]
         summary = compact_summary(report)
         assert summary["task_e"]["lifecycle_profile_effective_present_rate"] == 1.0
+        assert summary["task_f"]["classification"] == "RECENT_CONTEXT_WRITER_HEALTHY"
         assert report["promotion_allowed"] is False
         fallback_args = argparse.Namespace(
             db=str(paper),
@@ -783,6 +961,7 @@ def self_test():
             expected_commit=EXPECTED_COMMIT,
             mature_context_min_age_sec=MATURE_CONTEXT_MIN_AGE_SEC,
             min_mature_context_rows=MATURE_CONTEXT_MIN_ROWS,
+            recent_context_writer_rows=RECENT_WRITER_SMOKE_MIN_ROWS,
         )
         fallback_report = build_report(fallback_args)
         assert fallback_report["deploy_ts_source"] in {
@@ -792,6 +971,7 @@ def self_test():
         }
         assert fallback_report["task_a_post_deploy_quote_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
         assert fallback_report["task_e_post_deploy_context_field_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
+        assert fallback_report["task_f_recent_context_writer_health"]["classification"] == "RECENT_CONTEXT_WRITER_HEALTHY"
         assert fallback_report["task_b_clean_window_monitor"]["classification"] == "QUOTE_CLEAN_WINDOW_PENDING"
         assert fallback_report["promotion_allowed"] is False
     print("SELF_TEST_PASS context_blocker_monitor")
@@ -808,6 +988,7 @@ def parse_args(argv=None):
     parser.add_argument("--expected-commit", default=EXPECTED_COMMIT)
     parser.add_argument("--mature-context-min-age-sec", type=int, default=MATURE_CONTEXT_MIN_AGE_SEC)
     parser.add_argument("--min-mature-context-rows", type=int, default=MATURE_CONTEXT_MIN_ROWS)
+    parser.add_argument("--recent-context-writer-rows", type=int, default=RECENT_CONTEXT_WRITER_HEALTH_ROWS)
     parser.add_argument("--out")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)

@@ -200,6 +200,7 @@ def build_context_clean_window_progress(
     context_monitor_clean_window,
     context_monitor_field_audit,
     context_monitor_field_smoke,
+    context_monitor_recent_writer_health=None,
 ):
     field_blockers = {
         "lifecycle_profile": "lifecycle_profile_coverage_below_80pct",
@@ -239,7 +240,17 @@ def build_context_clean_window_progress(
             "post_deploy_context_fields_healthy": boolish(
                 (context_monitor_field_smoke or {}).get("post_deploy_context_fields_healthy")
             ),
+            "recent_context_writer_health_classification": (
+                (context_monitor_recent_writer_health or {}).get("classification")
+            ),
+            "recent_context_writer_inferred_clean_window_state": (
+                (context_monitor_recent_writer_health or {}).get("inferred_clean_window_state")
+            ),
+            "recent_context_writer_newest_age_sec": (
+                (context_monitor_recent_writer_health or {}).get("newest_age_sec")
+            ),
         },
+        "recent_context_writer_health": context_monitor_recent_writer_health or {},
         "quote_clean_window": {
             "classification": (context_monitor_clean_window or {}).get("classification"),
             "pre_fix_rows_remaining": (context_monitor_clean_window or {}).get("pre_fix_rows_remaining"),
@@ -748,6 +759,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
     context_monitor_field_audit = context_blocker_monitor.get("task_d_context_field_coverage_audit") or {}
     context_monitor_field_smoke = context_blocker_monitor.get("task_e_post_deploy_context_field_smoke_test") or {}
+    context_monitor_recent_writer_health = context_blocker_monitor.get("task_f_recent_context_writer_health") or {}
     runtime_health_snapshot = readiness_reports.get("runtime_health_snapshot") or {}
     runtime_health_blockers = list(runtime_health_snapshot.get("blockers") or [])
     runtime_health_warnings = list(runtime_health_snapshot.get("warnings") or [])
@@ -1438,6 +1450,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "volume_kline_coverage_audit": context_blocker_monitor.get("task_c_volume_kline_coverage_audit") or {},
             "context_field_coverage_audit": context_monitor_field_audit,
             "post_deploy_context_field_smoke_test": context_monitor_field_smoke,
+            "recent_context_writer_health": context_monitor_recent_writer_health,
             "reconciled_warnings": reconciled_context_warnings,
         },
         "context_clean_window_progress": build_context_clean_window_progress(
@@ -1450,6 +1463,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             context_monitor_clean_window=context_monitor_clean_window,
             context_monitor_field_audit=context_monitor_field_audit,
             context_monitor_field_smoke=context_monitor_field_smoke,
+            context_monitor_recent_writer_health=context_monitor_recent_writer_health,
         ),
         "runtime_health_snapshot": {
             "available": bool(runtime_health_snapshot),
@@ -2263,6 +2277,17 @@ def self_test():
                 "classification": "VERIFIED_POST_DEPLOY",
                 "post_deploy_context_fields_healthy": True,
             },
+            "task_f_recent_context_writer_health": {
+                "classification": "RECENT_CONTEXT_WRITER_HEALTHY",
+                "inferred_clean_window_state": "writer_healthy_old_rows_remaining",
+                "newest_age_sec": 12,
+                "fields": {
+                    "lifecycle_profile": {"effective_present_rate": 1.0},
+                    "source_component": {"effective_present_rate": 1.0},
+                    "markov_bucket": {"effective_present_rate": 1.0},
+                    "volume_profile": {"effective_present_rate": 0.4},
+                },
+            },
             "task_d_context_field_coverage_audit": {
                 "lifecycle_profile": {
                     "denominator_rows": 10,
@@ -2292,6 +2317,9 @@ def self_test():
     assert context_progress["classification"] == "CONTEXT_CLEAN_WINDOW_PENDING"
     assert context_progress["waiting_fields"] == ["lifecycle_profile"]
     assert context_progress["fields"]["lifecycle_profile"]["rows_needed_to_80pct"] == 1
+    assert context_progress["writer_status"]["recent_context_writer_health_classification"] == "RECENT_CONTEXT_WRITER_HEALTHY"
+    assert context_progress["writer_status"]["recent_context_writer_inferred_clean_window_state"] == "writer_healthy_old_rows_remaining"
+    assert context_progress["recent_context_writer_health"]["newest_age_sec"] == 12
     assert context_progress["automatic_runtime_change_allowed"] is False
     matured_volume_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "matured_volume_capture_cross_audit": {
