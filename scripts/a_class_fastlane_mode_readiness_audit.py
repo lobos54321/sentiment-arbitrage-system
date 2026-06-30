@@ -144,6 +144,8 @@ def effective_runtime_state(row, now_ts):
         "source_trade_id": row_value(row, "source_trade_id"),
         "token_ca": row_value(row, "token_ca"),
         "symbol": row_value(row, "symbol"),
+        "created_at": safe_float(row_value(row, "created_at")),
+        "updated_at": safe_float(row_value(row, "updated_at")),
         "last_realized_pnl_pct": safe_float(row_value(row, "last_realized_pnl_pct")),
         "last_realized_pnl_sol": safe_float(row_value(row, "last_realized_pnl_sol")),
         "loss_cap_pct": safe_float(row_value(row, "loss_cap_pct")),
@@ -1103,6 +1105,64 @@ def classify(runtime, final_contract, failed_conditions):
     }
 
 
+def build_stage2_flat_summary(runtime, classification, failed_conditions, capture_stage_rates, final_contract):
+    state = runtime.get("mode_state") or {}
+    events = capture_stage_rates.get("events") or {}
+    hard_blockers = final_contract.get("hard_blockers") or {}
+    spread_block_count = sum(
+        safe_int(hard_blockers.get(key), 0)
+        for key in ("spread_above_route_limit", "spread_extreme")
+    )
+    action = str(state.get("action") or state.get("status") or "").upper()
+    status = str(state.get("status") or action or "").upper()
+    shadow_entered_ts = None
+    shadow_entered_ts_source = None
+    if action == "SHADOW" or status == "SHADOW":
+        shadow_entered_ts = state.get("last_breach_ts") or state.get("updated_at") or state.get("created_at")
+        shadow_entered_ts_source = (
+            "last_breach_ts"
+            if state.get("last_breach_ts") is not None
+            else ("updated_at" if state.get("updated_at") is not None else "created_at")
+        )
+    clean_windows_passed = classification.get("clean_windows_passed")
+    required_clean_window = {
+        "condition": "context_coverage_clean_window",
+        "clean_windows_required": state.get("clean_windows_required"),
+        "passed": clean_windows_passed,
+    }
+    return {
+        "mode_status": status or None,
+        "mode_action": action or None,
+        "mode_reason": state.get("reason") or classification.get("reason"),
+        "shadow_entered_ts": shadow_entered_ts,
+        "shadow_entered_ts_source": shadow_entered_ts_source,
+        "cooldown_elapsed": (safe_float(state.get("cooldown_remaining_sec"), 0) or 0) <= 0,
+        "cooldown_remaining_sec": safe_float(state.get("cooldown_remaining_sec"), 0),
+        "clean_window_required_conditions": [required_clean_window],
+        "clean_window_passed_conditions": [required_clean_window] if clean_windows_passed else [],
+        "clean_window_failed_conditions": failed_conditions,
+        "raw_gs_events": capture_stage_rates.get("denominator_raw_gold_silver_events"),
+        "raw_gs_signal_ids": capture_stage_rates.get("denominator_raw_signal_ids"),
+        "candidate_matched_any": events.get("candidate_matched_any"),
+        "has_decision_record": events.get("decision_records"),
+        "pass_allow": events.get("pass_or_allow"),
+        "pending_entry": events.get("pending_entry"),
+        "reached_final_entry_contract": events.get("final_entry_contract"),
+        "final_entry_block_mode_disabled": events.get("mode_disabled_final_entry"),
+        "final_entry_block_mode_disabled_only": events.get("mode_disabled_only_final_entry"),
+        "final_entry_block_expected_rr": safe_int(hard_blockers.get("expected_rr_below_2"), 0),
+        "final_entry_block_spread": spread_block_count,
+        "paper_trade_intent": events.get("paper_trade_intent"),
+        "paper_trade_committed": events.get("paper_committed"),
+        "entered": events.get("entered"),
+        "realized": events.get("realized"),
+        "promotion_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "strategy_change_allowed": False,
+    }
+
+
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
@@ -1126,6 +1186,13 @@ def build_report(args):
         capture_stage_rates,
         failed,
     )
+    flat_summary = build_stage2_flat_summary(
+        runtime,
+        classification,
+        failed,
+        capture_stage_rates,
+        final_contract,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "a_class_fastlane_mode_audit_24h",
@@ -1141,6 +1208,32 @@ def build_report(args):
         "strategy_change_allowed": False,
         "canary_increase_allowed": False,
         "paper_enablement_allowed": False,
+        "mode_status": flat_summary["mode_status"],
+        "mode_action": flat_summary["mode_action"],
+        "mode_reason": flat_summary["mode_reason"],
+        "shadow_entered_ts": flat_summary["shadow_entered_ts"],
+        "shadow_entered_ts_source": flat_summary["shadow_entered_ts_source"],
+        "cooldown_elapsed": flat_summary["cooldown_elapsed"],
+        "cooldown_remaining_sec": flat_summary["cooldown_remaining_sec"],
+        "clean_window_required_conditions": flat_summary["clean_window_required_conditions"],
+        "clean_window_passed_conditions": flat_summary["clean_window_passed_conditions"],
+        "clean_window_failed_conditions": flat_summary["clean_window_failed_conditions"],
+        "raw_gs_events": flat_summary["raw_gs_events"],
+        "raw_gs_signal_ids": flat_summary["raw_gs_signal_ids"],
+        "candidate_matched_any": flat_summary["candidate_matched_any"],
+        "has_decision_record": flat_summary["has_decision_record"],
+        "pass_allow": flat_summary["pass_allow"],
+        "pending_entry": flat_summary["pending_entry"],
+        "reached_final_entry_contract": flat_summary["reached_final_entry_contract"],
+        "final_entry_block_mode_disabled": flat_summary["final_entry_block_mode_disabled"],
+        "final_entry_block_mode_disabled_only": flat_summary["final_entry_block_mode_disabled_only"],
+        "final_entry_block_expected_rr": flat_summary["final_entry_block_expected_rr"],
+        "final_entry_block_spread": flat_summary["final_entry_block_spread"],
+        "paper_trade_intent": flat_summary["paper_trade_intent"],
+        "paper_trade_committed": flat_summary["paper_trade_committed"],
+        "entered": flat_summary["entered"],
+        "realized": flat_summary["realized"],
+        "stage2_flat_summary": flat_summary,
         "runtime_safety": runtime,
         "A_CLASS_mode_status": final_contract.get("mode_status") or {},
         "effective_runtime_mode_state": runtime.get("mode_state") or {},
@@ -1191,6 +1284,17 @@ def compact_summary(report):
         "final_entry_status": report.get("final_entry_status"),
         "reason": report.get("reason"),
         "current_capture_stage": report.get("current_capture_stage"),
+        "mode_status": report.get("mode_status"),
+        "mode_reason": report.get("mode_reason"),
+        "raw_gs_events": report.get("raw_gs_events"),
+        "candidate_matched_any": report.get("candidate_matched_any"),
+        "has_decision_record": report.get("has_decision_record"),
+        "pass_allow": report.get("pass_allow"),
+        "pending_entry": report.get("pending_entry"),
+        "reached_final_entry_contract": report.get("reached_final_entry_contract"),
+        "final_entry_block_mode_disabled": report.get("final_entry_block_mode_disabled"),
+        "paper_trade_intent": report.get("paper_trade_intent"),
+        "paper_trade_committed": report.get("paper_trade_committed"),
         "human_action_required": report.get("human_action_required"),
         "promotion_allowed": False,
         "clean_windows_passed": (report.get("clean_window_conditions") or {}).get("passed"),
@@ -1361,6 +1465,29 @@ def self_test():
         assert report["reason"] == "cooldown_elapsed_requires_clean_windows"
         assert report["clean_window_conditions"]["passed"] is False
         assert report["human_action_required"] is False
+        assert report["mode_status"] == "SHADOW"
+        assert report["mode_action"] == "SHADOW"
+        assert report["mode_reason"] == "cooldown_elapsed_requires_clean_windows"
+        assert report["shadow_entered_ts"] == now - 90000
+        assert report["cooldown_elapsed"] is True
+        assert report["clean_window_required_conditions"][0]["condition"] == "context_coverage_clean_window"
+        assert report["clean_window_passed_conditions"] == []
+        assert report["clean_window_failed_conditions"][0]["condition"] == "source_quote_clean_coverage_below_80pct"
+        assert report["raw_gs_events"] == 4
+        assert report["candidate_matched_any"] == 4
+        assert report["has_decision_record"] == 3
+        assert report["pass_allow"] == 2
+        assert report["pending_entry"] == 2
+        assert report["reached_final_entry_contract"] == 2
+        assert report["final_entry_block_mode_disabled"] == 2
+        assert report["final_entry_block_mode_disabled_only"] == 1
+        assert report["final_entry_block_expected_rr"] == 1
+        assert report["final_entry_block_spread"] == 0
+        assert report["paper_trade_intent"] == 0
+        assert report["paper_trade_committed"] == 0
+        assert report["entered"] == 0
+        assert report["realized"] == 0
+        assert report["stage2_flat_summary"]["paper_enablement_allowed"] is False
         assert report["final_entry_contract"]["mode_disabled_rows"] == 2
         assert report["final_entry_contract"]["mode_disabled_only_rows"] == 1
         assert report["final_entry_contract"]["mode_disabled_plus_other_rows"] == 1

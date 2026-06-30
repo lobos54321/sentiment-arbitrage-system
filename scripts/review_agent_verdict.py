@@ -643,6 +643,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     readiness_shortfall = final_entry.get("readiness_shortfall_summary") or {}
     paper_proposal_readiness = final_entry.get("paper_entry_proposal_readiness") or {}
+    stage2_flat = final_entry.get("stage2_flat_summary") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
     top_formal_blocker = first_blocker_priority(blockers) if blockers else (
         final_entry.get("reason") or classification
@@ -682,6 +683,89 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "promotion_allowed": promotion_allowed,
         "human_action_required": human_action_required,
         "current_capture_stage": current_capture_stage,
+        "mode_status": final_entry.get("mode_status") or stage2_flat.get("mode_status"),
+        "mode_action": final_entry.get("mode_action") or stage2_flat.get("mode_action"),
+        "mode_reason": final_entry.get("mode_reason") or stage2_flat.get("mode_reason"),
+        "shadow_entered_ts": final_entry.get("shadow_entered_ts") or stage2_flat.get("shadow_entered_ts"),
+        "shadow_entered_ts_source": (
+            final_entry.get("shadow_entered_ts_source")
+            or stage2_flat.get("shadow_entered_ts_source")
+        ),
+        "cooldown_elapsed": final_entry.get("cooldown_elapsed") if "cooldown_elapsed" in final_entry else stage2_flat.get("cooldown_elapsed"),
+        "cooldown_remaining_sec": (
+            final_entry.get("cooldown_remaining_sec")
+            if "cooldown_remaining_sec" in final_entry
+            else stage2_flat.get("cooldown_remaining_sec")
+        ),
+        "clean_window_required_conditions": (
+            final_entry.get("clean_window_required_conditions")
+            or stage2_flat.get("clean_window_required_conditions")
+            or []
+        ),
+        "clean_window_passed_conditions": (
+            final_entry.get("clean_window_passed_conditions")
+            or stage2_flat.get("clean_window_passed_conditions")
+            or []
+        ),
+        "clean_window_failed_conditions": (
+            final_entry.get("clean_window_failed_conditions")
+            or stage2_flat.get("clean_window_failed_conditions")
+            or []
+        ),
+        "raw_gs_events": final_entry.get("raw_gs_events") or stage2_flat.get("raw_gs_events"),
+        "raw_gs_signal_ids": final_entry.get("raw_gs_signal_ids") or stage2_flat.get("raw_gs_signal_ids"),
+        "candidate_matched_any": (
+            final_entry.get("candidate_matched_any")
+            if "candidate_matched_any" in final_entry
+            else stage2_flat.get("candidate_matched_any")
+        ),
+        "has_decision_record": (
+            final_entry.get("has_decision_record")
+            if "has_decision_record" in final_entry
+            else stage2_flat.get("has_decision_record")
+        ),
+        "pass_allow": final_entry.get("pass_allow") if "pass_allow" in final_entry else stage2_flat.get("pass_allow"),
+        "pending_entry": (
+            final_entry.get("pending_entry")
+            if "pending_entry" in final_entry
+            else stage2_flat.get("pending_entry")
+        ),
+        "reached_final_entry_contract": (
+            final_entry.get("reached_final_entry_contract")
+            if "reached_final_entry_contract" in final_entry
+            else stage2_flat.get("reached_final_entry_contract")
+        ),
+        "final_entry_block_mode_disabled": (
+            final_entry.get("final_entry_block_mode_disabled")
+            if "final_entry_block_mode_disabled" in final_entry
+            else stage2_flat.get("final_entry_block_mode_disabled")
+        ),
+        "final_entry_block_mode_disabled_only": (
+            final_entry.get("final_entry_block_mode_disabled_only")
+            if "final_entry_block_mode_disabled_only" in final_entry
+            else stage2_flat.get("final_entry_block_mode_disabled_only")
+        ),
+        "final_entry_block_expected_rr": (
+            final_entry.get("final_entry_block_expected_rr")
+            if "final_entry_block_expected_rr" in final_entry
+            else stage2_flat.get("final_entry_block_expected_rr")
+        ),
+        "final_entry_block_spread": (
+            final_entry.get("final_entry_block_spread")
+            if "final_entry_block_spread" in final_entry
+            else stage2_flat.get("final_entry_block_spread")
+        ),
+        "paper_trade_intent": (
+            final_entry.get("paper_trade_intent")
+            if "paper_trade_intent" in final_entry
+            else stage2_flat.get("paper_trade_intent")
+        ),
+        "paper_trade_committed": (
+            final_entry.get("paper_trade_committed")
+            if "paper_trade_committed" in final_entry
+            else stage2_flat.get("paper_trade_committed")
+        ),
+        "stage2_entry_funnel_summary": stage2_flat,
         "detector_capture_rate": capture_stage_rates.get("detector_capture_rate"),
         "decision_record_capture_rate": capture_stage_rates.get("decision_record_capture_rate"),
         "decision_capture_rate": capture_stage_rates.get("pass_allow_capture_rate"),
@@ -1139,6 +1223,41 @@ def self_test():
             "final_entry_status": "FUNNEL_BLOCKED_EXPECTED",
             "reason": "cooldown_elapsed_requires_clean_windows",
             "current_capture_stage": "mode_disabled_clean_window_pending",
+            "stage2_flat_summary": {
+                "mode_status": "SHADOW",
+                "mode_action": "SHADOW",
+                "mode_reason": "cooldown_elapsed_requires_clean_windows",
+                "shadow_entered_ts": 1234,
+                "shadow_entered_ts_source": "last_breach_ts",
+                "cooldown_elapsed": True,
+                "cooldown_remaining_sec": 0,
+                "clean_window_required_conditions": [
+                    {"condition": "context_coverage_clean_window", "clean_windows_required": 4, "passed": False}
+                ],
+                "clean_window_passed_conditions": [],
+                "clean_window_failed_conditions": [
+                    {"condition": "source_quote_clean_coverage_below_80pct", "source": "context_coverage_audit"}
+                ],
+                "raw_gs_events": 10,
+                "raw_gs_signal_ids": 10,
+                "candidate_matched_any": 10,
+                "has_decision_record": 9,
+                "pass_allow": 5,
+                "pending_entry": 3,
+                "reached_final_entry_contract": 1,
+                "final_entry_block_mode_disabled": 1,
+                "final_entry_block_mode_disabled_only": 1,
+                "final_entry_block_expected_rr": 0,
+                "final_entry_block_spread": 0,
+                "paper_trade_intent": 0,
+                "paper_trade_committed": 0,
+                "entered": 0,
+                "realized": 0,
+                "promotion_allowed": False,
+                "paper_enablement_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "strategy_change_allowed": False,
+            },
             "capture_stage_rates": {
                 "detector_capture_rate": 1.0,
                 "decision_record_capture_rate": 0.9,
@@ -1228,6 +1347,22 @@ def self_test():
         }
     })
     assert stage_verdict["current_capture_stage"] == "mode_disabled_clean_window_pending"
+    assert stage_verdict["mode_status"] == "SHADOW"
+    assert stage_verdict["mode_action"] == "SHADOW"
+    assert stage_verdict["mode_reason"] == "cooldown_elapsed_requires_clean_windows"
+    assert stage_verdict["shadow_entered_ts"] == 1234
+    assert stage_verdict["cooldown_elapsed"] is True
+    assert stage_verdict["clean_window_failed_conditions"][0]["condition"] == "source_quote_clean_coverage_below_80pct"
+    assert stage_verdict["raw_gs_events"] == 10
+    assert stage_verdict["candidate_matched_any"] == 10
+    assert stage_verdict["has_decision_record"] == 9
+    assert stage_verdict["pass_allow"] == 5
+    assert stage_verdict["pending_entry"] == 3
+    assert stage_verdict["reached_final_entry_contract"] == 1
+    assert stage_verdict["final_entry_block_mode_disabled"] == 1
+    assert stage_verdict["paper_trade_intent"] == 0
+    assert stage_verdict["paper_trade_committed"] == 0
+    assert stage_verdict["stage2_entry_funnel_summary"]["paper_enablement_allowed"] is False
     assert stage_verdict["detector_capture_rate"] == 1.0
     assert stage_verdict["decision_capture_rate"] == 0.5
     assert stage_verdict["pending_capture_rate"] == 0.3
