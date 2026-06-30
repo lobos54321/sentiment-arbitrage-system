@@ -78,6 +78,7 @@ def load_json(path):
 
 DERIVED_READINESS_SIBLINGS = {
     "candidate_effectiveness": "candidate_effectiveness_24h.json",
+    "candidate_improvement_opportunities": "candidate_improvement_opportunities_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "capture_cross_validity": "capture_cross_validity_24h.json",
     "hypothesis_validation_oos_probe_0p1h": "hypothesis_validation_audit_oos_probe_0p1h.json",
@@ -1191,6 +1192,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             or {}
         ),
         "per_candidate_effectiveness_summary": readiness_reports.get("candidate_effectiveness") or {},
+        "candidate_improvement_opportunities_summary": readiness_reports.get("candidate_improvement_opportunities") or {},
         "Markov_effectiveness_summary": readiness_reports.get("markov_effectiveness") or {},
         "two_d_cross_validity_summary": readiness_reports.get("capture_cross_validity") or {},
         "next_highest_priority_blocker": next_highest_priority_blocker,
@@ -1831,6 +1833,11 @@ def self_test():
             "candidate_count": 84,
             "classification_counts": {"potential_entry_hypothesis": 2},
         })
+        write_json(root / "candidate_improvement_opportunities_24h.json", {
+            "schema_version": "candidate_improvement_opportunities.v1",
+            "opportunity_count": 2,
+            "promotion_allowed": False,
+        })
         write_json(root / "markov_effectiveness_24h.json", {
             "schema_version": "markov_effectiveness_report.v1",
             "status": "insufficient_or_uninformative",
@@ -1874,6 +1881,7 @@ def self_test():
         })
         siblings = load_sibling_readiness_reports(str(capture_path))
         assert siblings["candidate_effectiveness"]["candidate_count"] == 84
+        assert siblings["candidate_improvement_opportunities"]["opportunity_count"] == 2
         assert siblings["markov_effectiveness"]["status"] == "insufficient_or_uninformative"
         assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
         assert siblings["hypothesis_validation_oos_probe_0p1h"]["overall"]["promotion_allowed"] is False
@@ -1884,6 +1892,7 @@ def self_test():
         assert explicit["candidate_effectiveness"]["candidate_count"] == 1
         sibling_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports=siblings)
         assert sibling_verdict["per_candidate_effectiveness_summary"]["candidate_count"] == 84
+        assert sibling_verdict["candidate_improvement_opportunities_summary"]["opportunity_count"] == 2
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
         assert sibling_verdict["oos_readiness_summary"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"

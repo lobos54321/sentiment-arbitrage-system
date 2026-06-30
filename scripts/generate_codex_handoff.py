@@ -462,6 +462,7 @@ def build_handoff(verdict):
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
+                "candidate_improvement_opportunities_summary": verdict.get("candidate_improvement_opportunities_summary") or {},
                 "Markov_effectiveness_summary": verdict.get("Markov_effectiveness_summary") or {},
                 "two_d_cross_validity_summary": verdict.get("two_d_cross_validity_summary") or {},
             },
@@ -525,6 +526,7 @@ def self_test():
         "A_CLASS_mode_status": {"final_entry_status": "READINESS_AUDIT_ONLY"},
         "final_entry_contract_blocker_breakdown": {},
         "per_candidate_effectiveness_summary": {"candidate_count": 84},
+        "candidate_improvement_opportunities_summary": {"opportunity_count": 2},
         "Markov_effectiveness_summary": {"status": "insufficient_or_uninformative"},
         "two_d_cross_validity_summary": {"valid_cross_count": 0},
         "quote_context_coverage": {
@@ -676,6 +678,7 @@ def self_test():
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "Readiness Summaries" in text
+    assert "candidate_improvement_opportunities_summary" in text
     quote_pending_verdict = {
         **verdict,
         "classification": "BLOCKED_CONTEXT_COVERAGE",

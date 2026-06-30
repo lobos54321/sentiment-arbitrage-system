@@ -387,6 +387,167 @@ def build_candidate_effectiveness_report(capture):
     }
 
 
+def safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def improvement_priority(row):
+    recall_lift = safe_float(row.get("recall_lift_vs_candidate_baseline")) or 0.0
+    precision = safe_float(row.get("match_precision_event")) or 0.0
+    matched = row.get("matched_gold_silver_events") or row.get("matched_raw_all_gold_silver_events") or 0
+    signals = row.get("slice_signal_count") or row.get("signal_count") or 0
+    return (recall_lift, precision, matched, signals)
+
+
+def build_candidate_improvement_opportunities_report(capture, candidate_effectiveness, cross_validity):
+    """Convert capture evidence into shadow-only candidate improvement opportunities."""
+    candidate_class = {
+        row.get("candidate_id"): row
+        for row in (candidate_effectiveness.get("top_candidates") or [])
+    }
+    valid_crosses = list(cross_validity.get("valid_top_crosses") or [])
+    invalid_crosses = list(cross_validity.get("invalid_sample") or [])
+    watchlist = list(capture.get("watchlist_hypotheses") or [])
+    opportunities = []
+
+    for row in valid_crosses:
+        if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
+            continue
+        candidate_id = row.get("candidate_id")
+        base = candidate_class.get(candidate_id) or {}
+        classification = base.get("classification")
+        dimension = row.get("dimension")
+        slice_value = row.get("slice_value")
+        if classification == "potential_entry_hypothesis":
+            opportunity_type = "refine_potential_entry_hypothesis_with_context"
+        elif classification == "true_detector":
+            opportunity_type = "derive_context_filtered_shadow_candidate"
+        else:
+            opportunity_type = "track_context_slice_shadow_only"
+        opportunities.append({
+            "opportunity_type": opportunity_type,
+            "scope": "shadow_only_candidate_or_context_feature",
+            "candidate_id": candidate_id,
+            "candidate_classification": classification,
+            "family": row.get("family"),
+            "dimension": dimension,
+            "slice_value": slice_value,
+            "evidence_level": "discovery_same_window",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "suggested_action": (
+                "register_shadow_context_hypothesis"
+                if opportunity_type != "track_context_slice_shadow_only"
+                else "continue_shadow_tracking"
+            ),
+            "metrics": {
+                key: row.get(key)
+                for key in (
+                    "matched_gold_silver_events",
+                    "match_recall_event",
+                    "match_precision_event",
+                    "recall_lift_vs_candidate_baseline",
+                )
+            },
+            "blocked_by": [],
+            "next_validation": "repeat_same_definition_in_next_clean_window_then_oos_if_repeated",
+        })
+
+    for row in invalid_crosses:
+        if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
+            continue
+        reasons = list(row.get("invalid_reasons") or [])
+        opportunities.append({
+            "opportunity_type": "blocked_context_slice_candidate_opportunity",
+            "scope": "shadow_only_after_context_coverage_fix",
+            "candidate_id": row.get("candidate_id"),
+            "candidate_classification": (candidate_class.get(row.get("candidate_id")) or {}).get("classification"),
+            "family": row.get("family"),
+            "dimension": row.get("dimension"),
+            "slice_value": row.get("slice_value"),
+            "evidence_level": "blocked_discovery_same_window",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "suggested_action": "do_not_register_until_context_coverage_passes",
+            "metrics": {
+                key: row.get(key)
+                for key in (
+                    "matched_gold_silver_events",
+                    "match_recall_event",
+                    "match_precision_event",
+                    "recall_lift_vs_candidate_baseline",
+                )
+            },
+            "blocked_by": reasons,
+            "next_validation": "rerun_after_context_coverage_clean_window",
+        })
+
+    # Include capture watchlist rows that may not appear in the top cross-validity sample.
+    existing_keys = {
+        (row.get("candidate_id"), row.get("dimension"), row.get("slice_value"))
+        for row in opportunities
+    }
+    for row in watchlist[:100]:
+        key = (row.get("candidate_id"), row.get("dimension"), row.get("slice_value"))
+        if key in existing_keys:
+            continue
+        if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
+            continue
+        opportunities.append({
+            "opportunity_type": "capture_watchlist_shadow_candidate_opportunity",
+            "scope": "shadow_only_candidate_or_context_feature",
+            "candidate_id": row.get("candidate_id"),
+            "candidate_classification": (candidate_class.get(row.get("candidate_id")) or {}).get("classification"),
+            "family": row.get("family"),
+            "dimension": row.get("dimension"),
+            "slice_value": row.get("slice_value"),
+            "evidence_level": "discovery_same_window",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "suggested_action": "register_shadow_context_hypothesis_if_context_validity_passes",
+            "metrics": {
+                key: row.get(key)
+                for key in (
+                    "matched_gold_silver_events",
+                    "match_recall_event",
+                    "match_precision_event",
+                    "recall_lift_vs_candidate_baseline",
+                    "precision_lift_vs_candidate_baseline",
+                )
+            },
+            "blocked_by": ["context_validity_not_checked_in_top_sample"],
+            "next_validation": "include_in_capture_cross_validity_or_rerun_with_larger_sample",
+        })
+
+    opportunities.sort(key=improvement_priority, reverse=True)
+    top = opportunities[:50]
+    return {
+        "schema_version": "candidate_improvement_opportunities.v1",
+        "report_type": "candidate_improvement_opportunities_24h",
+        "generated_at": utc_now(),
+        "evidence_level": "discovery_same_window",
+        "usage": "shadow_only_research_queue",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "opportunity_count": len(opportunities),
+        "top_opportunities": top,
+        "opportunity_type_counts": {
+            kind: sum(1 for row in opportunities if row.get("opportunity_type") == kind)
+            for kind in sorted({row.get("opportunity_type") for row in opportunities})
+        },
+        "blocked_context_opportunity_count": sum(1 for row in opportunities if row.get("blocked_by")),
+        "notes": [
+            "This report is a shadow-only research queue. It never promotes candidates or changes runtime policy.",
+            "Opportunities must repeat in a clean future window and pass OOS before human review.",
+        ],
+    }
+
+
 def build_markov_effectiveness_report(markov_reports, capture):
     profiles = {}
     total_green = 0
@@ -574,6 +735,7 @@ def run_reports(run_dir, args):
     raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{primary_hours}h.json"
     context_coverage_path = run_dir / f"context_coverage_audit_{primary_hours}h.json"
     candidate_effectiveness_path = run_dir / f"candidate_effectiveness_{primary_hours}h.json"
+    candidate_improvement_path = run_dir / f"candidate_improvement_opportunities_{primary_hours}h.json"
     markov_effectiveness_path = run_dir / f"markov_effectiveness_{primary_hours}h.json"
     capture_cross_validity_path = run_dir / f"capture_cross_validity_{primary_hours}h.json"
     a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
@@ -670,13 +832,20 @@ def run_reports(run_dir, args):
         context_report = build_context_coverage_report(capture)
         write_derived_report(context_coverage_path, context_report)
         readiness_paths["context_coverage"] = context_coverage_path
-        write_derived_report(candidate_effectiveness_path, build_candidate_effectiveness_report(capture))
+        candidate_effectiveness = build_candidate_effectiveness_report(capture)
+        write_derived_report(candidate_effectiveness_path, candidate_effectiveness)
         readiness_paths["candidate_effectiveness"] = candidate_effectiveness_path
         markov_reports = {name: load_json(path) for name, path in successful_markov.items() if Path(path).exists()}
         write_derived_report(markov_effectiveness_path, build_markov_effectiveness_report(markov_reports, capture))
         readiness_paths["markov_effectiveness"] = markov_effectiveness_path
-        write_derived_report(capture_cross_validity_path, build_capture_cross_validity_report(capture, context_report))
+        capture_cross_validity = build_capture_cross_validity_report(capture, context_report)
+        write_derived_report(capture_cross_validity_path, capture_cross_validity)
         readiness_paths["capture_cross_validity"] = capture_cross_validity_path
+        write_derived_report(
+            candidate_improvement_path,
+            build_candidate_improvement_opportunities_report(capture, candidate_effectiveness, capture_cross_validity),
+        )
+        readiness_paths["candidate_improvement_opportunities"] = candidate_improvement_path
         if raw_funnel_path.exists():
             raw_funnel = load_json(raw_funnel_path)
         else:
@@ -1092,6 +1261,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         json.dumps(
             {
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
+                "candidate_improvement_opportunities_summary": verdict.get("candidate_improvement_opportunities_summary") or {},
                 "Markov_effectiveness_summary": verdict.get("Markov_effectiveness_summary") or {},
                 "two_d_cross_validity_summary": verdict.get("two_d_cross_validity_summary") or {},
                 "next_highest_priority_blocker": verdict.get("next_highest_priority_blocker"),
@@ -1457,6 +1627,7 @@ def self_test():
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
             "per_candidate_effectiveness_summary",
+            "candidate_improvement_opportunities_summary",
             "Markov_effectiveness_summary",
             "two_d_cross_validity_summary",
             "promotion_allowed",
@@ -1509,6 +1680,7 @@ def self_test():
             "raw_gold_silver_funnel_audit_24h.json",
             "a_class_fastlane_mode_audit_24h.json",
             "candidate_effectiveness_24h.json",
+            "candidate_improvement_opportunities_24h.json",
             "markov_effectiveness_24h.json",
             "capture_cross_validity_24h.json",
             "pnl_cross_secondary_24h.json",
