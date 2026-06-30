@@ -2635,6 +2635,10 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         Array.isArray(registry.shadow_only_quality_timing_watch)
           ? registry.shadow_only_quality_timing_watch.length
           : 0,
+      shadow_only_quality_timing_candidate_probe_count:
+        Array.isArray(registry.shadow_only_quality_timing_candidate_probes)
+          ? registry.shadow_only_quality_timing_candidate_probes.length
+          : 0,
       shadow_only_matured_volume_watch_count:
         Array.isArray(registry.shadow_only_matured_volume_watch)
           ? registry.shadow_only_matured_volume_watch.length

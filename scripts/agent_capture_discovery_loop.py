@@ -1630,7 +1630,98 @@ def compact_quality_timing_shadow_hypothesis(row):
     }
 
 
-def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch, quality_timing_watch=None):
+def hypothesis_id_part(value):
+    text = str(value or "unknown").strip()
+    return "".join(ch if ch.isalnum() or ch in ("_", "-", ".") else "_" for ch in text)[:120] or "unknown"
+
+
+def is_quality_timing_probe_candidate(row):
+    if not isinstance(row, dict):
+        return False
+    candidate_id = str(row.get("candidate_id") or "")
+    family = str(row.get("family") or "")
+    if not candidate_id:
+        return False
+    if candidate_id in {"current_all", "current_would_enter_all"}:
+        return False
+    if family == "runtime" or candidate_id.startswith("runtime:"):
+        return False
+    return True
+
+
+def compact_quality_timing_candidate_probe(cluster_row, candidate_row, rank):
+    cluster = cluster_row.get("cluster")
+    candidate_id = candidate_row.get("candidate_id")
+    return {
+        "hypothesis_id": (
+            f"quality_timing_probe:{hypothesis_id_part(cluster)}:{hypothesis_id_part(candidate_id)}"
+        ),
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_quality_timing_candidate_probe",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "definition": {
+            "quality_timing_cluster": cluster,
+            "candidate_id": candidate_id,
+            "candidate_family": candidate_row.get("family"),
+            "dominant_stage_filter": [
+                item.get("stage")
+                for item in (cluster_row.get("stage_counts") or [])
+                if item.get("stage")
+            ],
+            "suggested_shadow_only_action": cluster_row.get("suggested_shadow_only_action"),
+        },
+        "latest_metrics": {
+            "cluster_event_count": cluster_row.get("event_count"),
+            "cluster_share_of_quality_timing_rejects": cluster_row.get("share_of_quality_timing_rejects"),
+            "cluster_share_of_raw_all_gold_silver": cluster_row.get("share_of_raw_all_gold_silver"),
+            "cluster_unique_tokens": cluster_row.get("unique_tokens"),
+            "candidate_cluster_match_count": candidate_row.get("count"),
+            "candidate_probe_rank_in_cluster": rank,
+            "candidate_matched_any_rate": cluster_row.get("candidate_matched_any_rate"),
+            "max_sustained_peak_pct_max": cluster_row.get("max_sustained_peak_pct_max"),
+            "time_to_sustained_peak_sec_median": cluster_row.get("time_to_sustained_peak_sec_median"),
+        },
+        "top_lifecycle_source_contexts": (cluster_row.get("top_lifecycle_source_contexts") or [])[:10],
+        "human_approval_required_if_fix_requires": cluster_row.get("human_approval_required_if_fix_requires"),
+        "next_validation": (
+            "track_candidate_within_quality_timing_cluster_in_next_clean_window_then_oos_if_repeated"
+        ),
+    }
+
+
+def build_quality_timing_candidate_probes(opportunities, *, per_cluster_limit=3, total_limit=24):
+    probes = []
+    seen = set()
+    for cluster_row in opportunities or []:
+        if not isinstance(cluster_row, dict) or not cluster_row.get("cluster"):
+            continue
+        rank = 0
+        for candidate_row in cluster_row.get("top_candidates") or []:
+            if not is_quality_timing_probe_candidate(candidate_row):
+                continue
+            rank += 1
+            key = (cluster_row.get("cluster"), candidate_row.get("candidate_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            probes.append(compact_quality_timing_candidate_probe(cluster_row, candidate_row, rank))
+            if rank >= per_cluster_limit or len(probes) >= total_limit:
+                break
+        if len(probes) >= total_limit:
+            break
+    return probes
+
+
+def stable_hypothesis_signature(
+    *,
+    watchlist_hypotheses,
+    matured_volume_watch,
+    quality_timing_watch=None,
+    quality_timing_candidate_probes=None,
+):
     watchlist_keys = []
     for row in watchlist_hypotheses or []:
         if not isinstance(row, dict):
@@ -1659,10 +1750,23 @@ def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch, q
             "definition": row.get("definition") or {},
         })
     quality_timing_keys = sorted(quality_timing_keys, key=lambda item: item.get("hypothesis_id") or "")
+    quality_timing_probe_keys = []
+    for row in quality_timing_candidate_probes or []:
+        if not isinstance(row, dict):
+            continue
+        quality_timing_probe_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    quality_timing_probe_keys = sorted(
+        quality_timing_probe_keys,
+        key=lambda item: item.get("hypothesis_id") or "",
+    )
     return {
         "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
         "shadow_only_matured_volume_watch": matured_keys,
         "shadow_only_quality_timing_watch": quality_timing_keys,
+        "shadow_only_quality_timing_candidate_probes": quality_timing_probe_keys,
     }
 
 
@@ -1702,11 +1806,15 @@ def update_hypothesis_registry(path, verdict, capture):
         for row in quality_timing_opportunities[:10]
         if isinstance(row, dict) and row.get("cluster")
     ]
+    quality_timing_candidate_probes = build_quality_timing_candidate_probes(
+        quality_timing_opportunities,
+    )
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
         matured_volume_watch=matured_volume_watch,
         quality_timing_watch=quality_timing_watch,
+        quality_timing_candidate_probes=quality_timing_candidate_probes,
     )
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
@@ -1725,6 +1833,7 @@ def update_hypothesis_registry(path, verdict, capture):
         "watchlist_hypotheses": watchlist_hypotheses,
         "shadow_only_matured_volume_watch": matured_volume_watch,
         "shadow_only_quality_timing_watch": quality_timing_watch,
+        "shadow_only_quality_timing_candidate_probes": quality_timing_candidate_probes,
         "recent_runs": recent[-20:],
     }
     write_json(target, registry)
@@ -2382,6 +2491,7 @@ def self_test():
         assert registry["schema_version"] == "hypothesis_registry.v2"
         assert "shadow_only_matured_volume_watch" in registry
         assert "shadow_only_quality_timing_watch" in registry
+        assert "shadow_only_quality_timing_candidate_probes" in registry
         manual_registry_path = root / "manual_hypothesis_registry.json"
         manual_registry = update_hypothesis_registry(
             manual_registry_path,
@@ -2432,7 +2542,10 @@ def self_test():
                                     {"stage": "decision_no_pass_or_allow", "count": 7}
                                 ],
                                 "top_candidates": [
-                                    {"candidate_id": "entry_mode_registry:smart_entry_pullback_bounce", "family": "entry_mode_registry", "count": 7}
+                                    {"candidate_id": "current_all", "family": "base", "count": 7},
+                                    {"candidate_id": "runtime:entry_mode_registry", "family": "runtime", "count": 7},
+                                    {"candidate_id": "entry_mode_registry:smart_entry_pullback_bounce", "family": "entry_mode_registry", "count": 7},
+                                    {"candidate_id": "entry_mode_registry:source_resonance_tiny_probe", "family": "entry_mode_registry", "count": 6},
                                 ],
                                 "top_families": [
                                     {"family": "entry_mode_registry", "count": 77}
@@ -2454,6 +2567,11 @@ def self_test():
         assert manual_registry["shadow_only_matured_volume_watch"][0]["promotion_allowed"] is False
         assert manual_registry["shadow_only_quality_timing_watch"][0]["hypothesis_id"] == "quality_timing:matrix_alignment_wait"
         assert manual_registry["shadow_only_quality_timing_watch"][0]["promotion_allowed"] is False
+        assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["hypothesis_id"] == (
+            "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce"
+        )
+        assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["promotion_allowed"] is False
+        assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["strategy_change_allowed"] is False
         required_artifacts = [
             "capture_discovery_24h.json",
             "capture_discovery_48h.json",
