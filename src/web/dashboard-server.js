@@ -2315,6 +2315,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const verdict = safeReadAgentJson(paths.verdict);
   const registry = safeReadAgentJson(paths.registry);
   const tests = safeReadAgentJson(paths.tests);
+  const shadowDecisionBridge = safeReadAgentJson(paths.shadow_decision_bridge);
   const runner = readAgentCaptureLoopRunnerStatus();
   const runtimeCommit = runtimeCommitFingerprint();
   const required = ['verdict', 'summary', 'handoff', 'registry'];
@@ -2418,6 +2419,17 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         ?? verdict.paper_entry_proposal_readiness?.mode_disabled_adjusted_final_eligibility_rate
         ?? null
       ),
+      shadow_decision_bridge_summary: shadowDecisionBridge ? {
+        available: !shadowDecisionBridge.error_code,
+        status: shadowDecisionBridge.status || null,
+        next_action: shadowDecisionBridge.next_action || null,
+        root_cause: shadowDecisionBridge.root_cause || null,
+        denominator: shadowDecisionBridge.denominator || null,
+        bridge_expectation: shadowDecisionBridge.bridge_expectation || null,
+        promotion_allowed: Boolean(shadowDecisionBridge.promotion_allowed),
+        automatic_bridge_to_entry_allowed: Boolean(shadowDecisionBridge.automatic_bridge_to_entry_allowed),
+        paper_enablement_allowed: Boolean(shadowDecisionBridge.paper_enablement_allowed),
+      } : null,
       paper_entry_proposal_readiness: verdict.paper_entry_proposal_readiness || null,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {

@@ -462,18 +462,42 @@ def build_shadow_decision_bridge_audit(raw_funnel):
     if shadow_count > 0:
         status = "SHADOW_DECISION_BRIDGE_AUDIT_REQUIRED"
         next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
+    current_decision_count = max(0, raw_signal_ids - no_decision_count)
+    optimistic_decision_count = min(raw_signal_ids, current_decision_count + shadow_count)
+    remaining_no_decision_after_shadow = max(0, no_decision_count - shadow_count)
     return {
         "schema_version": "shadow_decision_bridge_audit.v1",
         "report_type": "shadow_decision_bridge_audit_24h",
         "status": status,
         "next_action": next_action,
         "root_cause": "shadow_entry_hypotheses_matched_no_decision_bridge",
+        "bridge_expectation": {
+            "candidate_shadow_observer_mode": "shadow_only_observation",
+            "production_decision_event_expected_from_shadow_match": False,
+            "interpretation": (
+                "Shadow candidate matches are research evidence. By design they do not create pending entries, "
+                "paper trades, live orders, or production decision records."
+            ),
+            "gap_meaning": (
+                "These rows identify raw gold/silver signals where shadow entry hypotheses matched but no "
+                "production decision event exists for the raw signal_id. This is a bridge/instrumentation gap, "
+                "not promotion evidence and not permission to change runtime mode."
+            ),
+        },
         "denominator": {
             "raw_signal_ids": raw_signal_ids,
+            "current_decision_record_count": current_decision_count,
+            "current_decision_record_rate": safe_rate(current_decision_count, raw_signal_ids),
             "raw_signals_without_decision_record": no_decision_count,
             "shadow_entry_hypotheses_matched_no_decision_bridge": shadow_count,
             "shadow_bridge_gap_rate_vs_raw_signal_ids": safe_rate(shadow_count, raw_signal_ids),
             "shadow_bridge_gap_share_of_no_decision": safe_rate(shadow_count, no_decision_count),
+            "optimistic_decision_record_count_if_shadow_gap_logged": optimistic_decision_count,
+            "optimistic_decision_record_rate_if_shadow_gap_logged": safe_rate(
+                optimistic_decision_count,
+                raw_signal_ids,
+            ),
+            "remaining_no_decision_after_shadow_gap_logged": remaining_no_decision_after_shadow,
         },
         "no_decision_record_root_cause_counts": no_decision_roots,
         "no_decision_record_subroot_cause_counts": no_decision_subroots,
@@ -506,9 +530,17 @@ def build_shadow_decision_bridge_audit(raw_funnel):
         "promotion_allowed": False,
         "paper_enablement_allowed": False,
         "automatic_runtime_change_allowed": False,
+        "automatic_bridge_to_entry_allowed": False,
+        "human_approval_required_if_next_step_requires": [
+            "connecting shadow matches to production entry policy",
+            "creating pending entries from shadow candidates",
+            "enabling paper/live execution",
+            "changing final_entry_contract or A_CLASS mode",
+        ],
         "notes": [
             "This report is extracted from raw_gold_silver_funnel_audit and does not rescan or mutate trading state.",
             "A shadow match without a decision record is a bridge/instrumentation finding, not promotion evidence.",
+            "The optimistic decision-record rate is an attribution upper bound only; it does not imply pass, pending, final eligibility, paper capture, or realized capture.",
         ],
     }
 
