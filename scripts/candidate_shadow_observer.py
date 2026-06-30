@@ -1103,6 +1103,10 @@ def extract_signal_features(row, kline_features, source_features=None):
         "quote_context_applicable": True,
         "source_quote_context_applicable": True,
         "quote_context_writer_path": "candidate_shadow_observer:inferred",
+        "lifecycle_state": "NO_LIFECYCLE_CONTEXT",
+        "entry_bias": "NONE",
+        "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE",
+        "lifecycle_context_writer_path": "candidate_shadow_observer:default_no_lifecycle_context",
         "super_index": super_index,
         "status_has_reclaim": "RECLAIM" in status,
         "status_has_no_kline": "KLINE" in status or "UNKNOWN_DATA" in status,
@@ -1418,6 +1422,7 @@ def payload_for(features, candidate, matched, reason):
         "lifecycle_state",
         "entry_bias",
         "lifecycle_profile",
+        "lifecycle_context_writer_path",
         "kline_projection_available",
         "kline_bar_count",
         "kline_missing_reason",
@@ -2016,6 +2021,10 @@ def self_test():
     assert inferred_payload["quote_context_applicable"] is True
     assert inferred_payload["source_quote_context_applicable"] is True
     assert inferred_payload["quote_context_writer_path"] == "candidate_shadow_observer:inferred"
+    assert inferred_payload["lifecycle_state"] == "NO_LIFECYCLE_CONTEXT"
+    assert inferred_payload["entry_bias"] == "NONE"
+    assert inferred_payload["lifecycle_profile"] == "NO_LIFECYCLE_CONTEXT:NONE"
+    assert inferred_payload["lifecycle_context_writer_path"] == "candidate_shadow_observer:default_no_lifecycle_context"
     missing_kline_features = compute_kline_features([], 1_000, 1_100)
     missing_kline_payload = payload_for(
         {**inferred_features, **missing_kline_features},
