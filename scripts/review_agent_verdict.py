@@ -96,6 +96,7 @@ DERIVED_READINESS_SIBLINGS = {
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
+    "shadow_decision_bridge_audit": "shadow_decision_bridge_audit_24h.json",
     "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
     "runtime_health_snapshot": "runtime_health_snapshot_24h.json",
     "context_blocker_monitor": "context_blocker_monitor_24h.json",
@@ -916,6 +917,37 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         and shadow_bridge_mirror_coverage >= 1.0
         and not shadow_bridge_mirror_truncated
     )
+    shadow_bridge_candidate_counts = (shadow_decision_bridge.get("candidate_counts") or [])[:10]
+    shadow_bridge_family_counts = (shadow_decision_bridge.get("family_counts") or [])[:10]
+    shadow_bridge_reason_counts = (shadow_decision_bridge.get("reason_counts") or [])[:10]
+    shadow_bridge_review_queue_items = []
+    for row in shadow_bridge_candidate_counts[:10]:
+        if not isinstance(row, dict):
+            continue
+        shadow_bridge_review_queue_items.append({
+            "candidate_id": row.get("candidate_id"),
+            "candidate_family": row.get("family"),
+            "count": row.get("count"),
+            "status": "REVIEW_SHADOW_MATCHED_NO_DECISION_BRIDGE",
+            "next_action": "review_shadow_decision_bridge_instrumentation_without_entry_policy_change",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    shadow_bridge_review_queue = {
+        "classification": (
+            "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY"
+            if shadow_bridge_review_queue_items
+            else "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_EMPTY"
+        ),
+        "queue_count": len(shadow_bridge_review_queue_items),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "items": shadow_bridge_review_queue_items,
+    }
     largest_upstream_gap = readiness_shortfall.get("largest_upstream_gap_category") or {}
     largest_pending_gap = readiness_shortfall.get("largest_pending_to_final_gap_category") or {}
     parallel_next_action = None
@@ -1155,6 +1187,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "mirror_event_coverage_vs_shadow_bridge_gap": shadow_bridge_mirror_coverage,
             "mirror_event_truncated": shadow_bridge_mirror_truncated,
             "mirror_complete": shadow_bridge_mirror_complete,
+            "top_candidate_counts": shadow_bridge_candidate_counts,
+            "top_family_counts": shadow_bridge_family_counts,
+            "top_reason_counts": shadow_bridge_reason_counts,
+            "review_queue": shadow_bridge_review_queue,
             "promotion_allowed": False,
             "automatic_bridge_to_entry_allowed": False,
             "paper_enablement_allowed": False,
@@ -1727,7 +1763,28 @@ def self_test():
                 "promotion_allowed": False,
                 "paper_enablement_allowed": False,
             },
-        }
+        },
+        "shadow_decision_bridge_audit": {
+            "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
+            "denominator": {
+                "shadow_entry_hypotheses_matched_no_decision_bridge": 1,
+                "mirror_event_count": 1,
+                "mirror_event_coverage_vs_shadow_bridge_gap": 1.0,
+                "mirror_event_truncated": False,
+            },
+            "family_counts": [{"family": "base", "count": 1}],
+            "candidate_counts": [
+                {"candidate_id": "notath_quote_clean", "family": "base", "count": 1}
+            ],
+            "reason_counts": [
+                {
+                    "candidate_id": "notath_quote_clean",
+                    "family": "base",
+                    "reason": "runtime_source_quote_clean",
+                    "count": 1,
+                }
+            ],
+        },
     })
     assert stage_verdict["current_capture_stage"] == "mode_disabled_clean_window_pending"
     assert stage_verdict["mode_status"] == "SHADOW"
@@ -1758,6 +1815,11 @@ def self_test():
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
     assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_record_subroot_cause_counts"][0]["root_cause"] == "shadow_entry_hypotheses_matched_no_decision_bridge"
     assert stage_verdict["upstream_funnel_gap_summary"]["shadow_no_decision_entry_hypothesis_candidate_counts"][0]["candidate_id"] == "notath_quote_clean"
+    shadow_bridge_summary = stage_verdict["shadow_decision_bridge_audit_summary"]
+    assert shadow_bridge_summary["mirror_complete"] is True
+    assert shadow_bridge_summary["top_candidate_counts"][0]["candidate_id"] == "notath_quote_clean"
+    assert shadow_bridge_summary["review_queue"]["classification"] == "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY"
+    assert shadow_bridge_summary["review_queue"]["automatic_runtime_change_allowed"] is False
     assert stage_verdict["upstream_funnel_gap_summary"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 3
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
@@ -2192,6 +2254,19 @@ def self_test():
             "schema_version": "capture_cross_validity_report.v1",
             "valid_cross_count": 3,
         })
+        write_json(root / "shadow_decision_bridge_audit_24h.json", {
+            "schema_version": "shadow_decision_bridge_audit.v1",
+            "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
+            "denominator": {
+                "shadow_entry_hypotheses_matched_no_decision_bridge": 2,
+                "mirror_event_count": 2,
+                "mirror_event_coverage_vs_shadow_bridge_gap": 1.0,
+                "mirror_event_truncated": False,
+            },
+            "candidate_counts": [
+                {"candidate_id": "notath_quote_clean", "family": "base", "count": 2}
+            ],
+        })
         write_json(root / "hypothesis_validation_audit_oos_probe_0p1h.json", {
             "schema_version": "hypothesis_validation_audit.v1",
             "overall": {
@@ -2276,6 +2351,7 @@ def self_test():
         assert siblings["candidate_improvement_opportunities"]["opportunity_count"] == 2
         assert siblings["markov_effectiveness"]["status"] == "insufficient_or_uninformative"
         assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
+        assert siblings["shadow_decision_bridge_audit"]["status"] == "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE"
         assert siblings["hypothesis_validation_oos_probe_0p1h"]["overall"]["promotion_allowed"] is False
         assert siblings["matured_volume_cross_oos_probe_0p1h"]["overall"]["classification"] == "BLOCKED_MATURED_VOLUME_COVERAGE"
         assert siblings["oos_readiness_probe_refresh"]["classification"] == "OOS_PROBES_REFRESHED"
@@ -2288,6 +2364,7 @@ def self_test():
         assert sibling_verdict["candidate_improvement_opportunities_summary"]["opportunity_count"] == 2
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
+        assert sibling_verdict["shadow_decision_bridge_audit_summary"]["review_queue"]["classification"] == "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY"
         assert sibling_verdict["oos_readiness_summary"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
         assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 2
         assert sibling_verdict["oos_readiness_summary"]["sufficient_probe_count"] == 0

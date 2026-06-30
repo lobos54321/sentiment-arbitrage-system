@@ -609,6 +609,7 @@ def build_handoff(verdict):
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
+                "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
@@ -810,6 +811,39 @@ def self_test():
                 "oos_repeated_watch_count": 0,
             },
         },
+        "shadow_decision_bridge_audit_summary": {
+            "available": True,
+            "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
+            "shadow_bridge_gap_count": 8,
+            "mirror_complete": True,
+            "top_candidate_counts": [
+                {"candidate_id": "notath_quote_clean", "family": "base", "count": 8}
+            ],
+            "top_family_counts": [
+                {"family": "base", "count": 8}
+            ],
+            "top_reason_counts": [
+                {
+                    "candidate_id": "notath_quote_clean",
+                    "family": "base",
+                    "reason": "runtime_source_quote_clean",
+                    "count": 8,
+                }
+            ],
+            "review_queue": {
+                "classification": "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY",
+                "queue_count": 1,
+                "promotion_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "items": [
+                    {
+                        "candidate_id": "notath_quote_clean",
+                        "status": "REVIEW_SHADOW_MATCHED_NO_DECISION_BRIDGE",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
+        },
         "quality_timing_reject_research_audit": {
             "available": True,
             "verdict": "QUALITY_TIMING_REJECT_RESEARCH_READY",
@@ -898,6 +932,7 @@ def self_test():
     assert "NO_DECISION_RECORD" in text
     assert "candidate_shadow_observed_no_decision_event" in text
     assert "shadow_entry_hypotheses_matched_no_decision_bridge" in text
+    assert "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY" in text
     assert "notath_quote_clean" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
