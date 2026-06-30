@@ -1853,7 +1853,7 @@ def self_test():
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
-            oos_probe_hours="0.1,1",
+            oos_probe_hours="0.25,0.5,1",
             quote_fix_deploy_ts=int(time.time()) - 3600,
         )
         result = run_once(args)
@@ -1953,8 +1953,10 @@ def self_test():
             "matured_kline_volume_recheck_audit_24h.json",
             "matured_volume_capture_cross_audit_24h.json",
             "hypothesis_validation_audit_24h.json",
-            "matured_volume_capture_cross_audit_oos_probe_0p1h.json",
-            "hypothesis_validation_audit_oos_probe_0p1h.json",
+            "matured_volume_capture_cross_audit_oos_probe_0p25h.json",
+            "hypothesis_validation_audit_oos_probe_0p25h.json",
+            "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
+            "hypothesis_validation_audit_oos_probe_0p5h.json",
             "matured_volume_capture_cross_audit_oos_probe_1h.json",
             "hypothesis_validation_audit_oos_probe_1h.json",
             "low_confidence_research_capture_audit_24h.json",
@@ -1981,7 +1983,7 @@ def main():
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
     parser.add_argument(
         "--oos-probe-hours",
-        default="0.1,1",
+        default="0.25,0.5,1",
         help="Comma-separated non-overlapping probe windows for shadow-only OOS readiness checks.",
     )
     parser.add_argument("--max-runs", type=int, default=1)

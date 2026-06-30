@@ -83,8 +83,12 @@ DERIVED_READINESS_SIBLINGS = {
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "capture_cross_validity": "capture_cross_validity_24h.json",
     "hypothesis_validation_oos_probe_0p1h": "hypothesis_validation_audit_oos_probe_0p1h.json",
+    "hypothesis_validation_oos_probe_0p25h": "hypothesis_validation_audit_oos_probe_0p25h.json",
+    "hypothesis_validation_oos_probe_0p5h": "hypothesis_validation_audit_oos_probe_0p5h.json",
     "hypothesis_validation_oos_probe_1h": "hypothesis_validation_audit_oos_probe_1h.json",
     "matured_volume_cross_oos_probe_0p1h": "matured_volume_capture_cross_audit_oos_probe_0p1h.json",
+    "matured_volume_cross_oos_probe_0p25h": "matured_volume_capture_cross_audit_oos_probe_0p25h.json",
+    "matured_volume_cross_oos_probe_0p5h": "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
 }
 
@@ -226,6 +230,16 @@ def build_oos_readiness_summary(readiness_reports):
             "0p1h",
             "hypothesis_validation_oos_probe_0p1h",
             "matured_volume_cross_oos_probe_0p1h",
+        ),
+        (
+            "0p25h",
+            "hypothesis_validation_oos_probe_0p25h",
+            "matured_volume_cross_oos_probe_0p25h",
+        ),
+        (
+            "0p5h",
+            "hypothesis_validation_oos_probe_0p5h",
+            "matured_volume_cross_oos_probe_0p5h",
         ),
         (
             "1h",
