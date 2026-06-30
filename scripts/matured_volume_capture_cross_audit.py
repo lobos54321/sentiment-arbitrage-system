@@ -358,7 +358,7 @@ def load_context_rows(path, since_ts, context_carrier, max_scan_rows):
             rows = db.execute(
                 f"""
                 SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
-                       reason, observed_at, payload_json
+                       reason, observed_at, '{{}}' AS payload_json
                 FROM candidate_shadow_observations
                 WHERE {' AND '.join(filters)}
                 """,
