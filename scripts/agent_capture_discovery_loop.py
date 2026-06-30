@@ -710,6 +710,7 @@ def run_reports(run_dir, args):
             "--kline-db", args.kline_db,
             "--hours", str(primary_hours),
             "--expected-candidates", str(args.expected_candidates),
+            "--max-scan-rows", str(args.max_scan_rows),
             "--out", str(matured_volume_capture_cross_path),
         ],
         matured_volume_capture_cross_path,

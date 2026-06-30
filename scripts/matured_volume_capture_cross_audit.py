@@ -341,12 +341,8 @@ def load_context_rows(path, since_ts, context_carrier, max_scan_rows):
     try:
         if not table_exists(db, "candidate_shadow_observations"):
             return []
-        rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
         filters = ["COALESCE(observed_at, 0) >= ?", "candidate_id = ?"]
         params = [int(since_ts), context_carrier]
-        if rowid_floor is not None:
-            filters.append("rowid >= ?")
-            params.append(rowid_floor)
         rows = db.execute(
             f"""
             SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
@@ -359,9 +355,6 @@ def load_context_rows(path, since_ts, context_carrier, max_scan_rows):
         if not rows:
             filters = ["COALESCE(observed_at, 0) >= ?"]
             params = [int(since_ts)]
-            if rowid_floor is not None:
-                filters.append("rowid >= ?")
-                params.append(rowid_floor)
             rows = db.execute(
                 f"""
                 SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
@@ -385,16 +378,12 @@ def load_candidate_rows(path, since_ts, signal_ids, max_scan_rows, chunk_size=50
     try:
         if not table_exists(db, "candidate_shadow_observations"):
             return []
-        rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
         signal_ids = sorted(signal_ids)
         for index in range(0, len(signal_ids), int(chunk_size)):
             chunk = signal_ids[index:index + int(chunk_size)]
             placeholders = ",".join("?" for _ in chunk)
-            filters = [f"CAST(signal_id AS TEXT) IN ({placeholders})", "COALESCE(observed_at, 0) >= ?"]
+            filters = [f"signal_id IN ({placeholders})", "COALESCE(observed_at, 0) >= ?"]
             params = list(chunk) + [int(since_ts)]
-            if rowid_floor is not None:
-                filters.append("rowid >= ?")
-                params.append(rowid_floor)
             rows = db.execute(
                 f"""
                 SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
@@ -645,6 +634,12 @@ def build_report(args):
         "candidate_count_expected": args.expected_candidates,
         "candidate_count_observed": len(candidate_ids),
         "candidate_count_ok": len(candidate_ids) == int(args.expected_candidates),
+        "scan_strategy": {
+            "context_rows": "context_carrier_observed_at_window_no_rowid_floor",
+            "candidate_rows": "signal_id_scoped_index_join_no_rowid_floor",
+            "max_scan_rows": args.max_scan_rows,
+            "note": "Signal-scoped joins avoid truncating the 24h raw dog denominator while avoiding broad rowid scans.",
+        },
         "signals_scanned": len(scanned_signal_ids),
         "context_rows_scanned": len(context_rows),
         "candidate_observation_rows_scanned": len(observations),
