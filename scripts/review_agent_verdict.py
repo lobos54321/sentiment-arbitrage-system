@@ -702,6 +702,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 "raw_all_gold_silver": (matured_volume_cross.get("denominator") or {}).get("raw_all_gold_silver"),
                 "evaluable_gold_silver": (matured_volume_cross.get("denominator") or {}).get("evaluable_gold_silver"),
             },
+            "signal_id_reconciliation": matured_volume_cross.get("signal_id_reconciliation") or {},
             "h1_matured_building_volume": matured_volume_cross.get("h1_matured_building_volume") or {},
             "judgment_counts": matured_volume_cross.get("judgment_counts") or {},
             "top_slices": matured_volume_top_slices,

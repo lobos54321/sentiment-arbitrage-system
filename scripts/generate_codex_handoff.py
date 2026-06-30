@@ -165,6 +165,8 @@ def build_handoff(verdict):
         lines.append("")
     if any(blocker in {"volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"} for blocker in actionable):
         volume_kline = verdict.get("volume_kline_root_cause_audit") or {}
+        matured_recheck = verdict.get("matured_kline_volume_recheck_audit") or {}
+        matured_cross = verdict.get("matured_volume_capture_cross_audit") or {}
         volume_context = volume_kline.get("volume_context") or {}
         raw_kline = volume_kline.get("raw_gold_silver_kline") or {}
         compact_volume_kline = {
@@ -193,6 +195,21 @@ def build_handoff(verdict):
                     "low_confidence_research_audit",
                     "blocker",
                 )
+            },
+            "matured_kline_volume_recheck": {
+                "overall": matured_recheck.get("overall") or {},
+                "context_rows_scanned": matured_recheck.get("context_rows_scanned"),
+                "unknown_or_missing_rows": matured_recheck.get("unknown_or_missing_rows"),
+                "recheck": matured_recheck.get("recheck") or {},
+            },
+            "matured_volume_capture_cross": {
+                "overall": matured_cross.get("overall") or {},
+                "denominator": matured_cross.get("denominator") or {},
+                "signal_id_reconciliation": matured_cross.get("signal_id_reconciliation") or {},
+                "matured_volume_context": matured_cross.get("matured_volume_context") or {},
+                "h1_matured_building_volume": matured_cross.get("h1_matured_building_volume") or {},
+                "watch_slice_count": matured_cross.get("watch_slice_count"),
+                "next_research_action": matured_cross.get("next_research_action"),
             },
         }
         lines.extend([
@@ -600,6 +617,38 @@ def self_test():
                 "blocker": "kline_coverage_below_80pct",
             },
         },
+        "matured_kline_volume_recheck_audit": {
+            "overall": {
+                "classification": "DISCOVERY_ONLY_MATURED_KLINE_RECHECK",
+                "next_action": "shadow_delayed_volume_recheck_likely_useful",
+                "promotion_allowed": False,
+            },
+            "context_rows_scanned": 10,
+            "unknown_or_missing_rows": 6,
+            "recheck": {
+                "recoverable_known_rows": 5,
+                "recoverable_known_rate": 0.833333,
+                "still_unknown_rows": 1,
+            },
+        },
+        "matured_volume_capture_cross_audit": {
+            "overall": {
+                "classification": "MATURED_VOLUME_DISCOVERY_NO_SIGNAL",
+                "promotion_allowed": False,
+            },
+            "denominator": {
+                "raw_all_gold_silver": {"event_rows": 8, "joined_event_rate": 0.5}
+            },
+            "signal_id_reconciliation": {
+                "raw_all_gold_silver": {
+                    "joined_event_rate": 0.5,
+                    "unjoined_reason_counts": {"missing_context_carrier_observation": 4},
+                }
+            },
+            "matured_volume_context": {"known_rate": 0.9},
+            "watch_slice_count": 1,
+            "next_research_action": "review_non_h1_matured_volume_watch_slices",
+        },
     }
     text = build_handoff(quote_pending_volume_verdict)
     assert "handoff_needed: `true`" in text
@@ -607,6 +656,8 @@ def self_test():
     assert "Required Fixes" in text
     assert "Volume / Kline Root Cause" in text
     assert "volume_profile_unknown_from_insufficient_or_unclassified_kline" in text
+    assert "shadow_delayed_volume_recheck_likely_useful" in text
+    assert "missing_context_carrier_observation" in text
     assert "volume_profile_coverage_below_80pct" in text
     assert "`source_quote_clean_coverage_below_80pct`:" not in text
     verdict["blockers"] = []

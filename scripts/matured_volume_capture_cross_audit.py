@@ -63,6 +63,19 @@ def safe_bool(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def numeric_signal_id(value):
+    key = signal_id_key(value)
+    if key is None:
+        return None
+    try:
+        parsed = float(key)
+        if math.isfinite(parsed) and parsed.is_integer():
+            return int(parsed)
+    except Exception:
+        return None
+    return None
+
+
 def signal_id_key(value):
     if value is None or value == "":
         return None
@@ -76,6 +89,66 @@ def signal_id_key(value):
     except Exception:
         pass
     return text
+
+
+def signal_id_reconciliation(raw_rows, scanned_signal_ids):
+    scanned_signal_ids = {signal_id_key(value) for value in scanned_signal_ids if signal_id_key(value)}
+    scanned_numeric = [numeric_signal_id(value) for value in scanned_signal_ids]
+    scanned_numeric = [value for value in scanned_numeric if value is not None]
+    min_scanned = min(scanned_numeric) if scanned_numeric else None
+    max_scanned = max(scanned_numeric) if scanned_numeric else None
+    event_rows = len(raw_rows)
+    raw_signal_ids = [signal_id_key(row.get("signal_id")) for row in raw_rows]
+    present_signal_ids = [sid for sid in raw_signal_ids if sid]
+    unique_signal_ids = set(present_signal_ids)
+    joined_event_rows = sum(1 for sid in raw_signal_ids if sid and sid in scanned_signal_ids)
+    joined_unique_signal_ids = len(unique_signal_ids & scanned_signal_ids)
+    reason_counts = Counter()
+    samples = []
+    seen = Counter(present_signal_ids)
+    duplicate_event_rows = sum(max(0, count - 1) for count in seen.values())
+    for row, sid in zip(raw_rows, raw_signal_ids):
+        if not sid:
+            reason = "missing_signal_id"
+        elif sid in scanned_signal_ids:
+            continue
+        else:
+            numeric = numeric_signal_id(sid)
+            if numeric is not None and min_scanned is not None and numeric < min_scanned:
+                reason = "outside_candidate_observer_window_before"
+            elif numeric is not None and max_scanned is not None and numeric > max_scanned:
+                reason = "outside_candidate_observer_window_after"
+            elif numeric is None:
+                reason = "non_numeric_signal_id_unjoined"
+            else:
+                reason = "missing_context_carrier_observation"
+        reason_counts[reason] += 1
+        if len(samples) < 25:
+            samples.append(
+                {
+                    "raw_event_id": row.get("id"),
+                    "signal_id": sid,
+                    "token_ca": row.get("token_ca"),
+                    "signal_ts": row.get("signal_ts"),
+                    "reason": reason,
+                }
+            )
+    return {
+        "event_rows": event_rows,
+        "unique_signal_ids": len(unique_signal_ids),
+        "duplicate_event_rows": duplicate_event_rows,
+        "scanned_context_signal_ids": len(scanned_signal_ids),
+        "scanned_context_signal_id_min": min_scanned,
+        "scanned_context_signal_id_max": max_scanned,
+        "joined_event_rows": joined_event_rows,
+        "joined_event_rate": rate(joined_event_rows, event_rows),
+        "joined_unique_signal_ids": joined_unique_signal_ids,
+        "joined_unique_signal_id_rate": rate(joined_unique_signal_ids, len(unique_signal_ids)),
+        "unjoined_event_rows": event_rows - joined_event_rows,
+        "unjoined_reason_counts": dict(reason_counts.most_common()),
+        "unjoined_samples": samples,
+        "promotion_allowed": False,
+    }
 
 
 def jloads(raw):
@@ -513,18 +586,26 @@ def build_report(args):
     ]
     verdict_counts = Counter(row.get("verdict") for row in slices)
     top_slices = slices[: int(args.limit)]
+    raw_all_reconciliation = signal_id_reconciliation(raw_all, scanned_signal_ids)
+    evaluable_reconciliation = signal_id_reconciliation(evaluable, scanned_signal_ids)
     denominator = {
         "raw_all_gold_silver": {
             "event_rows": len(raw_all),
             "unique_tokens": len({row.get("token_ca") for row in raw_all if row.get("token_ca")}),
             "joined_signal_id_rows": len(raw_all_signal_ids & scanned_signal_ids),
             "signal_id_join_rate": rate(len(raw_all_signal_ids & scanned_signal_ids), len(raw_all_signal_ids)),
+            "joined_event_rows": raw_all_reconciliation.get("joined_event_rows"),
+            "joined_event_rate": raw_all_reconciliation.get("joined_event_rate"),
+            "duplicate_event_rows": raw_all_reconciliation.get("duplicate_event_rows"),
         },
         "evaluable_gold_silver": {
             "event_rows": len(evaluable),
             "unique_tokens": len({row.get("token_ca") for row in evaluable if row.get("token_ca")}),
             "joined_signal_id_rows": len(raw_signal_ids & scanned_signal_ids),
             "signal_id_join_rate": rate(len(raw_signal_ids & scanned_signal_ids), len(raw_signal_ids)),
+            "joined_event_rows": evaluable_reconciliation.get("joined_event_rows"),
+            "joined_event_rate": evaluable_reconciliation.get("joined_event_rate"),
+            "duplicate_event_rows": evaluable_reconciliation.get("duplicate_event_rows"),
         },
     }
     known_rate = rate(maturity_counts["known"], len(matured_contexts))
@@ -569,6 +650,12 @@ def build_report(args):
         "candidate_observation_rows_scanned": len(observations),
         "deduped_candidate_observation_rows": len(rows_by_key),
         "denominator": denominator,
+        "signal_id_reconciliation": {
+            "raw_all_gold_silver": raw_all_reconciliation,
+            "evaluable_gold_silver": evaluable_reconciliation,
+            "primary_join_metric": "joined_event_rate",
+            "note": "Read-only attribution for matured volume cross scope. It does not change the formal denominator.",
+        },
         "matured_volume_context": {
             "kline_cache_available": kline_available,
             "signals_with_matured_context": len(matured_contexts),
@@ -608,6 +695,7 @@ def compact_summary(report):
         "candidate_count_observed": report.get("candidate_count_observed"),
         "signals_scanned": report.get("signals_scanned"),
         "denominator": report.get("denominator"),
+        "signal_id_reconciliation": report.get("signal_id_reconciliation"),
         "matured_volume_context": report.get("matured_volume_context"),
         "h1_matured_building_volume": report.get("h1_matured_building_volume"),
         "judgment_counts": report.get("judgment_counts"),
@@ -711,9 +799,12 @@ def self_test():
         assert report["formal_denominator_changed"] is False
         assert report["matured_volume_context"]["known_rate"] == 1.0
         assert report["denominator"]["evaluable_gold_silver"]["event_rows"] == 1
+        assert report["signal_id_reconciliation"]["evaluable_gold_silver"]["joined_event_rate"] == 1.0
+        assert report["signal_id_reconciliation"]["raw_all_gold_silver"]["joined_event_rows"] == 1
         assert report["h1_matured_building_volume"]["rows"]
         assert report["candidate_count_observed"] == 3
         compact = compact_summary(report)
+        assert compact["signal_id_reconciliation"]["primary_join_metric"] == "joined_event_rate"
         assert compact["matured_volume_context"]["profile_counts"]["building"] == 2
     print("SELF_TEST_PASS matured_volume_capture_cross_audit")
 
