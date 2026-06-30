@@ -511,6 +511,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         if row.get("verdict") == "MATURED_VOLUME_DISCOVERY_WATCH"
     ]
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
+    quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -853,6 +854,35 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             },
             "blockers": low_confidence_audit.get("blockers") or [],
         },
+        "quality_timing_reject_research_audit": {
+            "available": bool(quality_timing_audit),
+            "verdict": quality_timing_audit.get("verdict"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": quality_timing_audit.get("denominator") or {},
+            "candidate_match_attribution": {
+                key: (quality_timing_audit.get("candidate_match_attribution") or {}).get(key)
+                for key in (
+                    "full_candidate_coverage_rate",
+                    "candidate_matched_any_events",
+                    "candidate_matched_any_rate",
+                    "top_candidates",
+                    "top_families",
+                )
+            },
+            "stage_attribution": {
+                "stage_counts": ((quality_timing_audit.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
+                "reason_counts": ((quality_timing_audit.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
+            },
+            "context_attribution": {
+                "lifecycle_source_counts": ((quality_timing_audit.get("context_attribution") or {}).get("lifecycle_source_counts") or [])[:10],
+                "markov_bucket_counts": ((quality_timing_audit.get("context_attribution") or {}).get("markov_bucket_counts") or [])[:8],
+            },
+            "shadow_only_next_actions": quality_timing_audit.get("shadow_only_next_actions") or [],
+            "blockers": quality_timing_audit.get("blockers") or [],
+        },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
             (readiness_reports.get("a_class_fastlane_mode_audit") or {}).get("final_entry_contract_blocker_breakdown")
@@ -967,6 +997,7 @@ def self_test():
     assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
+    assert verdict["quality_timing_reject_research_audit"]["available"] is False
     stage_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "a_class_fastlane_mode_audit": {
             "final_entry_status": "FUNNEL_BLOCKED_EXPECTED",
@@ -1290,6 +1321,50 @@ def self_test():
     matured_volume = matured_volume_verdict["matured_volume_capture_cross_audit"]
     assert matured_volume["top_watch_slices"][0]["candidate_id"] == "entry_mode_registry:ath_flat_structure_tiny_scout"
     assert matured_volume["next_research_action"] == "review_non_h1_matured_volume_watch_slices"
+    quality_timing_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "quality_timing_reject_research_audit": {
+            "verdict": "QUALITY_TIMING_REJECT_RESEARCH_READY",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "denominator": {
+                "quality_timing_reject_event_rows": 4,
+                "quality_timing_reject_share_of_raw_all": 0.2,
+            },
+            "candidate_match_attribution": {
+                "full_candidate_coverage_rate": 1.0,
+                "candidate_matched_any_events": 4,
+                "candidate_matched_any_rate": 1.0,
+                "top_candidates": [
+                    {"candidate_id": "kline:active_mom20_first3", "family": "kline", "count": 3}
+                ],
+                "top_families": [{"family": "kline", "count": 3}],
+            },
+            "stage_attribution": {
+                "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 4}],
+                "reason_counts": [
+                    {
+                        "stage": "decision_no_pass_or_allow",
+                        "component": "smart_entry",
+                        "event_type": "quality_gate",
+                        "decision": "REJECT",
+                        "reason": "quality_score_low",
+                        "count": 4,
+                    }
+                ],
+            },
+            "context_attribution": {
+                "lifecycle_source_counts": [
+                    {"lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE", "source_component": "matrix_evaluator", "count": 4}
+                ],
+                "markov_bucket_counts": [{"markov_bucket": "insufficient", "count": 4}],
+            },
+        }
+    })
+    qt = quality_timing_verdict["quality_timing_reject_research_audit"]
+    assert qt["available"] is True
+    assert qt["promotion_allowed"] is False
+    assert qt["candidate_match_attribution"]["top_candidates"][0]["candidate_id"] == "kline:active_mom20_first3"
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},

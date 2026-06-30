@@ -40,6 +40,7 @@ REPORT_TEST_COMMANDS = (
     ("matured_volume_capture_cross_self_test", ["scripts/matured_volume_capture_cross_audit.py", "--self-test"]),
     ("hypothesis_validation_self_test", ["scripts/hypothesis_validation_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
+    ("quality_timing_reject_research_self_test", ["scripts/quality_timing_reject_research_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
@@ -560,6 +561,7 @@ def run_reports(run_dir, args):
     matured_volume_capture_cross_path = run_dir / f"matured_volume_capture_cross_audit_{primary_hours}h.json"
     hypothesis_validation_path = run_dir / f"hypothesis_validation_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
+    quality_timing_research_path = run_dir / f"quality_timing_reject_research_audit_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -743,6 +745,22 @@ def run_reports(run_dir, args):
     ))
     if low_confidence_research_path.exists():
         readiness_paths["low_confidence_research_capture_audit"] = low_confidence_research_path
+    diagnostics.append(run_report(
+        "quality_timing_reject_research_audit",
+        [
+            "scripts/quality_timing_reject_research_audit.py",
+            "--db", args.paper_db,
+            "--raw-db", args.raw_db,
+            "--raw-funnel", str(raw_funnel_path),
+            "--hours", str(primary_hours),
+            "--expected-candidates", str(args.expected_candidates),
+            "--out", str(quality_timing_research_path),
+        ],
+        quality_timing_research_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if quality_timing_research_path.exists():
+        readiness_paths["quality_timing_reject_research_audit"] = quality_timing_research_path
     diagnostics.append(run_report(
         "a_class_fastlane_mode_readiness_audit",
         [
@@ -1377,6 +1395,7 @@ def self_test():
             "matured_volume_capture_cross_audit",
             "hypothesis_validation_audit",
             "low_confidence_research_capture_audit",
+            "quality_timing_reject_research_audit",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
             "per_candidate_effectiveness_summary",
@@ -1442,6 +1461,7 @@ def self_test():
             "matured_volume_capture_cross_audit_24h.json",
             "hypothesis_validation_audit_24h.json",
             "low_confidence_research_capture_audit_24h.json",
+            "quality_timing_reject_research_audit_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts

@@ -390,6 +390,31 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    quality_timing = verdict.get("quality_timing_reject_research_audit") or {}
+    if quality_timing:
+        lines.extend([
+            "## Quality / Timing Reject Research",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": quality_timing.get("available"),
+                    "verdict": quality_timing.get("verdict"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "denominator": quality_timing.get("denominator") or {},
+                    "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
+                    "stage_attribution": quality_timing.get("stage_attribution") or {},
+                    "context_attribution": quality_timing.get("context_attribution") or {},
+                    "shadow_only_next_actions": quality_timing.get("shadow_only_next_actions") or [],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -403,6 +428,7 @@ def build_handoff(verdict):
                 "matured_volume_capture_cross_audit": verdict.get("matured_volume_capture_cross_audit") or {},
                 "hypothesis_validation_audit": verdict.get("hypothesis_validation_audit") or {},
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
+                "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
@@ -577,6 +603,28 @@ def self_test():
                 "oos_repeated_watch_count": 0,
             },
         },
+        "quality_timing_reject_research_audit": {
+            "available": True,
+            "verdict": "QUALITY_TIMING_REJECT_RESEARCH_READY",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "denominator": {"quality_timing_reject_event_rows": 4},
+            "candidate_match_attribution": {
+                "top_candidates": [
+                    {"candidate_id": "kline:active_mom20_first3", "family": "kline", "count": 3}
+                ]
+            },
+            "stage_attribution": {
+                "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 4}]
+            },
+            "context_attribution": {
+                "lifecycle_source_counts": [
+                    {"lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE", "source_component": "matrix_evaluator", "count": 4}
+                ]
+            },
+            "shadow_only_next_actions": ["review_shadow_candidates_for_quality_timing_rejects"],
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
@@ -594,6 +642,9 @@ def self_test():
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
+    assert "Quality / Timing Reject Research" in text
+    assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
+    assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "Readiness Summaries" in text
     quote_pending_verdict = {
         **verdict,
