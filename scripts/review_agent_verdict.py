@@ -118,6 +118,28 @@ def compact_capture_row(row):
     return {key: row.get(key) for key in keys if key in row}
 
 
+def compact_matured_volume_slice(row):
+    keys = (
+        "candidate_id",
+        "family",
+        "dimension",
+        "slice_value",
+        "verdict",
+        "slice_signal_count",
+        "slice_raw_gs_count",
+        "candidate_match_count",
+        "matched_gs_count",
+        "match_recall_event",
+        "match_precision_event",
+        "candidate_baseline_recall_event",
+        "candidate_baseline_precision_event",
+        "recall_lift_vs_candidate_baseline",
+        "precision_lift_vs_candidate_baseline",
+        "promotion_allowed",
+    )
+    return {key: row.get(key) for key in keys if key in row}
+
+
 def hypothesis_metrics(capture, name):
     slices = capture.get("context_slices") or []
     if name == "H1":
@@ -351,6 +373,14 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
     matured_kline_recheck = readiness_reports.get("matured_kline_volume_recheck_audit") or {}
     matured_volume_cross = readiness_reports.get("matured_volume_capture_cross_audit") or {}
+    matured_volume_top_slices = [
+        compact_matured_volume_slice(row)
+        for row in (matured_volume_cross.get("top_slices") or [])[:10]
+    ]
+    matured_volume_watch_slices = [
+        row for row in matured_volume_top_slices
+        if row.get("verdict") == "MATURED_VOLUME_DISCOVERY_WATCH"
+    ]
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
@@ -551,6 +581,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             },
             "h1_matured_building_volume": matured_volume_cross.get("h1_matured_building_volume") or {},
             "judgment_counts": matured_volume_cross.get("judgment_counts") or {},
+            "top_slices": matured_volume_top_slices,
+            "top_watch_slices": matured_volume_watch_slices,
+            "watch_slice_count": len(matured_volume_watch_slices),
+            "next_research_action": (
+                "review_non_h1_matured_volume_watch_slices"
+                if matured_volume_watch_slices
+                and (matured_volume_cross.get("h1_matured_building_volume") or {}).get("status") != "MATURED_VOLUME_DISCOVERY_WATCH"
+                else (matured_volume_cross.get("overall") or {}).get("next_action")
+            ),
         },
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),
@@ -814,6 +853,38 @@ def self_test():
     })
     assert "lifecycle_profile_coverage_below_80pct" not in lifecycle_reconciled["blockers"]
     assert "lifecycle_profile_coverage_reconciled_by_mature_context" in lifecycle_reconciled["context_blocker_monitor"]["reconciled_warnings"]
+    matured_volume_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "matured_volume_capture_cross_audit": {
+            "overall": {
+                "classification": "MATURED_VOLUME_DISCOVERY_NO_SIGNAL",
+                "next_action": "keep_volume_sensitive_slices_shadow_only",
+                "promotion_allowed": False,
+            },
+            "h1_matured_building_volume": {"status": "NO_H1_MATURED_VOLUME_HIT"},
+            "judgment_counts": {"MATURED_VOLUME_DISCOVERY_WATCH": 1},
+            "top_slices": [
+                {
+                    "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
+                    "family": "entry_mode_registry",
+                    "dimension": "matured_volume_profile",
+                    "slice_value": "building",
+                    "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                    "slice_signal_count": 126,
+                    "slice_raw_gs_count": 10,
+                    "candidate_match_count": 62,
+                    "matched_gs_count": 5,
+                    "match_recall_event": 0.5,
+                    "match_precision_event": 0.080645,
+                    "recall_lift_vs_candidate_baseline": 0.131579,
+                    "precision_lift_vs_candidate_baseline": 0.017009,
+                    "promotion_allowed": False,
+                }
+            ],
+        }
+    })
+    matured_volume = matured_volume_verdict["matured_volume_capture_cross_audit"]
+    assert matured_volume["top_watch_slices"][0]["candidate_id"] == "entry_mode_registry:ath_flat_structure_tiny_scout"
+    assert matured_volume["next_research_action"] == "review_non_h1_matured_volume_watch_slices"
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},
