@@ -76,6 +76,31 @@ def load_json(path):
         return json.load(handle)
 
 
+DERIVED_READINESS_SIBLINGS = {
+    "candidate_effectiveness": "candidate_effectiveness_24h.json",
+    "markov_effectiveness": "markov_effectiveness_24h.json",
+    "capture_cross_validity": "capture_cross_validity_24h.json",
+}
+
+
+def load_sibling_readiness_reports(capture_path, existing=None):
+    reports = dict(existing or {})
+    if not capture_path:
+        return reports
+    base = Path(capture_path).expanduser().resolve().parent
+    for name, filename in DERIVED_READINESS_SIBLINGS.items():
+        if name in reports:
+            continue
+        path = base / filename
+        if not path.exists():
+            continue
+        try:
+            reports[name] = load_json(path)
+        except Exception:
+            pass
+    return reports
+
+
 def write_json(path, payload):
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1718,6 +1743,35 @@ def self_test():
         loaded = load_json(path)
         assert loaded is not None
         assert loaded["schema_version"] == SCHEMA_VERSION
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        capture_path = root / "capture_discovery_24h.json"
+        write_json(capture_path, capture)
+        write_json(root / "candidate_effectiveness_24h.json", {
+            "schema_version": "candidate_effectiveness_report.v1",
+            "candidate_count": 84,
+            "classification_counts": {"potential_entry_hypothesis": 2},
+        })
+        write_json(root / "markov_effectiveness_24h.json", {
+            "schema_version": "markov_effectiveness_report.v1",
+            "status": "insufficient_or_uninformative",
+        })
+        write_json(root / "capture_cross_validity_24h.json", {
+            "schema_version": "capture_cross_validity_report.v1",
+            "valid_cross_count": 3,
+        })
+        siblings = load_sibling_readiness_reports(str(capture_path))
+        assert siblings["candidate_effectiveness"]["candidate_count"] == 84
+        assert siblings["markov_effectiveness"]["status"] == "insufficient_or_uninformative"
+        assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
+        explicit = load_sibling_readiness_reports(str(capture_path), {
+            "candidate_effectiveness": {"candidate_count": 1}
+        })
+        assert explicit["candidate_effectiveness"]["candidate_count"] == 1
+        sibling_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports=siblings)
+        assert sibling_verdict["per_candidate_effectiveness_summary"]["candidate_count"] == 84
+        assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
+        assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
     print("SELF_TEST_PASS review_agent_verdict")
 
 
@@ -1753,6 +1807,7 @@ def main():
             raise SystemExit(f"invalid --readiness value {item!r}; expected name:path")
         name, path = item.split(":", 1)
         readiness_reports[name] = load_json(path)
+    readiness_reports = load_sibling_readiness_reports(args.capture, readiness_reports)
     tests = load_json(args.tests) if args.tests else {}
     verdict = build_verdict(
         load_json(args.capture),
