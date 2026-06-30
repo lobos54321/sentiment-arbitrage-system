@@ -444,6 +444,40 @@ def count_for_root(rows, root_cause):
     return 0
 
 
+def build_shadow_decision_mirror_examples(signal_examples, *, limit=20):
+    examples = []
+    for row in (signal_examples or [])[:limit]:
+        matched_sample = list(row.get("matched_entry_hypothesis_sample") or [])
+        examples.append(
+            {
+                "schema_version": "shadow_decision_evidence_mirror.event.v1",
+                "evidence_type": "shadow_entry_hypothesis_matched_no_decision_bridge",
+                "signal_id": row.get("signal_id"),
+                "token_ca": row.get("token_ca"),
+                "matched_entry_hypothesis_count": row.get("matched_entry_hypothesis_count"),
+                "matched_entry_hypothesis_sample": matched_sample[:12],
+                "matched_candidate_ids_sample": [
+                    item.get("candidate_id")
+                    for item in matched_sample[:12]
+                    if item.get("candidate_id")
+                ],
+                "source_artifact": "raw_gold_silver_funnel_audit",
+                "recommended_write_target": "shadow_decision_evidence_mirror_only",
+                "forbidden_write_targets": [
+                    "paper_decision_events",
+                    "a_class_decision_events",
+                    "pending_entries",
+                    "paper_trades",
+                ],
+                "creates_pending_entry": False,
+                "creates_paper_trade": False,
+                "changes_runtime_mode": False,
+                "promotion_allowed": False,
+            }
+        )
+    return examples
+
+
 def build_shadow_decision_bridge_audit(raw_funnel):
     """Extract the shadow-entry match/no-decision bridge gap into a focused artifact."""
     summary = raw_funnel.get("summary") or {}
@@ -465,6 +499,8 @@ def build_shadow_decision_bridge_audit(raw_funnel):
     current_decision_count = max(0, raw_signal_ids - no_decision_count)
     optimistic_decision_count = min(raw_signal_ids, current_decision_count + shadow_count)
     remaining_no_decision_after_shadow = max(0, no_decision_count - shadow_count)
+    signal_examples = raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples") or []
+    mirror_examples = build_shadow_decision_mirror_examples(signal_examples)
     return {
         "schema_version": "shadow_decision_bridge_audit.v1",
         "report_type": "shadow_decision_bridge_audit_24h",
@@ -498,13 +534,53 @@ def build_shadow_decision_bridge_audit(raw_funnel):
                 raw_signal_ids,
             ),
             "remaining_no_decision_after_shadow_gap_logged": remaining_no_decision_after_shadow,
+            "mirror_event_example_count": len(mirror_examples),
         },
+        "read_only_evidence_mirror": {
+            "schema_version": "shadow_decision_evidence_mirror.v1",
+            "status": "RECOMMENDED_READ_ONLY_INSTRUMENTATION" if shadow_count > 0 else "NO_MIRROR_NEEDED",
+            "purpose": (
+                "Record that the shadow mesh saw raw gold/silver opportunities when production decision "
+                "events were absent, without changing entry policy or paper/live execution."
+            ),
+            "recommended_write_target": "shadow_decision_evidence_mirror_only",
+            "recommended_storage": [
+                "agent artifact",
+                "read-only evidence log",
+                "separate SQLite table that is excluded from production decision/final-entry queries",
+            ],
+            "forbidden_write_targets": [
+                "paper_decision_events",
+                "a_class_decision_events",
+                "pending_entries",
+                "paper_trades",
+                "final_entry_contract",
+            ],
+            "required_fields": [
+                "event_ts",
+                "signal_id",
+                "token_ca",
+                "root_cause",
+                "matched_entry_hypothesis_count",
+                "matched_entry_hypothesis_sample",
+                "candidate_count_expected",
+                "promotion_allowed=false",
+                "creates_pending_entry=false",
+                "creates_paper_trade=false",
+                "changes_runtime_mode=false",
+            ],
+            "runtime_effect": "none",
+            "promotion_allowed": False,
+            "paper_enablement_allowed": False,
+            "automatic_runtime_change_allowed": False,
+        },
+        "mirror_event_examples": mirror_examples,
         "no_decision_record_root_cause_counts": no_decision_roots,
         "no_decision_record_subroot_cause_counts": no_decision_subroots,
         "family_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_family_counts") or [],
         "candidate_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_candidate_counts") or [],
         "reason_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_reason_counts") or [],
-        "signal_examples": raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples") or [],
+        "signal_examples": signal_examples,
         "nearby_signal_id_mismatch_count": count_for_root(
             no_decision_subroots,
             "token_time_decision_nearby_signal_id_mismatch",

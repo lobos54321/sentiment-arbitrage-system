@@ -92,6 +92,8 @@ def build_handoff(verdict):
     blockers = verdict.get("blockers") or []
     actionable = actionable_blockers(verdict)
     needed = handoff_needed(verdict)
+    parallel_action = verdict.get("parallel_next_action")
+    parallel_reason = verdict.get("parallel_next_action_reason")
     display_next_blocker = verdict.get("next_highest_priority_blocker")
     if quote_clean_window_pending(verdict) and display_next_blocker in QUOTE_COVERAGE_BLOCKERS:
         display_next_blocker = actionable[0] if actionable else None
@@ -104,6 +106,9 @@ def build_handoff(verdict):
         f"- deployment_commit: `{verdict.get('deployment_commit')}`",
         f"- verdict: `{verdict.get('classification')}`",
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
+        f"- next_action: `{verdict.get('next_action')}`",
+        f"- parallel_next_action: `{parallel_action}`",
+        f"- parallel_next_action_reason: `{parallel_reason}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
         f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
         f"- next_highest_priority_blocker: `{display_next_blocker}`",
@@ -169,11 +174,24 @@ def build_handoff(verdict):
             "Next action: continue non-quote-sensitive discovery, wait for the clean window, then rerun AutoLoop before evaluating quote-sensitive slices.",
             "",
         ])
+    if parallel_action:
+        lines.extend([
+            "## Parallel Read-only Action",
+            "",
+            f"- action: `{parallel_action}`",
+            f"- reason: `{parallel_reason}`",
+            "- allowed scope: read-only evaluator/report/dashboard instrumentation and shadow-only context evidence.",
+            "- forbidden scope: strategy, entry policy, hard/exit gates, final_entry_contract, A_CLASS mode, executor, paper/live enablement, canary size, wallet, or risk.",
+            "",
+        ])
     if not needed:
         lines.extend([
             "## Next Action",
             "",
-            "No Codex data/report/evaluator fix is required by this verdict. Continue collecting clean discovery data and rerun the loop.",
+            (
+                "No blocking Codex data/report/evaluator fix is required by the primary verdict. "
+                "Continue collecting clean discovery data and rerun the loop."
+            ),
             "",
         ])
     else:

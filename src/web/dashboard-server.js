@@ -2426,6 +2426,10 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         root_cause: shadowDecisionBridge.root_cause || null,
         denominator: shadowDecisionBridge.denominator || null,
         bridge_expectation: shadowDecisionBridge.bridge_expectation || null,
+        read_only_evidence_mirror: shadowDecisionBridge.read_only_evidence_mirror || null,
+        mirror_event_example_count: Array.isArray(shadowDecisionBridge.mirror_event_examples)
+          ? shadowDecisionBridge.mirror_event_examples.length
+          : null,
         promotion_allowed: Boolean(shadowDecisionBridge.promotion_allowed),
         automatic_bridge_to_entry_allowed: Boolean(shadowDecisionBridge.automatic_bridge_to_entry_allowed),
         paper_enablement_allowed: Boolean(shadowDecisionBridge.paper_enablement_allowed),
