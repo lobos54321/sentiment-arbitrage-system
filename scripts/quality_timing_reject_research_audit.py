@@ -16,6 +16,7 @@ import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from statistics import median
 
 from a_class_fastlane_mode_readiness_audit import (
     classify_pending_gap_reason,
@@ -239,6 +240,227 @@ def top_examples(rows, limit):
     return rows[:limit]
 
 
+def classify_shadow_review_cluster(stage, attribution):
+    component = str((attribution or {}).get("component") or "").lower()
+    event_type = str((attribution or {}).get("event_type") or "").lower()
+    reason = str((attribution or {}).get("reason") or "").lower()
+    decision = str((attribution or {}).get("decision") or "").lower()
+    text = " ".join([stage or "", component, event_type, decision, reason])
+    if "matrix" in component or "matrices not yet aligned" in reason:
+        return "matrix_alignment_wait"
+    if "lotto_observe_low_mc_vol" in reason or "low_volume" in reason or "low_vol" in reason:
+        return "low_volume_observe"
+    if "risky_newborn_pullback" in reason:
+        return "newborn_pullback_timing_reject"
+    if "not_ath" in reason:
+        return "notath_upstream_skip"
+    if "buy_pressure" in reason or "weak_buying_pressure" in reason:
+        return "buy_pressure_weak"
+    if "chasing_top" in reason:
+        return "chasing_top_timing_reject"
+    if "score_too_low" in reason or "quality_score" in reason:
+        return "score_or_quality_too_low"
+    if "negative_trend" in reason or "momentum_fading" in reason:
+        return "momentum_fading_or_negative_trend"
+    if "entry_node_timeout" in reason or "retry_watch_scheduled" in reason:
+        return "entry_timing_timeout_or_retry"
+    if "final_entry" in component or "final_entry" in reason:
+        return "final_entry_contract_research_block"
+    if "top10_pct" in reason or "concentration" in reason:
+        return "holder_concentration_quality_reject"
+    if text.strip():
+        return "other_quality_timing_reject"
+    return "unknown_quality_timing_reject"
+
+
+SHADOW_REVIEW_CLUSTER_DETAILS = {
+    "matrix_alignment_wait": {
+        "description": "Raw gold/silver reached a matrix wait state before pass/pending/final eligibility.",
+        "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing matrix alignment thresholds or treating OBSERVE/WAIT as entry-eligible",
+    },
+    "low_volume_observe": {
+        "description": "Raw gold/silver was skipped or delayed by low-volume observation logic.",
+        "suggested_shadow_only_action": "track_low_volume_gold_silver_shadow_probe",
+        "human_approval_required_if_fix_requires": "relaxing low-volume, liquidity, or market-quality gates",
+    },
+    "newborn_pullback_timing_reject": {
+        "description": "Raw gold/silver was rejected by newborn pullback timing logic.",
+        "suggested_shadow_only_action": "track_newborn_pullback_timing_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing newborn timing rules or pullback rejection thresholds",
+    },
+    "notath_upstream_skip": {
+        "description": "Raw gold/silver was skipped by upstream NOT_ATH routing or classification.",
+        "suggested_shadow_only_action": "track_notath_upstream_skip_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing upstream ATH/NOT_ATH routing policy",
+    },
+    "buy_pressure_weak": {
+        "description": "Raw gold/silver was rejected by weak buy-pressure or scout-quality logic.",
+        "suggested_shadow_only_action": "track_buy_pressure_weak_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "relaxing scout quality or buy-pressure gates",
+    },
+    "chasing_top_timing_reject": {
+        "description": "Raw gold/silver was rejected as chasing top.",
+        "suggested_shadow_only_action": "track_chasing_top_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing anti-chase timing policy",
+    },
+    "score_or_quality_too_low": {
+        "description": "Raw gold/silver was rejected by a score or quality threshold.",
+        "suggested_shadow_only_action": "track_score_quality_threshold_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing score or quality thresholds",
+    },
+    "momentum_fading_or_negative_trend": {
+        "description": "Raw gold/silver was rejected for fading momentum or negative trend.",
+        "suggested_shadow_only_action": "track_momentum_fading_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing momentum/trend rejection policy",
+    },
+    "entry_timing_timeout_or_retry": {
+        "description": "Raw gold/silver was delayed or timed out around entry retry/timing logic.",
+        "suggested_shadow_only_action": "track_entry_timing_timeout_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing entry retry, timeout, or scheduling policy",
+    },
+    "final_entry_contract_research_block": {
+        "description": "Raw gold/silver reached final-entry-related block evidence inside the quality/timing audit scope.",
+        "suggested_shadow_only_action": "decompose_final_entry_hard_block_shadow_only",
+        "human_approval_required_if_fix_requires": "changing final_entry_contract, A_CLASS mode, or paper/live enablement",
+    },
+    "holder_concentration_quality_reject": {
+        "description": "Raw gold/silver was rejected by holder concentration or related quality logic.",
+        "suggested_shadow_only_action": "track_holder_concentration_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "relaxing holder concentration or quality gates",
+    },
+    "other_quality_timing_reject": {
+        "description": "Raw gold/silver was rejected by a less frequent quality/timing reason.",
+        "suggested_shadow_only_action": "continue_reason_level_shadow_review",
+        "human_approval_required_if_fix_requires": "changing strategy, entry policy, gate, final_entry, or runtime behavior",
+    },
+    "unknown_quality_timing_reject": {
+        "description": "Raw gold/silver was rejected but the reason payload was not classifiable.",
+        "suggested_shadow_only_action": "improve_quality_timing_reason_instrumentation",
+        "human_approval_required_if_fix_requires": "changing strategy, entry policy, gate, final_entry, or runtime behavior",
+    },
+}
+
+
+def median_or_none(values):
+    parsed = [safe_float(value) for value in values]
+    parsed = [value for value in parsed if value is not None]
+    return None if not parsed else round(float(median(parsed)), 6)
+
+
+def max_or_none(values):
+    parsed = [safe_float(value) for value in values]
+    parsed = [value for value in parsed if value is not None]
+    return None if not parsed else round(max(parsed), 6)
+
+
+def build_shadow_only_review(
+    *,
+    raw_rows,
+    qt_count,
+    stage_counts,
+    cluster_counts,
+    cluster_stage_counts,
+    cluster_candidate_counts,
+    cluster_family_counts,
+    cluster_context_counts,
+    cluster_tokens,
+    cluster_matched_any,
+    cluster_peak_pct,
+    cluster_time_to_peak,
+    limit,
+):
+    opportunities = []
+    for cluster, count in cluster_counts.most_common(limit):
+        details = SHADOW_REVIEW_CLUSTER_DETAILS.get(
+            cluster,
+            SHADOW_REVIEW_CLUSTER_DETAILS["other_quality_timing_reject"],
+        )
+        opportunities.append({
+            "cluster": cluster,
+            "description": details["description"],
+            "event_count": count,
+            "share_of_quality_timing_rejects": rate(count, qt_count),
+            "share_of_raw_all_gold_silver": rate(count, len(raw_rows)),
+            "unique_tokens": len(cluster_tokens.get(cluster) or set()),
+            "candidate_matched_any_rate": rate(cluster_matched_any.get(cluster, 0), count),
+            "max_sustained_peak_pct_max": max_or_none(cluster_peak_pct.get(cluster) or []),
+            "time_to_sustained_peak_sec_median": median_or_none(cluster_time_to_peak.get(cluster) or []),
+            "stage_counts": compact_counter(
+                cluster_stage_counts.get(cluster) or Counter(),
+                ["stage"],
+                limit,
+            ),
+            "top_candidates": compact_counter(
+                cluster_candidate_counts.get(cluster) or Counter(),
+                ["candidate_id", "family"],
+                limit,
+            ),
+            "top_families": compact_counter(
+                cluster_family_counts.get(cluster) or Counter(),
+                ["family"],
+                limit,
+            ),
+            "top_lifecycle_source_contexts": compact_counter(
+                cluster_context_counts.get(cluster) or Counter(),
+                ["lifecycle_profile", "source_component"],
+                limit,
+            ),
+            "suggested_shadow_only_action": details["suggested_shadow_only_action"],
+            "evidence_level": EVIDENCE_LEVEL,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "human_approval_required_if_fix_requires": details["human_approval_required_if_fix_requires"],
+            "next_validation": "repeat_same_cluster_in_clean_window_then_oos_if_it_generates_shadow_candidate_lift",
+        })
+    dominant_stage = stage_counts.most_common(1)[0][0] if stage_counts else None
+    return {
+        "classification": (
+            "QUALITY_TIMING_SHADOW_REVIEW_READY"
+            if qt_count
+            else "QUALITY_TIMING_SHADOW_REVIEW_EMPTY"
+        ),
+        "quality_timing_false_negative_upper_bound": {
+            "event_count": qt_count,
+            "raw_all_gold_silver_event_rows": len(raw_rows),
+            "rate": rate(qt_count, len(raw_rows)),
+            "interpretation": (
+                "Upper bound only: these raw gold/silver events were rejected by quality/timing logic, "
+                "but this does not prove the reject was wrong or safe to trade."
+            ),
+        },
+        "dominant_cluster": opportunities[0]["cluster"] if opportunities else None,
+        "dominant_stage": dominant_stage,
+        "research_opportunity_count": len(opportunities),
+        "top_research_opportunities": opportunities,
+        "allowed_scope": [
+            "read-only evaluator/report improvements",
+            "shadow-only candidate or context instrumentation",
+            "hypothesis registry entries for future clean-window/OOS validation",
+        ],
+        "forbidden_scope": [
+            "strategy change",
+            "entry policy change",
+            "hard gate relaxation",
+            "exit gate change",
+            "final_entry_contract change",
+            "A_CLASS mode reset or enablement",
+            "paper/live executor enablement",
+            "canary or risk increase",
+        ],
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Use these clusters to decide what shadow-only probes to add or watch next.",
+            "Any change to thresholds, gates, final_entry_contract, runtime mode, executor, or risk requires human approval.",
+        ],
+    }
+
+
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
@@ -275,6 +497,15 @@ def build_report(args):
         schema_counts = Counter()
         quote_clean_counts = Counter()
         quote_exec_counts = Counter()
+        cluster_counts = Counter()
+        cluster_stage_counts = defaultdict(Counter)
+        cluster_candidate_counts = defaultdict(Counter)
+        cluster_family_counts = defaultdict(Counter)
+        cluster_context_counts = defaultdict(Counter)
+        cluster_tokens = defaultdict(set)
+        cluster_matched_any = Counter()
+        cluster_peak_pct = defaultdict(list)
+        cluster_time_to_peak = defaultdict(list)
         coverage_ok = 0
         matched_any = 0
         total_obs_rows = 0
@@ -300,9 +531,23 @@ def build_report(args):
             schema_counts[str(audit.get("context_schema_version") or "legacy_or_missing")] += 1
             quote_clean_counts[str(audit.get("source_quote_clean"))] += 1
             quote_exec_counts[str(audit.get("source_quote_executable"))] += 1
+            cluster = classify_shadow_review_cluster(event["stage"], event["attribution"])
+            cluster_counts[cluster] += 1
+            cluster_stage_counts[cluster][event["stage"]] += 1
+            cluster_context_counts[cluster][(lifecycle, source)] += 1
+            if audit.get("token_ca"):
+                cluster_tokens[cluster].add(audit.get("token_ca"))
+            if matched_obs:
+                cluster_matched_any[cluster] += 1
+            cluster_peak_pct[cluster].append(audit.get("max_sustained_peak_pct"))
+            cluster_time_to_peak[cluster].append(audit.get("time_to_sustained_peak_sec"))
             for obs in matched_obs:
                 candidate_counts[(obs.get("candidate_id") or "UNKNOWN", obs.get("family") or "UNKNOWN")] += 1
                 family_counts[obs.get("family") or "UNKNOWN"] += 1
+                cluster_candidate_counts[cluster][
+                    (obs.get("candidate_id") or "UNKNOWN", obs.get("family") or "UNKNOWN")
+                ] += 1
+                cluster_family_counts[cluster][obs.get("family") or "UNKNOWN"] += 1
             qt_rows.append(
                 {
                     "signal_id": signal_id,
@@ -310,6 +555,7 @@ def build_report(args):
                     "symbol": audit.get("symbol"),
                     "tier": audit.get("tier"),
                     "stage": event["stage"],
+                    "shadow_review_cluster": cluster,
                     "attribution": event["attribution"],
                     "candidate_observation_count": len(signal_obs),
                     "candidate_coverage_ok": candidate_coverage_ok,
@@ -344,6 +590,21 @@ def build_report(args):
             verdict = "QUALITY_TIMING_REJECT_RESEARCH_EMPTY"
         elif blockers:
             verdict = "QUALITY_TIMING_REJECT_RESEARCH_BLOCKED_DATA"
+        shadow_only_review = build_shadow_only_review(
+            raw_rows=raw_rows,
+            qt_count=qt_count,
+            stage_counts=stage_counts,
+            cluster_counts=cluster_counts,
+            cluster_stage_counts=cluster_stage_counts,
+            cluster_candidate_counts=cluster_candidate_counts,
+            cluster_family_counts=cluster_family_counts,
+            cluster_context_counts=cluster_context_counts,
+            cluster_tokens=cluster_tokens,
+            cluster_matched_any=cluster_matched_any,
+            cluster_peak_pct=cluster_peak_pct,
+            cluster_time_to_peak=cluster_time_to_peak,
+            limit=args.limit,
+        )
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -411,6 +672,7 @@ def build_report(args):
                     args.limit,
                 ),
             },
+            "shadow_only_review": shadow_only_review,
             "shadow_only_next_actions": [
                 "review_shadow_candidates_for_quality_timing_rejects",
                 "compare quality/timing reject candidate families against pending/final eligibility lifts",
@@ -439,6 +701,7 @@ def compact_summary(report):
         "top_reason_counts": ((report.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
         "top_candidates": ((report.get("candidate_match_attribution") or {}).get("top_candidates") or [])[:10],
         "top_contexts": ((report.get("context_attribution") or {}).get("lifecycle_source_counts") or [])[:10],
+        "shadow_only_review": report.get("shadow_only_review") or {},
         "blockers": report.get("blockers") or [],
     }
 
@@ -547,12 +810,21 @@ def self_test():
         assert report["denominator"]["quality_timing_reject_event_rows"] == 2
         assert report["candidate_match_attribution"]["candidate_matched_any_events"] == 2
         assert report["candidate_match_attribution"]["full_candidate_coverage_rate"] == 1.0
+        review = report["shadow_only_review"]
+        assert review["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
+        assert review["promotion_allowed"] is False
+        assert review["strategy_change_allowed"] is False
+        assert review["automatic_runtime_change_allowed"] is False
+        assert review["paper_enablement_allowed"] is False
+        assert review["research_opportunity_count"] >= 1
+        assert review["top_research_opportunities"][0]["promotion_allowed"] is False
         stages = {row["stage"]: row["count"] for row in report["stage_attribution"]["stage_counts"]}
         assert stages["decision_no_pass_or_allow"] == 1
         assert stages["pass_or_allow_without_pending_entry"] == 1
         assert "pending_without_final_entry_contract" not in stages
         compact = compact_summary(report)
         assert compact["promotion_allowed"] is False
+        assert compact["shadow_only_review"]["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
     print("SELF_TEST_PASS quality_timing_reject_research_audit")
 
 

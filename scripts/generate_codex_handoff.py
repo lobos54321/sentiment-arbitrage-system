@@ -504,6 +504,7 @@ def build_handoff(verdict):
                     "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
                     "stage_attribution": quality_timing.get("stage_attribution") or {},
                     "context_attribution": quality_timing.get("context_attribution") or {},
+                    "shadow_only_review": quality_timing.get("shadow_only_review") or {},
                     "shadow_only_next_actions": quality_timing.get("shadow_only_next_actions") or [],
                 },
                 indent=2,
@@ -750,6 +751,20 @@ def self_test():
                     {"lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE", "source_component": "matrix_evaluator", "count": 4}
                 ]
             },
+            "shadow_only_review": {
+                "classification": "QUALITY_TIMING_SHADOW_REVIEW_READY",
+                "dominant_cluster": "matrix_alignment_wait",
+                "dominant_stage": "decision_no_pass_or_allow",
+                "research_opportunity_count": 1,
+                "top_research_opportunities": [
+                    {
+                        "cluster": "matrix_alignment_wait",
+                        "event_count": 4,
+                        "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
             "shadow_only_next_actions": ["review_shadow_candidates_for_quality_timing_rejects"],
         },
     }
@@ -771,6 +786,8 @@ def self_test():
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Quality / Timing Reject Research" in text
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
+    assert "matrix_alignment_wait" in text
+    assert "track_matrix_alignment_false_negative_shadow_probe" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "Candidate Improvement Opportunities" in text
     assert "Markov Information Value" in text

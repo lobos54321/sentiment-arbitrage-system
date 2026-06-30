@@ -2357,6 +2357,21 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         source_quote_executable_counts:
           (report.context_attribution.source_quote_executable_counts || []).slice(0, 8),
       } : null,
+      shadow_only_review: report.shadow_only_review ? {
+        classification: report.shadow_only_review.classification || null,
+        dominant_cluster: report.shadow_only_review.dominant_cluster || null,
+        dominant_stage: report.shadow_only_review.dominant_stage || null,
+        quality_timing_false_negative_upper_bound:
+          report.shadow_only_review.quality_timing_false_negative_upper_bound || null,
+        research_opportunity_count: report.shadow_only_review.research_opportunity_count,
+        top_research_opportunities:
+          (report.shadow_only_review.top_research_opportunities || []).slice(0, 8),
+        promotion_allowed: Boolean(report.shadow_only_review.promotion_allowed),
+        strategy_change_allowed: Boolean(report.shadow_only_review.strategy_change_allowed),
+        automatic_runtime_change_allowed:
+          Boolean(report.shadow_only_review.automatic_runtime_change_allowed),
+        paper_enablement_allowed: Boolean(report.shadow_only_review.paper_enablement_allowed),
+      } : null,
       shadow_only_next_actions: report.shadow_only_next_actions || [],
       blockers: report.blockers || [],
     };

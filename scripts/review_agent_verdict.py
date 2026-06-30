@@ -1418,6 +1418,25 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 "lifecycle_source_counts": ((quality_timing_audit.get("context_attribution") or {}).get("lifecycle_source_counts") or [])[:10],
                 "markov_bucket_counts": ((quality_timing_audit.get("context_attribution") or {}).get("markov_bucket_counts") or [])[:8],
             },
+            "shadow_only_review": {
+                "classification": ((quality_timing_audit.get("shadow_only_review") or {}).get("classification")),
+                "dominant_cluster": ((quality_timing_audit.get("shadow_only_review") or {}).get("dominant_cluster")),
+                "dominant_stage": ((quality_timing_audit.get("shadow_only_review") or {}).get("dominant_stage")),
+                "quality_timing_false_negative_upper_bound": (
+                    (quality_timing_audit.get("shadow_only_review") or {}).get("quality_timing_false_negative_upper_bound")
+                    or {}
+                ),
+                "research_opportunity_count": (
+                    (quality_timing_audit.get("shadow_only_review") or {}).get("research_opportunity_count")
+                ),
+                "top_research_opportunities": (
+                    ((quality_timing_audit.get("shadow_only_review") or {}).get("top_research_opportunities") or [])[:8]
+                ),
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            },
             "shadow_only_next_actions": quality_timing_audit.get("shadow_only_next_actions") or [],
             "blockers": quality_timing_audit.get("blockers") or [],
         },
@@ -2032,12 +2051,34 @@ def self_test():
                 ],
                 "markov_bucket_counts": [{"markov_bucket": "insufficient", "count": 4}],
             },
+            "shadow_only_review": {
+                "classification": "QUALITY_TIMING_SHADOW_REVIEW_READY",
+                "dominant_cluster": "score_or_quality_too_low",
+                "dominant_stage": "decision_no_pass_or_allow",
+                "quality_timing_false_negative_upper_bound": {
+                    "event_count": 4,
+                    "raw_all_gold_silver_event_rows": 20,
+                    "rate": 0.2,
+                },
+                "research_opportunity_count": 1,
+                "top_research_opportunities": [
+                    {
+                        "cluster": "score_or_quality_too_low",
+                        "event_count": 4,
+                        "suggested_shadow_only_action": "track_score_quality_threshold_false_negative_shadow_probe",
+                        "promotion_allowed": False,
+                        "strategy_change_allowed": False,
+                    }
+                ],
+            },
         }
     })
     qt = quality_timing_verdict["quality_timing_reject_research_audit"]
     assert qt["available"] is True
     assert qt["promotion_allowed"] is False
     assert qt["candidate_match_attribution"]["top_candidates"][0]["candidate_id"] == "kline:active_mom20_first3"
+    assert qt["shadow_only_review"]["dominant_cluster"] == "score_or_quality_too_low"
+    assert qt["shadow_only_review"]["top_research_opportunities"][0]["promotion_allowed"] is False
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},
