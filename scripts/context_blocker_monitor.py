@@ -27,6 +27,8 @@ DEFAULT_CONTEXT_CARRIER = "current_all"
 EXPECTED_COMMIT = "1830286fcd8f326d40b19ceb4b394d70db1eb0bf"
 MATURE_CONTEXT_MIN_AGE_SEC = 6 * 3600
 MATURE_CONTEXT_MIN_ROWS = 50
+RECENT_WRITER_SMOKE_MAX_AGE_SEC = 3600
+RECENT_WRITER_SMOKE_MIN_ROWS = 10
 
 
 def utc_now_ts() -> int:
@@ -103,6 +105,35 @@ def load_context_rows(db, since_ts, carrier_candidate_id):
         row = dict(row)
         out.append((row, jloads(row.get("payload_json"))))
     return out
+
+
+def select_recent_writer_smoke_window(rows, now_ts, min_rows=RECENT_WRITER_SMOKE_MIN_ROWS, max_age_sec=RECENT_WRITER_SMOKE_MAX_AGE_SEC):
+    """Return a conservative recent row window for writer-health checks.
+
+    The API and worker may run this monitor without an explicit deploy
+    timestamp. In that case, use recent context carrier rows as a smoke test
+    for the current writer path. This does not prove the whole rolling window
+    is clean; it only prevents stale pre-fix rows from being misclassified as
+    an active writer bug.
+    """
+    if not rows:
+        return [], int(now_ts), "recent_writer_no_rows_fallback"
+    newest_observed_at = max(int(row.get("observed_at") or 0) for row, _payload in rows)
+    if len(rows) >= int(min_rows) and newest_observed_at >= int(now_ts) - int(max_age_sec):
+        tail = rows[-int(min_rows):]
+        deploy_ts = min(int(row.get("observed_at") or now_ts) for row, _payload in tail)
+        return tail, deploy_ts, "recent_writer_tail_rows_fallback"
+    cutoff = int(now_ts) - int(max_age_sec)
+    recent = [
+        (row, payload)
+        for row, payload in rows
+        if int(row.get("observed_at") or 0) >= cutoff
+    ]
+    if len(recent) >= int(min_rows):
+        deploy_ts = min(int(row.get("observed_at") or now_ts) for row, _payload in recent)
+        return recent, deploy_ts, "recent_writer_time_window_fallback"
+    deploy_ts = min(int(row.get("observed_at") or now_ts) for row, _payload in rows)
+    return list(rows), deploy_ts, "recent_writer_all_available_rows_fallback"
 
 
 def presence_stats(rows, key):
@@ -328,11 +359,9 @@ def load_raw_gold_silver_kline_coverage(raw_db, since_ts):
 def build_report(args):
     now_ts = int(args.now_ts or utc_now_ts())
     rolling_since = now_ts - int(float(args.hours) * 3600)
-    deploy_ts = int(args.deploy_ts or 0)
-    deploy_ts_source = "provided"
-    if deploy_ts <= 0:
-        deploy_ts = rolling_since
-        deploy_ts_source = "rolling_window_start_fallback"
+    requested_deploy_ts = int(args.deploy_ts or 0)
+    deploy_ts = requested_deploy_ts
+    deploy_ts_source = "provided" if requested_deploy_ts > 0 else "unset"
 
     paper_db = sqlite3.connect(args.db)
     paper_db.row_factory = sqlite3.Row
@@ -342,6 +371,8 @@ def build_report(args):
         raw_db.row_factory = sqlite3.Row
     try:
         rolling_rows = load_context_rows(paper_db, rolling_since, args.context_carrier)
+        if deploy_ts <= 0:
+            _smoke_rows, deploy_ts, deploy_ts_source = select_recent_writer_smoke_window(rolling_rows, now_ts)
         post_deploy_rows = [(row, payload) for row, payload in rolling_rows if int(row.get("observed_at") or 0) >= deploy_ts]
         pre_fix_rows = [
             (row, payload)
@@ -438,8 +469,12 @@ def build_report(args):
                 "paper_db": args.db,
                 "raw_db": args.raw_db,
                 "hours": args.hours,
+                "requested_deploy_ts": requested_deploy_ts,
                 "deploy_ts": deploy_ts,
                 "deploy_iso": iso(deploy_ts),
+                "deploy_ts_source": deploy_ts_source,
+                "recent_writer_smoke_max_age_sec": RECENT_WRITER_SMOKE_MAX_AGE_SEC,
+                "recent_writer_smoke_min_rows": RECENT_WRITER_SMOKE_MIN_ROWS,
                 "context_carrier": args.context_carrier,
                 "expected_commit": args.expected_commit,
                 "mature_context_min_age_sec": args.mature_context_min_age_sec,
@@ -456,6 +491,7 @@ def build_report(args):
                 "quote_context_writer_path_breakdown": dict(Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
                 "lifecycle_context_writer_path_breakdown": dict(Counter(payload_value(payload, "lifecycle_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
                 "post_deploy_quote_context_healthy": post_quote_healthy,
+                "smoke_scope": "post_deploy_rows" if requested_deploy_ts > 0 else deploy_ts_source,
             },
             "task_b_clean_window_monitor": {
                 "classification": clean_status,
@@ -490,8 +526,9 @@ def build_report(args):
                 "volume_profile": post_volume_profile,
                 "markov_bucket": post_markov_bucket,
                 "writer_path_breakdown": dict(Counter(payload_value(payload, "quote_context_writer_path") for _row, payload in post_deploy_rows).most_common()),
+                "smoke_scope": "post_deploy_rows" if requested_deploy_ts > 0 else deploy_ts_source,
                 "notes": [
-                    "Read-only smoke test for context carrier fields written after the supplied deploy timestamp.",
+                    "Read-only smoke test for context carrier fields written after the supplied deploy timestamp, or recent writer rows when no deploy timestamp is supplied.",
                     "lifecycle_profile may be an explicit NO_LIFECYCLE_CONTEXT bucket when no runtime lifecycle state exists.",
                     "source_component should be explicit when available, or an explicit no-source-context bucket when unavailable.",
                     "volume_profile remains allowed to be blocked separately by realtime kline maturity.",
@@ -657,9 +694,37 @@ def self_test():
         )
         rows = [
             (1, "A", now - 200, "current_all", "base", 1, "x", now - 200, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH"}),
+            (101, "A1", now - 190, "current_all", "base", 1, "x", now - 190, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH"}),
+            (102, "A2", now - 180, "current_all", "base", 1, "x", now - 180, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING"}),
+            (103, "A3", now - 170, "current_all", "base", 1, "x", now - 170, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING"}),
             (2, "B", now - 50, "current_all", "base", 1, "x", now - 50, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": False, "source_quote_executable": False, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "source_component": "NO_SOURCE_CONTEXT:NONE", "volume_profile": "building", "candle_pattern": "green"}),
             (3, "C", now - 25, "current_all", "base", 1, "x", now - 25, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": True, "source_quote_executable": True, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "source_component": "matrix_evaluator", "volume_profile": "unknown", "fbr_time_legal": True}),
         ]
+        for idx in range(4, 15):
+            rows.append(
+                (
+                    idx,
+                    f"R{idx}",
+                    now - (20 - idx),
+                    "current_all",
+                    "base",
+                    1,
+                    "x",
+                    now - (20 - idx),
+                    {
+                        "context_schema_version": "v2",
+                        "candidate_family": "base",
+                        "signal_type": "NEW_TRENDING",
+                        "quote_context_writer_path": "candidate_shadow_observer:inferred",
+                        "source_quote_clean": False,
+                        "source_quote_executable": False,
+                        "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE",
+                        "source_component": "NO_SOURCE_CONTEXT:NONE",
+                        "volume_profile": "building",
+                        "markov_bucket": "insufficient",
+                    },
+                )
+            )
         db.executemany(
             "INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?,?,?,?)",
             [(a, b, c, d, e, f, g, h, json.dumps(i)) for a, b, c, d, e, f, g, h, i in rows],
@@ -699,7 +764,7 @@ def self_test():
         assert report["task_a_post_deploy_quote_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
         assert report["task_a_post_deploy_quote_smoke_test"]["missing_rows"] == 0
         assert report["task_b_clean_window_monitor"]["classification"] == "QUOTE_CLEAN_WINDOW_PENDING"
-        assert report["task_b_clean_window_monitor"]["pre_fix_rows_remaining"] == 1
+        assert report["task_b_clean_window_monitor"]["pre_fix_rows_remaining"] == 4
         assert report["task_e_post_deploy_context_field_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
         assert report["task_e_post_deploy_context_field_smoke_test"]["lifecycle_profile"]["effective_present_rate"] == 1.0
         assert report["task_c_volume_kline_coverage_audit"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
@@ -720,7 +785,14 @@ def self_test():
             min_mature_context_rows=MATURE_CONTEXT_MIN_ROWS,
         )
         fallback_report = build_report(fallback_args)
-        assert fallback_report["deploy_ts_source"] == "rolling_window_start_fallback"
+        assert fallback_report["deploy_ts_source"] in {
+            "recent_writer_time_window_fallback",
+            "recent_writer_tail_rows_fallback",
+            "recent_writer_all_available_rows_fallback",
+        }
+        assert fallback_report["task_a_post_deploy_quote_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
+        assert fallback_report["task_e_post_deploy_context_field_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
+        assert fallback_report["task_b_clean_window_monitor"]["classification"] == "QUOTE_CLEAN_WINDOW_PENDING"
         assert fallback_report["promotion_allowed"] is False
     print("SELF_TEST_PASS context_blocker_monitor")
 
