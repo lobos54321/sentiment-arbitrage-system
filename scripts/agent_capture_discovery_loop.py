@@ -41,6 +41,7 @@ REPORT_TEST_COMMANDS = (
     ("hypothesis_validation_self_test", ["scripts/hypothesis_validation_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
     ("quality_timing_reject_research_self_test", ["scripts/quality_timing_reject_research_audit.py", "--self-test"]),
+    ("candidate_downstream_readiness_self_test", ["scripts/candidate_downstream_readiness_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
@@ -332,8 +333,14 @@ def build_context_coverage_report(capture):
     }
 
 
-def build_candidate_effectiveness_report(capture):
+def build_candidate_effectiveness_report(capture, downstream=None):
     rows = list(capture.get("candidate_baseline") or [])
+    downstream = downstream or {}
+    downstream_by_candidate = {
+        row.get("candidate_id"): row
+        for row in (downstream.get("all_candidates") or downstream.get("top_candidates") or [])
+        if row.get("candidate_id")
+    }
     classified = []
     counts = {"true_detector": 0, "low_precision_broad_detector": 0, "potential_entry_hypothesis": 0, "no_signal": 0}
     for row in rows:
@@ -354,7 +361,7 @@ def build_candidate_effectiveness_report(capture):
         else:
             label = "no_signal"
         counts[label] += 1
-        classified.append({
+        item = {
             "candidate_id": row.get("candidate_id"),
             "family": row.get("family"),
             "classification": label,
@@ -362,7 +369,31 @@ def build_candidate_effectiveness_report(capture):
             "matched_raw_all_gold_silver_events": matched_gs,
             "business_match_recall_event": recall,
             "match_precision_event": precision,
-        })
+        }
+        downstream_row = downstream_by_candidate.get(row.get("candidate_id")) or {}
+        if downstream_row:
+            item.update(
+                {
+                    "downstream_classification": downstream_row.get("classification"),
+                    "decision_record_rate_after_match": downstream_row.get("decision_record_rate_after_match"),
+                    "pass_allow_rate_after_match": downstream_row.get("pass_allow_rate_after_match"),
+                    "pending_rate_after_match": downstream_row.get("pending_rate_after_match"),
+                    "final_entry_contract_rate_after_match": downstream_row.get("final_entry_contract_rate_after_match"),
+                    "mode_disabled_adjusted_final_eligibility_rate_after_match": downstream_row.get(
+                        "mode_disabled_adjusted_final_eligibility_rate_after_match"
+                    ),
+                    "paper_trade_intent_rate_after_match": downstream_row.get("paper_trade_intent_rate_after_match"),
+                    "paper_trade_committed_rate_after_match": downstream_row.get("paper_trade_committed_rate_after_match"),
+                    "decision_record_count_after_match": downstream_row.get("decision_record_count_after_match"),
+                    "pending_count_after_match": downstream_row.get("pending_count_after_match"),
+                    "mode_disabled_only_final_entry_count_after_match": downstream_row.get(
+                        "mode_disabled_only_final_entry_count_after_match"
+                    ),
+                    "paper_trade_intent_count_after_match": downstream_row.get("paper_trade_intent_count_after_match"),
+                    "paper_trade_committed_count_after_match": downstream_row.get("paper_trade_committed_count_after_match"),
+                }
+            )
+        classified.append(item)
     order = {
         "potential_entry_hypothesis": 3,
         "true_detector": 2,
@@ -379,13 +410,17 @@ def build_candidate_effectiveness_report(capture):
         reverse=True,
     )
     return {
-        "schema_version": "candidate_effectiveness_report.v1",
+        "schema_version": "candidate_effectiveness_report.v2",
         "report_type": "candidate_effectiveness_24h",
         "candidate_count": len(rows),
+        "downstream_readiness_loaded": bool(downstream_by_candidate),
+        "downstream_stage_counts": downstream.get("stage_counts") or {},
+        "downstream_classification_counts": downstream.get("classification_counts") or {},
         "classification_counts": counts,
         "top_candidates": classified[:50],
         "notes": [
             "Capture-first classifications are discovery-only and do not imply entry promotion.",
+            "Downstream rates are conditional on candidate-matched raw gold/silver signal_ids.",
             "PnL is intentionally not used as the primary candidate-effectiveness criterion.",
         ],
     }
@@ -922,6 +957,7 @@ def run_reports(run_dir, args):
     }
     pnl_path = run_dir / f"pnl_cross_secondary_{primary_hours}h.json"
     raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{primary_hours}h.json"
+    candidate_downstream_path = run_dir / f"candidate_downstream_readiness_{primary_hours}h.json"
     context_coverage_path = run_dir / f"context_coverage_audit_{primary_hours}h.json"
     candidate_effectiveness_path = run_dir / f"candidate_effectiveness_{primary_hours}h.json"
     candidate_improvement_path = run_dir / f"candidate_improvement_opportunities_{primary_hours}h.json"
@@ -941,6 +977,7 @@ def run_reports(run_dir, args):
         if profile
     }
     diagnostics = []
+    readiness_paths = {}
 
     db_ready = file_available(args.paper_db) and sqlite_has_table(args.paper_db, "candidate_shadow_observations")
     raw_ready = file_available(args.raw_db) and sqlite_has_table(args.raw_db, "raw_signal_outcomes")
@@ -998,6 +1035,21 @@ def run_reports(run_dir, args):
         pnl_path,
         timeout=args.report_timeout_sec,
     ))
+    diagnostics.append(run_report(
+        "candidate_downstream_readiness",
+        [
+            "scripts/candidate_downstream_readiness_audit.py",
+            "--db", args.paper_db,
+            "--raw-db", args.raw_db,
+            "--hours", str(primary_hours),
+            "--expected-candidates", str(args.expected_candidates),
+            "--out", str(candidate_downstream_path),
+        ],
+        candidate_downstream_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if candidate_downstream_path.exists():
+        readiness_paths["candidate_downstream_readiness"] = candidate_downstream_path
     successful_markov = {}
     for profile, path in markov_paths.items():
         diagnostics.append(run_report(
@@ -1015,13 +1067,13 @@ def run_reports(run_dir, args):
         ))
         if path.exists():
             successful_markov[profile] = path
-    readiness_paths = {}
     try:
         capture = load_json(capture_path)
         context_report = build_context_coverage_report(capture)
         write_derived_report(context_coverage_path, context_report)
         readiness_paths["context_coverage"] = context_coverage_path
-        candidate_effectiveness = build_candidate_effectiveness_report(capture)
+        downstream = load_json(candidate_downstream_path) if candidate_downstream_path.exists() else {}
+        candidate_effectiveness = build_candidate_effectiveness_report(capture, downstream)
         write_derived_report(candidate_effectiveness_path, candidate_effectiveness)
         readiness_paths["candidate_effectiveness"] = candidate_effectiveness_path
         markov_reports = {name: load_json(path) for name, path in successful_markov.items() if Path(path).exists()}
