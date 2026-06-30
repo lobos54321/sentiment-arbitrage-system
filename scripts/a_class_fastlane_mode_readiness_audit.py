@@ -401,6 +401,21 @@ def raw_funnel_snapshot(raw_funnel):
         "raw_signals_with_final_entry_mode_disabled": raw_bridge.get("raw_signals_with_final_entry_mode_disabled"),
         "raw_signals_with_final_entry_mode_disabled_only": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_only"),
         "raw_signals_with_final_entry_mode_disabled_plus_other": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_plus_other"),
+        "no_decision_record_root_cause_counts": raw_bridge.get("no_decision_record_root_cause_counts"),
+        "no_decision_record_examples": raw_bridge.get("no_decision_record_examples"),
+        "no_decision_token_time_decision_without_exact_signal_id": raw_bridge.get(
+            "no_decision_token_time_decision_without_exact_signal_id"
+        ),
+        "no_decision_candidate_shadow_observed_no_decision_event": raw_bridge.get(
+            "no_decision_candidate_shadow_observed_no_decision_event"
+        ),
+        "no_decision_partial_candidate_observation_no_decision_event": raw_bridge.get(
+            "no_decision_partial_candidate_observation_no_decision_event"
+        ),
+        "no_decision_no_candidate_observation_or_decision_event": raw_bridge.get(
+            "no_decision_no_candidate_observation_or_decision_event"
+        ),
+        "no_decision_raw_event_missing_signal_id": raw_bridge.get("no_decision_raw_event_missing_signal_id"),
         "raw_signals_with_decision_no_pass_or_allow": raw_bridge.get("raw_signals_with_decision_no_pass_or_allow"),
         "decision_no_pass_or_allow_reason_counts": raw_bridge.get("decision_no_pass_or_allow_reason_counts"),
         "decision_no_pass_or_allow_examples": raw_bridge.get("decision_no_pass_or_allow_examples"),
@@ -563,7 +578,12 @@ def categorize_pending_to_final_gap(reason_counts):
     }
 
 
-def categorize_upstream_funnel_gap(no_decision_count, decision_no_pass_counts, pass_without_pending_counts):
+def categorize_upstream_funnel_gap(
+    no_decision_count,
+    decision_no_pass_counts,
+    pass_without_pending_counts,
+    no_decision_root_cause_counts=None,
+):
     categories = {}
 
     def add_category(category, count, reason_row=None, stage=None):
@@ -593,6 +613,23 @@ def categorize_upstream_funnel_gap(no_decision_count, decision_no_pass_counts, p
             )
 
     add_category("NO_DECISION_RECORD", safe_int(no_decision_count, 0) or 0, stage="no_decision_record")
+    no_decision_bucket = categories.get("NO_DECISION_RECORD")
+    if no_decision_bucket is not None:
+        for row in no_decision_root_cause_counts or []:
+            count = safe_int(row.get("count"), 0) or 0
+            if count <= 0 or len(no_decision_bucket["top_reasons"]) >= 8:
+                continue
+            no_decision_bucket["top_reasons"].append(
+                {
+                    "stage": "no_decision_record",
+                    "component": "raw_signal_decision_bridge",
+                    "event_type": "no_decision_record",
+                    "decision": "MISSING",
+                    "reason": row.get("root_cause"),
+                    "description": row.get("description"),
+                    "count": count,
+                }
+            )
     for row in decision_no_pass_counts or []:
         count = safe_int(row.get("count"), 0) or 0
         add_category(
@@ -781,6 +818,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         no_decision,
         raw_snapshot.get("decision_no_pass_or_allow_reason_counts") or [],
         raw_snapshot.get("pass_or_allow_without_pending_entry_reason_counts") or [],
+        raw_snapshot.get("no_decision_record_root_cause_counts") or [],
     )
     upstream_priority = upstream_gap_priority(raw_signals, pending, upstream_categories)
     readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
@@ -845,6 +883,23 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "pass_or_allow_signal_ids": pass_or_allow,
             "pending_entry_signal_ids": pending,
             "no_decision_record": no_decision,
+            "no_decision_record_root_cause_counts": raw_snapshot.get("no_decision_record_root_cause_counts") or [],
+            "no_decision_record_examples": raw_snapshot.get("no_decision_record_examples") or [],
+            "no_decision_token_time_decision_without_exact_signal_id": safe_int(
+                raw_snapshot.get("no_decision_token_time_decision_without_exact_signal_id"), 0
+            ),
+            "no_decision_candidate_shadow_observed_no_decision_event": safe_int(
+                raw_snapshot.get("no_decision_candidate_shadow_observed_no_decision_event"), 0
+            ),
+            "no_decision_partial_candidate_observation_no_decision_event": safe_int(
+                raw_snapshot.get("no_decision_partial_candidate_observation_no_decision_event"), 0
+            ),
+            "no_decision_no_candidate_observation_or_decision_event": safe_int(
+                raw_snapshot.get("no_decision_no_candidate_observation_or_decision_event"), 0
+            ),
+            "no_decision_raw_event_missing_signal_id": safe_int(
+                raw_snapshot.get("no_decision_raw_event_missing_signal_id"), 0
+            ),
             "decision_no_pass_or_allow": decision_no_pass,
             "pass_or_allow_without_pending_entry": pass_without_pending,
             "total_upstream_gap": no_decision + decision_no_pass + pass_without_pending,
@@ -1095,6 +1150,14 @@ def self_test():
                         "raw_signal_ids": 4,
                         "raw_signals_with_decision_record": 3,
                         "raw_signals_without_decision_record": 1,
+                        "no_decision_record_root_cause_counts": [
+                            {
+                                "root_cause": "candidate_shadow_observed_no_decision_event",
+                                "description": "Candidate shadow observations exist with full candidate coverage, but no decision event was written.",
+                                "count": 1,
+                            }
+                        ],
+                        "no_decision_candidate_shadow_observed_no_decision_event": 1,
                         "raw_signals_with_pass_or_allow": 2,
                         "raw_signals_with_pending_entry": 2,
                         "raw_signals_with_final_entry_contract": 2,
@@ -1148,6 +1211,8 @@ def self_test():
         assert report["capture_stage_rates"]["realized_capture_rate"] == 0.0
         assert report["pending_to_final_entry_gap"]["pending_to_final_entry_contract_rate"] == 1.0
         assert report["upstream_funnel_gap"]["no_decision_record"] == 1
+        assert report["upstream_funnel_gap"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
+        assert report["upstream_funnel_gap"]["upstream_gap_category_counts"]["categories"][0]["top_reasons"]
         assert report["upstream_funnel_gap"]["decision_no_pass_or_allow"] == 1
         assert report["upstream_funnel_gap"]["total_upstream_gap"] == 2
         assert report["upstream_funnel_gap"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 1

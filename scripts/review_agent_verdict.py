@@ -457,6 +457,19 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pass_or_allow_signal_ids": upstream_gap.get("pass_or_allow_signal_ids"),
             "pending_entry_signal_ids": upstream_gap.get("pending_entry_signal_ids"),
             "no_decision_record": upstream_gap.get("no_decision_record"),
+            "no_decision_record_root_cause_counts": upstream_gap.get("no_decision_record_root_cause_counts") or [],
+            "no_decision_token_time_decision_without_exact_signal_id": upstream_gap.get(
+                "no_decision_token_time_decision_without_exact_signal_id"
+            ),
+            "no_decision_candidate_shadow_observed_no_decision_event": upstream_gap.get(
+                "no_decision_candidate_shadow_observed_no_decision_event"
+            ),
+            "no_decision_partial_candidate_observation_no_decision_event": upstream_gap.get(
+                "no_decision_partial_candidate_observation_no_decision_event"
+            ),
+            "no_decision_no_candidate_observation_or_decision_event": upstream_gap.get(
+                "no_decision_no_candidate_observation_or_decision_event"
+            ),
             "decision_no_pass_or_allow": upstream_gap.get("decision_no_pass_or_allow"),
             "pass_or_allow_without_pending_entry": upstream_gap.get("pass_or_allow_without_pending_entry"),
             "total_upstream_gap": upstream_gap.get("total_upstream_gap"),
@@ -806,6 +819,14 @@ def self_test():
                     "pass_or_allow_signal_ids": 5,
                     "pending_entry_signal_ids": 3,
                     "no_decision_record": 1,
+                    "no_decision_record_root_cause_counts": [
+                        {
+                            "root_cause": "candidate_shadow_observed_no_decision_event",
+                            "description": "Candidate shadow observations exist with full candidate coverage, but no decision event was written.",
+                            "count": 1,
+                        }
+                    ],
+                    "no_decision_candidate_shadow_observed_no_decision_event": 1,
                     "decision_no_pass_or_allow": 4,
                     "pass_or_allow_without_pending_entry": 2,
                     "total_upstream_gap": 7,
@@ -841,6 +862,7 @@ def self_test():
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
     assert stage_verdict["paper_capture_rate"] == 0.0
     assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
+    assert stage_verdict["upstream_funnel_gap_summary"]["no_decision_candidate_shadow_observed_no_decision_event"] == 1
     assert stage_verdict["upstream_funnel_gap_summary"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 3
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"

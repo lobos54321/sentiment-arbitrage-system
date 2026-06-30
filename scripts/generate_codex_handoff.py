@@ -384,6 +384,14 @@ def self_test():
             "pass_or_allow_signal_ids": 8,
             "pending_entry_signal_ids": 5,
             "no_decision_record": 8,
+            "no_decision_record_root_cause_counts": [
+                {
+                    "root_cause": "candidate_shadow_observed_no_decision_event",
+                    "description": "Candidate shadow observations exist with full candidate coverage, but no decision event was written.",
+                    "count": 8,
+                }
+            ],
+            "no_decision_candidate_shadow_observed_no_decision_event": 8,
             "decision_no_pass_or_allow": 4,
             "pass_or_allow_without_pending_entry": 3,
             "total_upstream_gap": 15,
@@ -431,6 +439,7 @@ def self_test():
     assert "Upstream Funnel Gap" in text
     assert "QUALITY_OR_TIMING_REJECT" in text
     assert "NO_DECISION_RECORD" in text
+    assert "candidate_shadow_observed_no_decision_event" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text

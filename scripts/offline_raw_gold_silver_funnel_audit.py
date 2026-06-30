@@ -482,6 +482,34 @@ def _reason_rows(counter, limit=20):
     ]
 
 
+NO_DECISION_ROOT_CAUSE_DESCRIPTIONS = {
+    "token_time_decision_without_exact_signal_id": (
+        "Decision-like events exist for the same token/time window, but not under the raw signal_id."
+    ),
+    "candidate_shadow_observed_no_decision_event": (
+        "Candidate shadow observations exist with full candidate coverage, but no decision event was written."
+    ),
+    "partial_candidate_observation_no_decision_event": (
+        "Candidate shadow observations exist but coverage is incomplete, and no decision event was written."
+    ),
+    "raw_event_missing_signal_id": "The raw dog row has no usable signal_id.",
+    "no_candidate_observation_or_decision_event": (
+        "No candidate observation and no decision-like event were found for the raw signal."
+    ),
+}
+
+
+def _root_cause_rows(counter, descriptions, limit=20):
+    return [
+        {
+            "root_cause": key,
+            "description": descriptions.get(key, "Unclassified no-decision root cause."),
+            "count": count,
+        }
+        for key, count in counter.most_common(limit)
+    ]
+
+
 def _choose_decision_no_pass_row(signal_rows):
     sorted_rows = sorted(signal_rows or [], key=lambda row: safe_float(row["event_ts"]) or 0)
     terminal_rows = [
@@ -518,6 +546,119 @@ def _choose_pass_without_pending_row(signal_rows):
         terminal_rows[0] if terminal_rows else (after_pass[-1] if after_pass else None),
         first_pass_ts,
     )
+
+
+def _raw_signal_decision_window(raw_row):
+    if not raw_row:
+        return None, None
+    signal_ts = raw_row.get("signal_ts_norm")
+    if signal_ts is None:
+        signal_ts = normalize_ts(raw_row.get("signal_ts"))
+    if signal_ts is None:
+        return None, None
+    peak_sec = safe_float(raw_row.get("time_to_sustained_peak_sec"))
+    end_offset = max(60.0, min(900.0, peak_sec or 900.0))
+    return signal_ts - 60, signal_ts + end_offset
+
+
+def _decision_summary(row):
+    if not row:
+        return None
+    get = row.get if isinstance(row, dict) else lambda key, default=None: row[key] if key in row.keys() else default
+    return {
+        "source_kind": get("source_kind"),
+        "event_ts": get("event_ts"),
+        "signal_id": signal_id_key(get("signal_id")),
+        "token_ca": get("token_ca"),
+        "source_component": get("source_component") or get("component"),
+        "event_type": get("event_type"),
+        "decision": get("decision") or get("action"),
+        "reason": get("reason") or get("block_cause"),
+        "quote_clean": get("quote_clean"),
+        "quote_executable": get("quote_executable"),
+        "route_available": get("route_available"),
+    }
+
+
+def _attribute_no_decision_records(
+    missing_signal_ids,
+    raw_by_signal=None,
+    observations_by_signal=None,
+    decisions_by_token=None,
+    expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
+):
+    raw_by_signal = raw_by_signal or {}
+    observations_by_signal = observations_by_signal or {}
+    decisions_by_token = decisions_by_token or {}
+    root_counts = Counter()
+    examples = []
+    token_time_joined = 0
+    candidate_shadow_observed = 0
+    partial_candidate_observed = 0
+    no_observation_or_decision = 0
+    missing_signal_id = 0
+
+    for signal_id in sorted(missing_signal_ids or []):
+        raw_row = raw_by_signal.get(signal_id) or {}
+        token = str(raw_row.get("token_ca") or "")
+        observations = observations_by_signal.get(signal_id, [])
+        unique_candidates = {row.get("candidate_id") for row in observations if row.get("candidate_id")}
+        matched_count = sum(1 for row in observations if truthy(row.get("matched")))
+        start, end = _raw_signal_decision_window(raw_row)
+        token_time_decisions = []
+        if token and start is not None and end is not None:
+            for decision in decisions_by_token.get(token, []):
+                ts = decision.get("event_ts_norm") if isinstance(decision, dict) else None
+                if ts is None:
+                    ts = normalize_ts(decision.get("event_ts") if isinstance(decision, dict) else None)
+                if ts is None or ts < start or ts > end:
+                    continue
+                token_time_decisions.append(decision)
+        token_time_decisions.sort(key=lambda row: row.get("event_ts_norm") or normalize_ts(row.get("event_ts")) or 0)
+        if token_time_decisions:
+            root = "token_time_decision_without_exact_signal_id"
+            token_time_joined += 1
+        elif not signal_id:
+            root = "raw_event_missing_signal_id"
+            missing_signal_id += 1
+        elif len(unique_candidates) >= int(expected_candidates or 0):
+            root = "candidate_shadow_observed_no_decision_event"
+            candidate_shadow_observed += 1
+        elif unique_candidates:
+            root = "partial_candidate_observation_no_decision_event"
+            partial_candidate_observed += 1
+        else:
+            root = "no_candidate_observation_or_decision_event"
+            no_observation_or_decision += 1
+        root_counts[root] += 1
+        if len(examples) < 20:
+            examples.append(
+                {
+                    "signal_id": signal_id,
+                    "token_ca": token or raw_row.get("token_ca"),
+                    "root_cause": root,
+                    "description": NO_DECISION_ROOT_CAUSE_DESCRIPTIONS.get(root),
+                    "candidate_observation_count": len(observations),
+                    "unique_candidate_count": len(unique_candidates),
+                    "matched_candidate_count": matched_count,
+                    "token_time_decision_count": len(token_time_decisions),
+                    "token_time_decision_sample": [
+                        _decision_summary(row) for row in token_time_decisions[:3]
+                    ],
+                }
+            )
+
+    return {
+        "no_decision_record_root_cause_counts": _root_cause_rows(
+            root_counts, NO_DECISION_ROOT_CAUSE_DESCRIPTIONS
+        ),
+        "no_decision_record_examples": examples,
+        "no_decision_token_time_decision_without_exact_signal_id": token_time_joined,
+        "no_decision_candidate_shadow_observed_no_decision_event": candidate_shadow_observed,
+        "no_decision_partial_candidate_observation_no_decision_event": partial_candidate_observed,
+        "no_decision_no_candidate_observation_or_decision_event": no_observation_or_decision,
+        "no_decision_raw_event_missing_signal_id": missing_signal_id,
+    }
 
 
 def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
@@ -571,12 +712,29 @@ def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
     return result
 
 
-def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts):
+def load_raw_signal_decision_bridge(
+    paper_db,
+    raw_signal_ids,
+    since_ts,
+    until_ts,
+    *,
+    raw_rows=None,
+    observations=None,
+    token_time_decisions=None,
+    expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
+):
     result = {
         "raw_signal_ids": len(raw_signal_ids or []),
         "decision_records_by_signal_id": 0,
         "raw_signals_with_decision_record": 0,
         "raw_signals_without_decision_record": len(raw_signal_ids or []),
+        "no_decision_record_root_cause_counts": [],
+        "no_decision_record_examples": [],
+        "no_decision_token_time_decision_without_exact_signal_id": 0,
+        "no_decision_candidate_shadow_observed_no_decision_event": 0,
+        "no_decision_partial_candidate_observation_no_decision_event": 0,
+        "no_decision_no_candidate_observation_or_decision_event": 0,
+        "no_decision_raw_event_missing_signal_id": 0,
         "raw_signals_with_pass_or_allow": 0,
         "raw_signals_with_pending_entry": 0,
         "raw_signals_with_final_entry_contract": 0,
@@ -600,6 +758,19 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
         return result
 
     raw_id_set = set(raw_signal_ids or [])
+    raw_by_signal = {
+        row.get("signal_id_key"): row
+        for row in (raw_rows or [])
+        if row.get("signal_id_key")
+    }
+    observations_by_signal = defaultdict(list)
+    for row in observations or []:
+        if row.get("signal_id_key"):
+            observations_by_signal[row["signal_id_key"]].append(row)
+    decisions_by_token = defaultdict(list)
+    for row in token_time_decisions or []:
+        if row.get("token_ca"):
+            decisions_by_token[str(row["token_ca"])].append(row)
     window_rows = paper_db.execute(
         """
         SELECT event_ts, signal_id, component, event_type, decision, reason, payload_json
@@ -699,6 +870,15 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
                 }
             )
 
+    missing_decision_ids = raw_id_set - with_decision
+    no_decision_attribution = _attribute_no_decision_records(
+        missing_decision_ids,
+        raw_by_signal=raw_by_signal,
+        observations_by_signal=observations_by_signal,
+        decisions_by_token=decisions_by_token,
+        expected_candidates=expected_candidates,
+    )
+
     pending_without_final = (pending - final_contract) & raw_id_set
     pending_without_final_reasons = Counter()
     pending_without_final_examples = []
@@ -751,7 +931,8 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
         {
             "decision_records_by_signal_id": len(rows),
             "raw_signals_with_decision_record": len(with_decision & raw_id_set),
-            "raw_signals_without_decision_record": len(raw_id_set - with_decision),
+            "raw_signals_without_decision_record": len(missing_decision_ids),
+            **no_decision_attribution,
             "raw_signals_with_pass_or_allow": len(pass_allow & raw_id_set),
             "raw_signals_with_pending_entry": len(pending & raw_id_set),
             "raw_signals_with_final_entry_contract": len(final_contract & raw_id_set),
@@ -784,7 +965,18 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
     return result
 
 
-def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts, raw_signal_ids=None):
+def load_entry_bridge_summary(
+    paper_db,
+    db_path,
+    since_ts,
+    until_ts,
+    raw_signal_ids=None,
+    *,
+    raw_rows=None,
+    observations=None,
+    token_time_decisions=None,
+    expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
+):
     """Lightweight operational entry bridge audit.
 
     This intentionally queries indexed fixed components over the report window
@@ -795,7 +987,14 @@ def load_entry_bridge_summary(paper_db, db_path, since_ts, until_ts, raw_signal_
     summary = {
         "paper_decision_events_available": table_exists(paper_db, "paper_decision_events"),
         "raw_signal_decision_bridge": load_raw_signal_decision_bridge(
-            paper_db, raw_signal_ids or [], since_ts, until_ts
+            paper_db,
+            raw_signal_ids or [],
+            since_ts,
+            until_ts,
+            raw_rows=raw_rows or [],
+            observations=observations or [],
+            token_time_decisions=token_time_decisions or [],
+            expected_candidates=expected_candidates,
         ),
         "components": {},
         "terminal_event_type_counts_in_decision_events": {},
@@ -1262,7 +1461,17 @@ def build_report(args):
         until_ts = max([row.get("signal_ts_norm") or since_ts for row in raw_rows] + [now_ts])
         decisions = [] if args.skip_decisions else load_paper_decisions(paper_db, tokens, since_ts, until_ts)
         trades = [] if args.skip_trades else load_paper_trades(paper_db, tokens, since_ts, until_ts)
-        entry_bridge = load_entry_bridge_summary(paper_db, args.db, since_ts, now_ts, signal_ids)
+        entry_bridge = load_entry_bridge_summary(
+            paper_db,
+            args.db,
+            since_ts,
+            now_ts,
+            signal_ids,
+            raw_rows=raw_rows,
+            observations=observations,
+            token_time_decisions=decisions,
+            expected_candidates=args.expected_candidates,
+        )
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
         summary = summarize(audits, raw_rows, observations, decisions, trades, args.expected_candidates, entry_bridge)
         blockers = []
@@ -1357,6 +1566,11 @@ def compact_stdout_summary(report, out_path=None):
                 "raw_signals_with_final_entry_mode_disabled",
                 "raw_signals_with_final_entry_mode_disabled_only",
                 "raw_signals_with_final_entry_mode_disabled_plus_other",
+                "no_decision_record_root_cause_counts",
+                "no_decision_token_time_decision_without_exact_signal_id",
+                "no_decision_candidate_shadow_observed_no_decision_event",
+                "no_decision_partial_candidate_observation_no_decision_event",
+                "no_decision_no_candidate_observation_or_decision_event",
                 "raw_signals_with_decision_no_pass_or_allow",
                 "raw_signals_pass_or_allow_without_pending_entry",
                 "raw_scoped_final_entry_hard_blockers",
