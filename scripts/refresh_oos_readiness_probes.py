@@ -9,6 +9,7 @@ A_CLASS mode, final_entry_contract, executor settings, wallet, or risk.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -18,6 +19,8 @@ from pathlib import Path
 
 SCHEMA_VERSION = "refresh_oos_readiness_probes.v1"
 DEFAULT_PROBE_HOURS = "0.25,0.5,1"
+DEFAULT_POST_FREEZE_MIN_HOURS = 0.05
+DEFAULT_POST_FREEZE_SAFETY_SEC = 120
 
 
 def label_for_hours(value: str) -> str:
@@ -38,6 +41,26 @@ def load_json(path: Path) -> dict:
         return {}
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def parse_time(value) -> int | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except Exception:
+        pass
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return int(dt.datetime.fromisoformat(text).timestamp())
+    except Exception:
+        return None
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -117,7 +140,37 @@ def compact_validation(path: Path) -> dict:
 
 def build_report(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir)
+    registry = load_json(Path(args.registry))
     probes = [part.strip() for part in str(args.probe_hours).split(",") if part.strip()]
+    registry_updated_ts = parse_time(registry.get("updated_at"))
+    now_ts = int(time.time())
+    post_freeze_probe = {
+        "enabled": bool(args.post_freeze_probe),
+        "registry_updated_at": registry.get("updated_at"),
+        "registry_updated_ts": registry_updated_ts,
+        "now_ts": now_ts,
+        "safety_sec": args.post_freeze_safety_sec,
+        "min_hours": args.post_freeze_min_hours,
+        "added": False,
+        "hours": None,
+        "reason": None,
+    }
+    if args.post_freeze_probe:
+        if registry_updated_ts is None:
+            post_freeze_probe["reason"] = "registry_updated_at_missing_or_unparseable"
+        else:
+            usable_sec = now_ts - int(registry_updated_ts) - int(args.post_freeze_safety_sec)
+            usable_hours = max(0.0, float(usable_sec) / 3600.0)
+            if usable_hours < float(args.post_freeze_min_hours):
+                post_freeze_probe["reason"] = "post_freeze_window_too_young"
+                post_freeze_probe["hours"] = round(usable_hours, 4)
+            else:
+                hours_text = f"{usable_hours:.4f}".rstrip("0").rstrip(".")
+                if hours_text not in probes:
+                    probes.append(hours_text)
+                    post_freeze_probe["added"] = True
+                post_freeze_probe["hours"] = float(hours_text)
+                post_freeze_probe["reason"] = "post_freeze_safe_probe_added"
     commands = []
     results = []
     for hours in probes:
@@ -170,6 +223,7 @@ def build_report(args: argparse.Namespace) -> dict:
             "run_dir": str(run_dir),
             "probe_hours": probes,
         },
+        "post_freeze_probe": post_freeze_probe,
         "commands": commands,
         "probes": results,
         "failed_command_count": len(failed),
@@ -199,7 +253,7 @@ def self_test() -> None:
         run_dir.mkdir(parents=True)
         write_json(registry, {
             "schema_version": "hypothesis_registry.v2",
-            "updated_at": "2026-06-30T00:00:00Z",
+            "updated_at": int(time.time()) - 7200,
             "promotion_allowed": False,
             "shadow_only_matured_volume_watch": [],
         })
@@ -216,12 +270,16 @@ def self_test() -> None:
             expected_candidates=84,
             max_scan_rows=1000,
             timeout_sec=30,
+            post_freeze_probe=True,
+            post_freeze_min_hours=0.05,
+            post_freeze_safety_sec=120,
             out=str(root / "summary.json"),
         )
         report = build_report(args)
         assert report["promotion_allowed"] is False
         assert report["strategy_change_allowed"] is False
-        assert len(report["probes"]) == 1
+        assert len(report["probes"]) == 2
+        assert report["post_freeze_probe"]["added"] is True
         assert (run_dir / "matured_volume_capture_cross_audit_oos_probe_0p25h.json").exists()
         assert (run_dir / "hypothesis_validation_audit_oos_probe_0p25h.json").exists()
         assert Path(args.out).exists()
@@ -239,6 +297,10 @@ def main() -> int:
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
     parser.add_argument("--timeout-sec", type=int, default=180)
+    parser.add_argument("--post-freeze-probe", dest="post_freeze_probe", action="store_true", default=True)
+    parser.add_argument("--no-post-freeze-probe", dest="post_freeze_probe", action="store_false")
+    parser.add_argument("--post-freeze-min-hours", type=float, default=DEFAULT_POST_FREEZE_MIN_HOURS)
+    parser.add_argument("--post-freeze-safety-sec", type=int, default=DEFAULT_POST_FREEZE_SAFETY_SEC)
     parser.add_argument("--out", default="/app/data/agent_runs/latest/oos_readiness_probe_refresh.json")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
