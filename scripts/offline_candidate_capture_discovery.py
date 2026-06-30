@@ -28,6 +28,7 @@ QUOTE_CLEAN_KEYS = ("source_quote_clean", "source_quote_clean_seen")
 QUOTE_EXECUTABLE_KEYS = ("source_quote_executable", "source_quote_executable_proxy")
 QUOTE_UNKNOWN_VALUES = {"unknown", "unk", "null", "none", "unavailable"}
 QUOTE_NOT_APPLICABLE_VALUES = {"not_applicable", "not-applicable", "n/a", "na", "not applicable"}
+QUOTE_CONTEXT_PRESENT_STATUSES = {"true", "false", "not_applicable"}
 MATURE_CONTEXT_MIN_AGE_SEC = 6 * 3600
 MATURE_CONTEXT_MIN_ROWS = 50
 
@@ -1122,12 +1123,99 @@ def build_quote_context_coverage_audit(observations):
     return top
 
 
+def build_signal_price_quote_context_audit(carrier_rows):
+    signal_price_seen_rows = 0
+    with_quote_context_rows = 0
+    without_quote_context_rows = 0
+    by_status_pair = defaultdict(int)
+    by_schema = defaultdict(int)
+    by_source_component = defaultdict(int)
+    by_signal_type = defaultdict(int)
+    by_writer_path = defaultdict(int)
+    samples = []
+    for row in carrier_rows:
+        payload = row["payload"]
+        if not safe_bool(payload.get("signal_price_seen") or payload.get("signal_price_positive")):
+            continue
+        signal_price_seen_rows += 1
+        clean_status = quote_context_status(payload, QUOTE_CLEAN_KEYS)
+        executable_status = quote_context_status(payload, QUOTE_EXECUTABLE_KEYS)
+        has_quote_context = (
+            clean_status in QUOTE_CONTEXT_PRESENT_STATUSES
+            or executable_status in QUOTE_CONTEXT_PRESENT_STATUSES
+        )
+        if has_quote_context:
+            with_quote_context_rows += 1
+            continue
+        without_quote_context_rows += 1
+        status_pair = f"clean={clean_status}|executable={executable_status}"
+        by_status_pair[status_pair] += 1
+        by_schema[str(payload.get("context_schema_version") or "legacy_or_missing")] += 1
+        by_source_component[str(payload.get("source_component") or "UNKNOWN")] += 1
+        by_signal_type[str(payload.get("signal_type") or "UNKNOWN")] += 1
+        by_writer_path[writer_path(payload)] += 1
+        if len(samples) < 25:
+            samples.append(
+                {
+                    "signal_id": row.get("signal_id"),
+                    "token_ca": row.get("token_ca"),
+                    "candidate_id": row.get("candidate_id"),
+                    "clean_status": clean_status,
+                    "executable_status": executable_status,
+                    "context_schema_version": payload.get("context_schema_version"),
+                    "quote_clean_definition": payload.get("quote_clean_definition"),
+                    "source_component": payload.get("source_component"),
+                    "signal_type": payload.get("signal_type"),
+                    "writer_path": writer_path(payload),
+                    "payload_key_presence": {
+                        key: key in payload
+                        for key in (
+                            "signal_price_seen",
+                            "signal_price_positive",
+                            "source_quote_clean",
+                            "source_quote_clean_seen",
+                            "source_quote_executable",
+                            "source_quote_executable_proxy",
+                            "quote_context_applicable",
+                            "source_quote_context_applicable",
+                        )
+                    },
+                }
+            )
+    return {
+        "schema_version": "signal_price_quote_context_audit.v1",
+        "coverage_denominator_type": "signal_context_carrier_rows",
+        "coverage_denominator_rows": len(carrier_rows),
+        "signal_price_seen_rows": signal_price_seen_rows,
+        "signal_price_with_quote_context_rows": with_quote_context_rows,
+        "signal_price_without_quote_context_rows": without_quote_context_rows,
+        "signal_price_with_quote_context_rate": rate(with_quote_context_rows, signal_price_seen_rows),
+        "signal_price_without_quote_context_rate": rate(without_quote_context_rows, signal_price_seen_rows),
+        "missing_by_quote_status_pair": dict(sorted(by_status_pair.items())),
+        "missing_by_context_schema_version": dict(sorted(by_schema.items())),
+        "missing_by_source_component": dict(sorted(by_source_component.items())),
+        "missing_by_signal_type": dict(sorted(by_signal_type.items())),
+        "missing_by_writer_path": dict(sorted(by_writer_path.items())),
+        "samples": samples,
+        "definitions": {
+            "false_is_quote_context_present": True,
+            "not_applicable_is_quote_context_present": True,
+            "blocker_counts_only_missing_or_unknown_context": True,
+        },
+        "notes": [
+            "signal_price_seen must not imply quote_clean or quote_executable.",
+            "This audit only checks whether quote context was explicitly written when signal price was present.",
+        ],
+    }
+
+
 def build_context_health(observations):
     carrier_rows = select_context_carrier_rows(observations)
     rows = [row["payload"] for row in carrier_rows]
     signal_count = len(rows)
     quote_context_coverage = build_quote_context_coverage_audit(observations)
     quote_missing_root_cause = build_quote_missing_root_cause_audit(observations)
+    signal_price_quote_context_audit = build_signal_price_quote_context_audit(carrier_rows)
     context_field_coverage = {
         "lifecycle_profile": build_context_field_coverage_audit(
             observations, "lifecycle_profile", ("lifecycle_state",)
@@ -1173,13 +1261,7 @@ def build_context_health(observations):
         for payload in rows
         if safe_bool(payload.get("source_quote_executable") or payload.get("source_quote_executable_proxy"))
     )
-    signal_price_only = sum(
-        1
-        for payload in rows
-        if safe_bool(payload.get("signal_price_seen") or payload.get("signal_price_positive"))
-        and not safe_bool(payload.get("source_quote_clean") or payload.get("source_quote_clean_seen"))
-        and not safe_bool(payload.get("source_quote_executable") or payload.get("source_quote_executable_proxy"))
-    )
+    signal_price_only = signal_price_quote_context_audit.get("signal_price_without_quote_context_rows") or 0
     schema_versions = defaultdict(int)
     quote_clean_definitions = defaultdict(int)
     for payload in rows:
@@ -1217,6 +1299,7 @@ def build_context_health(observations):
         },
         "quote_context_coverage": quote_context_coverage,
         "quote_missing_root_cause": quote_missing_root_cause,
+        "signal_price_quote_context_audit": signal_price_quote_context_audit,
         "context_field_coverage": context_field_coverage,
         "context_schema_versions": dict(sorted(schema_versions.items())),
         "context_schema_version_counts": dict(sorted(schema_versions.items())),
@@ -1909,6 +1992,42 @@ def self_test():
         assert raw_db_out["signal_identity_reconciliation"]["unknown_unjoined"] == 0
         assert raw_db_out["signal_identity_reconciliation"]["raw_all_unjoined_fully_attributed"] is True
         assert "raw_all_dog_candidate_observation_join_incomplete" not in raw_db_out["report_health"]["promotion_blockers"]
+        explicit_false_quote_context = build_signal_price_quote_context_audit(
+            [
+                {
+                    "signal_id": "false-quote",
+                    "token_ca": "FQ",
+                    "candidate_id": "current_all",
+                    "payload": {
+                        "signal_price_seen": True,
+                        "source_quote_clean": False,
+                        "source_quote_executable": False,
+                        "context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,
+                        "quote_clean_definition": EXPECTED_QUOTE_CLEAN_DEFINITION,
+                    },
+                }
+            ]
+        )
+        assert explicit_false_quote_context["signal_price_seen_rows"] == 1
+        assert explicit_false_quote_context["signal_price_with_quote_context_rows"] == 1
+        assert explicit_false_quote_context["signal_price_without_quote_context_rows"] == 0
+        missing_quote_context = build_context_health(
+            [
+                {
+                    "signal_id": "missing-quote",
+                    "token_ca": "MQ",
+                    "candidate_id": "current_all",
+                    "observed_at": now,
+                    "payload": {
+                        "signal_price_seen": True,
+                        "context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,
+                        "quote_clean_definition": EXPECTED_QUOTE_CLEAN_DEFINITION,
+                    },
+                }
+            ]
+        )
+        assert missing_quote_context["signal_price_quote_context_audit"]["signal_price_without_quote_context_rows"] == 1
+        assert "signal_price_seen_without_quote_context_present" in missing_quote_context["gaps"]
     print("SELF_TEST_PASS offline_candidate_capture_discovery")
 
 
