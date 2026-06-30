@@ -448,6 +448,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_deploy_quote_smoke_test": context_monitor_quote_smoke,
             "clean_window_monitor": context_monitor_clean_window,
             "volume_kline_coverage_audit": context_blocker_monitor.get("task_c_volume_kline_coverage_audit") or {},
+            "context_field_coverage_audit": context_blocker_monitor.get("task_d_context_field_coverage_audit") or {},
         },
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},

@@ -132,6 +132,95 @@ def presence_stats(rows, key):
     }
 
 
+def field_presence_stats(rows, key, fallback_keys=()):
+    den = len(rows)
+    present = fallback_present = missing = unknown = 0
+    for _row, payload in rows:
+        value = payload.get(key)
+        if value not in (None, ""):
+            if isinstance(value, str) and value.strip().lower() in {"unknown", "unk"}:
+                unknown += 1
+            else:
+                present += 1
+            continue
+        fallback_hit = False
+        for fallback in fallback_keys:
+            fallback_value = payload.get(fallback)
+            if fallback_value not in (None, ""):
+                if isinstance(fallback_value, str) and fallback_value.strip().lower() in {"unknown", "unk"}:
+                    unknown += 1
+                else:
+                    fallback_present += 1
+                fallback_hit = True
+                break
+        if not fallback_hit:
+            missing += 1
+    effective_present = present + fallback_present
+    return {
+        "denominator_rows": den,
+        "field": key,
+        "fallback_fields": list(fallback_keys),
+        "present_rows": present,
+        "fallback_present_rows": fallback_present,
+        "effective_present_rows": effective_present,
+        "missing_rows": missing,
+        "unknown_rows": unknown,
+        "present_rate": rate(present, den),
+        "fallback_present_rate": rate(fallback_present, den),
+        "effective_present_rate": rate(effective_present, den),
+        "missing_rate": rate(missing, den),
+        "unknown_rate": rate(unknown, den),
+    }
+
+
+def field_missing_breakdown(rows, target_key, fallback_keys=()):
+    dims = {
+        "by_context_schema_version": "context_schema_version",
+        "by_source_component": "source_component",
+        "by_writer_path": "quote_context_writer_path",
+        "by_candidate_family": "candidate_family",
+        "by_signal_type": "signal_type",
+    }
+    result = {label: Counter() for label in dims}
+    result["by_payload_key_presence"] = Counter()
+    for _row, payload in rows:
+        if payload.get(target_key) not in (None, ""):
+            continue
+        if any(payload.get(fallback) not in (None, "") for fallback in fallback_keys):
+            continue
+        for label, key in dims.items():
+            result[label][payload_value(payload, key)] += 1
+        present = sorted(
+            key for key in (
+                "source_quote_clean",
+                "source_quote_executable",
+                "context_schema_version",
+                "quote_clean_definition",
+                "source_component",
+                "signal_type",
+                "lifecycle_profile",
+                "lifecycle_state",
+                "volume_profile",
+                "markov_bucket",
+            )
+            if payload.get(key) not in (None, "")
+        )
+        missing = sorted(
+            key for key in (
+                "source_component",
+                "lifecycle_profile",
+                "lifecycle_state",
+                "volume_profile",
+                "markov_bucket",
+            )
+            if payload.get(key) in (None, "")
+        )
+        result["by_payload_key_presence"][
+            "present=" + ",".join(present or ["none"]) + "|missing=" + ",".join(missing or ["none"])
+        ] += 1
+    return {key: dict(counter.most_common()) for key, counter in result.items()}
+
+
 def missing_breakdown(rows, target_key):
     dims = {
         "by_context_schema_version": "context_schema_version",
@@ -264,6 +353,17 @@ def build_report(args):
         raw_kline_rate = raw_kline.get("kline_coverage_rate")
         context_kline_rate = rate(len(context_kline_rows), len(rolling_rows))
         h1_blocked = (volume["present_rate"] or 0) < 0.8 or (raw_kline_rate is not None and raw_kline_rate < 0.8)
+        lifecycle_profile = field_presence_stats(rolling_rows, "lifecycle_profile", ("lifecycle_state",))
+        source_component = field_presence_stats(rolling_rows, "source_component")
+        markov_bucket = field_presence_stats(rolling_rows, "markov_bucket")
+        volume_profile_field = field_presence_stats(rolling_rows, "volume_profile")
+        context_field_blockers = []
+        if (lifecycle_profile["effective_present_rate"] or 0) < 0.8:
+            context_field_blockers.append("lifecycle_profile_coverage_below_80pct")
+        if (volume_profile_field["effective_present_rate"] or 0) < 0.8:
+            context_field_blockers.append("volume_profile_coverage_below_80pct")
+        if (markov_bucket["effective_present_rate"] or 0) < 0.8:
+            context_field_blockers.append("markov_bucket_coverage_below_80pct")
 
         report = {
             "schema_version": SCHEMA_VERSION,
@@ -343,11 +443,35 @@ def build_report(args):
                 "h1_status": "DATA_BLOCKED_VOLUME_KLINE" if h1_blocked else "H1_DATA_AVAILABLE_FOR_DISCOVERY_ONLY",
                 "h1_remains_blocked": h1_blocked,
             },
+            "task_d_context_field_coverage_audit": {
+                "classification": "DATA_BLOCKED_CONTEXT_FIELDS" if context_field_blockers else "CONTEXT_FIELDS_HEALTHY",
+                "rows_scanned": len(rolling_rows),
+                "blockers": context_field_blockers,
+                "lifecycle_profile": {
+                    **lifecycle_profile,
+                    "missing_breakdown": field_missing_breakdown(rolling_rows, "lifecycle_profile", ("lifecycle_state",)),
+                },
+                "source_component": {
+                    **source_component,
+                    "missing_breakdown": field_missing_breakdown(rolling_rows, "source_component"),
+                },
+                "markov_bucket": {
+                    **markov_bucket,
+                    "missing_breakdown": field_missing_breakdown(rolling_rows, "markov_bucket"),
+                },
+                "volume_profile": {
+                    **volume_profile_field,
+                    "missing_breakdown": field_missing_breakdown(rolling_rows, "volume_profile"),
+                },
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+            },
         }
         report["overall_verdict"] = {
             "quote_writer_fix": quote_classification,
             "rolling24_quote_status": clean_status,
             "h1_volume_kline_status": report["task_c_volume_kline_coverage_audit"]["classification"],
+            "context_field_status": report["task_d_context_field_coverage_audit"]["classification"],
             "promotion_allowed": False,
         }
         return report
@@ -369,6 +493,7 @@ def compact_summary(report):
     task_a = report["task_a_post_deploy_quote_smoke_test"]
     task_b = report["task_b_clean_window_monitor"]
     task_c = report["task_c_volume_kline_coverage_audit"]
+    task_d = report.get("task_d_context_field_coverage_audit") or {}
     return {
         "overall_verdict": report.get("overall_verdict"),
         "promotion_allowed": False,
@@ -396,6 +521,15 @@ def compact_summary(report):
             "volume_profile_not_applicable_rate": task_c.get("volume_profile_not_applicable_rate"),
             "kline_coverage_rate": task_c.get("kline_coverage_rate"),
             "h1_remains_blocked": task_c.get("h1_remains_blocked"),
+        },
+        "task_d": {
+            "classification": task_d.get("classification"),
+            "blockers": task_d.get("blockers"),
+            "rows_scanned": task_d.get("rows_scanned"),
+            "lifecycle_profile_effective_present_rate": (task_d.get("lifecycle_profile") or {}).get("effective_present_rate"),
+            "source_component_effective_present_rate": (task_d.get("source_component") or {}).get("effective_present_rate"),
+            "markov_bucket_effective_present_rate": (task_d.get("markov_bucket") or {}).get("effective_present_rate"),
+            "volume_profile_effective_present_rate": (task_d.get("volume_profile") or {}).get("effective_present_rate"),
         },
     }
 
@@ -460,6 +594,8 @@ def self_test():
         assert report["task_b_clean_window_monitor"]["classification"] == "QUOTE_CLEAN_WINDOW_PENDING"
         assert report["task_b_clean_window_monitor"]["pre_fix_rows_remaining"] == 1
         assert report["task_c_volume_kline_coverage_audit"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
+        assert report["task_d_context_field_coverage_audit"]["classification"] == "DATA_BLOCKED_CONTEXT_FIELDS"
+        assert "lifecycle_profile_coverage_below_80pct" in report["task_d_context_field_coverage_audit"]["blockers"]
         assert report["promotion_allowed"] is False
     print("SELF_TEST_PASS context_blocker_monitor")
 
