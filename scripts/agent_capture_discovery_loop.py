@@ -540,6 +540,28 @@ def first_blocker_priority(blockers):
     return blockers[0] if blockers else None
 
 
+def oos_probe_label(hours):
+    text = ("%s" % hours).rstrip("0").rstrip(".")
+    if not text:
+        text = "0"
+    return text.replace(".", "p") + "h"
+
+
+def parse_oos_probe_hours(value):
+    hours = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            parsed = float(item)
+        except ValueError:
+            continue
+        if parsed > 0:
+            hours.append(parsed)
+    return hours
+
+
 def run_reports(run_dir, args):
     primary_hours = int(args.hours)
     capture_path = run_dir / f"capture_discovery_{primary_hours}h.json"
@@ -731,6 +753,40 @@ def run_reports(run_dir, args):
     ))
     if hypothesis_validation_path.exists():
         readiness_paths["hypothesis_validation_audit"] = hypothesis_validation_path
+    for probe_hours in parse_oos_probe_hours(getattr(args, "oos_probe_hours", "")):
+        label = oos_probe_label(probe_hours)
+        oos_cross_path = run_dir / f"matured_volume_capture_cross_audit_oos_probe_{label}.json"
+        oos_validation_path = run_dir / f"hypothesis_validation_audit_oos_probe_{label}.json"
+        diagnostics.append(run_report(
+            f"matured_volume_capture_cross_oos_probe_{label}",
+            [
+                "scripts/matured_volume_capture_cross_audit.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
+                "--hours", str(probe_hours),
+                "--expected-candidates", str(args.expected_candidates),
+                "--max-scan-rows", str(args.max_scan_rows),
+                "--out", str(oos_cross_path),
+            ],
+            oos_cross_path,
+            timeout=args.report_timeout_sec,
+        ))
+        if oos_cross_path.exists():
+            readiness_paths[f"matured_volume_cross_oos_probe_{label}"] = oos_cross_path
+        diagnostics.append(run_report(
+            f"hypothesis_validation_oos_probe_{label}",
+            [
+                "scripts/hypothesis_validation_audit.py",
+                "--registry", args.registry,
+                "--matured-volume-cross", str(oos_cross_path),
+                "--out", str(oos_validation_path),
+            ],
+            oos_validation_path,
+            timeout=args.report_timeout_sec,
+        ))
+        if oos_validation_path.exists():
+            readiness_paths[f"hypothesis_validation_oos_probe_{label}"] = oos_validation_path
     diagnostics.append(run_report(
         "low_confidence_research_capture_audit",
         [
@@ -1369,6 +1425,7 @@ def self_test():
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
+            oos_probe_hours="0.1,1",
             quote_fix_deploy_ts=int(time.time()) - 3600,
         )
         result = run_once(args)
@@ -1461,6 +1518,10 @@ def self_test():
             "matured_kline_volume_recheck_audit_24h.json",
             "matured_volume_capture_cross_audit_24h.json",
             "hypothesis_validation_audit_24h.json",
+            "matured_volume_capture_cross_audit_oos_probe_0p1h.json",
+            "hypothesis_validation_audit_oos_probe_0p1h.json",
+            "matured_volume_capture_cross_audit_oos_probe_1h.json",
+            "hypothesis_validation_audit_oos_probe_1h.json",
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
         ]
@@ -1483,6 +1544,11 @@ def main():
     parser.add_argument("--report-timeout-sec", type=int, default=600)
     parser.add_argument("--test-timeout-sec", type=int, default=120)
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
+    parser.add_argument(
+        "--oos-probe-hours",
+        default="0.1,1",
+        help="Comma-separated non-overlapping probe windows for shadow-only OOS readiness checks.",
+    )
     parser.add_argument("--max-runs", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=300)
     parser.add_argument("--initial-delay-sec", type=int, default=0)
