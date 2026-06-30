@@ -391,11 +391,19 @@ def build_report(args):
                 context_field_warnings.append("lifecycle_profile_rolling_below_80_mature_context_ok")
             else:
                 context_field_blockers.append("lifecycle_profile_coverage_below_80pct")
+        if (source_component["effective_present_rate"] or 0) < 0.8:
+            if mature_enough_rows and (mature_source_component["effective_present_rate"] or 0) >= 0.8:
+                context_field_warnings.append("source_component_rolling_below_80_mature_context_ok")
+            else:
+                context_field_blockers.append("source_component_coverage_below_80pct")
         if (volume_profile_field["effective_present_rate"] or 0) < 0.8:
             context_field_blockers.append("volume_profile_coverage_below_80pct")
         if (markov_bucket["effective_present_rate"] or 0) < 0.8:
             context_field_blockers.append("markov_bucket_coverage_below_80pct")
-        post_context_field_healthy = (post_lifecycle_profile["effective_present_rate"] or 0) >= 0.99
+        post_context_field_healthy = (
+            (post_lifecycle_profile["effective_present_rate"] or 0) >= 0.99
+            and (post_source_component["effective_present_rate"] or 0) >= 0.99
+        )
         post_context_classification = "VERIFIED_POST_DEPLOY" if post_context_field_healthy else "NEEDS_CONTEXT_WRITER_FIX"
 
         report = {
@@ -465,6 +473,7 @@ def build_report(args):
                 "notes": [
                     "Read-only smoke test for context carrier fields written after the supplied deploy timestamp.",
                     "lifecycle_profile may be an explicit NO_LIFECYCLE_CONTEXT bucket when no runtime lifecycle state exists.",
+                    "source_component should be explicit when available, or an explicit no-source-context bucket when unavailable.",
                     "volume_profile remains allowed to be blocked separately by realtime kline maturity.",
                 ],
             },
@@ -628,8 +637,8 @@ def self_test():
         )
         rows = [
             (1, "A", now - 200, "current_all", "base", 1, "x", now - 200, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH"}),
-            (2, "B", now - 50, "current_all", "base", 1, "x", now - 50, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": False, "source_quote_executable": False, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "volume_profile": "building", "candle_pattern": "green"}),
-            (3, "C", now - 25, "current_all", "base", 1, "x", now - 25, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": True, "source_quote_executable": True, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "volume_profile": "unknown", "fbr_time_legal": True}),
+            (2, "B", now - 50, "current_all", "base", 1, "x", now - 50, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "ATH", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": False, "source_quote_executable": False, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "source_component": "NO_SOURCE_CONTEXT:NONE", "volume_profile": "building", "candle_pattern": "green"}),
+            (3, "C", now - 25, "current_all", "base", 1, "x", now - 25, {"context_schema_version": "v2", "candidate_family": "base", "signal_type": "NEW_TRENDING", "quote_context_writer_path": "candidate_shadow_observer:inferred", "source_quote_clean": True, "source_quote_executable": True, "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE", "source_component": "matrix_evaluator", "volume_profile": "unknown", "fbr_time_legal": True}),
         ]
         db.executemany(
             "INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?,?,?,?)",

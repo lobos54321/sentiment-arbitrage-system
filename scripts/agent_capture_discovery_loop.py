@@ -297,6 +297,10 @@ def build_context_coverage_report(capture):
             "coverage_denominator_type": "signal_context_carrier_rows",
             "coverage_pct": (field_coverage.get("source_component") or {}).get("coverage_pct"),
             "coverage_rate": pct_to_rate((field_coverage.get("source_component") or {}).get("coverage_pct")),
+            "blocker": "source_component_coverage_below_80pct"
+            if ((field_coverage.get("source_component") or {}).get("coverage_pct") is None
+                or (field_coverage.get("source_component") or {}).get("coverage_pct") < 80)
+            else None,
         },
         "markov_bucket_coverage": context_field_coverage.get("markov_bucket") or {
             "coverage_denominator_type": "signal_context_carrier_rows",
@@ -589,6 +593,11 @@ def build_markov_effectiveness_report(markov_reports, capture):
                 blocker for blocker in context_blockers
                 if "lifecycle_profile" in str(blocker)
             )
+        if "source_component" in dims:
+            blockers.extend(
+                blocker for blocker in context_blockers
+                if "source_component" in str(blocker)
+            )
         return sorted(set(blockers))
 
     def diagnose_profile(name, report):
@@ -674,7 +683,10 @@ def build_markov_effectiveness_report(markov_reports, capture):
             "profile": "candidate_source",
             "key_dimensions": ["candidate_id", "source_component"],
             "status": "observed" if "candidate_source" in observed_profiles else "recommended_to_run",
-            "blocked_by": [],
+            "blocked_by": [
+                blocker for blocker in context_blockers
+                if "source_component" in str(blocker)
+            ],
         },
         {
             "profile": "candidate_signal_type",
@@ -688,7 +700,7 @@ def build_markov_effectiveness_report(markov_reports, capture):
             "status": "observed" if "candidate_lifecycle_source" in observed_profiles else "recommended_to_run",
             "blocked_by": [
                 blocker for blocker in context_blockers
-                if "lifecycle_profile" in str(blocker)
+                if "lifecycle_profile" in str(blocker) or "source_component" in str(blocker)
             ],
         },
         {
@@ -757,6 +769,9 @@ def build_markov_effectiveness_report(markov_reports, capture):
 def build_capture_cross_validity_report(capture, context_report):
     quote_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_clean_present_rate") or 0)
     quote_exec_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_executable_present_rate") or 0)
+    source_component_rate = ((context_report.get("source_component_coverage") or {}).get("effective_present_rate"))
+    if source_component_rate is None:
+        source_component_rate = ((context_report.get("source_component_coverage") or {}).get("coverage_rate") or 0)
     volume_rate = ((context_report.get("volume_profile_coverage") or {}).get("coverage_rate") or 0)
     kline_rate = ((context_report.get("kline_coverage") or {}).get("coverage_rate") or 0)
     valid = []
@@ -766,6 +781,8 @@ def build_capture_cross_validity_report(capture, context_report):
         reasons = []
         if dim in {"source_quote_clean", "source_quote_executable", "source_quote_executable_proxy"} and (quote_rate < 0.8 or quote_exec_rate < 0.8):
             reasons.append("quote_context_coverage_below_80pct")
+        if dim == "source_component" and source_component_rate < 0.8:
+            reasons.append("source_component_coverage_below_80pct")
         if dim == "volume_profile" and volume_rate < 0.8:
             reasons.append("volume_profile_coverage_below_80pct")
         if dim in {"candle_pattern", "fbr_time_legal", "fbr_lookahead_warning"} and kline_rate < 0.8:
@@ -797,6 +814,7 @@ def build_capture_cross_validity_report(capture, context_report):
         "invalid_sample": invalid[:50],
         "criteria": {
             "quote_sensitive_requires_present_rate_gte": 0.8,
+            "source_component_requires_present_rate_gte": 0.8,
             "volume_sensitive_requires_present_rate_gte": 0.8,
             "kline_sensitive_requires_coverage_rate_gte": 0.8,
             "pnl_is_secondary": True,

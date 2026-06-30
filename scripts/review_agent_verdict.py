@@ -39,6 +39,7 @@ BLOCKER_PRIORITY = [
     "kline_coverage_below_80pct",
     "source_quote_clean_coverage_below_80pct",
     "source_quote_executable_coverage_below_80pct",
+    "source_component_coverage_below_80pct",
     "schema_mixed_quote_sensitive_slices_blocked",
     "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
     "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
@@ -604,6 +605,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             if blocker != "lifecycle_profile_coverage_below_80pct"
         ]
         reconciled_context_warnings.append("lifecycle_profile_coverage_reconciled_by_mature_context")
+    if (
+        "source_component_coverage_below_80pct" in blockers
+        and "source_component_rolling_below_80_mature_context_ok" in context_monitor_warnings
+    ):
+        blockers = [
+            blocker for blocker in blockers
+            if blocker != "source_component_coverage_below_80pct"
+        ]
+        reconciled_context_warnings.append("source_component_coverage_reconciled_by_mature_context")
 
     blockers = sorted(set(blockers))
     final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
@@ -673,6 +683,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             blocker for blocker in actionable_blockers
             if blocker != "lifecycle_profile_coverage_below_80pct"
         ]
+    source_component_clean_window_pending = (
+        "source_component_coverage_below_80pct" in blockers
+        and context_field_writer_fix_status == "VERIFIED_POST_DEPLOY"
+    )
+    if source_component_clean_window_pending:
+        actionable_blockers = [
+            blocker for blocker in actionable_blockers
+            if blocker != "source_component_coverage_below_80pct"
+        ]
     next_highest_priority_blocker = first_blocker_priority(actionable_blockers)
     candidate_integrity_ok = (
         candidate_expected == EXPECTED_CANDIDATE_COUNT
@@ -701,6 +720,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_blockers = {
         "source_quote_clean_coverage_below_80pct",
         "source_quote_executable_coverage_below_80pct",
+        "source_component_coverage_below_80pct",
         "volume_profile_coverage_below_80pct",
         "kline_coverage_below_80pct",
         "schema_mixed_quote_sensitive_slices_blocked",
@@ -1006,6 +1026,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "quote_clean_window_seconds_remaining": context_monitor_clean_window.get("seconds_until_natural_clean_window"),
         "context_field_writer_fix_status": context_field_writer_fix_status,
         "lifecycle_clean_window_pending": lifecycle_clean_window_pending,
+        "source_component_clean_window_pending": source_component_clean_window_pending,
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
         "volume_profile_blocker_state": volume_profile_state,

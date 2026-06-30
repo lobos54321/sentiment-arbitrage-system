@@ -502,6 +502,9 @@ def build_handoff(verdict):
             {
                 "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
                 "kline_coverage": verdict.get("kline_coverage") or {},
+                "source_component_coverage": verdict.get("source_component_coverage") or {},
+                "source_component_clean_window_pending": verdict.get("source_component_clean_window_pending"),
+                "context_field_writer_fix_status": verdict.get("context_field_writer_fix_status"),
                 "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
                 "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
                 "matured_volume_capture_cross_audit": verdict.get("matured_volume_capture_cross_audit") or {},

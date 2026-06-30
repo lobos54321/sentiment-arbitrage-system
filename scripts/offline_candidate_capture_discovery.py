@@ -897,9 +897,9 @@ def build_context_field_coverage_audit(observations, field, fallback_fields=()):
     mature_enough_rows = (mature.get("coverage_denominator_rows") or 0) >= MATURE_CONTEXT_MIN_ROWS
     maturity_adjusted_blocker = rolling_blocker
     warnings = []
-    if field == "lifecycle_profile" and rolling_blocker and mature_enough_rows and mature_rate >= 0.8:
+    if field in {"lifecycle_profile", "source_component"} and rolling_blocker and mature_enough_rows and mature_rate >= 0.8:
         maturity_adjusted_blocker = None
-        warnings.append("lifecycle_profile_rolling_below_80_mature_context_ok")
+        warnings.append(f"{field}_rolling_below_80_mature_context_ok")
 
     top.update(
         {
@@ -1278,7 +1278,7 @@ def build_context_health(observations):
         gaps.append("source_quote_clean_coverage_below_80pct")
     if quote_executable_present_rate is None or quote_executable_present_rate < 0.8:
         gaps.append("source_quote_executable_coverage_below_80pct")
-    for field in ("lifecycle_profile", "markov_bucket", "volume_profile"):
+    for field in ("lifecycle_profile", "source_component", "markov_bucket", "volume_profile"):
         field_audit = context_field_coverage.get(field) or {}
         blocker = field_audit.get("blocker")
         if blocker:
