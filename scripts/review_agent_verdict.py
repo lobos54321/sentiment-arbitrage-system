@@ -847,6 +847,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_blockers = {
         "source_quote_clean_coverage_below_80pct",
         "source_quote_executable_coverage_below_80pct",
+        "lifecycle_profile_coverage_below_80pct",
         "source_component_coverage_below_80pct",
         "volume_profile_coverage_below_80pct",
         "kline_coverage_below_80pct",
@@ -944,6 +945,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     top_actionable_blocker = next_highest_priority_blocker
     top_blocker = top_actionable_blocker or top_formal_blocker
+    if context_clean_window_pending and not actionable_blockers:
+        top_blocker = "context_clean_window_pending"
     if classification == "BLOCKED_DATA":
         next_action = "resolve_data_integrity_blocker"
     elif classification == "BLOCKED_CONTEXT_COVERAGE":
@@ -1981,6 +1984,8 @@ def self_test():
     assert "lifecycle_profile_coverage_below_80pct" not in lifecycle_pending["actionable_blockers"]
     assert lifecycle_pending["lifecycle_clean_window_pending"] is True
     assert lifecycle_pending["context_field_writer_fix_status"] == "VERIFIED_POST_DEPLOY"
+    assert lifecycle_pending["top_blocker"] == "context_clean_window_pending"
+    assert lifecycle_pending["top_formal_blocker"] == "lifecycle_profile_coverage_below_80pct"
     matured_volume_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "matured_volume_capture_cross_audit": {
             "overall": {
