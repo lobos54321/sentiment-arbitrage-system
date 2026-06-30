@@ -31,6 +31,8 @@ SCHEMA_VERSION = "agent_capture_discovery_loop.v1"
 DEFAULT_OUT_ROOT = "/app/data/agent_runs"
 DEFAULT_HANDOFF_DIR = "/app/data/agent_handoffs"
 DEFAULT_REGISTRY = "/app/data/hypothesis_registry.json"
+SHADOW_DECISION_MIRROR_EVENT_LIMIT = 200
+SHADOW_DECISION_MIRROR_EXAMPLE_LIMIT = 20
 REPORT_TEST_COMMANDS = (
     ("capture_self_test", ["scripts/offline_candidate_capture_discovery.py", "--self-test"]),
     ("pnl_cross_self_test", ["scripts/offline_candidate_cross_eval.py", "--self-test"]),
@@ -444,7 +446,7 @@ def count_for_root(rows, root_cause):
     return 0
 
 
-def build_shadow_decision_mirror_examples(signal_examples, *, limit=20):
+def build_shadow_decision_mirror_events(signal_examples, *, limit=SHADOW_DECISION_MIRROR_EVENT_LIMIT):
     examples = []
     for row in (signal_examples or [])[:limit]:
         matched_sample = list(row.get("matched_entry_hypothesis_sample") or [])
@@ -468,6 +470,7 @@ def build_shadow_decision_mirror_examples(signal_examples, *, limit=20):
                     "a_class_decision_events",
                     "pending_entries",
                     "paper_trades",
+                    "final_entry_contract",
                 ],
                 "creates_pending_entry": False,
                 "creates_paper_trade": False,
@@ -500,7 +503,21 @@ def build_shadow_decision_bridge_audit(raw_funnel):
     optimistic_decision_count = min(raw_signal_ids, current_decision_count + shadow_count)
     remaining_no_decision_after_shadow = max(0, no_decision_count - shadow_count)
     signal_examples = raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples") or []
-    mirror_examples = build_shadow_decision_mirror_examples(signal_examples)
+    source_signal_count = safe_int(
+        raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_count"),
+        shadow_count,
+    )
+    source_signal_count = shadow_count if source_signal_count is None else source_signal_count
+    source_examples_truncated = bool(
+        raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples_truncated")
+    )
+    mirror_events = build_shadow_decision_mirror_events(signal_examples)
+    mirror_examples = mirror_events[:SHADOW_DECISION_MIRROR_EXAMPLE_LIMIT]
+    mirror_truncated = bool(
+        source_examples_truncated
+        or len(mirror_events) < source_signal_count
+        or len(mirror_events) < shadow_count
+    )
     return {
         "schema_version": "shadow_decision_bridge_audit.v1",
         "report_type": "shadow_decision_bridge_audit_24h",
@@ -534,7 +551,17 @@ def build_shadow_decision_bridge_audit(raw_funnel):
                 raw_signal_ids,
             ),
             "remaining_no_decision_after_shadow_gap_logged": remaining_no_decision_after_shadow,
+            "source_signal_examples_count": len(signal_examples),
+            "source_signal_examples_total": source_signal_count,
+            "source_signal_examples_limit": raw_bridge.get(
+                "shadow_no_decision_entry_hypothesis_signal_example_limit"
+            ),
+            "source_signal_examples_truncated": source_examples_truncated,
+            "mirror_event_count": len(mirror_events),
             "mirror_event_example_count": len(mirror_examples),
+            "mirror_event_limit": SHADOW_DECISION_MIRROR_EVENT_LIMIT,
+            "mirror_event_coverage_vs_shadow_bridge_gap": safe_rate(len(mirror_events), shadow_count),
+            "mirror_event_truncated": mirror_truncated,
         },
         "read_only_evidence_mirror": {
             "schema_version": "shadow_decision_evidence_mirror.v1",
@@ -569,11 +596,16 @@ def build_shadow_decision_bridge_audit(raw_funnel):
                 "creates_paper_trade=false",
                 "changes_runtime_mode=false",
             ],
+            "event_count": len(mirror_events),
+            "event_limit": SHADOW_DECISION_MIRROR_EVENT_LIMIT,
+            "event_coverage_vs_shadow_bridge_gap": safe_rate(len(mirror_events), shadow_count),
+            "event_truncated": mirror_truncated,
             "runtime_effect": "none",
             "promotion_allowed": False,
             "paper_enablement_allowed": False,
             "automatic_runtime_change_allowed": False,
         },
+        "mirror_events": mirror_events,
         "mirror_event_examples": mirror_examples,
         "no_decision_record_root_cause_counts": no_decision_roots,
         "no_decision_record_subroot_cause_counts": no_decision_subroots,
@@ -2359,6 +2391,19 @@ def self_test():
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
+        shadow_bridge = load_json(latest_dir / "shadow_decision_bridge_audit_24h.json")
+        assert "mirror_events" in shadow_bridge
+        assert "mirror_event_examples" in shadow_bridge
+        assert "mirror_event_count" in shadow_bridge["denominator"]
+        assert "mirror_event_coverage_vs_shadow_bridge_gap" in shadow_bridge["denominator"]
+        assert shadow_bridge["read_only_evidence_mirror"]["promotion_allowed"] is False
+        assert shadow_bridge["read_only_evidence_mirror"]["automatic_runtime_change_allowed"] is False
+        for event in shadow_bridge.get("mirror_events") or []:
+            assert event["recommended_write_target"] == "shadow_decision_evidence_mirror_only"
+            assert event["creates_pending_entry"] is False
+            assert event["creates_paper_trade"] is False
+            assert event["changes_runtime_mode"] is False
+            assert "final_entry_contract" in event["forbidden_write_targets"]
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
 

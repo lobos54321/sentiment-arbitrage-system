@@ -22,6 +22,7 @@ from pathlib import Path
 SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v4"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
+SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT = 200
 
 
 def jloads(raw):
@@ -709,6 +710,7 @@ def _attribute_no_decision_records(
     shadow_no_decision_candidate_counts = Counter()
     shadow_no_decision_reason_counts = Counter()
     shadow_no_decision_signal_examples = []
+    shadow_no_decision_signal_count = 0
 
     for signal_id in sorted(missing_signal_ids or []):
         raw_row = raw_by_signal.get(signal_id) or {}
@@ -792,6 +794,7 @@ def _attribute_no_decision_records(
                 }
             )
         if subroot == "shadow_entry_hypotheses_matched_no_decision_bridge":
+            shadow_no_decision_signal_count += 1
             matched = [row for row in observations if truthy(row.get("matched"))]
             entry_matches = [row for row in matched if _shadow_entry_hypothesis_candidate(row)]
             for row in entry_matches:
@@ -801,7 +804,7 @@ def _attribute_no_decision_records(
                 shadow_no_decision_family_counts[family] += 1
                 shadow_no_decision_candidate_counts[(candidate_id, family)] += 1
                 shadow_no_decision_reason_counts[(candidate_id, family, reason)] += 1
-            if len(shadow_no_decision_signal_examples) < 20:
+            if len(shadow_no_decision_signal_examples) < SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT:
                 shadow_no_decision_signal_examples.append(
                     {
                         "signal_id": signal_id,
@@ -834,6 +837,11 @@ def _attribute_no_decision_records(
         ),
         "shadow_no_decision_entry_hypothesis_reason_counts": _shadow_hypothesis_reason_rows(
             shadow_no_decision_reason_counts
+        ),
+        "shadow_no_decision_entry_hypothesis_signal_count": shadow_no_decision_signal_count,
+        "shadow_no_decision_entry_hypothesis_signal_example_limit": SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT,
+        "shadow_no_decision_entry_hypothesis_signal_examples_truncated": (
+            shadow_no_decision_signal_count > len(shadow_no_decision_signal_examples)
         ),
         "shadow_no_decision_entry_hypothesis_signal_examples": shadow_no_decision_signal_examples,
         "no_decision_token_time_decision_without_exact_signal_id": token_time_joined,
