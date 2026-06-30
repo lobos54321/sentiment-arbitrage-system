@@ -2401,6 +2401,38 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         missing_unknown_count: verdict.quote_missing_root_cause.missing_unknown_count,
         dominant_root_cause: verdict.quote_missing_root_cause.dominant_root_cause,
       } : null,
+      quote_writer_fix_status: verdict.quote_writer_fix_status || null,
+      quote_clean_window_status: verdict.quote_clean_window_status || null,
+      quote_clean_window_eta_iso: verdict.quote_clean_window_eta_iso || null,
+      quote_clean_window_seconds_remaining: verdict.quote_clean_window_seconds_remaining ?? null,
+      context_field_writer_fix_status: verdict.context_field_writer_fix_status || null,
+      context_clean_window_pending: Boolean(verdict.context_clean_window_pending),
+      context_clean_window_eta_iso: verdict.context_clean_window_eta_iso || null,
+      context_clean_window_seconds_remaining: verdict.context_clean_window_seconds_remaining ?? null,
+      lifecycle_clean_window_pending: Boolean(verdict.lifecycle_clean_window_pending),
+      source_component_clean_window_pending: Boolean(verdict.source_component_clean_window_pending),
+      context_blocker_monitor_summary: verdict.context_blocker_monitor ? {
+        available: Boolean(verdict.context_blocker_monitor.available),
+        overall_verdict: verdict.context_blocker_monitor.overall_verdict || null,
+        clean_window_monitor: verdict.context_blocker_monitor.clean_window_monitor ? {
+          classification: verdict.context_blocker_monitor.clean_window_monitor.classification,
+          pre_fix_rows_remaining: verdict.context_blocker_monitor.clean_window_monitor.pre_fix_rows_remaining,
+          post_fix_rows: verdict.context_blocker_monitor.clean_window_monitor.post_fix_rows,
+          rolling24_rows: verdict.context_blocker_monitor.clean_window_monitor.rolling24_rows,
+          estimated_clean_at_iso: verdict.context_blocker_monitor.clean_window_monitor.estimated_clean_at_iso,
+          seconds_until_natural_clean_window:
+            verdict.context_blocker_monitor.clean_window_monitor.seconds_until_natural_clean_window,
+          quote_coverage_rolling24:
+            verdict.context_blocker_monitor.clean_window_monitor.quote_coverage_rolling24,
+          quote_coverage_post_fix_rows_only:
+            verdict.context_blocker_monitor.clean_window_monitor.quote_coverage_post_fix_rows_only,
+        } : null,
+        context_field_status:
+          verdict.context_blocker_monitor.context_field_coverage_audit?.classification || null,
+        context_field_blockers:
+          verdict.context_blocker_monitor.context_field_coverage_audit?.blockers || [],
+        reconciled_warnings: verdict.context_blocker_monitor.reconciled_warnings || [],
+      } : null,
       volume_profile_coverage: verdict.volume_profile_coverage || null,
       kline_coverage: verdict.kline_coverage || null,
       runtime_health_status: verdict.runtime_health_status || null,
