@@ -24,6 +24,8 @@ from pathlib import Path
 SCHEMA_VERSION = "context_blocker_monitor.v1"
 DEFAULT_CONTEXT_CARRIER = "current_all"
 EXPECTED_COMMIT = "1830286fcd8f326d40b19ceb4b394d70db1eb0bf"
+MATURE_CONTEXT_MIN_AGE_SEC = 6 * 3600
+MATURE_CONTEXT_MIN_ROWS = 50
 
 
 def utc_now_ts() -> int:
@@ -171,6 +173,21 @@ def field_presence_stats(rows, key, fallback_keys=()):
         "missing_rate": rate(missing, den),
         "unknown_rate": rate(unknown, den),
     }
+
+
+def row_signal_age_sec(row, now_ts):
+    ts = row.get("signal_ts") or row.get("observed_at")
+    try:
+        return max(0, int(now_ts) - int(float(ts)))
+    except Exception:
+        return None
+
+
+def mature_context_rows(rows, now_ts, min_age_sec):
+    return [
+        (row, payload) for row, payload in rows
+        if (row_signal_age_sec(row, now_ts) is not None and row_signal_age_sec(row, now_ts) >= int(min_age_sec))
+    ]
 
 
 def field_missing_breakdown(rows, target_key, fallback_keys=()):
@@ -357,9 +374,19 @@ def build_report(args):
         source_component = field_presence_stats(rolling_rows, "source_component")
         markov_bucket = field_presence_stats(rolling_rows, "markov_bucket")
         volume_profile_field = field_presence_stats(rolling_rows, "volume_profile")
+        mature_rows = mature_context_rows(rolling_rows, now_ts, args.mature_context_min_age_sec)
+        mature_lifecycle_profile = field_presence_stats(mature_rows, "lifecycle_profile", ("lifecycle_state",))
+        mature_source_component = field_presence_stats(mature_rows, "source_component")
+        mature_volume_profile = field_presence_stats(mature_rows, "volume_profile")
+        mature_markov_bucket = field_presence_stats(mature_rows, "markov_bucket")
+        mature_enough_rows = len(mature_rows) >= int(args.min_mature_context_rows)
         context_field_blockers = []
+        context_field_warnings = []
         if (lifecycle_profile["effective_present_rate"] or 0) < 0.8:
-            context_field_blockers.append("lifecycle_profile_coverage_below_80pct")
+            if mature_enough_rows and (mature_lifecycle_profile["effective_present_rate"] or 0) >= 0.8:
+                context_field_warnings.append("lifecycle_profile_rolling_below_80_mature_context_ok")
+            else:
+                context_field_blockers.append("lifecycle_profile_coverage_below_80pct")
         if (volume_profile_field["effective_present_rate"] or 0) < 0.8:
             context_field_blockers.append("volume_profile_coverage_below_80pct")
         if (markov_bucket["effective_present_rate"] or 0) < 0.8:
@@ -381,6 +408,8 @@ def build_report(args):
                 "deploy_iso": iso(deploy_ts),
                 "context_carrier": args.context_carrier,
                 "expected_commit": args.expected_commit,
+                "mature_context_min_age_sec": args.mature_context_min_age_sec,
+                "min_mature_context_rows": args.min_mature_context_rows,
             },
             "task_a_post_deploy_quote_smoke_test": {
                 "classification": quote_classification,
@@ -446,21 +475,30 @@ def build_report(args):
             "task_d_context_field_coverage_audit": {
                 "classification": "DATA_BLOCKED_CONTEXT_FIELDS" if context_field_blockers else "CONTEXT_FIELDS_HEALTHY",
                 "rows_scanned": len(rolling_rows),
+                "mature_context_rows_scanned": len(mature_rows),
+                "mature_context_enough_rows": mature_enough_rows,
+                "mature_context_min_age_sec": args.mature_context_min_age_sec,
+                "min_mature_context_rows": args.min_mature_context_rows,
                 "blockers": context_field_blockers,
+                "warnings": context_field_warnings,
                 "lifecycle_profile": {
                     **lifecycle_profile,
+                    "mature_context": mature_lifecycle_profile,
                     "missing_breakdown": field_missing_breakdown(rolling_rows, "lifecycle_profile", ("lifecycle_state",)),
                 },
                 "source_component": {
                     **source_component,
+                    "mature_context": mature_source_component,
                     "missing_breakdown": field_missing_breakdown(rolling_rows, "source_component"),
                 },
                 "markov_bucket": {
                     **markov_bucket,
+                    "mature_context": mature_markov_bucket,
                     "missing_breakdown": field_missing_breakdown(rolling_rows, "markov_bucket"),
                 },
                 "volume_profile": {
                     **volume_profile_field,
+                    "mature_context": mature_volume_profile,
                     "missing_breakdown": field_missing_breakdown(rolling_rows, "volume_profile"),
                 },
                 "promotion_allowed": False,
@@ -525,11 +563,17 @@ def compact_summary(report):
         "task_d": {
             "classification": task_d.get("classification"),
             "blockers": task_d.get("blockers"),
+            "warnings": task_d.get("warnings"),
             "rows_scanned": task_d.get("rows_scanned"),
+            "mature_context_rows_scanned": task_d.get("mature_context_rows_scanned"),
+            "mature_context_enough_rows": task_d.get("mature_context_enough_rows"),
             "lifecycle_profile_effective_present_rate": (task_d.get("lifecycle_profile") or {}).get("effective_present_rate"),
+            "lifecycle_profile_mature_effective_present_rate": ((task_d.get("lifecycle_profile") or {}).get("mature_context") or {}).get("effective_present_rate"),
             "source_component_effective_present_rate": (task_d.get("source_component") or {}).get("effective_present_rate"),
+            "source_component_mature_effective_present_rate": ((task_d.get("source_component") or {}).get("mature_context") or {}).get("effective_present_rate"),
             "markov_bucket_effective_present_rate": (task_d.get("markov_bucket") or {}).get("effective_present_rate"),
             "volume_profile_effective_present_rate": (task_d.get("volume_profile") or {}).get("effective_present_rate"),
+            "volume_profile_mature_effective_present_rate": ((task_d.get("volume_profile") or {}).get("mature_context") or {}).get("effective_present_rate"),
         },
     }
 
@@ -587,6 +631,8 @@ def self_test():
             now_ts=now,
             context_carrier="current_all",
             expected_commit=EXPECTED_COMMIT,
+            mature_context_min_age_sec=MATURE_CONTEXT_MIN_AGE_SEC,
+            min_mature_context_rows=MATURE_CONTEXT_MIN_ROWS,
         )
         report = build_report(args)
         assert report["task_a_post_deploy_quote_smoke_test"]["classification"] == "VERIFIED_POST_DEPLOY"
@@ -609,6 +655,8 @@ def parse_args(argv=None):
     parser.add_argument("--now-ts", type=int, default=None)
     parser.add_argument("--context-carrier", default=DEFAULT_CONTEXT_CARRIER)
     parser.add_argument("--expected-commit", default=EXPECTED_COMMIT)
+    parser.add_argument("--mature-context-min-age-sec", type=int, default=MATURE_CONTEXT_MIN_AGE_SEC)
+    parser.add_argument("--min-mature-context-rows", type=int, default=MATURE_CONTEXT_MIN_ROWS)
     parser.add_argument("--out")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)

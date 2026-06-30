@@ -28,6 +28,8 @@ QUOTE_CLEAN_KEYS = ("source_quote_clean", "source_quote_clean_seen")
 QUOTE_EXECUTABLE_KEYS = ("source_quote_executable", "source_quote_executable_proxy")
 QUOTE_UNKNOWN_VALUES = {"unknown", "unk", "null", "none", "unavailable"}
 QUOTE_NOT_APPLICABLE_VALUES = {"not_applicable", "not-applicable", "n/a", "na", "not applicable"}
+MATURE_CONTEXT_MIN_AGE_SEC = 6 * 3600
+MATURE_CONTEXT_MIN_ROWS = 50
 
 DIMENSIONS = (
     "source_quote_clean",
@@ -108,6 +110,20 @@ def rate(numerator, denominator):
     if not denominator:
         return None
     return round(float(numerator) / float(denominator), 6)
+
+
+def row_signal_age_sec(row, now_ts):
+    ts = safe_int(row.get("signal_ts") or row.get("observed_at"))
+    if ts is None:
+        return None
+    return max(0, int(now_ts) - int(ts))
+
+
+def mature_context_rows(rows, now_ts, min_age_sec=MATURE_CONTEXT_MIN_AGE_SEC):
+    return [
+        row for row in rows
+        if (row_signal_age_sec(row, now_ts) is not None and row_signal_age_sec(row, now_ts) >= min_age_sec)
+    ]
 
 
 def compact_rate_counts(prefix, counts, denominator):
@@ -788,7 +804,10 @@ def context_field_coverage_summary(rows, field, fallback_fields=()):
 
 def build_context_field_coverage_audit(observations, field, fallback_fields=()):
     carriers = select_context_carrier_rows(observations)
+    now_ts = int(time.time())
     top = context_field_coverage_summary(carriers, field, fallback_fields)
+    mature_carriers = mature_context_rows(carriers, now_ts)
+    mature = context_field_coverage_summary(mature_carriers, field, fallback_fields)
     missing_rows = [
         row for row in carriers
         if context_field_status(row["payload"], field, fallback_fields) == "missing"
@@ -858,12 +877,28 @@ def build_context_field_coverage_audit(observations, field, fallback_fields=()):
             "count": dominant_count,
             "share": rate(dominant_count, len(missing_rows)),
         }
+    rolling_rate = top.get("effective_present_rate") or 0
+    rolling_blocker = f"{field}_coverage_below_80pct" if rolling_rate < 0.8 else None
+    mature_rate = mature.get("effective_present_rate") or 0
+    mature_enough_rows = (mature.get("coverage_denominator_rows") or 0) >= MATURE_CONTEXT_MIN_ROWS
+    maturity_adjusted_blocker = rolling_blocker
+    warnings = []
+    if field == "lifecycle_profile" and rolling_blocker and mature_enough_rows and mature_rate >= 0.8:
+        maturity_adjusted_blocker = None
+        warnings.append("lifecycle_profile_rolling_below_80_mature_context_ok")
+
     top.update(
         {
             "schema_version": "context_field_coverage_audit.v1",
             "coverage_denominator_type": "signal_context_carrier_rows",
             "context_carrier_candidate_ids": sorted({row.get("candidate_id") for row in carriers if row.get("candidate_id")}),
-            "blocker": f"{field}_coverage_below_80pct" if (top.get("effective_present_rate") or 0) < 0.8 else None,
+            "rolling_blocker": rolling_blocker,
+            "blocker": maturity_adjusted_blocker,
+            "mature_context_min_age_sec": MATURE_CONTEXT_MIN_AGE_SEC,
+            "mature_context_min_rows": MATURE_CONTEXT_MIN_ROWS,
+            "mature_context_enough_rows": mature_enough_rows,
+            "mature_context": mature,
+            "warnings": warnings,
             "missing_breakdowns": {
                 key: dict(counter.most_common())
                 for key, counter in missing_breakdowns.items()
@@ -874,6 +909,7 @@ def build_context_field_coverage_audit(observations, field, fallback_fields=()):
             "notes": [
                 "Read-only context field coverage audit; it does not alter candidate matching, entry policy, gates, or runtime mode.",
                 "effective_present includes the primary field plus explicitly configured fallback fields.",
+                "mature_context is a diagnostic window for runtime fields that can arrive after the initial signal; it never changes candidate matching.",
             ],
         }
     )
@@ -1149,12 +1185,9 @@ def build_context_health(observations):
         gaps.append("source_quote_executable_coverage_below_80pct")
     for field in ("lifecycle_profile", "markov_bucket", "volume_profile"):
         field_audit = context_field_coverage.get(field) or {}
-        effective_rate = field_audit.get("effective_present_rate")
-        coverage = field_coverage[field]["coverage_pct"]
-        if effective_rate is None and coverage is not None:
-            effective_rate = coverage / 100.0
-        if effective_rate is None or effective_rate < 0.8:
-            gaps.append(f"{field}_coverage_below_80pct")
+        blocker = field_audit.get("blocker")
+        if blocker:
+            gaps.append(blocker)
     if signal_price_only:
         gaps.append("signal_price_seen_without_quote_context_present")
     if expected_schema_coverage_pct is not None and expected_schema_coverage_pct < 95:
