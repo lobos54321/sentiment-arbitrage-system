@@ -36,6 +36,7 @@ REPORT_TEST_COMMANDS = (
     ("pnl_cross_self_test", ["scripts/offline_candidate_cross_eval.py", "--self-test"]),
     ("virtual_markov_self_test", ["scripts/build_candidate_virtual_markov.py", "--self-test"]),
     ("volume_kline_audit_self_test", ["scripts/volume_kline_coverage_audit.py", "--self-test"]),
+    ("matured_kline_volume_recheck_self_test", ["scripts/matured_kline_volume_recheck_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
@@ -528,6 +529,7 @@ def run_reports(run_dir, args):
     a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
     context_blocker_monitor_path = run_dir / f"context_blocker_monitor_{primary_hours}h.json"
     volume_kline_audit_path = run_dir / f"volume_kline_coverage_audit_{primary_hours}h.json"
+    matured_kline_recheck_path = run_dir / f"matured_kline_volume_recheck_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
@@ -654,6 +656,20 @@ def run_reports(run_dir, args):
     ))
     if volume_kline_audit_path.exists():
         readiness_paths["volume_kline_coverage_audit"] = volume_kline_audit_path
+    diagnostics.append(run_report(
+        "matured_kline_volume_recheck_audit",
+        [
+            "scripts/matured_kline_volume_recheck_audit.py",
+            "--db", args.paper_db,
+            "--kline-db", args.kline_db,
+            "--hours", str(primary_hours),
+            "--out", str(matured_kline_recheck_path),
+        ],
+        matured_kline_recheck_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if matured_kline_recheck_path.exists():
+        readiness_paths["matured_kline_volume_recheck_audit"] = matured_kline_recheck_path
     diagnostics.append(run_report(
         "low_confidence_research_capture_audit",
         [
@@ -1129,6 +1145,7 @@ def create_self_test_dbs(root):
     now = int(time.time())
     paper = root / "paper.db"
     raw = root / "raw.db"
+    kline = root / "kline.db"
     db = sqlite3.connect(paper)
     db.executescript(
         """
@@ -1186,16 +1203,37 @@ def create_self_test_dbs(root):
     )
     raw_db.commit()
     raw_db.close()
-    return paper, raw
+    kline_db = sqlite3.connect(kline)
+    kline_db.executescript(
+        """
+        CREATE TABLE kline_1m(
+          token_ca TEXT, pool_address TEXT DEFAULT '', timestamp INTEGER,
+          open REAL, high REAL, low REAL, close REAL, volume REAL,
+          PRIMARY KEY(token_ca, timestamp)
+        );
+        """
+    )
+    kline_db.executemany(
+        "INSERT INTO kline_1m(token_ca,timestamp,open,high,low,close,volume) VALUES (?,?,?,?,?,?,?)",
+        [
+            ("DOG", now - 120, 1, 1.1, 0.9, 1.0, 10),
+            ("DOG", now - 60, 1, 1.2, 0.9, 1.1, 20),
+            ("DOG", now, 1.1, 1.4, 1.0, 1.3, 40),
+        ],
+    )
+    kline_db.commit()
+    kline_db.close()
+    return paper, raw, kline
 
 
 def self_test():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        paper, raw = create_self_test_dbs(root)
+        paper, raw, kline = create_self_test_dbs(root)
         args = argparse.Namespace(
             paper_db=str(paper),
             raw_db=str(raw),
+            kline_db=str(kline),
             hours=24,
             expected_candidates=2,
             out_root=str(root / "agent_runs"),
@@ -1228,6 +1266,7 @@ def self_test():
             "volume_profile_coverage",
             "kline_coverage",
             "volume_kline_root_cause_audit",
+            "matured_kline_volume_recheck_audit",
             "low_confidence_research_capture_audit",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
@@ -1254,6 +1293,7 @@ def self_test():
             "context_coverage_audit_24h.json",
             "context_blocker_monitor_24h.json",
             "volume_kline_coverage_audit_24h.json",
+            "matured_kline_volume_recheck_audit_24h.json",
             "low_confidence_research_capture_audit_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
@@ -1265,6 +1305,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
     parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
+    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)

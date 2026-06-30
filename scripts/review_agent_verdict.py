@@ -336,6 +336,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     }
     final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
+    matured_kline_recheck = readiness_reports.get("matured_kline_volume_recheck_audit") or {}
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
@@ -434,6 +435,29 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "low_confidence_research_audit",
                     "primary_denominator_drop_reason_counts",
                     "blocker",
+                )
+            },
+        },
+        "matured_kline_volume_recheck_audit": {
+            "available": bool(matured_kline_recheck),
+            "overall": matured_kline_recheck.get("overall") or {},
+            "promotion_allowed": False,
+            "formal_denominator_changed": bool(matured_kline_recheck.get("formal_denominator_changed")),
+            "context_rows_scanned": matured_kline_recheck.get("context_rows_scanned"),
+            "unknown_or_missing_rows": matured_kline_recheck.get("unknown_or_missing_rows"),
+            "kline_cache_available": matured_kline_recheck.get("kline_cache_available"),
+            "recheck": {
+                key: (matured_kline_recheck.get("recheck") or {}).get(key)
+                for key in (
+                    "rechecked_rows",
+                    "recoverable_known_rows",
+                    "recoverable_known_rate",
+                    "still_unknown_rows",
+                    "still_unknown_rate",
+                    "current_volume_profile_counts",
+                    "current_volume_profile_reason_counts",
+                    "current_kline_bar_count_bucket_counts",
+                    "signal_age_bucket_counts_now",
                 )
             },
         },
@@ -580,6 +604,7 @@ def self_test():
     assert verdict["non_quote_sensitive_capture_discovery_allowed"] is True
     assert verdict["quote_sensitive_slices_blocked"] is False
     assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
+    assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
