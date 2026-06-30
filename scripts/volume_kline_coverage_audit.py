@@ -205,6 +205,24 @@ def bucket_pct(value):
     return "lt_20"
 
 
+def kline_uncovered_root_cause(row):
+    if truthy(row.get("kline_covered")):
+        return "covered"
+    if truthy(row.get("outlier_flag")):
+        return "outlier_price"
+    if not truthy(row.get("same_source_path")):
+        return "not_same_source_path"
+    confidence = norm_text(row.get("baseline_confidence")).lower()
+    if confidence not in {"high", "medium"}:
+        return f"baseline_confidence_{confidence}"
+    reason = norm_text(row.get("coverage_reason")).lower()
+    if reason not in {"missing", "unknown", "covered"}:
+        return f"coverage_reason_{reason}"
+    if row.get("first_bar_lag_sec") is None:
+        return "missing_first_bar"
+    return "kline_covered_false_composite_unknown"
+
+
 def select_expr(columns, names):
     return [name if name in columns else f"NULL AS {name}" for name in names]
 
@@ -303,6 +321,7 @@ def raw_kline_audit(raw_db, since_ts):
             primary_drop["evaluable"] += 1
 
     early_complete = sum(1 for row in rows if truthy(row.get("early_15m_complete")))
+    uncovered_root_cause_counts = Counter(kline_uncovered_root_cause(row) for row in uncovered_rows)
     return {
         "available": True,
         "source": "raw_signal_outcomes",
@@ -315,7 +334,12 @@ def raw_kline_audit(raw_db, since_ts):
         "blocker": "kline_coverage_below_80pct" if (coverage_rate or 0) < 0.8 else None,
         "coverage_reason_counts": count("coverage_reason"),
         "coverage_reason_counts_uncovered": count("coverage_reason", uncovered_rows),
+        "kline_uncovered_root_cause_counts": dict(uncovered_root_cause_counts.most_common()),
         "baseline_confidence_counts": count("baseline_confidence"),
+        "baseline_confidence_counts_uncovered": count("baseline_confidence", uncovered_rows),
+        "same_source_path_counts_uncovered": dict(
+            Counter("true" if truthy(row.get("same_source_path")) else "false" for row in uncovered_rows).most_common()
+        ),
         "source_kind_counts": count("source_kind"),
         "source_family_counts": count("source_family"),
         "path_source_kind_counts": count("path_source_kind"),
@@ -430,6 +454,7 @@ def compact_summary(report):
             "kline_coverage_rate": kline.get("kline_coverage_rate"),
             "kline_uncovered_rows": kline.get("kline_uncovered_rows"),
             "coverage_reason_counts_uncovered": kline.get("coverage_reason_counts_uncovered"),
+            "kline_uncovered_root_cause_counts": kline.get("kline_uncovered_root_cause_counts"),
             "first_bar_lag_bucket_counts_uncovered": kline.get("first_bar_lag_bucket_counts_uncovered"),
             "early_15m_complete_rate": kline.get("early_15m_complete_rate"),
             "blocker": kline.get("blocker"),
@@ -503,6 +528,7 @@ def self_test():
         assert report["volume_context"]["unknown_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_rows"] == 1
+        assert report["raw_gold_silver_kline"]["kline_uncovered_root_cause_counts"]["not_same_source_path"] == 1
         assert report["overall"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
         compact = compact_summary(report)
         assert compact["overall"]["promotion_allowed"] is False
