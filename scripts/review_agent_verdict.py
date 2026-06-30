@@ -228,6 +228,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     report_health = capture.get("report_health") or {}
     quote_context_coverage = capture.get("quote_context_coverage") or context.get("quote_context_coverage") or {}
     quote_missing_root_cause = capture.get("quote_missing_root_cause") or context.get("quote_missing_root_cause") or {}
+    context_blocker_monitor = readiness_reports.get("context_blocker_monitor") or {}
+    context_monitor_overall = context_blocker_monitor.get("overall_verdict") or {}
+    context_monitor_quote_smoke = context_blocker_monitor.get("task_a_post_deploy_quote_smoke_test") or {}
+    context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
     blockers = list(report_health.get("promotion_blockers") or [])
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
@@ -278,7 +282,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     blocked_subtype = None
     if any(blocker in quote_coverage_blockers for blocker in blockers):
         dominant_quote_missing = quote_missing_root_cause.get("dominant_root_cause")
-        if dominant_quote_missing == "legacy_schema":
+        monitor_writer_verified = (
+            context_monitor_overall.get("quote_writer_fix") == "VERIFIED_POST_DEPLOY"
+            or context_monitor_quote_smoke.get("classification") == "VERIFIED_POST_DEPLOY"
+        )
+        monitor_clean_pending = (
+            context_monitor_overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING"
+            or context_monitor_clean_window.get("classification") == "QUOTE_CLEAN_WINDOW_PENDING"
+        )
+        if monitor_writer_verified and monitor_clean_pending:
+            blocked_subtype = "CLEAN_V2_WINDOW_PENDING"
+        elif dominant_quote_missing == "legacy_schema":
             blocked_subtype = "CLEAN_V2_WINDOW_PENDING"
         elif dominant_quote_missing == "v2_writer_path_missing_quote_fields":
             blocked_subtype = "NEEDS_DATA_WRITER_FIX"
@@ -375,6 +389,13 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "quote_clean_definition": quote_definition,
         "quote_context_coverage": quote_context_coverage,
         "quote_missing_root_cause": quote_missing_root_cause,
+        "context_blocker_monitor": {
+            "available": bool(context_blocker_monitor),
+            "overall_verdict": context_monitor_overall,
+            "post_deploy_quote_smoke_test": context_monitor_quote_smoke,
+            "clean_window_monitor": context_monitor_clean_window,
+            "volume_kline_coverage_audit": context_blocker_monitor.get("task_c_volume_kline_coverage_audit") or {},
+        },
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
@@ -535,6 +556,38 @@ def self_test():
     }, tests={"passed": True})
     assert legacy_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
     assert legacy_quote_blocked["classification"] == "BLOCKED_CONTEXT_COVERAGE"
+    monitor_reconciled_quote_blocked = build_verdict({
+        **capture,
+        "quote_context_coverage": {
+            **capture["quote_context_coverage"],
+            "source_quote_clean_present_rate": 0.6,
+            "source_quote_executable_present_rate": 0.6,
+        },
+        "quote_missing_root_cause": {
+            "quote_missing_rows_total": 4,
+            "missing_due_to_legacy_schema_count": 0,
+            "missing_due_to_writer_path_count": 4,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "v2_writer_path_missing_quote_fields",
+        },
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True}, readiness_reports={
+        "context_blocker_monitor": {
+            "overall_verdict": {
+                "quote_writer_fix": "VERIFIED_POST_DEPLOY",
+                "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
+            },
+            "task_a_post_deploy_quote_smoke_test": {
+                "classification": "VERIFIED_POST_DEPLOY",
+            },
+            "task_b_clean_window_monitor": {
+                "classification": "QUOTE_CLEAN_WINDOW_PENDING",
+            },
+        }
+    })
+    assert monitor_reconciled_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
+    assert monitor_reconciled_quote_blocked["context_blocker_monitor"]["available"] is True
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},

@@ -523,6 +523,7 @@ def run_reports(run_dir, args):
     markov_effectiveness_path = run_dir / f"markov_effectiveness_{primary_hours}h.json"
     capture_cross_validity_path = run_dir / f"capture_cross_validity_{primary_hours}h.json"
     a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
+    context_blocker_monitor_path = run_dir / f"context_blocker_monitor_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -634,6 +635,22 @@ def run_reports(run_dir, args):
             readiness_paths[f"capture_{hours}h"] = path
     if raw_funnel_path.exists():
         readiness_paths["raw_gold_silver_funnel_audit"] = raw_funnel_path
+    if int(args.quote_fix_deploy_ts or 0) > 0:
+        diagnostics.append(run_report(
+            "context_blocker_monitor",
+            [
+                "scripts/context_blocker_monitor.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--hours", str(primary_hours),
+                "--deploy-ts", str(int(args.quote_fix_deploy_ts)),
+                "--out", str(context_blocker_monitor_path),
+            ],
+            context_blocker_monitor_path,
+            timeout=args.report_timeout_sec,
+        ))
+        if context_blocker_monitor_path.exists():
+            readiness_paths["context_blocker_monitor"] = context_blocker_monitor_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,
@@ -1080,7 +1097,9 @@ def create_self_test_dbs(root):
             payload = {
                 "context_schema_version": "candidate-shadow-context-v2.no_signal_price_quote_inference",
                 "quote_clean_definition": "source_or_executable_quote_only_no_signal_price",
+                "quote_context_writer_path": "candidate_shadow_observer:inferred",
                 "source_quote_clean": True,
+                "source_quote_executable": True,
                 "volume_profile": "building" if candidate.startswith("kline:") else "UNKNOWN",
                 "lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE",
                 "source_component": "matrix_evaluator",
@@ -1135,6 +1154,7 @@ def self_test():
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
+            quote_fix_deploy_ts=int(time.time()) - 3600,
         )
         result = run_once(args)
         assert Path(result["latest_verdict"]).exists()
@@ -1179,6 +1199,7 @@ def self_test():
             "capture_cross_validity_24h.json",
             "pnl_cross_secondary_24h.json",
             "context_coverage_audit_24h.json",
+            "context_blocker_monitor_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
@@ -1201,6 +1222,12 @@ def main():
     parser.add_argument("--max-runs", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=300)
     parser.add_argument("--initial-delay-sec", type=int, default=0)
+    parser.add_argument(
+        "--quote-fix-deploy-ts",
+        type=int,
+        default=0,
+        help="Unix timestamp of quote writer fix deployment; enables post-deploy quote clean-window monitor.",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
