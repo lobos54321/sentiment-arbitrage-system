@@ -1455,6 +1455,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "paper_enablement_allowed": False,
             "denominator": quality_timing_probe_validation.get("denominator") or {},
             "status_counts": quality_timing_probe_validation.get("status_counts") or {},
+            "oos_readiness_queue": (
+                quality_timing_probe_validation.get("oos_readiness_queue") or {}
+            ),
             "top_repeated_probes": (
                 quality_timing_probe_validation.get("top_repeated_probes") or []
             )[:10],
@@ -2116,6 +2119,19 @@ def self_test():
                 "repeated_probe_rate": 0.5,
             },
             "status_counts": {"REPEATED_SHADOW_PROBE": 1},
+            "oos_readiness_queue": {
+                "classification": "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+                "queue_count": 1,
+                "promotion_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "items": [
+                    {
+                        "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
+                        "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
             "top_repeated_probes": [
                 {
                     "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
@@ -2129,6 +2145,8 @@ def self_test():
     assert qtp["available"] is True
     assert qtp["classification"] == "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW"
     assert qtp["promotion_allowed"] is False
+    assert qtp["oos_readiness_queue"]["classification"] == "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+    assert qtp["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
     assert qtp["top_repeated_probes"][0]["status"] == "REPEATED_SHADOW_PROBE"
     reconciled = {
         **capture,

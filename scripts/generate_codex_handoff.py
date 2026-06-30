@@ -575,6 +575,9 @@ def build_handoff(verdict):
                     "paper_enablement_allowed": False,
                     "denominator": quality_timing_probe_validation.get("denominator") or {},
                     "status_counts": quality_timing_probe_validation.get("status_counts") or {},
+                    "oos_readiness_queue": (
+                        quality_timing_probe_validation.get("oos_readiness_queue") or {}
+                    ),
                     "top_repeated_probes": (
                         quality_timing_probe_validation.get("top_repeated_probes") or []
                     )[:8],
@@ -861,6 +864,19 @@ def self_test():
                 "REPEATED_SHADOW_PROBE": 2,
                 "NOT_OBSERVED_CURRENT_WINDOW": 1,
             },
+            "oos_readiness_queue": {
+                "classification": "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+                "queue_count": 1,
+                "promotion_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "items": [
+                    {
+                        "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
+                        "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
             "top_repeated_probes": [
                 {
                     "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
@@ -895,6 +911,7 @@ def self_test():
     assert "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW" in text
     assert "REPEATED_SHADOW_PROBE" in text
     assert "quality_timing_probe:matrix_alignment_wait" in text
+    assert "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW" in text
     assert "Candidate Improvement Opportunities" in text
     assert "Markov Information Value" in text
     assert "candidate_source" in text

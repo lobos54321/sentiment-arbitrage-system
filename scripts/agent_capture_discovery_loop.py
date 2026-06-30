@@ -1851,6 +1851,69 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
             len(probes),
         ),
     }
+    oos_queue_items = []
+    for row in repeated_rows:
+        definition = row.get("definition") or {}
+        current_window = row.get("current_window") or {}
+        oos_queue_items.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+            "scope": "shadow_only_quality_timing_candidate_probe",
+            "quality_timing_cluster": definition.get("quality_timing_cluster"),
+            "candidate_id": definition.get("candidate_id"),
+            "candidate_family": definition.get("candidate_family"),
+            "current_window": {
+                "cluster_event_count": current_window.get("cluster_event_count"),
+                "cluster_unique_tokens": current_window.get("cluster_unique_tokens"),
+                "cluster_share_of_quality_timing_rejects": (
+                    current_window.get("cluster_share_of_quality_timing_rejects")
+                ),
+                "cluster_share_of_raw_all_gold_silver": (
+                    current_window.get("cluster_share_of_raw_all_gold_silver")
+                ),
+                "candidate_cluster_match_count": (
+                    current_window.get("candidate_cluster_match_count")
+                ),
+                "candidate_probe_rank_in_cluster": (
+                    current_window.get("candidate_probe_rank_in_cluster")
+                ),
+                "max_sustained_peak_pct_max": current_window.get("max_sustained_peak_pct_max"),
+                "time_to_sustained_peak_sec_median": (
+                    current_window.get("time_to_sustained_peak_sec_median")
+                ),
+            },
+            "readiness_gates": {
+                "same_window_repeated": True,
+                "context_clean_window_required": True,
+                "non_overlapping_oos_required": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "next_action": "evaluate_probe_in_next_clean_non_overlapping_window",
+        })
+    oos_readiness_queue = {
+        "classification": (
+            "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+            if oos_queue_items
+            else "QUALITY_TIMING_OOS_QUEUE_EMPTY"
+        ),
+        "queue_count": len(oos_queue_items),
+        "pending_clean_window_count": len(oos_queue_items),
+        "ready_for_runtime_change_count": 0,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "items": oos_queue_items[:12],
+        "notes": [
+            "Queue is read-only and shadow-only.",
+            "Items may only move to OOS judgment after context clean windows pass.",
+            "This queue does not authorize strategy, gate, A_CLASS, executor, paper, or risk changes.",
+        ],
+    }
 
     return {
         "schema_version": "quality_timing_candidate_probe_validation.v1",
@@ -1870,6 +1933,8 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
         "repeated_probe_rate": denominator["repeated_probe_rate"],
         "denominator": denominator,
         "status_counts": dict(status_counts),
+        "oos_readiness_queue_count": oos_readiness_queue["queue_count"],
+        "oos_readiness_queue": oos_readiness_queue,
         "top_repeated_probes": repeated_rows[:12],
         "probe_validations": rows,
         "notes": [
@@ -2816,6 +2881,9 @@ def self_test():
             quality_probe_validation.get("denominator") or {}
         ).get("repeated_probe_count")
         assert "repeated_probe_rate" in quality_probe_validation
+        assert "oos_readiness_queue" in quality_probe_validation
+        assert quality_probe_validation["oos_readiness_queue"]["promotion_allowed"] is False
+        assert quality_probe_validation["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
         assert "probe_validations" in quality_probe_validation
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
