@@ -213,6 +213,24 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    hypothesis_validation = verdict.get("hypothesis_validation_audit") or {}
+    if hypothesis_validation:
+        compact_hypothesis_validation = {
+            "available": hypothesis_validation.get("available"),
+            "overall": hypothesis_validation.get("overall") or {},
+            "promotion_allowed": False,
+            "matured_volume_hypothesis_validation": (
+                hypothesis_validation.get("matured_volume_hypothesis_validation") or {}
+            ),
+        }
+        lines.extend([
+            "## Hypothesis Validation",
+            "",
+            "```json",
+            json.dumps(compact_hypothesis_validation, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -311,12 +329,26 @@ def self_test():
         },
         "H1_capture_metrics": {"status": "WATCH"},
         "H2_capture_metrics": {"status": "not_observed"},
+        "hypothesis_validation_audit": {
+            "available": True,
+            "overall": {
+                "classification": "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW",
+                "promotion_allowed": False,
+            },
+            "matured_volume_hypothesis_validation": {
+                "registered_hypothesis_count": 10,
+                "repeated_watch_count": 10,
+                "oos_repeated_watch_count": 0,
+            },
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
     assert "raw_dog_rows_incomplete" in text
     assert "Quote Context Coverage" in text
     assert "Quote Missing Root Cause" in text
+    assert "Hypothesis Validation" in text
+    assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Readiness Summaries" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
