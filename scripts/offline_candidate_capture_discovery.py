@@ -14,7 +14,7 @@ import math
 import sqlite3
 import tempfile
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 
@@ -736,6 +736,150 @@ def quote_coverage_summary(rows):
     }
 
 
+def context_field_group_key(row, dimension):
+    payload = row["payload"]
+    if dimension == "by_context_schema_version":
+        return str(payload.get("context_schema_version") or "legacy_or_missing")
+    if dimension == "by_writer_path":
+        return writer_path(payload)
+    if dimension == "by_source_component":
+        return str(payload.get("source_component") or "MISSING")
+    if dimension == "by_signal_type":
+        return str(payload.get("signal_type") or "UNKNOWN")
+    if dimension == "by_candidate_family":
+        return str(row.get("family") or "UNKNOWN")
+    if dimension == "by_context_carrier_candidate_id":
+        return str(row.get("candidate_id") or "UNKNOWN")
+    if dimension == "by_lifecycle_profile":
+        return str(payload.get("lifecycle_profile") or payload.get("lifecycle_state") or "MISSING")
+    return "UNKNOWN"
+
+
+def context_field_status(payload, field, fallback_fields=()):
+    value = payload.get(field)
+    if value not in (None, ""):
+        return "present"
+    for fallback in fallback_fields:
+        if payload.get(fallback) not in (None, ""):
+            return "fallback_present"
+    return "missing"
+
+
+def context_field_coverage_summary(rows, field, fallback_fields=()):
+    denominator = len(rows)
+    counts = Counter(context_field_status(row["payload"], field, fallback_fields) for row in rows)
+    present = counts.get("present", 0)
+    fallback_present = counts.get("fallback_present", 0)
+    missing = counts.get("missing", 0)
+    return {
+        "coverage_denominator_rows": denominator,
+        "field": field,
+        "fallback_fields": list(fallback_fields),
+        "present_rows": present,
+        "present_rate": rate(present, denominator),
+        "fallback_present_rows": fallback_present,
+        "fallback_present_rate": rate(fallback_present, denominator),
+        "effective_present_rows": present + fallback_present,
+        "effective_present_rate": rate(present + fallback_present, denominator),
+        "missing_rows": missing,
+        "missing_rate": rate(missing, denominator),
+    }
+
+
+def build_context_field_coverage_audit(observations, field, fallback_fields=()):
+    carriers = select_context_carrier_rows(observations)
+    top = context_field_coverage_summary(carriers, field, fallback_fields)
+    missing_rows = [
+        row for row in carriers
+        if context_field_status(row["payload"], field, fallback_fields) == "missing"
+    ]
+    breakdowns = {}
+    for dimension in (
+        "by_context_schema_version",
+        "by_writer_path",
+        "by_source_component",
+        "by_signal_type",
+        "by_candidate_family",
+        "by_context_carrier_candidate_id",
+        "by_lifecycle_profile",
+    ):
+        grouped = defaultdict(list)
+        for row in carriers:
+            grouped[context_field_group_key(row, dimension)].append(row)
+        breakdowns[dimension] = {
+            key: context_field_coverage_summary(rows, field, fallback_fields)
+            for key, rows in sorted(grouped.items(), key=lambda item: str(item[0]))
+        }
+    missing_breakdowns = {
+        "by_context_schema_version": Counter(),
+        "by_writer_path": Counter(),
+        "by_source_component": Counter(),
+        "by_signal_type": Counter(),
+        "by_candidate_family": Counter(),
+        "by_context_carrier_candidate_id": Counter(),
+        "by_payload_key_presence": Counter(),
+    }
+    samples = []
+    for row in missing_rows:
+        payload = row["payload"]
+        missing_breakdowns["by_context_schema_version"][str(payload.get("context_schema_version") or "legacy_or_missing")] += 1
+        missing_breakdowns["by_writer_path"][writer_path(payload)] += 1
+        missing_breakdowns["by_source_component"][str(payload.get("source_component") or "MISSING")] += 1
+        missing_breakdowns["by_signal_type"][str(payload.get("signal_type") or "UNKNOWN")] += 1
+        missing_breakdowns["by_candidate_family"][str(row.get("family") or "UNKNOWN")] += 1
+        missing_breakdowns["by_context_carrier_candidate_id"][str(row.get("candidate_id") or "UNKNOWN")] += 1
+        missing_breakdowns["by_payload_key_presence"][payload_key_presence_signature(payload)] += 1
+        if len(samples) < 25:
+            samples.append(
+                {
+                    "signal_id": row.get("signal_id"),
+                    "token_ca": row.get("token_ca"),
+                    "candidate_id": row.get("candidate_id"),
+                    "family": row.get("family"),
+                    "signal_ts": row.get("signal_ts"),
+                    "observed_at": row.get("observed_at"),
+                    "context_schema_version": payload.get("context_schema_version"),
+                    "writer_path": writer_path(payload),
+                    "source_component": payload.get("source_component"),
+                    "signal_type": payload.get("signal_type"),
+                    "lifecycle_profile": payload.get("lifecycle_profile"),
+                    "lifecycle_state": payload.get("lifecycle_state"),
+                    "volume_profile": payload.get("volume_profile"),
+                    "payload_key_presence": payload_key_presence_signature(payload),
+                }
+            )
+    dominant_missing = None
+    if missing_rows:
+        writer_counts = missing_breakdowns["by_writer_path"]
+        dominant_writer, dominant_count = writer_counts.most_common(1)[0]
+        dominant_missing = {
+            "dimension": "writer_path",
+            "value": dominant_writer,
+            "count": dominant_count,
+            "share": rate(dominant_count, len(missing_rows)),
+        }
+    top.update(
+        {
+            "schema_version": "context_field_coverage_audit.v1",
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "context_carrier_candidate_ids": sorted({row.get("candidate_id") for row in carriers if row.get("candidate_id")}),
+            "blocker": f"{field}_coverage_below_80pct" if (top.get("effective_present_rate") or 0) < 0.8 else None,
+            "missing_breakdowns": {
+                key: dict(counter.most_common())
+                for key, counter in missing_breakdowns.items()
+            },
+            "dominant_missing_bucket": dominant_missing,
+            "breakdowns": breakdowns,
+            "samples": samples,
+            "notes": [
+                "Read-only context field coverage audit; it does not alter candidate matching, entry policy, gates, or runtime mode.",
+                "effective_present includes the primary field plus explicitly configured fallback fields.",
+            ],
+        }
+    )
+    return top
+
+
 def payload_key_presence_signature(payload):
     keys = (
         "source_quote_clean",
@@ -935,6 +1079,14 @@ def build_context_health(observations):
     signal_count = len(rows)
     quote_context_coverage = build_quote_context_coverage_audit(observations)
     quote_missing_root_cause = build_quote_missing_root_cause_audit(observations)
+    context_field_coverage = {
+        "lifecycle_profile": build_context_field_coverage_audit(
+            observations, "lifecycle_profile", ("lifecycle_state",)
+        ),
+        "source_component": build_context_field_coverage_audit(observations, "source_component"),
+        "markov_bucket": build_context_field_coverage_audit(observations, "markov_bucket"),
+        "volume_profile": build_context_field_coverage_audit(observations, "volume_profile"),
+    }
     fields = (
         "source_quote_clean",
         "source_quote_clean_seen",
@@ -996,8 +1148,12 @@ def build_context_health(observations):
     if quote_executable_present_rate is None or quote_executable_present_rate < 0.8:
         gaps.append("source_quote_executable_coverage_below_80pct")
     for field in ("lifecycle_profile", "markov_bucket", "volume_profile"):
+        field_audit = context_field_coverage.get(field) or {}
+        effective_rate = field_audit.get("effective_present_rate")
         coverage = field_coverage[field]["coverage_pct"]
-        if coverage is None or coverage < 80:
+        if effective_rate is None and coverage is not None:
+            effective_rate = coverage / 100.0
+        if effective_rate is None or effective_rate < 0.8:
             gaps.append(f"{field}_coverage_below_80pct")
     if signal_price_only:
         gaps.append("signal_price_seen_without_quote_context_present")
@@ -1015,6 +1171,7 @@ def build_context_health(observations):
         },
         "quote_context_coverage": quote_context_coverage,
         "quote_missing_root_cause": quote_missing_root_cause,
+        "context_field_coverage": context_field_coverage,
         "context_schema_versions": dict(sorted(schema_versions.items())),
         "context_schema_version_counts": dict(sorted(schema_versions.items())),
         "expected_context_schema_version": EXPECTED_CONTEXT_SCHEMA_VERSION,

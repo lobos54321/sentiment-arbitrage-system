@@ -429,6 +429,19 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "quote_clean_definition": quote_definition,
         "quote_context_coverage": quote_context_coverage,
         "quote_missing_root_cause": quote_missing_root_cause,
+        "context_field_coverage": (
+            readiness_reports.get("context_coverage") or {}
+        ).get("context_field_coverage") or (capture.get("context_health") or {}).get("context_field_coverage") or {},
+        "lifecycle_profile_coverage": (
+            (readiness_reports.get("context_coverage") or {}).get("lifecycle_profile_coverage")
+            or ((capture.get("context_health") or {}).get("context_field_coverage") or {}).get("lifecycle_profile")
+            or {}
+        ),
+        "source_component_coverage": (
+            (readiness_reports.get("context_coverage") or {}).get("source_component_coverage")
+            or ((capture.get("context_health") or {}).get("context_field_coverage") or {}).get("source_component")
+            or {}
+        ),
         "context_blocker_monitor": {
             "available": bool(context_blocker_monitor),
             "overall_verdict": context_monitor_overall,

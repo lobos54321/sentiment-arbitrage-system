@@ -264,6 +264,7 @@ def write_derived_report(path, payload):
 def build_context_coverage_report(capture):
     context = capture.get("context_health") or {}
     field_coverage = context.get("field_coverage") or {}
+    context_field_coverage = context.get("context_field_coverage") or {}
     denominator = capture.get("denominator_audit") or {}
     raw_all = denominator.get("raw_all_gold_silver_event_rows") or 0
     dropped_kline = (denominator.get("filter_drop_breakdown_non_exclusive") or {}).get("dropped_kline_uncovered", 0)
@@ -280,6 +281,30 @@ def build_context_coverage_report(capture):
         "report_type": "context_coverage_audit",
         "quote_context_coverage": capture.get("quote_context_coverage") or context.get("quote_context_coverage") or {},
         "quote_missing_root_cause": capture.get("quote_missing_root_cause") or context.get("quote_missing_root_cause") or {},
+        "context_field_coverage": context_field_coverage,
+        "lifecycle_profile_coverage": context_field_coverage.get("lifecycle_profile") or {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_pct": (field_coverage.get("lifecycle_profile") or {}).get("coverage_pct"),
+            "coverage_rate": pct_to_rate((field_coverage.get("lifecycle_profile") or {}).get("coverage_pct")),
+            "blocker": "lifecycle_profile_coverage_below_80pct"
+            if ((field_coverage.get("lifecycle_profile") or {}).get("coverage_pct") is None
+                or (field_coverage.get("lifecycle_profile") or {}).get("coverage_pct") < 80)
+            else None,
+        },
+        "source_component_coverage": context_field_coverage.get("source_component") or {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_pct": (field_coverage.get("source_component") or {}).get("coverage_pct"),
+            "coverage_rate": pct_to_rate((field_coverage.get("source_component") or {}).get("coverage_pct")),
+        },
+        "markov_bucket_coverage": context_field_coverage.get("markov_bucket") or {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "coverage_pct": (field_coverage.get("markov_bucket") or {}).get("coverage_pct"),
+            "coverage_rate": pct_to_rate((field_coverage.get("markov_bucket") or {}).get("coverage_pct")),
+            "blocker": "markov_bucket_coverage_below_80pct"
+            if ((field_coverage.get("markov_bucket") or {}).get("coverage_pct") is None
+                or (field_coverage.get("markov_bucket") or {}).get("coverage_pct") < 80)
+            else None,
+        },
         "volume_profile_coverage": {
             "coverage_denominator_type": "signal_context_carrier_rows",
             "coverage_pct": volume_pct,
