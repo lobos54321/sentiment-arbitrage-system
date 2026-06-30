@@ -363,6 +363,25 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    oos_readiness = verdict.get("oos_readiness_summary") or {}
+    if oos_readiness:
+        compact_oos = {
+            "classification": oos_readiness.get("classification"),
+            "available_probe_count": oos_readiness.get("available_probe_count"),
+            "sufficient_probe_count": oos_readiness.get("sufficient_probe_count"),
+            "oos_repeated_watch_probe_count": oos_readiness.get("oos_repeated_watch_probe_count"),
+            "next_action": oos_readiness.get("next_action"),
+            "promotion_allowed": False,
+            "probes": (oos_readiness.get("probes") or [])[:4],
+        }
+        lines.extend([
+            "## OOS Readiness",
+            "",
+            "```json",
+            json.dumps(compact_oos, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     entry_gap = verdict.get("entry_funnel_gap_summary") or {}
     readiness_shortfall = verdict.get("readiness_shortfall_summary") or {}
     paper_proposal = verdict.get("paper_entry_proposal_readiness") or {}

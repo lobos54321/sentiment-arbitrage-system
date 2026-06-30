@@ -80,6 +80,10 @@ DERIVED_READINESS_SIBLINGS = {
     "candidate_effectiveness": "candidate_effectiveness_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "capture_cross_validity": "capture_cross_validity_24h.json",
+    "hypothesis_validation_oos_probe_0p1h": "hypothesis_validation_audit_oos_probe_0p1h.json",
+    "hypothesis_validation_oos_probe_1h": "hypothesis_validation_audit_oos_probe_1h.json",
+    "matured_volume_cross_oos_probe_0p1h": "matured_volume_capture_cross_audit_oos_probe_0p1h.json",
+    "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
 }
 
 
@@ -116,11 +120,11 @@ def as_float(value):
         return None
 
 
-def as_int(value):
+def as_int(value, default=None):
     try:
         return int(value)
     except (TypeError, ValueError):
-        return None
+        return default
 
 
 def boolish(value):
@@ -187,6 +191,79 @@ def first_blocker_priority(blockers):
         if blocker in blocker_set:
             return blocker
     return sorted(blocker_set)[0] if blocker_set else None
+
+
+def compact_oos_probe(name, report, cross_report=None):
+    validation = (report or {}).get("matured_volume_hypothesis_validation") or {}
+    quality = validation.get("eval_window_quality") or {}
+    overall = (report or {}).get("overall") or {}
+    cross_overall = (cross_report or {}).get("overall") or {}
+    cross_context = (cross_report or {}).get("matured_volume_context") or {}
+    return {
+        "probe": name,
+        "available": bool(report),
+        "classification": overall.get("classification"),
+        "next_action": overall.get("next_action"),
+        "promotion_allowed": False,
+        "human_action_required": bool(overall.get("human_action_required")),
+        "sufficient_for_oos_judgment": bool(quality.get("sufficient_for_oos_judgment")),
+        "blockers": quality.get("blockers") or [],
+        "signals_scanned": quality.get("signals_scanned"),
+        "evaluable_raw_gs_event_rows": quality.get("evaluable_raw_gs_event_rows"),
+        "matured_volume_known_rate": quality.get("matured_volume_known_rate"),
+        "cross_classification": quality.get("cross_classification") or cross_overall.get("classification"),
+        "cross_known_rate": cross_context.get("known_rate"),
+        "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
+        "repeated_watch_count": validation.get("repeated_watch_count"),
+    }
+
+
+def build_oos_readiness_summary(readiness_reports):
+    probe_specs = (
+        (
+            "0p1h",
+            "hypothesis_validation_oos_probe_0p1h",
+            "matured_volume_cross_oos_probe_0p1h",
+        ),
+        (
+            "1h",
+            "hypothesis_validation_oos_probe_1h",
+            "matured_volume_cross_oos_probe_1h",
+        ),
+    )
+    probes = [
+        compact_oos_probe(
+            label,
+            readiness_reports.get(hypothesis_key) or {},
+            readiness_reports.get(cross_key) or {},
+        )
+        for label, hypothesis_key, cross_key in probe_specs
+    ]
+    available = [row for row in probes if row["available"]]
+    sufficient = [row for row in available if row["sufficient_for_oos_judgment"]]
+    repeated = [row for row in sufficient if (as_int(row.get("oos_repeated_watch_count"), 0) or 0) > 0]
+    if not available:
+        classification = "OOS_PROBES_MISSING"
+        next_action = "run_non_overlapping_oos_probe_when_discovery_hit_exists"
+    elif not sufficient:
+        classification = "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
+        next_action = "continue_collecting_post_freeze_window_before_judging_oos"
+    elif repeated:
+        classification = "OOS_REPEATED_WATCH_PENDING_REVIEW"
+        next_action = "review_repeated_oos_watch_without_promotion"
+    else:
+        classification = "OOS_NO_REPEAT_CONTINUE_WATCH"
+        next_action = "continue_watchlist_validation"
+    return {
+        "available_probe_count": len(available),
+        "sufficient_probe_count": len(sufficient),
+        "oos_repeated_watch_probe_count": len(repeated),
+        "classification": classification,
+        "next_action": next_action,
+        "promotion_allowed": False,
+        "human_action_required": False,
+        "probes": probes,
+    }
 
 
 def volume_profile_blocker_state(blockers, matured_kline_recheck, matured_volume_cross):
@@ -631,6 +708,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "markov_bucket_coverage_below_80pct",
     }
     hypothesis_validation = readiness_reports.get("hypothesis_validation_audit") or {}
+    oos_readiness_summary = build_oos_readiness_summary(readiness_reports)
     matured_volume_top_slices = [
         compact_matured_volume_slice(row)
         for row in (matured_volume_cross.get("top_slices") or [])[:10]
@@ -1045,6 +1123,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 )
             },
         },
+        "oos_readiness_summary": oos_readiness_summary,
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),
             "verdict": low_confidence_audit.get("verdict"),
@@ -1760,10 +1839,45 @@ def self_test():
             "schema_version": "capture_cross_validity_report.v1",
             "valid_cross_count": 3,
         })
+        write_json(root / "hypothesis_validation_audit_oos_probe_0p1h.json", {
+            "schema_version": "hypothesis_validation_audit.v1",
+            "overall": {
+                "classification": "OOS_WINDOW_TOO_SMALL_CONTINUE_WAIT",
+                "next_action": "continue_collecting_post_freeze_window_before_judging_oos_repeat",
+                "promotion_allowed": False,
+            },
+            "matured_volume_hypothesis_validation": {
+                "eval_window_quality": {
+                    "sufficient_for_oos_judgment": False,
+                    "signals_scanned": 12,
+                    "evaluable_raw_gs_event_rows": 0,
+                    "matured_volume_known_rate": 0.416667,
+                    "blockers": [
+                        "oos_signal_count_below_min",
+                        "oos_raw_gs_event_count_below_min",
+                    ],
+                },
+                "oos_repeated_watch_count": 0,
+            },
+            "promotion_allowed": False,
+        })
+        write_json(root / "matured_volume_capture_cross_audit_oos_probe_0p1h.json", {
+            "schema_version": "matured_volume_capture_cross_audit.v1",
+            "overall": {
+                "classification": "BLOCKED_MATURED_VOLUME_COVERAGE",
+                "promotion_allowed": False,
+            },
+            "matured_volume_context": {
+                "known_rate": 0.416667,
+            },
+            "promotion_allowed": False,
+        })
         siblings = load_sibling_readiness_reports(str(capture_path))
         assert siblings["candidate_effectiveness"]["candidate_count"] == 84
         assert siblings["markov_effectiveness"]["status"] == "insufficient_or_uninformative"
         assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
+        assert siblings["hypothesis_validation_oos_probe_0p1h"]["overall"]["promotion_allowed"] is False
+        assert siblings["matured_volume_cross_oos_probe_0p1h"]["overall"]["classification"] == "BLOCKED_MATURED_VOLUME_COVERAGE"
         explicit = load_sibling_readiness_reports(str(capture_path), {
             "candidate_effectiveness": {"candidate_count": 1}
         })
@@ -1772,6 +1886,10 @@ def self_test():
         assert sibling_verdict["per_candidate_effectiveness_summary"]["candidate_count"] == 84
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
+        assert sibling_verdict["oos_readiness_summary"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
+        assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 1
+        assert sibling_verdict["oos_readiness_summary"]["sufficient_probe_count"] == 0
+        assert sibling_verdict["oos_readiness_summary"]["promotion_allowed"] is False
     print("SELF_TEST_PASS review_agent_verdict")
 
 
