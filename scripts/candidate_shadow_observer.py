@@ -932,14 +932,22 @@ def volume_profile(bars):
 
 
 def compute_kline_features(bars, signal_ts_sec, now_sec):
+    initial_volume_profile = volume_profile(bars[:5]) if bars else "unknown"
+    initial_volume_profile_reason = (
+        "kline_bars_unavailable"
+        if not bars
+        else "insufficient_kline_bars_lt_3"
+        if len(bars[:5]) < 3
+        else "classified_from_first_5_bars"
+    )
     features = {
         "kline_projection_available": False,
         "kline_bar_count": len(bars),
         "fbr_time_legal": False,
         "kline_time_legal": False,
         "candle_pattern": "unknown",
-        "volume_profile": "unknown",
-        "volume_profile_reason": "kline_bars_unavailable",
+        "volume_profile": initial_volume_profile,
+        "volume_profile_reason": initial_volume_profile_reason,
     }
     if not bars:
         features["kline_missing_reason"] = "no_signal_time_kline_bars"
@@ -968,8 +976,6 @@ def compute_kline_features(bars, signal_ts_sec, now_sec):
             "entry_bar_red": bool(first_close < first_open),
             "entry_body_ratio": None,
             "candle_pattern": classify_candle(first),
-            "volume_profile": volume_profile(bars[:5]),
-            "volume_profile_reason": "classified_from_first_5_bars",
         }
     )
     first_range = float(first["high"]) - float(first["low"])
@@ -1414,6 +1420,7 @@ def payload_for(features, candidate, matched, reason):
         "lifecycle_profile",
         "kline_projection_available",
         "kline_bar_count",
+        "kline_missing_reason",
         "entry_bar_open_ts",
         "entry_bar_close_ts",
         "signal_to_bar_alignment_sec",
@@ -2019,6 +2026,16 @@ def self_test():
     assert missing_kline_payload["volume_profile"] == "unknown"
     assert missing_kline_payload["volume_profile_reason"] == "kline_bars_unavailable"
     assert missing_kline_payload["candle_pattern"] == "unknown"
+    two_bar_features = compute_kline_features(
+        [
+            {"timestamp": 1_000, "open": 1, "close": 1.1, "high": 1.2, "low": 0.9, "volume": 10},
+            {"timestamp": 1_060, "open": 1.1, "close": 1.2, "high": 1.3, "low": 1.0, "volume": 20},
+        ],
+        1_000,
+        1_200,
+    )
+    assert two_bar_features["volume_profile"] == "unknown"
+    assert two_bar_features["volume_profile_reason"] == "insufficient_kline_bars_lt_3"
     no_quote_match, no_quote_reason = eval_base_candidate("notath_quote_clean", inferred_features)
     assert no_quote_match is False
     assert no_quote_reason == "missing_runtime_source_quote_clean"
