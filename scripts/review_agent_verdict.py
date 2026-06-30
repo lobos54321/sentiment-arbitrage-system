@@ -78,10 +78,20 @@ def load_json(path):
 
 
 DERIVED_READINESS_SIBLINGS = {
+    "candidate_downstream_readiness": "candidate_downstream_readiness_24h.json",
+    "context_coverage": "context_coverage_audit_24h.json",
     "candidate_effectiveness": "candidate_effectiveness_24h.json",
     "candidate_improvement_opportunities": "candidate_improvement_opportunities_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "capture_cross_validity": "capture_cross_validity_24h.json",
+    "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
+    "matured_kline_volume_recheck_audit": "matured_kline_volume_recheck_audit_24h.json",
+    "matured_volume_capture_cross_audit": "matured_volume_capture_cross_audit_24h.json",
+    "hypothesis_validation_audit": "hypothesis_validation_audit_24h.json",
+    "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
+    "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
+    "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
+    "context_blocker_monitor": "context_blocker_monitor_24h.json",
     "hypothesis_validation_oos_probe_0p1h": "hypothesis_validation_audit_oos_probe_0p1h.json",
     "hypothesis_validation_oos_probe_0p25h": "hypothesis_validation_audit_oos_probe_0p25h.json",
     "hypothesis_validation_oos_probe_0p5h": "hypothesis_validation_audit_oos_probe_0p5h.json",
@@ -109,6 +119,9 @@ def load_sibling_readiness_reports(capture_path, existing=None):
             reports[name] = load_json(path)
         except Exception:
             pass
+    context_report = reports.get("context_coverage") or {}
+    reports.setdefault("volume_profile_coverage", context_report.get("volume_profile_coverage") or {})
+    reports.setdefault("kline_coverage", context_report.get("kline_coverage") or {})
     return reports
 
 
