@@ -27,6 +27,7 @@ H1_CANDIDATES = {
     "kline:active_mom20_first3",
     "kline:lowvol_active20_support",
 }
+DEFAULT_MAX_SCAN_ROWS = 300_000
 
 
 def utc_now():
@@ -93,6 +94,19 @@ def cols(db, table):
     if not table_exists(db, table):
         return set()
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def recent_rowid_floor(db, table, max_scan_rows):
+    if not max_scan_rows or max_scan_rows <= 0:
+        return None
+    try:
+        row = db.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()
+        max_rowid = int(row[0] or 0) if row else 0
+    except Exception:
+        return None
+    if max_rowid <= 0:
+        return None
+    return max(1, max_rowid - int(max_scan_rows) + 1)
 
 
 def volume_profile(bars):
@@ -233,39 +247,93 @@ def load_raw_gold_silver(path, since_ts):
     return raw_all, evaluable, meta
 
 
-def load_observation_rows(path, since_ts):
+def normalize_observation_row(row):
+    payload = jloads(row["payload_json"])
+    return {
+        "signal_id": signal_id_key(row["signal_id"]),
+        "token_ca": row["token_ca"],
+        "signal_ts": safe_int(row["signal_ts"]),
+        "candidate_id": row["candidate_id"],
+        "family": row["family"],
+        "matched": safe_bool(row["matched"]),
+        "reason": row["reason"],
+        "observed_at": safe_int(row["observed_at"]),
+        "payload": payload,
+    }
+
+
+def load_context_rows(path, since_ts, context_carrier, max_scan_rows):
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     try:
         if not table_exists(db, "candidate_shadow_observations"):
             return []
+        rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
+        filters = ["COALESCE(observed_at, 0) >= ?", "candidate_id = ?"]
+        params = [int(since_ts), context_carrier]
+        if rowid_floor is not None:
+            filters.append("rowid >= ?")
+            params.append(rowid_floor)
         rows = db.execute(
-            """
+            f"""
             SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
                    reason, observed_at, payload_json
             FROM candidate_shadow_observations
-            WHERE COALESCE(observed_at, 0) >= ?
+            WHERE {' AND '.join(filters)}
             """,
-            (int(since_ts),),
+            tuple(params),
         ).fetchall()
+        if not rows:
+            filters = ["COALESCE(observed_at, 0) >= ?"]
+            params = [int(since_ts)]
+            if rowid_floor is not None:
+                filters.append("rowid >= ?")
+                params.append(rowid_floor)
+            rows = db.execute(
+                f"""
+                SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
+                       reason, observed_at, payload_json
+                FROM candidate_shadow_observations
+                WHERE {' AND '.join(filters)}
+                """,
+                tuple(params),
+            ).fetchall()
     finally:
         db.close()
+    return [normalize_observation_row(row) for row in rows]
+
+
+def load_candidate_rows(path, since_ts, signal_ids, max_scan_rows, chunk_size=500):
+    if not signal_ids:
+        return []
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
     out = []
-    for row in rows:
-        payload = jloads(row["payload_json"])
-        out.append(
-            {
-                "signal_id": signal_id_key(row["signal_id"]),
-                "token_ca": row["token_ca"],
-                "signal_ts": safe_int(row["signal_ts"]),
-                "candidate_id": row["candidate_id"],
-                "family": row["family"],
-                "matched": safe_bool(row["matched"]),
-                "reason": row["reason"],
-                "observed_at": safe_int(row["observed_at"]),
-                "payload": payload,
-            }
-        )
+    try:
+        if not table_exists(db, "candidate_shadow_observations"):
+            return []
+        rowid_floor = recent_rowid_floor(db, "candidate_shadow_observations", max_scan_rows)
+        signal_ids = sorted(signal_ids)
+        for index in range(0, len(signal_ids), int(chunk_size)):
+            chunk = signal_ids[index:index + int(chunk_size)]
+            placeholders = ",".join("?" for _ in chunk)
+            filters = [f"CAST(signal_id AS TEXT) IN ({placeholders})", "COALESCE(observed_at, 0) >= ?"]
+            params = list(chunk) + [int(since_ts)]
+            if rowid_floor is not None:
+                filters.append("rowid >= ?")
+                params.append(rowid_floor)
+            rows = db.execute(
+                f"""
+                SELECT signal_id, token_ca, signal_ts, candidate_id, family, matched,
+                       reason, observed_at, payload_json
+                FROM candidate_shadow_observations
+                WHERE {' AND '.join(filters)}
+                """,
+                tuple(params),
+            ).fetchall()
+            out.extend(normalize_observation_row(row) for row in rows)
+    finally:
+        db.close()
     return out
 
 
@@ -401,8 +469,9 @@ def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
     raw_all, evaluable, raw_meta = load_raw_gold_silver(args.raw_db, since_ts)
-    observations = load_observation_rows(args.db, since_ts) if Path(args.db).exists() else []
-    signal_contexts = pick_signal_contexts(observations, args.context_carrier)
+    context_rows = load_context_rows(args.db, since_ts, args.context_carrier, args.max_scan_rows) if Path(args.db).exists() else []
+    signal_contexts = pick_signal_contexts(context_rows, args.context_carrier)
+    observations = load_candidate_rows(args.db, since_ts, set(signal_contexts), args.max_scan_rows) if Path(args.db).exists() else []
     matured_contexts, kline_available = matured_volume_contexts(args.kline_db, signal_contexts, args.kline_limit)
     raw_signal_ids = {row["signal_id"] for row in evaluable if row.get("signal_id")}
     raw_all_signal_ids = {row["signal_id"] for row in raw_all if row.get("signal_id")}
@@ -496,7 +565,8 @@ def build_report(args):
         "candidate_count_observed": len(candidate_ids),
         "candidate_count_ok": len(candidate_ids) == int(args.expected_candidates),
         "signals_scanned": len(scanned_signal_ids),
-        "observation_rows_scanned": len(observations),
+        "context_rows_scanned": len(context_rows),
+        "candidate_observation_rows_scanned": len(observations),
         "deduped_candidate_observation_rows": len(rows_by_key),
         "denominator": denominator,
         "matured_volume_context": {
@@ -630,6 +700,7 @@ def self_test():
             hours=1,
             expected_candidates=3,
             context_carrier="current_all",
+            max_scan_rows=300_000,
             kline_limit=125,
             limit=10,
             now_ts=now,
@@ -655,6 +726,7 @@ def parse_args(argv=None):
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--context-carrier", default=DEFAULT_CONTEXT_CARRIER)
+    parser.add_argument("--max-scan-rows", type=int, default=DEFAULT_MAX_SCAN_ROWS)
     parser.add_argument("--kline-limit", type=int, default=125)
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--now-ts", type=int, default=None)
