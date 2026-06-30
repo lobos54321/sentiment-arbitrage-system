@@ -335,6 +335,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "markov_bucket_coverage_below_80pct",
     }
     final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
+    volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -398,6 +399,39 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         },
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
+        "volume_kline_root_cause_audit": {
+            "available": bool(volume_kline_audit),
+            "overall": volume_kline_audit.get("overall") or {},
+            "volume_context": {
+                key: (volume_kline_audit.get("volume_context") or {}).get(key)
+                for key in (
+                    "rows_scanned",
+                    "field_present_rate",
+                    "known_rate",
+                    "missing_rate",
+                    "unknown_rate",
+                    "value_counts",
+                    "blocker",
+                    "root_causes",
+                    "missing_or_unknown_breakdown",
+                )
+            },
+            "raw_gold_silver_kline": {
+                key: (volume_kline_audit.get("raw_gold_silver_kline") or {}).get(key)
+                for key in (
+                    "raw_all_gold_silver_event_rows",
+                    "raw_all_gold_silver_unique_tokens",
+                    "kline_covered_rows",
+                    "kline_uncovered_rows",
+                    "kline_coverage_rate",
+                    "coverage_reason_counts_uncovered",
+                    "first_bar_lag_bucket_counts_uncovered",
+                    "early_15m_complete_rate",
+                    "primary_denominator_drop_reason_counts",
+                    "blocker",
+                )
+            },
+        },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
             (readiness_reports.get("a_class_fastlane_mode_audit") or {}).get("final_entry_contract_blocker_breakdown")

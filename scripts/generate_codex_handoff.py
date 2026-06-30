@@ -221,6 +221,7 @@ def build_handoff(verdict):
             {
                 "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
                 "kline_coverage": verdict.get("kline_coverage") or {},
+                "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
