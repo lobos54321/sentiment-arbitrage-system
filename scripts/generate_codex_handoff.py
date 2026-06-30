@@ -356,6 +356,17 @@ def self_test():
                     }
                 ],
             },
+            "readiness_gap_priority": {
+                "current_shortfall_to_60": 6,
+                "categories_ranked_by_optimistic_readiness_gain": [
+                    {
+                        "category": "QUALITY_OR_TIMING_REJECT",
+                        "optimistic_mode_adjusted_final_eligibility_rate_if_all_bridged": 0.5,
+                        "requires_final_entry_contract_eval": True,
+                    }
+                ],
+                "promotion_allowed": False,
+            },
         },
         "hypothesis_validation_audit": {
             "available": True,
@@ -378,6 +389,7 @@ def self_test():
     assert "Hypothesis Validation" in text
     assert "Entry Funnel Gap" in text
     assert "QUALITY_OR_TIMING_REJECT" in text
+    assert "readiness_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Readiness Summaries" in text
     verdict["blockers"] = []

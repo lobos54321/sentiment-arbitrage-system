@@ -459,6 +459,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pending_without_final_entry_category_counts": (
                 pending_to_final_gap.get("pending_without_final_entry_category_counts") or {}
             ),
+            "readiness_gap_priority": pending_to_final_gap.get("readiness_gap_priority") or {},
             "automatic_runtime_change_allowed": False,
             "strategy_change_allowed": False,
             "paper_enablement_allowed": False,

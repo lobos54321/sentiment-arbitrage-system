@@ -505,6 +505,61 @@ def categorize_pending_to_final_gap(reason_counts):
     }
 
 
+def readiness_gap_priority(raw_signals, mode_disabled_only, final_entry_contract, pending_gap_categories):
+    target_count = int(math.ceil(float(raw_signals or 0) * 0.6)) if raw_signals else None
+    current_shortfall = None if target_count is None else max(0, target_count - int(mode_disabled_only or 0))
+    categories = []
+    for item in (pending_gap_categories or {}).get("categories") or []:
+        count = safe_int(item.get("count"), 0) or 0
+        optimistic_mode_adjusted = int(mode_disabled_only or 0) + count
+        optimistic_final_contract = int(final_entry_contract or 0) + count
+        categories.append(
+            {
+                "category": item.get("category"),
+                "count": count,
+                "share_of_pending_without_final": item.get("share_of_pending_without_final"),
+                "current_mode_disabled_adjusted_final_eligibility_count": int(mode_disabled_only or 0),
+                "optimistic_mode_adjusted_final_eligibility_count_if_all_bridged": optimistic_mode_adjusted,
+                "optimistic_mode_adjusted_final_eligibility_rate_if_all_bridged": rate(optimistic_mode_adjusted, raw_signals),
+                "optimistic_final_entry_contract_count_if_all_bridged": optimistic_final_contract,
+                "optimistic_final_entry_contract_rate_if_all_bridged": rate(optimistic_final_contract, raw_signals),
+                "remaining_shortfall_to_60_if_all_bridged": (
+                    None if target_count is None else max(0, target_count - optimistic_mode_adjusted)
+                ),
+                "can_reach_60_alone_under_optimistic_assumption": (
+                    False if target_count is None else optimistic_mode_adjusted >= target_count
+                ),
+                "evidence_level": "optimistic_readiness_upper_bound_not_policy_change",
+                "requires_final_entry_contract_eval": True,
+                "promotion_allowed": False,
+                "automatic_allowed_scope": item.get("automatic_allowed_scope"),
+                "human_approval_required_if_fix_requires": item.get("human_approval_required_if_fix_requires"),
+                "top_reasons": item.get("top_reasons") or [],
+            }
+        )
+    categories.sort(
+        key=lambda item: (
+            item["remaining_shortfall_to_60_if_all_bridged"] if item["remaining_shortfall_to_60_if_all_bridged"] is not None else 10**9,
+            -item["count"],
+            item.get("category") or "",
+        )
+    )
+    return {
+        "target": "mode_disabled_adjusted_final_eligibility_rate >= 0.60",
+        "denominator_raw_signal_ids": raw_signals,
+        "target_count_60pct": target_count,
+        "current_mode_disabled_adjusted_final_eligibility_count": mode_disabled_only,
+        "current_final_entry_contract_count": final_entry_contract,
+        "current_shortfall_to_60": current_shortfall,
+        "categories_ranked_by_optimistic_readiness_gain": categories,
+        "interpretation": "Upper bounds only. Bridging a category would still require final_entry_contract evaluation; strategy, mode, gate, executor, and risk changes require human approval.",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+    }
+
+
 def build_capture_stage_rates(raw_snapshot, final_contract):
     raw_events = safe_int(raw_snapshot.get("raw_gold_silver_events"), 0)
     raw_signals = safe_int(raw_snapshot.get("raw_signal_ids"), 0) or raw_events
@@ -540,6 +595,12 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     mode_adjusted_rate = rate(mode_disabled_only, raw_signals) if scoped_mode_disabled_only_available else None
     pending_reason_counts = raw_snapshot.get("pending_without_final_entry_reason_counts") or []
     pending_gap_categories = categorize_pending_to_final_gap(pending_reason_counts)
+    readiness_priority = readiness_gap_priority(
+        raw_signals,
+        mode_disabled_only,
+        final_entry_contract,
+        pending_gap_categories,
+    )
     readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
     if scoped_mode_disabled_only_available:
         readiness_status = (
@@ -594,6 +655,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             )
             or [],
             "pending_without_final_entry_category_counts": pending_gap_categories,
+            "readiness_gap_priority": readiness_priority,
         },
         "mode_disabled_adjusted_final_eligibility": {
             "status": readiness_status,
