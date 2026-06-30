@@ -1500,22 +1500,23 @@ def run_reports(run_dir, args):
     ))
     if quality_timing_research_path.exists():
         readiness_paths["quality_timing_reject_research_audit"] = quality_timing_research_path
+    context_monitor_cmd = [
+        "scripts/context_blocker_monitor.py",
+        "--db", args.paper_db,
+        "--raw-db", args.raw_db,
+        "--hours", str(primary_hours),
+        "--out", str(context_blocker_monitor_path),
+    ]
     if int(args.quote_fix_deploy_ts or 0) > 0:
-        diagnostics.append(run_report(
-            "context_blocker_monitor",
-            [
-                "scripts/context_blocker_monitor.py",
-                "--db", args.paper_db,
-                "--raw-db", args.raw_db,
-                "--hours", str(primary_hours),
-                "--deploy-ts", str(int(args.quote_fix_deploy_ts)),
-                "--out", str(context_blocker_monitor_path),
-            ],
-            context_blocker_monitor_path,
-            timeout=args.report_timeout_sec,
-        ))
-        if context_blocker_monitor_path.exists():
-            readiness_paths["context_blocker_monitor"] = context_blocker_monitor_path
+        context_monitor_cmd.extend(["--deploy-ts", str(int(args.quote_fix_deploy_ts))])
+    diagnostics.append(run_report(
+        "context_blocker_monitor",
+        context_monitor_cmd,
+        context_blocker_monitor_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if context_blocker_monitor_path.exists():
+        readiness_paths["context_blocker_monitor"] = context_blocker_monitor_path
     diagnostics.append(run_report(
         "a_class_fastlane_mode_readiness_audit",
         [

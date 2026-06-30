@@ -329,8 +329,10 @@ def build_report(args):
     now_ts = int(args.now_ts or utc_now_ts())
     rolling_since = now_ts - int(float(args.hours) * 3600)
     deploy_ts = int(args.deploy_ts or 0)
+    deploy_ts_source = "provided"
     if deploy_ts <= 0:
-        raise SystemExit("--deploy-ts is required for clean-window monitoring")
+        deploy_ts = rolling_since
+        deploy_ts_source = "rolling_window_start_fallback"
 
     paper_db = sqlite3.connect(args.db)
     paper_db.row_factory = sqlite3.Row
@@ -426,6 +428,9 @@ def build_report(args):
             "report_type": "context_blocker_monitor",
             "generated_at": now_ts,
             "generated_at_iso": iso(now_ts),
+            "deploy_ts": deploy_ts,
+            "deploy_ts_iso": iso(deploy_ts),
+            "deploy_ts_source": deploy_ts_source,
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "canonical_backfill_performed": False,
@@ -703,6 +708,20 @@ def self_test():
         summary = compact_summary(report)
         assert summary["task_e"]["lifecycle_profile_effective_present_rate"] == 1.0
         assert report["promotion_allowed"] is False
+        fallback_args = argparse.Namespace(
+            db=str(paper),
+            raw_db=str(raw),
+            hours=1,
+            deploy_ts=0,
+            now_ts=now,
+            context_carrier="current_all",
+            expected_commit=EXPECTED_COMMIT,
+            mature_context_min_age_sec=MATURE_CONTEXT_MIN_AGE_SEC,
+            min_mature_context_rows=MATURE_CONTEXT_MIN_ROWS,
+        )
+        fallback_report = build_report(fallback_args)
+        assert fallback_report["deploy_ts_source"] == "rolling_window_start_fallback"
+        assert fallback_report["promotion_allowed"] is False
     print("SELF_TEST_PASS context_blocker_monitor")
 
 

@@ -1063,6 +1063,31 @@ def compute_kline_features(bars, signal_ts_sec, now_sec):
     return features
 
 
+CONTEXT_DEFAULTS = {
+    "source_quote_clean": False,
+    "source_quote_clean_seen": False,
+    "source_quote_executable": False,
+    "source_quote_executable_proxy": False,
+    "quote_context_applicable": True,
+    "source_quote_context_applicable": True,
+    "quote_context_writer_path": "candidate_shadow_observer:inferred",
+    "source_component": "NO_SOURCE_CONTEXT:NONE",
+    "source_component_context_applicable": True,
+    "source_component_writer_path": "candidate_shadow_observer:default_no_source_context",
+    "lifecycle_state": "NO_LIFECYCLE_CONTEXT",
+    "entry_bias": "NONE",
+    "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE",
+    "lifecycle_context_writer_path": "candidate_shadow_observer:default_no_lifecycle_context",
+}
+
+
+def apply_context_defaults(features):
+    for key, default in CONTEXT_DEFAULTS.items():
+        if features.get(key) in (None, ""):
+            features[key] = default
+    return features
+
+
 def extract_signal_features(row, kline_features, source_features=None):
     text = "\n".join(str(row[key] or "") for key in ("description", "raw_message"))
     signal_ts = normalize_ts_sec(row["timestamp"]) or normalize_ts_sec(row["receive_ts"])
@@ -1100,20 +1125,7 @@ def extract_signal_features(row, kline_features, source_features=None):
         "signal_price": signal_price,
         "signal_price_seen": bool(signal_price and signal_price > 0),
         "signal_price_positive": bool(signal_price and signal_price > 0),
-        "source_quote_clean": False,
-        "source_quote_clean_seen": False,
-        "source_quote_executable": False,
-        "source_quote_executable_proxy": False,
-        "quote_context_applicable": True,
-        "source_quote_context_applicable": True,
-        "quote_context_writer_path": "candidate_shadow_observer:inferred",
-        "source_component": "NO_SOURCE_CONTEXT:NONE",
-        "source_component_context_applicable": True,
-        "source_component_writer_path": "candidate_shadow_observer:default_no_source_context",
-        "lifecycle_state": "NO_LIFECYCLE_CONTEXT",
-        "entry_bias": "NONE",
-        "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE",
-        "lifecycle_context_writer_path": "candidate_shadow_observer:default_no_lifecycle_context",
+        **CONTEXT_DEFAULTS,
         "super_index": super_index,
         "status_has_reclaim": "RECLAIM" in status,
         "status_has_no_kline": "KLINE" in status or "UNKNOWN_DATA" in status,
@@ -1121,7 +1133,7 @@ def extract_signal_features(row, kline_features, source_features=None):
     }
     features.update(kline_features)
     features.update(source_features or {})
-    return features
+    return apply_context_defaults(features)
 
 
 def reason_for_missing(*parts):
@@ -2037,6 +2049,52 @@ def self_test():
     assert inferred_payload["entry_bias"] == "NONE"
     assert inferred_payload["lifecycle_profile"] == "NO_LIFECYCLE_CONTEXT:NONE"
     assert inferred_payload["lifecycle_context_writer_path"] == "candidate_shadow_observer:default_no_lifecycle_context"
+    null_context_payload = payload_for(
+        extract_signal_features(
+            {
+                "id": 101,
+                "token_ca": "NULLCTX",
+                "symbol": "NULLCTX",
+                "timestamp": 1_772_000_000_000,
+                "receive_ts": 1_772_000_000_000,
+                "signal_type": "NEW_TRENDING",
+                "is_ath": 0,
+                "market_cap": 12000,
+                "holders": 150,
+                "volume_24h": 50000,
+                "top10_pct": 24,
+                "ai_confidence": 70,
+                "ai_narrative_tier": "A",
+                "narrative_score": 1.0,
+                "description": "MC: $12K",
+                "raw_message": "",
+                "hard_gate_status": "PASS",
+                "signal_source": "premium_channel_ath",
+            },
+            {},
+            {
+                "source_component": None,
+                "source_component_writer_path": None,
+                "source_quote_clean": None,
+                "source_quote_clean_seen": None,
+                "source_quote_executable": None,
+                "source_quote_executable_proxy": None,
+                "lifecycle_state": None,
+                "entry_bias": None,
+                "lifecycle_profile": None,
+            },
+        ),
+        {"candidate_id": "current_all", "family": "base", "mode_meta": None},
+        True,
+        "all_signals_denominator",
+    )
+    assert null_context_payload["source_component"] == "NO_SOURCE_CONTEXT:NONE"
+    assert null_context_payload["source_component_writer_path"] == "candidate_shadow_observer:default_no_source_context"
+    assert null_context_payload["source_quote_clean"] is False
+    assert null_context_payload["source_quote_clean_seen"] is False
+    assert null_context_payload["source_quote_executable"] is False
+    assert null_context_payload["source_quote_executable_proxy"] is False
+    assert null_context_payload["lifecycle_profile"] == "NO_LIFECYCLE_CONTEXT:NONE"
     source_payload = payload_for(
         extract_signal_features(
             {
