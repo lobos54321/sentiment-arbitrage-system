@@ -2030,15 +2030,19 @@ function getHypothesisRegistryPath() {
 function agentCaptureArtifactPaths() {
   const latestDir = join(getAgentRunsRoot(), 'latest');
   const agentLog = process.env.AGENT_CAPTURE_DISCOVERY_LOG || join(dirname(getPaperDbPath()), 'agent-capture-discovery.log');
+  const runnerStatus = process.env.AGENT_CAPTURE_DISCOVERY_RUNNER_STATUS
+    || join(dirname(getPaperDbPath()), 'agent-capture-discovery-runner-status.json');
   return {
     verdict: join(latestDir, 'reviewer_verdict.json'),
     summary: join(latestDir, 'run_summary.md'),
     handoff: join(getAgentHandoffsDir(), 'latest_codex_handoff.md'),
     registry: getHypothesisRegistryPath(),
     capture: join(latestDir, 'candidate_capture_discovery_24h.json'),
-    pnl: join(latestDir, 'candidate_pnl_cross_24h.json'),
+    pnl: join(latestDir, 'pnl_cross_secondary_24h.json'),
     markov_runtime: join(latestDir, 'candidate_virtual_markov_runtime_24h.json'),
     markov_kline: join(latestDir, 'candidate_virtual_markov_kline_24h.json'),
+    runtime_health: join(latestDir, 'runtime_health_snapshot_24h.json'),
+    runner_status: runnerStatus,
     tests: join(latestDir, 'tests.json'),
     log: agentLog,
   };
@@ -2078,6 +2082,205 @@ function agentArtifactStat(filePath) {
   }
 }
 
+function safeWriteAgentJson(filePath, payload) {
+  fs.mkdirSync(dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, filePath);
+}
+
+function processIsAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let agentCaptureLoopRunner = {
+  running: false,
+  pid: null,
+  started_at: null,
+  run_id: null,
+};
+
+function readAgentCaptureLoopRunnerStatus() {
+  const paths = agentCaptureArtifactPaths();
+  const status = safeReadAgentJson(paths.runner_status);
+  if (!status || status.error_code) {
+    return {
+      schema_version: 'agent_capture_loop_runner_status.v1',
+      available: false,
+      running: Boolean(agentCaptureLoopRunner.running && processIsAlive(agentCaptureLoopRunner.pid)),
+      pid: agentCaptureLoopRunner.pid || null,
+    };
+  }
+  const startedMs = Date.parse(status.started_at || '');
+  const ageMs = Number.isFinite(startedMs) ? Date.now() - startedMs : null;
+  const staleRunning = Boolean(status.running && ageMs != null && ageMs > 3 * 60 * 60 * 1000);
+  const running = Boolean(status.running && !staleRunning && processIsAlive(status.pid));
+  return {
+    ...status,
+    available: true,
+    running,
+    stale_running_status: staleRunning,
+    age_minutes: ageMs == null ? null : +(ageMs / 60000).toFixed(2),
+    pid_alive: processIsAlive(status.pid),
+  };
+}
+
+function sanitizeCaptureHours(value, primaryHours) {
+  const fallback = String(primaryHours || 24);
+  const raw = String(value || fallback).split(',');
+  const out = [];
+  for (const item of raw) {
+    const parsed = parseInt(item.trim(), 10);
+    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 168 && !out.includes(parsed)) {
+      out.push(parsed);
+    }
+  }
+  return out.length ? out.join(',') : fallback;
+}
+
+function triggerAgentCaptureDiscoveryLoop(url) {
+  const paths = agentCaptureArtifactPaths();
+  const current = readAgentCaptureLoopRunnerStatus();
+  if (current.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      runner: current,
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    };
+  }
+
+  const hours = boundedIntParam(url, 'hours', 24, 1, 168);
+  const captureHours = sanitizeCaptureHours(url.searchParams.get('capture_hours') || url.searchParams.get('capture-hours'), hours);
+  const expectedCandidates = boundedIntParam(url, 'expected_candidates', 84, 1, 200);
+  const reportTimeoutSec = boundedIntParam(url, 'report_timeout_sec', 600, 30, 3600);
+  const testTimeoutSec = boundedIntParam(url, 'test_timeout_sec', 120, 30, 600);
+  const maxScanRows = boundedIntParam(url, 'max_scan_rows', 2000000, 1000, 5000000);
+  const quoteFixDeployTs = parseUnixishTime(url.searchParams.get('quote_fix_deploy_ts')) || 0;
+  const oosProbeHours = String(url.searchParams.get('oos_probe_hours') || '0.25,0.5,1')
+    .replace(/[^0-9.,]/g, '')
+    .slice(0, 80) || '0.25,0.5,1';
+  const timeoutMs = boundedIntParam(url, 'timeout_sec', 1800, 60, 7200) * 1000;
+  const runId = `api_${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}_${randomUUID().slice(0, 8)}`;
+  const startedAt = new Date().toISOString();
+  const args = [
+    'scripts/agent_capture_discovery_loop.py',
+    '--paper-db', getPaperDbPath(),
+    '--raw-db', getRawSignalOutcomesDbPath(),
+    '--kline-db', getKlineCacheDbPath(),
+    '--data-dir', dirname(getPaperDbPath()),
+    '--hours', String(hours),
+    '--capture-hours', captureHours,
+    '--expected-candidates', String(expectedCandidates),
+    '--report-timeout-sec', String(reportTimeoutSec),
+    '--test-timeout-sec', String(testTimeoutSec),
+    '--max-scan-rows', String(maxScanRows),
+    '--oos-probe-hours', oosProbeHours,
+    '--max-runs', '1',
+  ];
+  if (quoteFixDeployTs > 0) {
+    args.push('--quote-fix-deploy-ts', String(quoteFixDeployTs));
+  }
+
+  fs.mkdirSync(dirname(paths.log), { recursive: true });
+  fs.mkdirSync(dirname(paths.runner_status), { recursive: true });
+  const logStream = fs.createWriteStream(paths.log, { flags: 'a' });
+  writeRedactedLogStream(logStream, `[agent-capture-loop] ${startedAt} start run_id=${runId} python3 ${args.join(' ')}\n`);
+
+  const child = spawn('python3', args, {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  agentCaptureLoopRunner = {
+    running: true,
+    pid: child.pid,
+    started_at: startedAt,
+    run_id: runId,
+  };
+  const baseStatus = {
+    schema_version: 'agent_capture_loop_runner_status.v1',
+    run_id: runId,
+    running: true,
+    pid: child.pid,
+    started_at: startedAt,
+    finished_at: null,
+    command: ['python3', ...args],
+    log_path: paths.log,
+    latest_dir: join(getAgentRunsRoot(), 'latest'),
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
+    notes: [
+      'Read-only evaluator/report loop only.',
+      'Does not modify strategy, gates, A_CLASS, executor, wallet, or risk settings.',
+    ],
+  };
+  safeWriteAgentJson(paths.runner_status, baseStatus);
+
+  child.stdout.on('data', (chunk) => writeRedactedLogStream(logStream, chunk));
+  child.stderr.on('data', (chunk) => writeRedactedLogStream(logStream, chunk));
+
+  let finished = false;
+  const finish = (error, code, signal, timedOut = false) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeoutHandle);
+    const finishedAt = new Date().toISOString();
+    const status = {
+      ...baseStatus,
+      running: false,
+      finished_at: finishedAt,
+      exit_code: code ?? null,
+      signal: signal || null,
+      timed_out: Boolean(timedOut),
+      error: error ? error.message : null,
+    };
+    agentCaptureLoopRunner = {
+      running: false,
+      pid: child.pid,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      run_id: runId,
+    };
+    writeRedactedLogStream(logStream, `[agent-capture-loop] ${finishedAt} finish run_id=${runId} code=${code ?? ''} signal=${signal || ''} timed_out=${Boolean(timedOut)} error=${error?.message || ''}\n`);
+    try { safeWriteAgentJson(paths.runner_status, status); } catch {}
+    try { logStream.end(); } catch {}
+  };
+  const timeoutHandle = setTimeout(() => {
+    try { child.kill('SIGTERM'); } catch {}
+    finish(new Error(`timeout_after_${Math.floor(timeoutMs / 1000)}s`), null, 'SIGTERM', true);
+  }, timeoutMs);
+  child.on('error', (error) => finish(error, null, null, false));
+  child.on('exit', (code, signal) => finish(code === 0 ? null : new Error(`exit_${code ?? signal}`), code, signal, false));
+
+  return {
+    accepted: true,
+    status: 'started',
+    runner: readAgentCaptureLoopRunnerStatus(),
+    command: ['python3', ...args],
+    log_path: paths.log,
+    status_path: paths.runner_status,
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
+  };
+}
+
 function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const includeReports = Boolean(options.includeReports);
   const paths = agentCaptureArtifactPaths();
@@ -2088,6 +2291,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const verdict = safeReadAgentJson(paths.verdict);
   const registry = safeReadAgentJson(paths.registry);
   const tests = safeReadAgentJson(paths.tests);
+  const runner = readAgentCaptureLoopRunnerStatus();
   const required = ['verdict', 'summary', 'handoff', 'registry'];
   const missingRequired = required.filter((name) => !artifacts[name]?.available);
   const payload = {
@@ -2162,6 +2366,9 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       } : null,
       volume_profile_coverage: verdict.volume_profile_coverage || null,
       kline_coverage: verdict.kline_coverage || null,
+      runtime_health_status: verdict.runtime_health_status || null,
+      runtime_health_blockers: verdict.runtime_health_blockers || [],
+      runtime_health_warnings: verdict.runtime_health_warnings || [],
       A_CLASS_mode_status: verdict.A_CLASS_mode_status || null,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {
@@ -2200,9 +2407,10 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       passed: Boolean(tests.passed),
       result_count: Array.isArray(tests.results) ? tests.results.length : 0,
     } : { available: false },
+    runner_status: runner,
     notes: {
       read_only: true,
-      discovery_only: 'This endpoint only exposes materialized discovery artifacts. It does not run the loop or change trading policy.',
+      discovery_only: 'This endpoint only exposes materialized discovery artifacts and read-only runner status. It never changes trading policy.',
     },
   };
   if (includeReports) {
@@ -2214,6 +2422,8 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       pnl: safeReadAgentJson(paths.pnl),
       markov_runtime: safeReadAgentJson(paths.markov_runtime),
       markov_kline: safeReadAgentJson(paths.markov_kline),
+      runtime_health: safeReadAgentJson(paths.runtime_health),
+      runner_status: runner,
     };
   }
   return payload;
@@ -10801,6 +11011,47 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(snapshot.required_artifacts_complete ? 200 : 202, apiJsonHeaders());
     res.end(JSON.stringify(snapshot, null, 2));
     return;
+  } else if (url.pathname === '/api/agent/capture-discovery/run-status') {
+    if (!checkAuth(req, url, res)) return;
+    const snapshot = buildAgentCaptureDiscoveryLatestSnapshot({ includeReports: false });
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify({
+      schema_version: 'agent_capture_loop_run_status_api.v1',
+      generated_at: new Date().toISOString(),
+      runner_status: snapshot.runner_status,
+      verdict_summary: snapshot.verdict_summary,
+      artifacts: {
+        verdict: snapshot.artifacts.verdict,
+        summary: snapshot.artifacts.summary,
+        runtime_health: snapshot.artifacts.runtime_health,
+        runner_status: snapshot.artifacts.runner_status,
+        log: snapshot.artifacts.log,
+      },
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/agent/capture-discovery/run') {
+    if (!checkAuth(req, url, res)) return;
+    if (!requirePost(req, res)) return;
+    try {
+      const result = triggerAgentCaptureDiscoveryLoop(url);
+      res.writeHead(result.accepted ? 202 : 409, apiJsonHeaders());
+      res.end(JSON.stringify(result, null, 2));
+    } catch (error) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({
+        error: error.message,
+        error_code: 'agent_capture_loop_run_failed',
+        promotion_allowed: false,
+        strategy_change_allowed: false,
+        automatic_runtime_change_allowed: false,
+        paper_enablement_allowed: false,
+      }, null, 2));
+    }
+    return;
   } else if (url.pathname === '/api/data/download/agent-capture-discovery') {
     if (!checkAuth(req, url, res)) return;
     const aliases = {
@@ -10812,6 +11063,8 @@ const server = http.createServer(async (req, res) => {
       pnl_cross: 'pnl',
       markov_runtime: 'markov_runtime',
       markov_kline: 'markov_kline',
+      runtime_health: 'runtime_health',
+      runner_status: 'runner_status',
       self_tests: 'tests',
       agent_log: 'log',
     };
