@@ -336,6 +336,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     }
     final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
+    low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -435,6 +436,38 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "blocker",
                 )
             },
+        },
+        "low_confidence_research_capture_audit": {
+            "available": bool(low_confidence_audit),
+            "verdict": low_confidence_audit.get("verdict"),
+            "promotion_allowed": False,
+            "formal_denominator_changed": bool(low_confidence_audit.get("formal_denominator_changed")),
+            "denominator": {
+                "raw_all_gold_silver": (low_confidence_audit.get("denominator") or {}).get("raw_all_gold_silver"),
+                "formal_evaluable_gold_silver": (low_confidence_audit.get("denominator") or {}).get("formal_evaluable_gold_silver"),
+                "low_confidence_research_gold_silver": (low_confidence_audit.get("denominator") or {}).get("low_confidence_research_gold_silver"),
+                "low_confidence_31_60_gold_silver": (low_confidence_audit.get("denominator") or {}).get("low_confidence_31_60_gold_silver"),
+            },
+            "candidate_layer": {
+                key: (low_confidence_audit.get("candidate_layer") or {}).get(key)
+                for key in (
+                    "full_candidate_coverage_rate",
+                    "candidate_match_any_events",
+                    "candidate_match_any_rate",
+                    "top_candidates_by_low_confidence_raw_gs_match",
+                )
+            },
+            "decision_layer": {
+                key: (low_confidence_audit.get("decision_layer") or {}).get(key)
+                for key in (
+                    "decision_record_rate",
+                    "would_enter_rate",
+                    "entered_rate",
+                    "realized_rate",
+                    "terminal_bucket_counts",
+                )
+            },
+            "blockers": low_confidence_audit.get("blockers") or [],
         },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
@@ -547,6 +580,7 @@ def self_test():
     assert verdict["non_quote_sensitive_capture_discovery_allowed"] is True
     assert verdict["quote_sensitive_slices_blocked"] is False
     assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
+    assert verdict["low_confidence_research_capture_audit"]["available"] is False
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
     quote_blocked = build_verdict({
