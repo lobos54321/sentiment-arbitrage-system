@@ -1176,22 +1176,6 @@ def run_reports(run_dir, args):
     ))
     if quality_timing_research_path.exists():
         readiness_paths["quality_timing_reject_research_audit"] = quality_timing_research_path
-    diagnostics.append(run_report(
-        "a_class_fastlane_mode_readiness_audit",
-        [
-            "scripts/a_class_fastlane_mode_readiness_audit.py",
-            "--db", args.paper_db,
-            "--raw-funnel", str(raw_funnel_path),
-            "--context-coverage", str(context_coverage_path),
-            "--volume-kline-audit", str(volume_kline_audit_path),
-            "--hours", str(primary_hours),
-            "--out", str(a_class_fastlane_path),
-        ],
-        a_class_fastlane_path,
-        timeout=args.report_timeout_sec,
-    ))
-    if a_class_fastlane_path.exists():
-        readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
     if int(args.quote_fix_deploy_ts or 0) > 0:
         diagnostics.append(run_report(
             "context_blocker_monitor",
@@ -1208,6 +1192,23 @@ def run_reports(run_dir, args):
         ))
         if context_blocker_monitor_path.exists():
             readiness_paths["context_blocker_monitor"] = context_blocker_monitor_path
+    diagnostics.append(run_report(
+        "a_class_fastlane_mode_readiness_audit",
+        [
+            "scripts/a_class_fastlane_mode_readiness_audit.py",
+            "--db", args.paper_db,
+            "--raw-funnel", str(raw_funnel_path),
+            "--context-coverage", str(context_coverage_path),
+            "--volume-kline-audit", str(volume_kline_audit_path),
+            "--context-blocker-monitor", str(context_blocker_monitor_path),
+            "--hours", str(primary_hours),
+            "--out", str(a_class_fastlane_path),
+        ],
+        a_class_fastlane_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if a_class_fastlane_path.exists():
+        readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,

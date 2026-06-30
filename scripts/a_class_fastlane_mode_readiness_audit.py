@@ -349,26 +349,78 @@ def load_final_entry_contract_events(db, since_ts, until_ts):
     }
 
 
-def context_failed_conditions(context, volume_kline):
+def add_failed_condition(failed, condition, source, **extra):
+    if not condition:
+        return
+    if any(row.get("condition") == condition for row in failed):
+        return
+    row = {"condition": condition, "source": source}
+    row.update({key: value for key, value in extra.items() if value is not None})
+    failed.append(row)
+
+
+def context_failed_conditions(context, volume_kline, context_monitor=None):
     failed = []
+    context_monitor = context_monitor or {}
+    monitor_overall = context_monitor.get("overall_verdict") or {}
+    monitor_task_b = context_monitor.get("task_b_rolling_24h_quote_clean_window") or {}
+    monitor_task_d = context_monitor.get("task_d_context_field_coverage_audit") or {}
+    monitor_blockers = set(monitor_task_d.get("blockers") or [])
+    quote_window_pending = monitor_overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING"
+    context_writer_verified = monitor_overall.get("context_field_writer_fix") == "VERIFIED_POST_DEPLOY"
+    if quote_window_pending:
+        add_failed_condition(
+            failed,
+            "quote_clean_window_pending",
+            "context_blocker_monitor",
+            estimated_clean_at_iso=monitor_task_b.get("estimated_clean_at_iso"),
+            pre_fix_rows_remaining=monitor_task_b.get("pre_fix_rows_remaining"),
+        )
+    if context_writer_verified:
+        for blocker, pending_condition in (
+            ("lifecycle_profile_coverage_below_80pct", "lifecycle_profile_clean_window_pending"),
+            ("source_component_coverage_below_80pct", "source_component_clean_window_pending"),
+        ):
+            if blocker in monitor_blockers:
+                add_failed_condition(
+                    failed,
+                    pending_condition,
+                    "context_blocker_monitor",
+                    original_blocker=blocker,
+                )
     blockers = set((context.get("blockers") or []))
     for blocker in sorted(blockers):
         if blocker in {
             "source_quote_clean_coverage_below_80pct",
             "source_quote_executable_coverage_below_80pct",
+            "lifecycle_profile_coverage_below_80pct",
+            "source_component_coverage_below_80pct",
             "volume_profile_coverage_below_80pct",
             "kline_coverage_below_80pct",
             "schema_mixed_quote_sensitive_slices_blocked",
             "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
             "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
         }:
-            failed.append({"condition": blocker, "source": "context_coverage_audit"})
+            if quote_window_pending and blocker in {
+                "source_quote_clean_coverage_below_80pct",
+                "source_quote_executable_coverage_below_80pct",
+                "schema_mixed_quote_sensitive_slices_blocked",
+                "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+                "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+            }:
+                continue
+            if context_writer_verified and blocker in {
+                "lifecycle_profile_coverage_below_80pct",
+                "source_component_coverage_below_80pct",
+            }:
+                continue
+            add_failed_condition(failed, blocker, "context_coverage_audit")
     volume = volume_kline.get("volume_context") or {}
-    if volume.get("blocker") and not any(row["condition"] == volume.get("blocker") for row in failed):
-        failed.append({"condition": volume.get("blocker"), "source": "volume_kline_coverage_audit"})
+    if volume.get("blocker"):
+        add_failed_condition(failed, volume.get("blocker"), "volume_kline_coverage_audit")
     kline = volume_kline.get("raw_gold_silver_kline") or {}
-    if kline.get("blocker") and not any(row["condition"] == kline.get("blocker") for row in failed):
-        failed.append({"condition": kline.get("blocker"), "source": "volume_kline_coverage_audit"})
+    if kline.get("blocker"):
+        add_failed_condition(failed, kline.get("blocker"), "volume_kline_coverage_audit")
     return failed
 
 
@@ -1169,6 +1221,7 @@ def build_report(args):
     raw_funnel = load_json(args.raw_funnel)
     context = load_json(args.context_coverage)
     volume_kline = load_json(args.volume_kline_audit)
+    context_monitor = load_json(args.context_blocker_monitor)
     db = sqlite3.connect(args.db)
     db.row_factory = sqlite3.Row
     try:
@@ -1176,7 +1229,7 @@ def build_report(args):
         final_contract = load_final_entry_contract_events(db, since_ts, now_ts)
     finally:
         db.close()
-    failed = context_failed_conditions(context, volume_kline)
+    failed = context_failed_conditions(context, volume_kline, context_monitor)
     classification = classify(runtime, final_contract, failed)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
     capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
@@ -1203,6 +1256,7 @@ def build_report(args):
             "raw_funnel": args.raw_funnel,
             "context_coverage": args.context_coverage,
             "volume_kline_audit": args.volume_kline_audit,
+            "context_blocker_monitor": args.context_blocker_monitor,
         },
         "promotion_allowed": False,
         "strategy_change_allowed": False,
@@ -1246,6 +1300,13 @@ def build_report(args):
             "failed_conditions": failed,
             "context_coverage_loaded": bool(context),
             "volume_kline_audit_loaded": bool(volume_kline),
+            "context_blocker_monitor_loaded": bool(context_monitor),
+        },
+        "clean_window_monitor": {
+            "overall_verdict": context_monitor.get("overall_verdict") or {},
+            "quote_clean_window": context_monitor.get("task_b_rolling_24h_quote_clean_window") or {},
+            "context_field_coverage": context_monitor.get("task_d_context_field_coverage_audit") or {},
+            "post_deploy_context_smoke": context_monitor.get("task_e_context_field_post_deploy_smoke") or {},
         },
         "raw_funnel_snapshot": raw_snapshot,
         "capture_stage_rates": capture_stage_rates,
@@ -1318,6 +1379,7 @@ def self_test():
         db_path = root / "paper.db"
         raw_path = root / "raw_funnel.json"
         context_path = root / "context.json"
+        context_monitor_path = root / "context_monitor.json"
         volume_path = root / "volume.json"
         db = sqlite3.connect(db_path)
         db.execute(
@@ -1455,6 +1517,7 @@ def self_test():
             raw_funnel=str(raw_path),
             context_coverage=str(context_path),
             volume_kline_audit=str(volume_path),
+            context_blocker_monitor=None,
             hours=24,
             now_ts=now,
             out=None,
@@ -1518,6 +1581,32 @@ def self_test():
         assert "mode_disabled_adjusted_final_eligibility_below_60pct" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
         assert "paper_trade_entry_intent_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
         assert "paper_trade_committed_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        write_json(context_monitor_path, {
+            "overall_verdict": {
+                "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
+                "context_field_writer_fix": "VERIFIED_POST_DEPLOY",
+            },
+            "task_b_rolling_24h_quote_clean_window": {
+                "estimated_clean_at_iso": "2030-01-01T00:00:00Z",
+                "pre_fix_rows_remaining": 10,
+            },
+            "task_d_context_field_coverage_audit": {
+                "blockers": [
+                    "source_component_coverage_below_80pct",
+                    "lifecycle_profile_coverage_below_80pct",
+                ]
+            },
+        })
+        args.context_blocker_monitor = str(context_monitor_path)
+        report = build_report(args)
+        failed_conditions = {row["condition"] for row in report["clean_window_failed_conditions"]}
+        assert "quote_clean_window_pending" in failed_conditions
+        assert "source_component_clean_window_pending" in failed_conditions
+        assert "lifecycle_profile_clean_window_pending" in failed_conditions
+        assert "source_quote_clean_coverage_below_80pct" not in failed_conditions
+        assert report["clean_window_conditions"]["context_blocker_monitor_loaded"] is True
+        assert report["clean_window_monitor"]["overall_verdict"]["rolling24_quote_status"] == "QUOTE_CLEAN_WINDOW_PENDING"
+        args.context_blocker_monitor = None
         write_json(context_path, {"blockers": []})
         report = build_report(args)
         assert report["final_entry_status"] == "FUNNEL_BLOCKED_STUCK"
@@ -1532,6 +1621,7 @@ def parse_args(argv=None):
     parser.add_argument("--raw-funnel", default=None)
     parser.add_argument("--context-coverage", default=None)
     parser.add_argument("--volume-kline-audit", default=None)
+    parser.add_argument("--context-blocker-monitor", default=None)
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--now-ts", type=int, default=None)
     parser.add_argument("--out")
