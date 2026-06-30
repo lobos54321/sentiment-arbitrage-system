@@ -600,6 +600,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 key: (hypothesis_validation.get("matured_volume_hypothesis_validation") or {}).get(key)
                 for key in (
                     "registry_frozen_before_eval_window",
+                    "eval_window_quality",
                     "registered_hypothesis_count",
                     "found_in_current_report_count",
                     "repeated_watch_count",

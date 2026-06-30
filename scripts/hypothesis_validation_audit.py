@@ -17,6 +17,9 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = "hypothesis_validation_audit.v1"
+MIN_OOS_SIGNALS = 50
+MIN_OOS_RAW_GS_EVENTS = 10
+MIN_OOS_MATURED_VOLUME_KNOWN_RATE = 0.8
 
 
 def utc_now():
@@ -134,10 +137,52 @@ def is_repeated_watch(row):
     return (recall_lift is not None and recall_lift > 0) and (precision_lift is not None and precision_lift >= 0)
 
 
+def eval_window_quality(cross):
+    denominator = cross.get("denominator") or {}
+    evaluable = denominator.get("evaluable_gold_silver") or {}
+    matured_context = cross.get("matured_volume_context") or {}
+    overall = cross.get("overall") or {}
+    signals_scanned = cross.get("signals_scanned") or 0
+    raw_gs_events = evaluable.get("event_rows") or 0
+    known_rate = as_float(matured_context.get("known_rate"))
+    candidate_count_ok = cross.get("candidate_count_ok")
+    if candidate_count_ok is None:
+        expected = cross.get("candidate_count_expected")
+        observed = cross.get("candidate_count_observed")
+        candidate_count_ok = expected is not None and observed == expected
+    blockers = []
+    classification = overall.get("classification")
+    if classification and str(classification).startswith("BLOCKED_"):
+        blockers.append(f"cross_{classification}")
+    if not candidate_count_ok:
+        blockers.append("candidate_count_not_ok")
+    if signals_scanned < MIN_OOS_SIGNALS:
+        blockers.append("oos_signal_count_below_min")
+    if raw_gs_events < MIN_OOS_RAW_GS_EVENTS:
+        blockers.append("oos_raw_gs_event_count_below_min")
+    if known_rate is None or known_rate < MIN_OOS_MATURED_VOLUME_KNOWN_RATE:
+        blockers.append("oos_matured_volume_known_rate_below_min")
+    return {
+        "signals_scanned": signals_scanned,
+        "evaluable_raw_gs_event_rows": raw_gs_events,
+        "matured_volume_known_rate": known_rate,
+        "candidate_count_expected": cross.get("candidate_count_expected"),
+        "candidate_count_observed": cross.get("candidate_count_observed"),
+        "candidate_count_ok": bool(candidate_count_ok),
+        "cross_classification": classification,
+        "min_oos_signals": MIN_OOS_SIGNALS,
+        "min_oos_raw_gs_events": MIN_OOS_RAW_GS_EVENTS,
+        "min_oos_matured_volume_known_rate": MIN_OOS_MATURED_VOLUME_KNOWN_RATE,
+        "sufficient_for_oos_judgment": not blockers,
+        "blockers": blockers,
+    }
+
+
 def validate_matured_volume_hypotheses(registry, cross):
     hypotheses = registry.get("shadow_only_matured_volume_watch") or []
     indexed = index_matured_volume_slices(cross)
     window = cross.get("window") or {}
+    window_quality = eval_window_quality(cross)
     registry_updated_ts = parse_time(registry.get("updated_at"))
     eval_since_ts = parse_time(window.get("since_ts"))
     eval_until_ts = parse_time(window.get("until_ts"))
@@ -156,6 +201,11 @@ def validate_matured_volume_hypotheses(registry, cross):
         )
         current = indexed.get(key)
         repeated = is_repeated_watch(current)
+        oos_evaluable = bool(
+            frozen_before_eval
+            and window_quality["sufficient_for_oos_judgment"]
+            and current is not None
+        )
         rows.append(
             {
                 "hypothesis_id": item.get("hypothesis_id"),
@@ -167,13 +217,16 @@ def validate_matured_volume_hypotheses(registry, cross):
                 "current_found": current is not None,
                 "repeated_watch": repeated,
                 "registry_frozen_before_eval_window": frozen_before_eval,
-                "oos_evaluable": bool(frozen_before_eval and current is not None),
+                "oos_window_sufficient": window_quality["sufficient_for_oos_judgment"],
+                "oos_evaluable": oos_evaluable,
                 "promotion_allowed": False,
                 "status": (
                     "OOS_REPEATED_WATCH_PENDING_REVIEW"
-                    if frozen_before_eval and repeated
+                    if oos_evaluable and repeated
                     else "OOS_NO_REPEAT"
-                    if frozen_before_eval and current is not None
+                    if oos_evaluable and current is not None
+                    else "OOS_WINDOW_TOO_SMALL_NOT_EVALUATED"
+                    if frozen_before_eval and not window_quality["sufficient_for_oos_judgment"]
                     else "NOT_FOUND_IN_CURRENT_TOP_SLICES"
                     if current is None
                     else "SAME_WINDOW_REPEAT_NOT_OOS"
@@ -193,6 +246,7 @@ def validate_matured_volume_hypotheses(registry, cross):
             "until_ts": eval_until_ts,
             "hours": window.get("hours"),
         },
+        "eval_window_quality": window_quality,
         "registry_frozen_before_eval_window": frozen_before_eval,
         "registered_hypothesis_count": len(hypotheses),
         "found_in_current_report_count": found_count,
@@ -218,6 +272,9 @@ def build_report(args):
     elif not matured_volume_validation["registry_frozen_before_eval_window"]:
         classification = "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW"
         next_action = "wait_for_next_window_or_run_non_overlapping_eval"
+    elif not (matured_volume_validation.get("eval_window_quality") or {}).get("sufficient_for_oos_judgment"):
+        classification = "OOS_WINDOW_TOO_SMALL_CONTINUE_WAIT"
+        next_action = "continue_collecting_post_freeze_window_before_judging_oos_repeat"
     elif matured_volume_validation["oos_repeated_watch_count"] > 0:
         classification = "OOS_WATCH_REPEATED_PENDING_REVIEW"
         next_action = "keep_shadow_only_and_prepare_human_review_after_additional_window"
@@ -255,6 +312,7 @@ def compact_summary(report):
             key: validation.get(key)
             for key in (
                 "registry_frozen_before_eval_window",
+                "eval_window_quality",
                 "registered_hypothesis_count",
                 "found_in_current_report_count",
                 "repeated_watch_count",
@@ -291,6 +349,13 @@ def self_test():
         }
         cross = {
             "window": {"since_ts": 1782799200, "until_ts": 1782885600, "hours": 24},
+            "candidate_count_expected": 84,
+            "candidate_count_observed": 84,
+            "candidate_count_ok": True,
+            "signals_scanned": 200,
+            "denominator": {"evaluable_gold_silver": {"event_rows": 20}},
+            "matured_volume_context": {"known_rate": 0.95},
+            "overall": {"classification": "MATURED_VOLUME_DISCOVERY_WATCH"},
             "top_slices": [
                 {
                     "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
@@ -329,6 +394,15 @@ def self_test():
         write_json(registry_path, registry)
         report = build_report(args)
         assert report["overall"]["classification"] == "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW"
+
+        registry["updated_at"] = "2026-06-30T05:00:00Z"
+        cross["signals_scanned"] = 8
+        cross["denominator"] = {"evaluable_gold_silver": {"event_rows": 1}}
+        write_json(registry_path, registry)
+        write_json(cross_path, cross)
+        report = build_report(args)
+        assert report["overall"]["classification"] == "OOS_WINDOW_TOO_SMALL_CONTINUE_WAIT"
+        assert report["matured_volume_hypothesis_validation"]["eval_window_quality"]["sufficient_for_oos_judgment"] is False
     print("SELF_TEST_PASS hypothesis_validation_audit")
 
 
