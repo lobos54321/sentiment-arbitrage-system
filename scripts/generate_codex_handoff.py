@@ -601,6 +601,7 @@ def build_handoff(verdict):
                 "source_component_clean_window_pending": verdict.get("source_component_clean_window_pending"),
                 "context_clean_window_pending": verdict.get("context_clean_window_pending"),
                 "context_clean_window_eta_iso": verdict.get("context_clean_window_eta_iso"),
+                "context_clean_window_progress": verdict.get("context_clean_window_progress") or {},
                 "context_field_writer_fix_status": verdict.get("context_field_writer_fix_status"),
                 "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
                 "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
@@ -951,6 +952,7 @@ def self_test():
     assert "Markov Information Value" in text
     assert "candidate_source" in text
     assert "Readiness Summaries" in text
+    assert "context_clean_window_progress" in text
     assert "candidate_improvement_opportunities_summary" in text
     quote_pending_verdict = {
         **verdict,

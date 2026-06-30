@@ -165,6 +165,99 @@ def boolish(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def compact_context_field_progress(field_audit, field_name, blocker_name):
+    row = (field_audit or {}).get(field_name) or {}
+    mature = row.get("mature_context") or {}
+    return {
+        "field": field_name,
+        "blocker": blocker_name,
+        "denominator_rows": row.get("denominator_rows"),
+        "effective_present_rate": row.get("effective_present_rate"),
+        "present_rate": row.get("present_rate"),
+        "missing_rows": row.get("missing_rows"),
+        "unknown_rows": row.get("unknown_rows"),
+        "rows_needed_to_80pct": row.get("rows_needed_to_80pct"),
+        "target_effective_present_rate": row.get("target_effective_present_rate"),
+        "mature_context": {
+            "denominator_rows": mature.get("denominator_rows"),
+            "effective_present_rate": mature.get("effective_present_rate"),
+            "present_rate": mature.get("present_rate"),
+            "missing_rows": mature.get("missing_rows"),
+            "unknown_rows": mature.get("unknown_rows"),
+            "rows_needed_to_80pct": mature.get("rows_needed_to_80pct"),
+        },
+    }
+
+
+def build_context_clean_window_progress(
+    *,
+    blockers,
+    actionable_blockers,
+    context_clean_window_pending,
+    quote_clean_window_pending,
+    context_field_writer_fix_status,
+    quote_writer_fix_status,
+    context_monitor_clean_window,
+    context_monitor_field_audit,
+    context_monitor_field_smoke,
+):
+    field_blockers = {
+        "lifecycle_profile": "lifecycle_profile_coverage_below_80pct",
+        "source_component": "source_component_coverage_below_80pct",
+        "volume_profile": "volume_profile_coverage_below_80pct",
+        "markov_bucket": "markov_bucket_coverage_below_80pct",
+    }
+    fields = {
+        field: compact_context_field_progress(context_monitor_field_audit, field, blocker)
+        for field, blocker in field_blockers.items()
+    }
+    blocker_set = set(blockers or [])
+    waiting_fields = [
+        field for field, blocker in field_blockers.items()
+        if blocker in blocker_set
+    ]
+    actionable_set = set(actionable_blockers or [])
+    actionable_fields = [
+        field for field, blocker in field_blockers.items()
+        if blocker in actionable_set
+    ]
+    if context_clean_window_pending:
+        classification = "CONTEXT_CLEAN_WINDOW_PENDING"
+    elif waiting_fields:
+        classification = "CONTEXT_FIELDS_BLOCKED"
+    else:
+        classification = "CONTEXT_FIELDS_READY"
+    return {
+        "classification": classification,
+        "context_clean_window_pending": bool(context_clean_window_pending),
+        "quote_clean_window_pending": bool(quote_clean_window_pending),
+        "waiting_fields": waiting_fields,
+        "actionable_fields": actionable_fields,
+        "writer_status": {
+            "context_field_writer_fix_status": context_field_writer_fix_status,
+            "quote_writer_fix_status": quote_writer_fix_status,
+            "post_deploy_context_fields_healthy": boolish(
+                (context_monitor_field_smoke or {}).get("post_deploy_context_fields_healthy")
+            ),
+        },
+        "quote_clean_window": {
+            "classification": (context_monitor_clean_window or {}).get("classification"),
+            "pre_fix_rows_remaining": (context_monitor_clean_window or {}).get("pre_fix_rows_remaining"),
+            "post_fix_rows": (context_monitor_clean_window or {}).get("post_fix_rows"),
+            "rolling24_rows": (context_monitor_clean_window or {}).get("rolling24_rows"),
+            "estimated_clean_at_iso": (context_monitor_clean_window or {}).get("estimated_clean_at_iso"),
+            "seconds_until_natural_clean_window": (
+                (context_monitor_clean_window or {}).get("seconds_until_natural_clean_window")
+            ),
+        },
+        "fields": fields,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def runtime_commit():
     for key in (
         "ZEABUR_GIT_COMMIT_SHA",
@@ -1252,6 +1345,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_deploy_context_field_smoke_test": context_monitor_field_smoke,
             "reconciled_warnings": reconciled_context_warnings,
         },
+        "context_clean_window_progress": build_context_clean_window_progress(
+            blockers=blockers,
+            actionable_blockers=actionable_blockers,
+            context_clean_window_pending=context_clean_window_pending,
+            quote_clean_window_pending=quote_clean_window_pending,
+            context_field_writer_fix_status=context_field_writer_fix_status,
+            quote_writer_fix_status=quote_writer_fix_status,
+            context_monitor_clean_window=context_monitor_clean_window,
+            context_monitor_field_audit=context_monitor_field_audit,
+            context_monitor_field_smoke=context_monitor_field_smoke,
+        ),
         "runtime_health_snapshot": {
             "available": bool(runtime_health_snapshot),
             "status": runtime_health_snapshot.get("status"),
@@ -2059,6 +2163,24 @@ def self_test():
             },
             "task_e_post_deploy_context_field_smoke_test": {
                 "classification": "VERIFIED_POST_DEPLOY",
+                "post_deploy_context_fields_healthy": True,
+            },
+            "task_d_context_field_coverage_audit": {
+                "lifecycle_profile": {
+                    "denominator_rows": 10,
+                    "effective_present_rate": 0.7,
+                    "rows_needed_to_80pct": 1,
+                    "mature_context": {
+                        "denominator_rows": 5,
+                        "effective_present_rate": 0.6,
+                        "rows_needed_to_80pct": 1,
+                    },
+                },
+                "source_component": {
+                    "denominator_rows": 10,
+                    "effective_present_rate": 1.0,
+                    "rows_needed_to_80pct": 0,
+                },
             },
         }
     })
@@ -2068,6 +2190,11 @@ def self_test():
     assert lifecycle_pending["context_field_writer_fix_status"] == "VERIFIED_POST_DEPLOY"
     assert lifecycle_pending["top_blocker"] == "context_clean_window_pending"
     assert lifecycle_pending["top_formal_blocker"] == "lifecycle_profile_coverage_below_80pct"
+    context_progress = lifecycle_pending["context_clean_window_progress"]
+    assert context_progress["classification"] == "CONTEXT_CLEAN_WINDOW_PENDING"
+    assert context_progress["waiting_fields"] == ["lifecycle_profile"]
+    assert context_progress["fields"]["lifecycle_profile"]["rows_needed_to_80pct"] == 1
+    assert context_progress["automatic_runtime_change_allowed"] is False
     matured_volume_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "matured_volume_capture_cross_audit": {
             "overall": {
