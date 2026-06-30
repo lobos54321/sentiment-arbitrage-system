@@ -818,6 +818,12 @@ def main():
     parser.add_argument("--capture", required=False)
     parser.add_argument("--pnl", default=None)
     parser.add_argument("--markov", action="append", default=[], help="profile:path")
+    parser.add_argument(
+        "--readiness",
+        action="append",
+        default=[],
+        help="name:path readiness/report artifact, e.g. a_class_fastlane_mode_audit:/app/data/agent_runs/latest/a_class_fastlane_mode_audit_24h.json",
+    )
     parser.add_argument("--tests", default=None)
     parser.add_argument("--out", default="data/agent_runs/latest/reviewer_verdict.json")
     parser.add_argument("--self-test", action="store_true")
@@ -833,8 +839,20 @@ def main():
             raise SystemExit(f"invalid --markov value {item!r}; expected profile:path")
         name, path = item.split(":", 1)
         markov_reports[name] = load_json(path)
+    readiness_reports = {}
+    for item in args.readiness:
+        if ":" not in item:
+            raise SystemExit(f"invalid --readiness value {item!r}; expected name:path")
+        name, path = item.split(":", 1)
+        readiness_reports[name] = load_json(path)
     tests = load_json(args.tests) if args.tests else {}
-    verdict = build_verdict(load_json(args.capture), load_json(args.pnl) if args.pnl else None, markov_reports, tests=tests)
+    verdict = build_verdict(
+        load_json(args.capture),
+        load_json(args.pnl) if args.pnl else None,
+        markov_reports,
+        tests=tests,
+        readiness_reports=readiness_reports,
+    )
     write_json(args.out, verdict)
     print(json.dumps({"out": args.out, "classification": verdict["classification"], "blockers": verdict["blockers"]}, sort_keys=True))
 
