@@ -1833,6 +1833,25 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
         classification = "QUALITY_TIMING_PROBES_NOT_REPEATED_CURRENT_WINDOW"
         next_action = "continue_monitoring_registered_shadow_probes"
 
+    denominator = {
+        "registered_probe_count": len(probes),
+        "current_quality_timing_cluster_count": len(clusters),
+        "validated_probe_count": len(rows),
+        "repeated_probe_count": status_counts.get("REPEATED_SHADOW_PROBE", 0),
+        "cluster_repeated_candidate_not_top_count": status_counts.get(
+            "CLUSTER_REPEATED_CANDIDATE_NOT_TOP",
+            0,
+        ),
+        "not_observed_current_window_count": status_counts.get(
+            "NOT_OBSERVED_CURRENT_WINDOW",
+            0,
+        ),
+        "repeated_probe_rate": safe_rate(
+            status_counts.get("REPEATED_SHADOW_PROBE", 0),
+            len(probes),
+        ),
+    }
+
     return {
         "schema_version": "quality_timing_candidate_probe_validation.v1",
         "report_type": "quality_timing_candidate_probe_validation_24h",
@@ -1844,24 +1863,12 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
-        "denominator": {
-            "registered_probe_count": len(probes),
-            "current_quality_timing_cluster_count": len(clusters),
-            "validated_probe_count": len(rows),
-            "repeated_probe_count": status_counts.get("REPEATED_SHADOW_PROBE", 0),
-            "cluster_repeated_candidate_not_top_count": status_counts.get(
-                "CLUSTER_REPEATED_CANDIDATE_NOT_TOP",
-                0,
-            ),
-            "not_observed_current_window_count": status_counts.get(
-                "NOT_OBSERVED_CURRENT_WINDOW",
-                0,
-            ),
-            "repeated_probe_rate": safe_rate(
-                status_counts.get("REPEATED_SHADOW_PROBE", 0),
-                len(probes),
-            ),
-        },
+        "registered_probe_count": denominator["registered_probe_count"],
+        "current_quality_timing_cluster_count": denominator["current_quality_timing_cluster_count"],
+        "validated_probe_count": denominator["validated_probe_count"],
+        "repeated_probe_count": denominator["repeated_probe_count"],
+        "repeated_probe_rate": denominator["repeated_probe_rate"],
+        "denominator": denominator,
         "status_counts": dict(status_counts),
         "top_repeated_probes": repeated_rows[:12],
         "probe_validations": rows,
@@ -2802,6 +2809,13 @@ def self_test():
         quality_probe_validation = load_json(latest_dir / "quality_timing_candidate_probe_validation_24h.json")
         assert quality_probe_validation["promotion_allowed"] is False
         assert quality_probe_validation["strategy_change_allowed"] is False
+        assert quality_probe_validation["registered_probe_count"] == (
+            quality_probe_validation.get("denominator") or {}
+        ).get("registered_probe_count")
+        assert quality_probe_validation["repeated_probe_count"] == (
+            quality_probe_validation.get("denominator") or {}
+        ).get("repeated_probe_count")
+        assert "repeated_probe_rate" in quality_probe_validation
         assert "probe_validations" in quality_probe_validation
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
