@@ -762,6 +762,8 @@ def load_global_runtime_features(conn, token_ca, signal_ts_sec):
                 {
                     "matrix_bucket": matrix or features.get("matrix_bucket"),
                     "source_component": component,
+                    "source_component_context_applicable": True,
+                    "source_component_writer_path": "candidate_shadow_observer:a_class_decision_events",
                     "source_resonance_state": ":".join(str(x) for x in (component, reason) if x not in (None, "")),
                     "source_quote_clean": quote_clean,
                     "source_quote_clean_seen": quote_clean,
@@ -793,6 +795,8 @@ def load_global_runtime_features(conn, token_ca, signal_ts_sec):
             features.update(
                 {
                     "source_component": component,
+                    "source_component_context_applicable": True,
+                    "source_component_writer_path": "candidate_shadow_observer:opportunity_events",
                     "source_resonance_state": ":".join(str(x) for x in (component, reason) if x not in (None, "")),
                     "source_quote_clean": quote_clean,
                     "source_quote_clean_seen": quote_clean,
@@ -1103,6 +1107,9 @@ def extract_signal_features(row, kline_features, source_features=None):
         "quote_context_applicable": True,
         "source_quote_context_applicable": True,
         "quote_context_writer_path": "candidate_shadow_observer:inferred",
+        "source_component": "NO_SOURCE_CONTEXT:NONE",
+        "source_component_context_applicable": True,
+        "source_component_writer_path": "candidate_shadow_observer:default_no_source_context",
         "lifecycle_state": "NO_LIFECYCLE_CONTEXT",
         "entry_bias": "NONE",
         "lifecycle_profile": "NO_LIFECYCLE_CONTEXT:NONE",
@@ -1394,6 +1401,8 @@ def payload_for(features, candidate, matched, reason):
         "source_resonance_level",
         "source_resonance_score",
         "source_component",
+        "source_component_context_applicable",
+        "source_component_writer_path",
         "gmgn_pre_seen",
         "gmgn_lead_time_sec",
         "source_quote_clean",
@@ -2021,10 +2030,47 @@ def self_test():
     assert inferred_payload["quote_context_applicable"] is True
     assert inferred_payload["source_quote_context_applicable"] is True
     assert inferred_payload["quote_context_writer_path"] == "candidate_shadow_observer:inferred"
+    assert inferred_payload["source_component"] == "NO_SOURCE_CONTEXT:NONE"
+    assert inferred_payload["source_component_context_applicable"] is True
+    assert inferred_payload["source_component_writer_path"] == "candidate_shadow_observer:default_no_source_context"
     assert inferred_payload["lifecycle_state"] == "NO_LIFECYCLE_CONTEXT"
     assert inferred_payload["entry_bias"] == "NONE"
     assert inferred_payload["lifecycle_profile"] == "NO_LIFECYCLE_CONTEXT:NONE"
     assert inferred_payload["lifecycle_context_writer_path"] == "candidate_shadow_observer:default_no_lifecycle_context"
+    source_payload = payload_for(
+        extract_signal_features(
+            {
+                "id": 100,
+                "token_ca": "SOURCECA",
+                "symbol": "SOURCE",
+                "timestamp": 1_772_000_000_000,
+                "receive_ts": 1_772_000_000_000,
+                "signal_type": "NEW_TRENDING",
+                "is_ath": 0,
+                "market_cap": 12000,
+                "holders": 150,
+                "volume_24h": 50000,
+                "top10_pct": 24,
+                "ai_confidence": 70,
+                "ai_narrative_tier": "A",
+                "narrative_score": 1.0,
+                "description": "MC: $12K",
+                "raw_message": "",
+                "hard_gate_status": "PASS",
+                "signal_source": "premium_channel_ath",
+            },
+            {},
+            {
+                "source_component": "matrix_evaluator",
+                "source_component_writer_path": "candidate_shadow_observer:a_class_decision_events",
+            },
+        ),
+        {"candidate_id": "current_all", "family": "base", "mode_meta": None},
+        True,
+        "all_signals_denominator",
+    )
+    assert source_payload["source_component"] == "matrix_evaluator"
+    assert source_payload["source_component_writer_path"] == "candidate_shadow_observer:a_class_decision_events"
     missing_kline_features = compute_kline_features([], 1_000, 1_100)
     missing_kline_payload = payload_for(
         {**inferred_features, **missing_kline_features},
