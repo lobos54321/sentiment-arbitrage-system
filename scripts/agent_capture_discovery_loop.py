@@ -880,6 +880,8 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- strategy_change_allowed: `{str(bool(verdict.get('strategy_change_allowed'))).lower()}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
+        f"- formal_volume_sensitive_slices_blocked: `{str(bool(verdict.get('formal_volume_sensitive_slices_blocked'))).lower()}`",
+        f"- shadow_matured_volume_slices_evaluable: `{str(bool(verdict.get('shadow_matured_volume_slices_evaluable'))).lower()}`",
         "",
         "## Integrity",
         "",

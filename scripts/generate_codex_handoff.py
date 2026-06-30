@@ -75,7 +75,10 @@ def quote_clean_window_pending(verdict):
 
 
 def actionable_blockers(verdict):
-    blockers = list(verdict.get("actionable_blockers") or verdict.get("blockers") or [])
+    if "actionable_blockers" in verdict:
+        blockers = list(verdict.get("actionable_blockers") or [])
+    else:
+        blockers = list(verdict.get("blockers") or [])
     if quote_clean_window_pending(verdict):
         blockers = [blocker for blocker in blockers if blocker not in QUOTE_COVERAGE_BLOCKERS]
     return blockers
@@ -106,6 +109,8 @@ def build_handoff(verdict):
         f"- next_highest_priority_blocker: `{display_next_blocker}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
+        f"- formal_volume_sensitive_slices_blocked: `{str(bool(verdict.get('formal_volume_sensitive_slices_blocked'))).lower()}`",
+        f"- shadow_matured_volume_slices_evaluable: `{str(bool(verdict.get('shadow_matured_volume_slices_evaluable'))).lower()}`",
         f"- quote_writer_fix_status: `{verdict.get('quote_writer_fix_status')}`",
         f"- quote_clean_window_status: `{verdict.get('quote_clean_window_status')}`",
         f"- quote_clean_window_eta_iso: `{verdict.get('quote_clean_window_eta_iso')}`",
@@ -163,7 +168,12 @@ def build_handoff(verdict):
             if hint:
                 lines.append(f"- `{blocker}`: {hint}")
         lines.append("")
-    if any(blocker in {"volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"} for blocker in actionable):
+    volume_state = verdict.get("volume_profile_blocker_state") or {}
+    show_volume_kline = (
+        any(blocker in {"volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"} for blocker in actionable)
+        or bool(volume_state)
+    )
+    if show_volume_kline:
         volume_kline = verdict.get("volume_kline_root_cause_audit") or {}
         matured_recheck = verdict.get("matured_kline_volume_recheck_audit") or {}
         matured_cross = verdict.get("matured_volume_capture_cross_audit") or {}
@@ -211,6 +221,7 @@ def build_handoff(verdict):
                 "watch_slice_count": matured_cross.get("watch_slice_count"),
                 "next_research_action": matured_cross.get("next_research_action"),
             },
+            "volume_profile_blocker_state": volume_state,
         }
         lines.extend([
             "## Volume / Kline Root Cause",
@@ -660,6 +671,48 @@ def self_test():
     assert "missing_context_carrier_observation" in text
     assert "volume_profile_coverage_below_80pct" in text
     assert "`source_quote_clean_coverage_below_80pct`:" not in text
+    matured_volume_path_available_verdict = {
+        **quote_pending_verdict,
+        "blockers": [
+            "source_quote_clean_coverage_below_80pct",
+            "source_quote_executable_coverage_below_80pct",
+            "volume_profile_coverage_below_80pct",
+        ],
+        "actionable_blockers": [],
+        "next_highest_priority_blocker": None,
+        "formal_volume_sensitive_slices_blocked": True,
+        "shadow_matured_volume_slices_evaluable": True,
+        "volume_profile_blocker_state": {
+            "classification": "SHADOW_MATURED_VOLUME_PATH_AVAILABLE",
+            "formal_volume_slices_evaluable": False,
+            "shadow_matured_volume_slices_evaluable": True,
+            "recoverable_known_rate": 0.98,
+            "matured_volume_known_rate": 0.91,
+            "scope_reconciled": True,
+            "next_action": "continue_shadow_matured_volume_validation_without_formal_volume_promotion",
+            "promotion_allowed": False,
+        },
+        "matured_volume_capture_cross_audit": {
+            "overall": {
+                "classification": "MATURED_VOLUME_DISCOVERY_WATCH",
+                "promotion_allowed": False,
+            },
+            "signal_id_reconciliation": {
+                "raw_all_gold_silver": {
+                    "joined_event_rate": 0.32,
+                    "unjoined_reason_counts": {"outside_candidate_observer_window_before": 93},
+                }
+            },
+            "matured_volume_context": {"known_rate": 0.91},
+            "watch_slice_count": 3,
+        },
+    }
+    text = build_handoff(matured_volume_path_available_verdict)
+    assert "handoff_needed: `false`" in text
+    assert "Required Fixes" not in text
+    assert "Volume / Kline Root Cause" in text
+    assert "SHADOW_MATURED_VOLUME_PATH_AVAILABLE" in text
+    assert "shadow_matured_volume_slices_evaluable: `true`" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text
