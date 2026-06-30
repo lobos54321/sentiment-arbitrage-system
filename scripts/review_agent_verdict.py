@@ -90,6 +90,7 @@ DERIVED_READINESS_SIBLINGS = {
     "matured_volume_cross_oos_probe_0p25h": "matured_volume_capture_cross_audit_oos_probe_0p25h.json",
     "matured_volume_cross_oos_probe_0p5h": "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
+    "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
 }
 
 
@@ -279,6 +280,45 @@ def build_oos_readiness_summary(readiness_reports):
         "promotion_allowed": False,
         "human_action_required": False,
         "probes": probes,
+    }
+
+
+def compact_oos_probe_refresh(report):
+    if not report:
+        return {"available": False}
+    probes = []
+    for row in report.get("probes") or []:
+        cross = row.get("cross") or {}
+        validation = row.get("validation") or {}
+        probes.append({
+            "probe": row.get("probe"),
+            "cross_classification": cross.get("classification"),
+            "validation_classification": validation.get("classification"),
+            "signals_scanned": validation.get("signals_scanned") or cross.get("signals_scanned"),
+            "evaluable_raw_gs_event_rows": (
+                validation.get("evaluable_raw_gs_event_rows")
+                if validation.get("evaluable_raw_gs_event_rows") is not None
+                else cross.get("evaluable_raw_gs_event_rows")
+            ),
+            "matured_volume_known_rate": (
+                validation.get("matured_volume_known_rate")
+                if validation.get("matured_volume_known_rate") is not None
+                else cross.get("matured_volume_known_rate")
+            ),
+            "sufficient_for_oos_judgment": validation.get("sufficient_for_oos_judgment"),
+            "blockers": validation.get("blockers") or [],
+        })
+    return {
+        "available": True,
+        "classification": report.get("classification"),
+        "generated_at": report.get("generated_at"),
+        "failed_command_count": report.get("failed_command_count"),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "probe_count": len(probes),
+        "probes": probes,
+        "next_action": report.get("next_action"),
     }
 
 
@@ -749,6 +789,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     }
     hypothesis_validation = readiness_reports.get("hypothesis_validation_audit") or {}
     oos_readiness_summary = build_oos_readiness_summary(readiness_reports)
+    oos_probe_refresh = readiness_reports.get("oos_readiness_probe_refresh") or {}
     matured_volume_top_slices = [
         compact_matured_volume_slice(row)
         for row in (matured_volume_cross.get("top_slices") or [])[:10]
@@ -1170,6 +1211,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             },
         },
         "oos_readiness_summary": oos_readiness_summary,
+        "oos_probe_refresh_status": compact_oos_probe_refresh(oos_probe_refresh),
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),
             "verdict": low_confidence_audit.get("verdict"),
@@ -1925,6 +1967,34 @@ def self_test():
             },
             "promotion_allowed": False,
         })
+        write_json(root / "oos_readiness_probe_refresh.json", {
+            "schema_version": "refresh_oos_readiness_probes.v1",
+            "classification": "OOS_PROBES_REFRESHED",
+            "generated_at": "2026-06-30T00:00:00Z",
+            "failed_command_count": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "probes": [
+                {
+                    "probe": "0p1h",
+                    "cross": {
+                        "classification": "BLOCKED_MATURED_VOLUME_COVERAGE",
+                        "signals_scanned": 12,
+                        "evaluable_raw_gs_event_rows": 0,
+                        "matured_volume_known_rate": 0.416667,
+                    },
+                    "validation": {
+                        "classification": "OOS_WINDOW_TOO_SMALL_CONTINUE_WAIT",
+                        "signals_scanned": 12,
+                        "evaluable_raw_gs_event_rows": 0,
+                        "matured_volume_known_rate": 0.416667,
+                        "sufficient_for_oos_judgment": False,
+                        "blockers": ["oos_raw_gs_event_count_below_min"],
+                    },
+                }
+            ],
+        })
         siblings = load_sibling_readiness_reports(str(capture_path))
         assert siblings["candidate_effectiveness"]["candidate_count"] == 84
         assert siblings["candidate_improvement_opportunities"]["opportunity_count"] == 2
@@ -1932,6 +2002,7 @@ def self_test():
         assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
         assert siblings["hypothesis_validation_oos_probe_0p1h"]["overall"]["promotion_allowed"] is False
         assert siblings["matured_volume_cross_oos_probe_0p1h"]["overall"]["classification"] == "BLOCKED_MATURED_VOLUME_COVERAGE"
+        assert siblings["oos_readiness_probe_refresh"]["classification"] == "OOS_PROBES_REFRESHED"
         explicit = load_sibling_readiness_reports(str(capture_path), {
             "candidate_effectiveness": {"candidate_count": 1}
         })
@@ -1945,6 +2016,9 @@ def self_test():
         assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 1
         assert sibling_verdict["oos_readiness_summary"]["sufficient_probe_count"] == 0
         assert sibling_verdict["oos_readiness_summary"]["promotion_allowed"] is False
+        assert sibling_verdict["oos_probe_refresh_status"]["available"] is True
+        assert sibling_verdict["oos_probe_refresh_status"]["failed_command_count"] == 0
+        assert sibling_verdict["oos_probe_refresh_status"]["probes"][0]["probe"] == "0p1h"
     print("SELF_TEST_PASS review_agent_verdict")
 
 
