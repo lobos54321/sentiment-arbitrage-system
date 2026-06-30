@@ -606,6 +606,7 @@ def build_handoff(verdict):
                 "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
                 "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
                 "matured_volume_capture_cross_audit": verdict.get("matured_volume_capture_cross_audit") or {},
+                "matured_volume_watch_queue": verdict.get("matured_volume_watch_queue") or {},
                 "hypothesis_validation_audit": verdict.get("hypothesis_validation_audit") or {},
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
@@ -940,6 +941,25 @@ def self_test():
                 }
             ],
         },
+        "matured_volume_watch_queue": {
+            "classification": "MATURED_VOLUME_WATCH_QUEUE_READY",
+            "queue_count": 1,
+            "h1_status": "NO_H1_MATURED_VOLUME_HIT",
+            "promotion_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "items": [
+                {
+                    "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
+                    "candidate_family": "entry_mode_registry",
+                    "slice_value": "building",
+                    "status": "REVIEW_MATURED_VOLUME_DISCOVERY_WATCH",
+                    "promotion_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                }
+            ],
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
@@ -965,6 +985,8 @@ def self_test():
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "quality_timing_shadow_review_queue" in text
     assert "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY" in text
+    assert "matured_volume_watch_queue" in text
+    assert "MATURED_VOLUME_WATCH_QUEUE_READY" in text
     assert "Quality / Timing Candidate Probe Validation" in text
     assert "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW" in text
     assert "REPEATED_SHADOW_PROBE" in text

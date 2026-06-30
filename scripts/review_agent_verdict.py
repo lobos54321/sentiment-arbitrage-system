@@ -962,6 +962,55 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         row for row in matured_volume_top_slices
         if row.get("verdict") == "MATURED_VOLUME_DISCOVERY_WATCH"
     ]
+    matured_volume_watch_queue_items = []
+    for row in matured_volume_watch_slices[:10]:
+        if not isinstance(row, dict):
+            continue
+        matured_volume_watch_queue_items.append({
+            "candidate_id": row.get("candidate_id"),
+            "candidate_family": row.get("family"),
+            "dimension": row.get("dimension"),
+            "slice_value": row.get("slice_value"),
+            "matched_gs_count": row.get("matched_gs_count"),
+            "slice_raw_gs_count": row.get("slice_raw_gs_count"),
+            "slice_signal_count": row.get("slice_signal_count"),
+            "candidate_match_count": row.get("candidate_match_count"),
+            "match_recall_event": row.get("match_recall_event"),
+            "match_precision_event": row.get("match_precision_event"),
+            "recall_lift_vs_candidate_baseline": row.get("recall_lift_vs_candidate_baseline"),
+            "precision_lift_vs_candidate_baseline": row.get("precision_lift_vs_candidate_baseline"),
+            "status": "REVIEW_MATURED_VOLUME_DISCOVERY_WATCH",
+            "next_action": "track_same_definition_in_next_clean_window_then_oos_if_repeated",
+            "evidence_level": "discovery_same_window",
+            "time_legal_note": (
+                "matured volume is delayed research context; do not use as immediate entry evidence"
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    matured_volume_watch_queue = {
+        "classification": (
+            "MATURED_VOLUME_WATCH_QUEUE_READY"
+            if matured_volume_watch_queue_items
+            else "MATURED_VOLUME_WATCH_QUEUE_EMPTY"
+        ),
+        "queue_count": len(matured_volume_watch_queue_items),
+        "overall_classification": (matured_volume_cross.get("overall") or {}).get("classification"),
+        "next_research_action": matured_volume_cross.get("next_research_action"),
+        "h1_status": (matured_volume_cross.get("h1_matured_building_volume") or {}).get("status"),
+        "watch_slice_count": len(matured_volume_watch_slices),
+        "matured_volume_known_rate": (
+            (matured_volume_cross.get("matured_volume_context") or {}).get("known_rate")
+        ),
+        "formal_denominator_changed": bool(matured_volume_cross.get("formal_denominator_changed")),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "items": matured_volume_watch_queue_items,
+    }
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
@@ -1526,6 +1575,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "top_slices": matured_volume_top_slices,
             "top_watch_slices": matured_volume_watch_slices,
             "watch_slice_count": len(matured_volume_watch_slices),
+            "review_queue": matured_volume_watch_queue,
             "next_research_action": (
                 "review_non_h1_matured_volume_watch_slices"
                 if matured_volume_watch_slices
@@ -1533,6 +1583,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 else (matured_volume_cross.get("overall") or {}).get("next_action")
             ),
         },
+        "matured_volume_watch_queue": matured_volume_watch_queue,
         "hypothesis_validation_audit": {
             "available": bool(hypothesis_validation),
             "overall": hypothesis_validation.get("overall") or {},
@@ -2274,6 +2325,10 @@ def self_test():
     matured_volume = matured_volume_verdict["matured_volume_capture_cross_audit"]
     assert matured_volume["top_watch_slices"][0]["candidate_id"] == "entry_mode_registry:ath_flat_structure_tiny_scout"
     assert matured_volume["next_research_action"] == "review_non_h1_matured_volume_watch_slices"
+    assert matured_volume["review_queue"]["classification"] == "MATURED_VOLUME_WATCH_QUEUE_READY"
+    assert matured_volume["review_queue"]["items"][0]["candidate_id"] == "entry_mode_registry:ath_flat_structure_tiny_scout"
+    assert matured_volume["review_queue"]["items"][0]["automatic_runtime_change_allowed"] is False
+    assert matured_volume_verdict["matured_volume_watch_queue"]["queue_count"] == 1
     quality_timing_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "quality_timing_reject_research_audit": {
             "verdict": "QUALITY_TIMING_REJECT_RESEARCH_READY",
