@@ -499,6 +499,47 @@ NO_DECISION_ROOT_CAUSE_DESCRIPTIONS = {
 }
 
 
+NO_DECISION_SUBROOT_DESCRIPTIONS = {
+    "token_time_decision_nearby_signal_id_mismatch": (
+        "Decision-like events exist in the token/time window, but they are attached to a different signal_id."
+    ),
+    "token_time_decision_missing_signal_id": (
+        "Decision-like events exist in the token/time window, but the event source did not write signal_id."
+    ),
+    "shadow_entry_hypotheses_matched_no_decision_bridge": (
+        "Full candidate mesh observed the signal and one or more shadow entry hypotheses matched, but no decision event was written."
+    ),
+    "shadow_observation_only_matches_no_entry_hypothesis": (
+        "Full candidate mesh observed the signal, but matched rows were only baseline/context/readmodel candidates."
+    ),
+    "shadow_context_carrier_missing_or_unmatched": (
+        "Candidate rows exist but the current_all context carrier was missing or unmatched."
+    ),
+    "partial_shadow_observation_no_decision_event": (
+        "Candidate observations were incomplete and no decision event was written."
+    ),
+    "no_shadow_observation_or_decision_event": (
+        "No candidate observation and no decision-like event were found for the raw signal."
+    ),
+    "raw_event_missing_signal_id": "The raw dog row has no usable signal_id.",
+}
+
+
+NON_ENTRY_SHADOW_CANDIDATES = {
+    "current_all",
+    "current_would_enter_all",
+    "current_would_enter_no_enqueue",
+    "markov_yellow_or_green",
+    "notath_executable_quote_clean",
+    "runtime:entry_readiness_policy",
+    "runtime:entry_mode_registry",
+    "runtime:phase_policy",
+    "runtime:entry_audit_contract",
+    "lifecycle:stage2a_stop_loss_recovery",
+    "lifecycle:stage3_signal_awakening",
+}
+
+
 def _root_cause_rows(counter, descriptions, limit=20):
     return [
         {
@@ -508,6 +549,46 @@ def _root_cause_rows(counter, descriptions, limit=20):
         }
         for key, count in counter.most_common(limit)
     ]
+
+
+def _shadow_entry_hypothesis_candidate(row):
+    candidate_id = str(row.get("candidate_id") or "")
+    family = str(row.get("family") or "")
+    if candidate_id in NON_ENTRY_SHADOW_CANDIDATES:
+        return False
+    if candidate_id.startswith("runtime:") or candidate_id.startswith("historical:"):
+        return False
+    if candidate_id.startswith("lifecycle:stage2a") or candidate_id.startswith("lifecycle:stage3"):
+        return False
+    return family in {"base", "kline", "entry_mode_registry", "lifecycle"} or bool(candidate_id)
+
+
+def _classify_no_decision_subroot(root, signal_id, observations, token_time_decisions, expected_candidates):
+    if root == "token_time_decision_without_exact_signal_id":
+        signal_ids = {
+            str((_decision_summary(row) or {}).get("signal_id") or "")
+            for row in token_time_decisions or []
+            if (_decision_summary(row) or {}).get("signal_id")
+        }
+        if signal_ids:
+            return "token_time_decision_nearby_signal_id_mismatch"
+        return "token_time_decision_missing_signal_id"
+    if root == "raw_event_missing_signal_id":
+        return "raw_event_missing_signal_id"
+    if root == "partial_candidate_observation_no_decision_event":
+        return "partial_shadow_observation_no_decision_event"
+    if root == "no_candidate_observation_or_decision_event":
+        return "no_shadow_observation_or_decision_event"
+    if root != "candidate_shadow_observed_no_decision_event":
+        return root
+    current_all = next((row for row in observations or [] if row.get("candidate_id") == "current_all"), None)
+    if not current_all or not truthy(current_all.get("matched")):
+        return "shadow_context_carrier_missing_or_unmatched"
+    matched = [row for row in observations or [] if truthy(row.get("matched"))]
+    entry_matches = [row for row in matched if _shadow_entry_hypothesis_candidate(row)]
+    if entry_matches:
+        return "shadow_entry_hypotheses_matched_no_decision_bridge"
+    return "shadow_observation_only_matches_no_entry_hypothesis"
 
 
 def _choose_decision_no_pass_row(signal_rows):
@@ -591,6 +672,7 @@ def _attribute_no_decision_records(
     observations_by_signal = observations_by_signal or {}
     decisions_by_token = decisions_by_token or {}
     root_counts = Counter()
+    subroot_counts = Counter()
     examples = []
     token_time_joined = 0
     candidate_shadow_observed = 0
@@ -630,17 +712,49 @@ def _attribute_no_decision_records(
         else:
             root = "no_candidate_observation_or_decision_event"
             no_observation_or_decision += 1
+        subroot = _classify_no_decision_subroot(
+            root,
+            signal_id,
+            observations,
+            token_time_decisions,
+            expected_candidates,
+        )
         root_counts[root] += 1
+        subroot_counts[subroot] += 1
         if len(examples) < 20:
+            matched = [row for row in observations if truthy(row.get("matched"))]
+            entry_matches = [row for row in matched if _shadow_entry_hypothesis_candidate(row)]
+            current_would_enter = next(
+                (row for row in observations if row.get("candidate_id") == "current_would_enter_all"),
+                None,
+            )
             examples.append(
                 {
                     "signal_id": signal_id,
                     "token_ca": token or raw_row.get("token_ca"),
                     "root_cause": root,
+                    "subroot_cause": subroot,
                     "description": NO_DECISION_ROOT_CAUSE_DESCRIPTIONS.get(root),
+                    "subroot_description": NO_DECISION_SUBROOT_DESCRIPTIONS.get(subroot),
                     "candidate_observation_count": len(observations),
                     "unique_candidate_count": len(unique_candidates),
                     "matched_candidate_count": matched_count,
+                    "matched_entry_hypothesis_count": len(entry_matches),
+                    "matched_candidate_family_counts": dict(
+                        Counter(str(row.get("family") or "UNKNOWN") for row in matched)
+                    ),
+                    "matched_entry_hypothesis_sample": [
+                        {
+                            "candidate_id": row.get("candidate_id"),
+                            "family": row.get("family"),
+                            "reason": row.get("reason"),
+                        }
+                        for row in entry_matches[:12]
+                    ],
+                    "current_would_enter_all": {
+                        "matched": truthy(current_would_enter.get("matched")) if current_would_enter else None,
+                        "reason": current_would_enter.get("reason") if current_would_enter else None,
+                    },
                     "token_time_decision_count": len(token_time_decisions),
                     "token_time_decision_sample": [
                         _decision_summary(row) for row in token_time_decisions[:3]
@@ -651,6 +765,9 @@ def _attribute_no_decision_records(
     return {
         "no_decision_record_root_cause_counts": _root_cause_rows(
             root_counts, NO_DECISION_ROOT_CAUSE_DESCRIPTIONS
+        ),
+        "no_decision_record_subroot_cause_counts": _root_cause_rows(
+            subroot_counts, NO_DECISION_SUBROOT_DESCRIPTIONS
         ),
         "no_decision_record_examples": examples,
         "no_decision_token_time_decision_without_exact_signal_id": token_time_joined,
@@ -1567,6 +1684,7 @@ def compact_stdout_summary(report, out_path=None):
                 "raw_signals_with_final_entry_mode_disabled_only",
                 "raw_signals_with_final_entry_mode_disabled_plus_other",
                 "no_decision_record_root_cause_counts",
+                "no_decision_record_subroot_cause_counts",
                 "no_decision_token_time_decision_without_exact_signal_id",
                 "no_decision_candidate_shadow_observed_no_decision_event",
                 "no_decision_partial_candidate_observation_no_decision_event",

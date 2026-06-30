@@ -391,6 +391,13 @@ def self_test():
                     "count": 8,
                 }
             ],
+            "no_decision_record_subroot_cause_counts": [
+                {
+                    "root_cause": "shadow_entry_hypotheses_matched_no_decision_bridge",
+                    "description": "Full candidate mesh observed the signal and one or more shadow entry hypotheses matched, but no decision event was written.",
+                    "count": 8,
+                }
+            ],
             "no_decision_candidate_shadow_observed_no_decision_event": 8,
             "decision_no_pass_or_allow": 4,
             "pass_or_allow_without_pending_entry": 3,
@@ -440,6 +447,7 @@ def self_test():
     assert "QUALITY_OR_TIMING_REJECT" in text
     assert "NO_DECISION_RECORD" in text
     assert "candidate_shadow_observed_no_decision_event" in text
+    assert "shadow_entry_hypotheses_matched_no_decision_bridge" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
