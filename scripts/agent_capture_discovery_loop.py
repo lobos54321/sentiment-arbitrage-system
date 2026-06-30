@@ -37,6 +37,7 @@ REPORT_TEST_COMMANDS = (
     ("virtual_markov_self_test", ["scripts/build_candidate_virtual_markov.py", "--self-test"]),
     ("volume_kline_audit_self_test", ["scripts/volume_kline_coverage_audit.py", "--self-test"]),
     ("matured_kline_volume_recheck_self_test", ["scripts/matured_kline_volume_recheck_audit.py", "--self-test"]),
+    ("matured_volume_capture_cross_self_test", ["scripts/matured_volume_capture_cross_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
@@ -530,6 +531,7 @@ def run_reports(run_dir, args):
     context_blocker_monitor_path = run_dir / f"context_blocker_monitor_{primary_hours}h.json"
     volume_kline_audit_path = run_dir / f"volume_kline_coverage_audit_{primary_hours}h.json"
     matured_kline_recheck_path = run_dir / f"matured_kline_volume_recheck_audit_{primary_hours}h.json"
+    matured_volume_capture_cross_path = run_dir / f"matured_volume_capture_cross_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
@@ -670,6 +672,22 @@ def run_reports(run_dir, args):
     ))
     if matured_kline_recheck_path.exists():
         readiness_paths["matured_kline_volume_recheck_audit"] = matured_kline_recheck_path
+    diagnostics.append(run_report(
+        "matured_volume_capture_cross_audit",
+        [
+            "scripts/matured_volume_capture_cross_audit.py",
+            "--db", args.paper_db,
+            "--raw-db", args.raw_db,
+            "--kline-db", args.kline_db,
+            "--hours", str(primary_hours),
+            "--expected-candidates", str(args.expected_candidates),
+            "--out", str(matured_volume_capture_cross_path),
+        ],
+        matured_volume_capture_cross_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if matured_volume_capture_cross_path.exists():
+        readiness_paths["matured_volume_capture_cross_audit"] = matured_volume_capture_cross_path
     diagnostics.append(run_report(
         "low_confidence_research_capture_audit",
         [
@@ -884,6 +902,8 @@ def build_run_summary(verdict, paths, diagnostics, tests):
                 "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
                 "kline_coverage": verdict.get("kline_coverage") or {},
                 "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
+                "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
+                "matured_volume_capture_cross_audit": verdict.get("matured_volume_capture_cross_audit") or {},
             },
             indent=2,
             sort_keys=True,
@@ -1267,6 +1287,7 @@ def self_test():
             "kline_coverage",
             "volume_kline_root_cause_audit",
             "matured_kline_volume_recheck_audit",
+            "matured_volume_capture_cross_audit",
             "low_confidence_research_capture_audit",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
@@ -1294,6 +1315,7 @@ def self_test():
             "context_blocker_monitor_24h.json",
             "volume_kline_coverage_audit_24h.json",
             "matured_kline_volume_recheck_audit_24h.json",
+            "matured_volume_capture_cross_audit_24h.json",
             "low_confidence_research_capture_audit_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]

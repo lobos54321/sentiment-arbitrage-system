@@ -337,6 +337,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     final_entry = readiness_reports.get("a_class_fastlane_mode_audit") or {}
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
     matured_kline_recheck = readiness_reports.get("matured_kline_volume_recheck_audit") or {}
+    matured_volume_cross = readiness_reports.get("matured_volume_capture_cross_audit") or {}
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
@@ -460,6 +461,32 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "signal_age_bucket_counts_now",
                 )
             },
+        },
+        "matured_volume_capture_cross_audit": {
+            "available": bool(matured_volume_cross),
+            "overall": matured_volume_cross.get("overall") or {},
+            "promotion_allowed": False,
+            "formal_denominator_changed": bool(matured_volume_cross.get("formal_denominator_changed")),
+            "candidate_count_observed": matured_volume_cross.get("candidate_count_observed"),
+            "signals_scanned": matured_volume_cross.get("signals_scanned"),
+            "matured_volume_context": {
+                key: (matured_volume_cross.get("matured_volume_context") or {}).get(key)
+                for key in (
+                    "kline_cache_available",
+                    "signals_with_matured_context",
+                    "known_rows",
+                    "unknown_rows",
+                    "known_rate",
+                    "profile_counts",
+                    "reason_counts",
+                )
+            },
+            "denominator": {
+                "raw_all_gold_silver": (matured_volume_cross.get("denominator") or {}).get("raw_all_gold_silver"),
+                "evaluable_gold_silver": (matured_volume_cross.get("denominator") or {}).get("evaluable_gold_silver"),
+            },
+            "h1_matured_building_volume": matured_volume_cross.get("h1_matured_building_volume") or {},
+            "judgment_counts": matured_volume_cross.get("judgment_counts") or {},
         },
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),
@@ -605,6 +632,7 @@ def self_test():
     assert verdict["quote_sensitive_slices_blocked"] is False
     assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
     assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
+    assert verdict["matured_volume_capture_cross_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
