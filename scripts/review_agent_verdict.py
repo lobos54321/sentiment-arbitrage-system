@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v5"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
@@ -102,6 +106,54 @@ def boolish(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def runtime_commit():
+    for key in (
+        "ZEABUR_GIT_COMMIT_SHA",
+        "ZEABUR_GIT_COMMIT",
+        "ZEABUR_COMMIT_SHA",
+        "GIT_COMMIT",
+        "COMMIT_SHA",
+        "SOURCE_VERSION",
+        "RAILWAY_GIT_COMMIT_SHA",
+        "VERCEL_GIT_COMMIT_SHA",
+        "RENDER_GIT_COMMIT",
+        "GITHUB_SHA",
+    ):
+        value = os.environ.get(key)
+        if value:
+            return value
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip() or None
+    except Exception:
+        return None
+    return None
+
+
+def deployment_commit():
+    for key in (
+        "ZEABUR_GIT_COMMIT_SHA",
+        "ZEABUR_GIT_COMMIT",
+        "ZEABUR_COMMIT_SHA",
+        "COMMIT_SHA",
+        "GIT_COMMIT",
+        "SOURCE_VERSION",
+        "GITHUB_SHA",
+    ):
+        value = os.environ.get(key)
+        if value:
+            return value
+    return runtime_commit()
 
 
 def first_blocker_priority(blockers):
@@ -363,6 +415,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     markov_reports = markov_reports or {}
     readiness_reports = readiness_reports or {}
     tests = tests or {}
+    current_commit = readiness_reports.get("current_commit") or runtime_commit()
+    deployed_commit = readiness_reports.get("deployment_commit") or deployment_commit() or current_commit
+    if not current_commit:
+        current_commit = deployed_commit
+    if not deployed_commit:
+        deployed_commit = current_commit
     coverage = capture.get("coverage") or {}
     context = capture.get("context_health") or {}
     denominator = capture.get("raw_gold_silver_denominator") or {}
@@ -615,8 +673,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "phase": "discovery_mesh",
-        "current_commit": readiness_reports.get("current_commit"),
-        "deployment_commit": readiness_reports.get("deployment_commit"),
+        "current_commit": current_commit,
+        "deployment_commit": deployed_commit,
         "verdict": classification,
         "classification": classification,
         "next_action": next_action,
@@ -1054,6 +1112,28 @@ def self_test():
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
     assert verdict["quality_timing_reject_research_audit"]["available"] is False
+    env_commit_key = "ZEABUR_GIT_COMMIT_SHA"
+    old_env_commit = os.environ.get(env_commit_key)
+    os.environ[env_commit_key] = "env_commit_fixture"
+    try:
+        env_commit_verdict = build_verdict(capture, tests={"passed": True})
+        assert env_commit_verdict["current_commit"] == "env_commit_fixture"
+        assert env_commit_verdict["deployment_commit"] == "env_commit_fixture"
+        explicit_commit_verdict = build_verdict(
+            capture,
+            tests={"passed": True},
+            readiness_reports={
+                "current_commit": "explicit_current_fixture",
+                "deployment_commit": "explicit_deploy_fixture",
+            },
+        )
+        assert explicit_commit_verdict["current_commit"] == "explicit_current_fixture"
+        assert explicit_commit_verdict["deployment_commit"] == "explicit_deploy_fixture"
+    finally:
+        if old_env_commit is None:
+            os.environ.pop(env_commit_key, None)
+        else:
+            os.environ[env_commit_key] = old_env_commit
     stage_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "a_class_fastlane_mode_audit": {
             "final_entry_status": "FUNNEL_BLOCKED_EXPECTED",
