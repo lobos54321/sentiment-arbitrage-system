@@ -1123,6 +1123,55 @@ def build_report(args):
         paper_db.close()
 
 
+def compact_stdout_summary(report, out_path=None):
+    summary = report.get("summary") or {}
+    entry_bridge = summary.get("entry_bridge_layer") or {}
+    final_contract = entry_bridge.get("final_entry_contract") or {}
+    raw_bridge = entry_bridge.get("raw_signal_decision_bridge") or {}
+    evidence_log = entry_bridge.get("paper_evidence_log") or {}
+    return {
+        "out": str(out_path) if out_path else None,
+        "verdict": report.get("verdict"),
+        "promotion_blockers": report.get("promotion_blockers") or [],
+        "raw_denominator": summary.get("raw_denominator") or {},
+        "decision_layer": {
+            key: (summary.get("decision_layer") or {}).get(key)
+            for key in (
+                "decision_record_rate",
+                "events_with_decision_record",
+                "events_without_decision_record",
+                "would_enter_events",
+                "would_enter_rate",
+                "entered_events",
+                "entered_rate",
+                "realized_events",
+                "realized_rate",
+            )
+        },
+        "entry_bridge": {
+            key: raw_bridge.get(key)
+            for key in (
+                "raw_signal_ids",
+                "raw_signals_with_decision_record",
+                "raw_signals_without_decision_record",
+                "raw_signals_with_pass_or_allow",
+                "raw_signals_with_pending_entry",
+                "raw_signals_with_final_entry_contract",
+                "raw_signals_with_final_entry_block",
+            )
+        },
+        "final_entry_contract": {
+            "rows": final_contract.get("rows"),
+            "hard_blockers": final_contract.get("hard_blockers") or {},
+            "mode_status": final_contract.get("mode_status") or {},
+            "mode_action": final_contract.get("mode_action") or {},
+            "mode_reason": final_contract.get("mode_reason") or {},
+        },
+        "paper_evidence_event_counts": evidence_log.get("event_type_counts") or {},
+        "paper_trades_entry_ts_window_count": entry_bridge.get("paper_trades_entry_ts_window_count"),
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default="/app/data/paper_trades.db")
@@ -1140,7 +1189,9 @@ def main():
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text + "\n", encoding="utf-8")
-    print(text)
+        print(json.dumps(compact_stdout_summary(report, out), ensure_ascii=False, sort_keys=True))
+    else:
+        print(text)
 
 
 if __name__ == "__main__":
