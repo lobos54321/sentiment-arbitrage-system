@@ -369,15 +369,14 @@ def load_context_rows(path, since_ts, context_carrier, max_scan_rows):
     return [normalize_observation_row(row) for row in rows]
 
 
-def load_candidate_rows(path, since_ts, signal_ids, max_scan_rows, chunk_size=500):
+def iter_candidate_rows(path, since_ts, signal_ids, chunk_size=100):
     if not signal_ids:
-        return []
+        return
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
-    out = []
     try:
         if not table_exists(db, "candidate_shadow_observations"):
-            return []
+            return
         signal_ids = sorted(signal_ids)
         for index in range(0, len(signal_ids), int(chunk_size)):
             chunk = signal_ids[index:index + int(chunk_size)]
@@ -393,10 +392,10 @@ def load_candidate_rows(path, since_ts, signal_ids, max_scan_rows, chunk_size=50
                 """,
                 tuple(params),
             ).fetchall()
-            out.extend(normalize_observation_row(row) for row in rows)
+            for row in rows:
+                yield normalize_observation_row(row)
     finally:
         db.close()
-    return out
 
 
 def pick_signal_contexts(observations, context_carrier):
@@ -533,21 +532,11 @@ def build_report(args):
     raw_all, evaluable, raw_meta = load_raw_gold_silver(args.raw_db, since_ts)
     context_rows = load_context_rows(args.db, since_ts, args.context_carrier, args.max_scan_rows) if Path(args.db).exists() else []
     signal_contexts = pick_signal_contexts(context_rows, args.context_carrier)
-    observations = load_candidate_rows(args.db, since_ts, set(signal_contexts), args.max_scan_rows) if Path(args.db).exists() else []
     matured_contexts, kline_available = matured_volume_contexts(args.kline_db, signal_contexts, args.kline_limit)
     raw_signal_ids = {row["signal_id"] for row in evaluable if row.get("signal_id")}
     raw_all_signal_ids = {row["signal_id"] for row in raw_all if row.get("signal_id")}
-    candidate_ids = {row.get("candidate_id") for row in observations if row.get("candidate_id")}
-    rows_by_key = {}
-    for row in observations:
-        sid = row.get("signal_id")
-        cid = row.get("candidate_id")
-        if not sid or not cid:
-            continue
-        key = (sid, cid)
-        current = rows_by_key.get(key)
-        if current is None or (row.get("observed_at") or 0) >= (current.get("observed_at") or 0):
-            rows_by_key[key] = row
+    candidate_ids = set()
+    candidate_observation_rows_scanned = 0
     slice_stats = defaultdict(lambda: defaultdict(int))
     baseline_stats = defaultdict(lambda: defaultdict(int))
     maturity_counts = Counter()
@@ -562,7 +551,12 @@ def build_report(args):
             maturity_counts["unknown"] += 1
         else:
             maturity_counts["known"] += 1
-    for (sid, _cid), row in rows_by_key.items():
+    candidate_iter = iter_candidate_rows(args.db, since_ts, set(signal_contexts)) if Path(args.db).exists() else iter(())
+    for row in candidate_iter:
+        candidate_observation_rows_scanned += 1
+        if row.get("candidate_id"):
+            candidate_ids.add(row.get("candidate_id"))
+        sid = row.get("signal_id")
         if sid not in scanned_signal_ids:
             continue
         context = matured_contexts.get(sid) or {}
@@ -601,7 +595,7 @@ def build_report(args):
     if not kline_available:
         classification = "BLOCKED_KLINE_CACHE_UNAVAILABLE"
         next_action = "restore_or_mount_kline_cache_for_matured_volume_cross"
-    elif not observations:
+    elif candidate_observation_rows_scanned == 0:
         classification = "BLOCKED_DATA"
         next_action = "candidate_shadow_observations_unavailable"
     elif (known_rate or 0) < 0.8:
@@ -642,8 +636,8 @@ def build_report(args):
         },
         "signals_scanned": len(scanned_signal_ids),
         "context_rows_scanned": len(context_rows),
-        "candidate_observation_rows_scanned": len(observations),
-        "deduped_candidate_observation_rows": len(rows_by_key),
+        "candidate_observation_rows_scanned": candidate_observation_rows_scanned,
+        "deduped_candidate_observation_rows": candidate_observation_rows_scanned,
         "denominator": denominator,
         "signal_id_reconciliation": {
             "raw_all_gold_silver": raw_all_reconciliation,
