@@ -6205,6 +6205,15 @@ function livePaperReviewPath(hours) {
   return join(getLivePaperReviewDir(), `paper_review_${safeHours}h.json`);
 }
 
+function writeLivePaperReviewSnapshot(hours, snapshot) {
+  const target = livePaperReviewPath(hours);
+  fs.mkdirSync(dirname(target), { recursive: true });
+  const tmp = `${target}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmp, target);
+  return target;
+}
+
 function paperReviewSnapshotRefreshStatusPath() {
   const raw = process.env.PAPER_REVIEW_SNAPSHOT_REFRESH_STATUS
     || join(dirname(getPaperDbPath()), 'paper-review-snapshot-refresh-status.json');
@@ -12359,6 +12368,7 @@ const server = http.createServer(async (req, res) => {
       const includeLatency = ['1', 'true', 'yes'].includes(String(url.searchParams.get('include_latency') || '0').toLowerCase());
       const freeze = ['1', 'true', 'yes'].includes(String(url.searchParams.get('freeze') || '0').toLowerCase());
       const persist = freeze || !['0', 'false', 'no'].includes(String(url.searchParams.get('persist') || '1').toLowerCase());
+      const materializeLive = ['1', 'true', 'yes', 'on'].includes(String(url.searchParams.get('materialize_live') || '').toLowerCase());
       const materialized = ['1', 'true', 'yes'].includes(String(url.searchParams.get('materialized') || '').toLowerCase())
         || (includeClosedLoop && !includeDetails && !includeProbeSummary && !includeSourceSummary && String(windowLabel).match(/^(8|24)$/));
       if (materialized) {
@@ -12467,12 +12477,19 @@ const server = http.createServer(async (req, res) => {
       if (persist) {
         persistedFiles = writePaperReviewSnapshotFiles(snapshot, { dir: getPaperReviewDir() });
       }
+      let liveMaterializedPath = null;
+      if (materializeLive) {
+        const materializedHours = Math.max(1, Math.min(24, Number.parseInt(String(windowLabel).replace(/[^0-9]/g, ''), 10) || 24));
+        liveMaterializedPath = writeLivePaperReviewSnapshot(materializedHours, snapshot);
+      }
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({
         ...snapshot,
         freeze,
         persisted_files: persistedFiles,
+        materialize_live: materializeLive,
+        live_materialized_path: liveMaterializedPath,
         query_ms: Date.now() - startedAt,
         timings_ms: timings,
       }, null, 2));
