@@ -540,9 +540,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     readiness_shortfall = final_entry.get("readiness_shortfall_summary") or {}
     paper_proposal_readiness = final_entry.get("paper_entry_proposal_readiness") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
-    top_blocker = first_blocker_priority(blockers) if blockers else (
+    top_formal_blocker = first_blocker_priority(blockers) if blockers else (
         final_entry.get("reason") or classification
     )
+    top_actionable_blocker = next_highest_priority_blocker
+    top_blocker = top_actionable_blocker or top_formal_blocker
     if classification == "BLOCKED_DATA":
         next_action = "resolve_data_integrity_blocker"
     elif classification == "BLOCKED_CONTEXT_COVERAGE":
@@ -650,6 +652,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "paper_enablement_allowed": False,
         },
         "top_blocker": top_blocker,
+        "top_actionable_blocker": top_actionable_blocker,
+        "top_formal_blocker": top_formal_blocker,
         "non_quote_sensitive_capture_discovery_allowed": non_quote_sensitive_capture_discovery_allowed,
         "quote_sensitive_slices_blocked": quote_sensitive_slices_blocked,
         "formal_volume_sensitive_slices_blocked": "volume_profile_coverage_below_80pct" in blockers,
@@ -1272,6 +1276,8 @@ def self_test():
     assert "volume_profile_coverage_below_80pct" in quote_pending_with_matured_volume_path["blockers"]
     assert "volume_profile_coverage_below_80pct" not in quote_pending_with_matured_volume_path["actionable_blockers"]
     assert quote_pending_with_matured_volume_path["next_highest_priority_blocker"] is None
+    assert quote_pending_with_matured_volume_path["top_actionable_blocker"] is None
+    assert quote_pending_with_matured_volume_path["top_formal_blocker"] == "volume_profile_coverage_below_80pct"
     assert quote_pending_with_matured_volume_path["shadow_matured_volume_slices_evaluable"] is True
     assert quote_pending_with_matured_volume_path["formal_volume_sensitive_slices_blocked"] is True
     assert quote_pending_with_matured_volume_path["volume_profile_blocker_state"]["classification"] == "SHADOW_MATURED_VOLUME_PATH_AVAILABLE"
