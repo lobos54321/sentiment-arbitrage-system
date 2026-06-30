@@ -373,6 +373,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
     matured_kline_recheck = readiness_reports.get("matured_kline_volume_recheck_audit") or {}
     matured_volume_cross = readiness_reports.get("matured_volume_capture_cross_audit") or {}
+    hypothesis_validation = readiness_reports.get("hypothesis_validation_audit") or {}
     matured_volume_top_slices = [
         compact_matured_volume_slice(row)
         for row in (matured_volume_cross.get("top_slices") or [])[:10]
@@ -590,6 +591,21 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 and (matured_volume_cross.get("h1_matured_building_volume") or {}).get("status") != "MATURED_VOLUME_DISCOVERY_WATCH"
                 else (matured_volume_cross.get("overall") or {}).get("next_action")
             ),
+        },
+        "hypothesis_validation_audit": {
+            "available": bool(hypothesis_validation),
+            "overall": hypothesis_validation.get("overall") or {},
+            "promotion_allowed": False,
+            "matured_volume_hypothesis_validation": {
+                key: (hypothesis_validation.get("matured_volume_hypothesis_validation") or {}).get(key)
+                for key in (
+                    "registry_frozen_before_eval_window",
+                    "registered_hypothesis_count",
+                    "found_in_current_report_count",
+                    "repeated_watch_count",
+                    "oos_repeated_watch_count",
+                )
+            },
         },
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),

@@ -38,6 +38,7 @@ REPORT_TEST_COMMANDS = (
     ("volume_kline_audit_self_test", ["scripts/volume_kline_coverage_audit.py", "--self-test"]),
     ("matured_kline_volume_recheck_self_test", ["scripts/matured_kline_volume_recheck_audit.py", "--self-test"]),
     ("matured_volume_capture_cross_self_test", ["scripts/matured_volume_capture_cross_audit.py", "--self-test"]),
+    ("hypothesis_validation_self_test", ["scripts/hypothesis_validation_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
@@ -557,6 +558,7 @@ def run_reports(run_dir, args):
     volume_kline_audit_path = run_dir / f"volume_kline_coverage_audit_{primary_hours}h.json"
     matured_kline_recheck_path = run_dir / f"matured_kline_volume_recheck_audit_{primary_hours}h.json"
     matured_volume_capture_cross_path = run_dir / f"matured_volume_capture_cross_audit_{primary_hours}h.json"
+    hypothesis_validation_path = run_dir / f"hypothesis_validation_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
@@ -713,6 +715,19 @@ def run_reports(run_dir, args):
     ))
     if matured_volume_capture_cross_path.exists():
         readiness_paths["matured_volume_capture_cross_audit"] = matured_volume_capture_cross_path
+    diagnostics.append(run_report(
+        "hypothesis_validation_audit",
+        [
+            "scripts/hypothesis_validation_audit.py",
+            "--registry", args.registry,
+            "--matured-volume-cross", str(matured_volume_capture_cross_path),
+            "--out", str(hypothesis_validation_path),
+        ],
+        hypothesis_validation_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if hypothesis_validation_path.exists():
+        readiness_paths["hypothesis_validation_audit"] = hypothesis_validation_path
     diagnostics.append(run_report(
         "low_confidence_research_capture_audit",
         [
@@ -1352,6 +1367,7 @@ def self_test():
             "volume_kline_root_cause_audit",
             "matured_kline_volume_recheck_audit",
             "matured_volume_capture_cross_audit",
+            "hypothesis_validation_audit",
             "low_confidence_research_capture_audit",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
@@ -1416,6 +1432,7 @@ def self_test():
             "volume_kline_coverage_audit_24h.json",
             "matured_kline_volume_recheck_audit_24h.json",
             "matured_volume_capture_cross_audit_24h.json",
+            "hypothesis_validation_audit_24h.json",
             "low_confidence_research_capture_audit_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
