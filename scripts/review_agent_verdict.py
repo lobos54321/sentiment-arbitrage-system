@@ -222,6 +222,39 @@ def compact_oos_probe(name, report, cross_report=None):
         "cross_known_rate": cross_context.get("known_rate"),
         "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
         "repeated_watch_count": validation.get("repeated_watch_count"),
+        "registry_frozen_before_eval_window": validation.get("registry_frozen_before_eval_window"),
+    }
+
+
+def compact_oos_refresh_probe(row):
+    cross = row.get("cross") or {}
+    validation = row.get("validation") or {}
+    return {
+        "probe": row.get("probe"),
+        "available": bool(cross or validation),
+        "classification": validation.get("classification"),
+        "next_action": validation.get("next_action"),
+        "promotion_allowed": False,
+        "human_action_required": False,
+        "sufficient_for_oos_judgment": bool(validation.get("sufficient_for_oos_judgment")),
+        "blockers": validation.get("blockers") or [],
+        "signals_scanned": validation.get("signals_scanned") or cross.get("signals_scanned"),
+        "evaluable_raw_gs_event_rows": (
+            validation.get("evaluable_raw_gs_event_rows")
+            if validation.get("evaluable_raw_gs_event_rows") is not None
+            else cross.get("evaluable_raw_gs_event_rows")
+        ),
+        "matured_volume_known_rate": (
+            validation.get("matured_volume_known_rate")
+            if validation.get("matured_volume_known_rate") is not None
+            else cross.get("matured_volume_known_rate")
+        ),
+        "cross_classification": cross.get("classification"),
+        "cross_known_rate": cross.get("matured_volume_known_rate"),
+        "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
+        "repeated_watch_count": validation.get("repeated_watch_count"),
+        "registry_frozen_before_eval_window": validation.get("registry_frozen_before_eval_window"),
+        "source": "oos_readiness_probe_refresh",
     }
 
 
@@ -256,6 +289,13 @@ def build_oos_readiness_summary(readiness_reports):
         )
         for label, hypothesis_key, cross_key in probe_specs
     ]
+    fixed_labels = {label for label, _hypothesis_key, _cross_key in probe_specs}
+    refresh_report = readiness_reports.get("oos_readiness_probe_refresh") or {}
+    for row in refresh_report.get("probes") or []:
+        label = row.get("probe")
+        if not label or label in fixed_labels:
+            continue
+        probes.append(compact_oos_refresh_probe(row))
     available = [row for row in probes if row["available"]]
     sufficient = [row for row in available if row["sufficient_for_oos_judgment"]]
     repeated = [row for row in sufficient if (as_int(row.get("oos_repeated_watch_count"), 0) or 0) > 0]
@@ -1992,6 +2032,24 @@ def self_test():
                         "sufficient_for_oos_judgment": False,
                         "blockers": ["oos_raw_gs_event_count_below_min"],
                     },
+                },
+                {
+                    "probe": "0p333h",
+                    "cross": {
+                        "classification": "BLOCKED_MATURED_VOLUME_COVERAGE",
+                        "signals_scanned": 18,
+                        "evaluable_raw_gs_event_rows": 0,
+                        "matured_volume_known_rate": 0.5,
+                    },
+                    "validation": {
+                        "classification": "OOS_WINDOW_TOO_SMALL_CONTINUE_WAIT",
+                        "signals_scanned": 18,
+                        "evaluable_raw_gs_event_rows": 0,
+                        "matured_volume_known_rate": 0.5,
+                        "sufficient_for_oos_judgment": False,
+                        "blockers": ["oos_raw_gs_event_count_below_min"],
+                        "registry_frozen_before_eval_window": True,
+                    },
                 }
             ],
         })
@@ -2013,9 +2071,11 @@ def self_test():
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
         assert sibling_verdict["oos_readiness_summary"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
-        assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 1
+        assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 2
         assert sibling_verdict["oos_readiness_summary"]["sufficient_probe_count"] == 0
         assert sibling_verdict["oos_readiness_summary"]["promotion_allowed"] is False
+        assert sibling_verdict["oos_readiness_summary"]["probes"][-1]["probe"] == "0p333h"
+        assert sibling_verdict["oos_readiness_summary"]["probes"][-1]["source"] == "oos_readiness_probe_refresh"
         assert sibling_verdict["oos_probe_refresh_status"]["available"] is True
         assert sibling_verdict["oos_probe_refresh_status"]["failed_command_count"] == 0
         assert sibling_verdict["oos_probe_refresh_status"]["probes"][0]["probe"] == "0p1h"
