@@ -95,6 +95,7 @@ DERIVED_READINESS_SIBLINGS = {
     "hypothesis_validation_audit": "hypothesis_validation_audit_24h.json",
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
+    "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
     "runtime_health_snapshot": "runtime_health_snapshot_24h.json",
     "context_blocker_monitor": "context_blocker_monitor_24h.json",
@@ -869,6 +870,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     ]
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
+    quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -1443,6 +1445,20 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "shadow_only_next_actions": quality_timing_audit.get("shadow_only_next_actions") or [],
             "blockers": quality_timing_audit.get("blockers") or [],
         },
+        "quality_timing_candidate_probe_validation": {
+            "available": bool(quality_timing_probe_validation),
+            "classification": quality_timing_probe_validation.get("classification"),
+            "next_action": quality_timing_probe_validation.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": quality_timing_probe_validation.get("denominator") or {},
+            "status_counts": quality_timing_probe_validation.get("status_counts") or {},
+            "top_repeated_probes": (
+                quality_timing_probe_validation.get("top_repeated_probes") or []
+            )[:10],
+        },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
             (readiness_reports.get("a_class_fastlane_mode_audit") or {}).get("final_entry_contract_blocker_breakdown")
@@ -1559,6 +1575,7 @@ def self_test():
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
     assert verdict["quality_timing_reject_research_audit"]["available"] is False
+    assert verdict["quality_timing_candidate_probe_validation"]["available"] is False
     env_commit_key = "ZEABUR_GIT_COMMIT_SHA"
     old_env_commit = os.environ.get(env_commit_key)
     os.environ[env_commit_key] = "env_commit_fixture"
@@ -2084,6 +2101,35 @@ def self_test():
     assert qt["candidate_match_attribution"]["top_candidates"][0]["candidate_id"] == "kline:active_mom20_first3"
     assert qt["shadow_only_review"]["dominant_cluster"] == "score_or_quality_too_low"
     assert qt["shadow_only_review"]["top_research_opportunities"][0]["promotion_allowed"] is False
+    quality_timing_probe_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "quality_timing_candidate_probe_validation": {
+            "classification": "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW",
+            "next_action": "continue_shadow_probe_tracking_until_clean_window_then_oos",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": {
+                "registered_probe_count": 2,
+                "validated_probe_count": 2,
+                "repeated_probe_count": 1,
+                "repeated_probe_rate": 0.5,
+            },
+            "status_counts": {"REPEATED_SHADOW_PROBE": 1},
+            "top_repeated_probes": [
+                {
+                    "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
+                    "status": "REPEATED_SHADOW_PROBE",
+                    "promotion_allowed": False,
+                }
+            ],
+        }
+    })
+    qtp = quality_timing_probe_verdict["quality_timing_candidate_probe_validation"]
+    assert qtp["available"] is True
+    assert qtp["classification"] == "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW"
+    assert qtp["promotion_allowed"] is False
+    assert qtp["top_repeated_probes"][0]["status"] == "REPEATED_SHADOW_PROBE"
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},

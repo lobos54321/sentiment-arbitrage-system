@@ -2065,6 +2065,7 @@ function agentCaptureArtifactPaths() {
     oos_readiness_refresh: join(latestDir, 'oos_readiness_probe_refresh.json'),
     low_confidence_research: join(latestDir, 'low_confidence_research_capture_audit_24h.json'),
     quality_timing_research: join(latestDir, 'quality_timing_reject_research_audit_24h.json'),
+    quality_timing_probe_validation: join(latestDir, 'quality_timing_candidate_probe_validation_24h.json'),
     runtime_health: join(latestDir, 'runtime_health_snapshot_24h.json'),
     runner_status: runnerStatus,
     tests: join(latestDir, 'tests.json'),
@@ -2317,6 +2318,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const tests = safeReadAgentJson(paths.tests);
   const shadowDecisionBridge = safeReadAgentJson(paths.shadow_decision_bridge);
   const qualityTimingResearch = safeReadAgentJson(paths.quality_timing_research);
+  const qualityTimingProbeValidation = safeReadAgentJson(paths.quality_timing_probe_validation);
   const runner = readAgentCaptureLoopRunnerStatus();
   const runtimeCommit = runtimeCommitFingerprint();
   const compactQualityTimingResearch = (report) => {
@@ -2378,6 +2380,24 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   };
   const qualityTimingResearchSummary = compactQualityTimingResearch(
     verdict?.quality_timing_reject_research_audit || qualityTimingResearch,
+  );
+  const compactQualityTimingProbeValidation = (report) => {
+    if (!report) return null;
+    return {
+      available: !report.error_code,
+      classification: report.classification || null,
+      next_action: report.next_action || null,
+      promotion_allowed: Boolean(report.promotion_allowed),
+      strategy_change_allowed: Boolean(report.strategy_change_allowed),
+      automatic_runtime_change_allowed: Boolean(report.automatic_runtime_change_allowed),
+      paper_enablement_allowed: Boolean(report.paper_enablement_allowed),
+      denominator: report.denominator || {},
+      status_counts: report.status_counts || {},
+      top_repeated_probes: (report.top_repeated_probes || []).slice(0, 8),
+    };
+  };
+  const qualityTimingProbeValidationSummary = compactQualityTimingProbeValidation(
+    verdict?.quality_timing_candidate_probe_validation || qualityTimingProbeValidation,
   );
   const required = ['verdict', 'summary', 'handoff', 'registry'];
   const missingRequired = required.filter((name) => !artifacts[name]?.available);
@@ -2601,6 +2621,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       upstream_funnel_gap_summary: verdict.upstream_funnel_gap_summary || null,
       shadow_decision_bridge_audit_summary: verdict.shadow_decision_bridge_audit_summary || null,
       quality_timing_reject_research_audit: qualityTimingResearchSummary,
+      quality_timing_candidate_probe_validation: qualityTimingProbeValidationSummary,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {
         candidate_count: verdict.per_candidate_effectiveness_summary.candidate_count,
@@ -2689,6 +2710,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       oos_readiness_refresh: safeReadAgentJson(paths.oos_readiness_refresh),
       low_confidence_research: safeReadAgentJson(paths.low_confidence_research),
       quality_timing_research: safeReadAgentJson(paths.quality_timing_research),
+      quality_timing_probe_validation: safeReadAgentJson(paths.quality_timing_probe_validation),
       runtime_health: safeReadAgentJson(paths.runtime_health),
       runner_status: runner,
     };
@@ -11534,6 +11556,8 @@ const server = http.createServer(async (req, res) => {
       oos_readiness_probe_refresh: 'oos_readiness_refresh',
       low_confidence_research_capture: 'low_confidence_research',
       quality_timing_reject_research: 'quality_timing_research',
+      quality_timing_candidate_probe_validation: 'quality_timing_probe_validation',
+      quality_timing_probe_validation: 'quality_timing_probe_validation',
       runtime_health: 'runtime_health',
       runner_status: 'runner_status',
       self_tests: 'tests',
@@ -11619,6 +11643,7 @@ const server = http.createServer(async (req, res) => {
         agent_oos_readiness_refresh_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=oos_readiness_refresh`,
         agent_low_confidence_research_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=low_confidence_research`,
         agent_quality_timing_research_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=quality_timing_research`,
+        agent_quality_timing_probe_validation_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=quality_timing_probe_validation`,
         agent_runtime_health_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=runtime_health`,
         agent_runner_status_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=runner_status`,
         agent_self_tests_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=tests`,

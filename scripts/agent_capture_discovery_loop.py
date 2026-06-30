@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1722,6 +1723,154 @@ def build_quality_timing_candidate_probes(opportunities, *, per_cluster_limit=3,
     return probes
 
 
+def build_quality_timing_candidate_probe_validation(registry, quality_timing_report):
+    """Validate registered quality/timing probes against the current same-window audit.
+
+    This is intentionally read-only discovery evidence. It tracks whether a
+    shadow-only probe remains visible in the latest quality/timing reject window;
+    it does not promote candidates or authorize threshold changes.
+    """
+    registry = registry or {}
+    quality_timing_report = quality_timing_report or {}
+    probes = list(registry.get("shadow_only_quality_timing_candidate_probes") or [])
+    opportunities = (
+        (quality_timing_report.get("shadow_only_review") or {}).get("top_research_opportunities")
+        or []
+    )
+    clusters = {}
+    current_candidates = {}
+    for cluster_row in opportunities:
+        if not isinstance(cluster_row, dict) or not cluster_row.get("cluster"):
+            continue
+        cluster = cluster_row.get("cluster")
+        clusters[cluster] = cluster_row
+        rank = 0
+        for candidate_row in cluster_row.get("top_candidates") or []:
+            if not is_quality_timing_probe_candidate(candidate_row):
+                continue
+            rank += 1
+            current_candidates[(cluster, candidate_row.get("candidate_id"))] = {
+                "candidate": candidate_row,
+                "rank": rank,
+                "cluster": cluster_row,
+            }
+
+    rows = []
+    for probe in probes:
+        definition = probe.get("definition") or {}
+        cluster = definition.get("quality_timing_cluster")
+        candidate_id = definition.get("candidate_id")
+        current = current_candidates.get((cluster, candidate_id))
+        cluster_row = clusters.get(cluster)
+        current_candidate = (current or {}).get("candidate") or {}
+        status = "NOT_OBSERVED_CURRENT_WINDOW"
+        if current_candidate:
+            status = "REPEATED_SHADOW_PROBE"
+        elif cluster_row:
+            status = "CLUSTER_REPEATED_CANDIDATE_NOT_TOP"
+        rows.append({
+            "hypothesis_id": probe.get("hypothesis_id"),
+            "status": status,
+            "scope": "shadow_only_quality_timing_candidate_probe",
+            "evidence_level": "discovery_same_window_probe_validation",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "definition": {
+                "quality_timing_cluster": cluster,
+                "candidate_id": candidate_id,
+                "candidate_family": definition.get("candidate_family"),
+            },
+            "current_window": {
+                "cluster_repeated": bool(cluster_row),
+                "candidate_repeated": bool(current_candidate),
+                "cluster_event_count": (cluster_row or {}).get("event_count"),
+                "cluster_share_of_quality_timing_rejects": (
+                    (cluster_row or {}).get("share_of_quality_timing_rejects")
+                ),
+                "cluster_share_of_raw_all_gold_silver": (
+                    (cluster_row or {}).get("share_of_raw_all_gold_silver")
+                ),
+                "cluster_unique_tokens": (cluster_row or {}).get("unique_tokens"),
+                "candidate_cluster_match_count": current_candidate.get("count"),
+                "candidate_probe_rank_in_cluster": (current or {}).get("rank"),
+                "candidate_matched_any_rate": (cluster_row or {}).get("candidate_matched_any_rate"),
+                "max_sustained_peak_pct_max": (cluster_row or {}).get("max_sustained_peak_pct_max"),
+                "time_to_sustained_peak_sec_median": (
+                    (cluster_row or {}).get("time_to_sustained_peak_sec_median")
+                ),
+            },
+            "next_validation": (
+                "continue_shadow_only_tracking_until_clean_window_then_oos_if_repeated"
+            ),
+        })
+
+    status_counts = Counter(row.get("status") for row in rows)
+    repeated_rows = [
+        row for row in rows
+        if row.get("status") == "REPEATED_SHADOW_PROBE"
+    ]
+    repeated_rows = sorted(
+        repeated_rows,
+        key=lambda row: (
+            safe_int((row.get("current_window") or {}).get("cluster_event_count"), 0),
+            safe_int((row.get("current_window") or {}).get("candidate_cluster_match_count"), 0),
+        ),
+        reverse=True,
+    )
+    if not probes:
+        classification = "NO_REGISTERED_QUALITY_TIMING_CANDIDATE_PROBES"
+        next_action = "continue_quality_timing_cluster_discovery"
+    elif repeated_rows:
+        classification = "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW"
+        next_action = "continue_shadow_probe_tracking_until_clean_window_then_oos"
+    elif any(row.get("status") == "CLUSTER_REPEATED_CANDIDATE_NOT_TOP" for row in rows):
+        classification = "QUALITY_TIMING_CLUSTERS_REPEATED_CANDIDATES_SHIFTED"
+        next_action = "refresh_shadow_probe_candidates_from_current_cluster_leaders"
+    else:
+        classification = "QUALITY_TIMING_PROBES_NOT_REPEATED_CURRENT_WINDOW"
+        next_action = "continue_monitoring_registered_shadow_probes"
+
+    return {
+        "schema_version": "quality_timing_candidate_probe_validation.v1",
+        "report_type": "quality_timing_candidate_probe_validation_24h",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window_probe_validation",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "denominator": {
+            "registered_probe_count": len(probes),
+            "current_quality_timing_cluster_count": len(clusters),
+            "validated_probe_count": len(rows),
+            "repeated_probe_count": status_counts.get("REPEATED_SHADOW_PROBE", 0),
+            "cluster_repeated_candidate_not_top_count": status_counts.get(
+                "CLUSTER_REPEATED_CANDIDATE_NOT_TOP",
+                0,
+            ),
+            "not_observed_current_window_count": status_counts.get(
+                "NOT_OBSERVED_CURRENT_WINDOW",
+                0,
+            ),
+            "repeated_probe_rate": safe_rate(
+                status_counts.get("REPEATED_SHADOW_PROBE", 0),
+                len(probes),
+            ),
+        },
+        "status_counts": dict(status_counts),
+        "top_repeated_probes": repeated_rows[:12],
+        "probe_validations": rows,
+        "notes": [
+            "Read-only validation of shadow-only quality/timing candidate probes.",
+            "Repeated same-window probes are discovery evidence only; OOS validation and human approval are still required before any promotion.",
+        ],
+    }
+
+
 def stable_hypothesis_signature(
     *,
     watchlist_hypotheses,
@@ -2183,10 +2332,25 @@ def write_materialized_artifacts(
         return verdict_payload
 
     verdict = build_loop_verdict()
-
     verdict_path = run_dir / "reviewer_verdict.json"
-    write_json(verdict_path, verdict)
     registry = update_hypothesis_registry(args.registry, verdict, capture)
+    quality_timing_report = {}
+    quality_timing_path = readiness_paths.get("quality_timing_reject_research_audit")
+    if quality_timing_path and Path(quality_timing_path).exists():
+        try:
+            quality_timing_report = load_json(quality_timing_path)
+        except Exception:
+            quality_timing_report = {}
+    quality_timing_probe_validation_path = (
+        run_dir / f"quality_timing_candidate_probe_validation_{int(args.hours)}h.json"
+    )
+    write_json(
+        quality_timing_probe_validation_path,
+        build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
+    )
+    readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+    verdict = build_loop_verdict()
+    write_json(verdict_path, verdict)
     if refresh_oos_after_registry and state == "final":
         oos_refresh_path = run_dir / "oos_readiness_probe_refresh.json"
         probe_count = max(1, len(parse_oos_probe_hours(getattr(args, "oos_probe_hours", "")))) + 2
@@ -2612,6 +2776,7 @@ def self_test():
             "oos_readiness_probe_refresh.json",
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
+            "quality_timing_candidate_probe_validation_24h.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
@@ -2633,6 +2798,10 @@ def self_test():
             assert event["creates_paper_trade"] is False
             assert event["changes_runtime_mode"] is False
             assert "final_entry_contract" in event["forbidden_write_targets"]
+        quality_probe_validation = load_json(latest_dir / "quality_timing_candidate_probe_validation_24h.json")
+        assert quality_probe_validation["promotion_allowed"] is False
+        assert quality_probe_validation["strategy_change_allowed"] is False
+        assert "probe_validations" in quality_probe_validation
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
 

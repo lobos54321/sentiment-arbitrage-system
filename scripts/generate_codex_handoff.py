@@ -558,6 +558,33 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    quality_timing_probe_validation = verdict.get("quality_timing_candidate_probe_validation") or {}
+    if quality_timing_probe_validation:
+        lines.extend([
+            "## Quality / Timing Candidate Probe Validation",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": quality_timing_probe_validation.get("available"),
+                    "classification": quality_timing_probe_validation.get("classification"),
+                    "next_action": quality_timing_probe_validation.get("next_action"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "denominator": quality_timing_probe_validation.get("denominator") or {},
+                    "status_counts": quality_timing_probe_validation.get("status_counts") or {},
+                    "top_repeated_probes": (
+                        quality_timing_probe_validation.get("top_repeated_probes") or []
+                    )[:8],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -578,6 +605,7 @@ def build_handoff(verdict):
                 "hypothesis_validation_audit": verdict.get("hypothesis_validation_audit") or {},
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
+                "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
@@ -815,6 +843,32 @@ def self_test():
             },
             "shadow_only_next_actions": ["review_shadow_candidates_for_quality_timing_rejects"],
         },
+        "quality_timing_candidate_probe_validation": {
+            "available": True,
+            "classification": "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW",
+            "next_action": "continue_shadow_probe_tracking_until_clean_window_then_oos",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": {
+                "registered_probe_count": 3,
+                "validated_probe_count": 3,
+                "repeated_probe_count": 2,
+                "repeated_probe_rate": 0.666667,
+            },
+            "status_counts": {
+                "REPEATED_SHADOW_PROBE": 2,
+                "NOT_OBSERVED_CURRENT_WINDOW": 1,
+            },
+            "top_repeated_probes": [
+                {
+                    "hypothesis_id": "quality_timing_probe:matrix_alignment_wait:entry_mode_registry_smart_entry_pullback_bounce",
+                    "status": "REPEATED_SHADOW_PROBE",
+                    "promotion_allowed": False,
+                }
+            ],
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
@@ -837,6 +891,10 @@ def self_test():
     assert "matrix_alignment_wait" in text
     assert "track_matrix_alignment_false_negative_shadow_probe" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
+    assert "Quality / Timing Candidate Probe Validation" in text
+    assert "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW" in text
+    assert "REPEATED_SHADOW_PROBE" in text
+    assert "quality_timing_probe:matrix_alignment_wait" in text
     assert "Candidate Improvement Opportunities" in text
     assert "Markov Information Value" in text
     assert "candidate_source" in text
