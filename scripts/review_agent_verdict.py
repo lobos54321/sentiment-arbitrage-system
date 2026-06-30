@@ -1030,6 +1030,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             if "rate" in mode_adjusted_final
             else capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
         ),
+        "mode_disabled_adjusted_final_eligibility_rate": (
+            mode_adjusted_final.get("rate")
+            if "rate" in mode_adjusted_final
+            else capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
+        ),
         "paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
         "paper_trade_intent_rate": capture_stage_rates.get("paper_trade_intent_rate"),
         "realized_capture_rate": capture_stage_rates.get("realized_capture_rate"),

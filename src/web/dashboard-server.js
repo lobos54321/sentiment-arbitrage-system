@@ -2321,6 +2321,8 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
     schema_version: 'agent_capture_discovery_latest.v1',
     generated_at: new Date().toISOString(),
     phase: 'discovery_mesh',
+    current_commit: verdict?.current_commit || null,
+    deployment_commit: verdict?.deployment_commit || null,
     latest_dir: join(getAgentRunsRoot(), 'latest'),
     handoff_dir: getAgentHandoffsDir(),
     required_artifacts_complete: missingRequired.length === 0,
@@ -2330,6 +2332,10 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       available: !verdict.error_code,
       classification: verdict.classification,
       blocked_subtype: verdict.blocked_subtype,
+      next_action: verdict.next_action || null,
+      top_blocker: verdict.top_blocker || verdict.next_highest_priority_blocker || null,
+      actionable_blockers: verdict.actionable_blockers || [],
+      context_clean_window_eta_iso: verdict.context_clean_window_eta_iso || null,
       current_commit: verdict.current_commit,
       deployment_commit: verdict.deployment_commit,
       promotion_allowed: Boolean(verdict.promotion_allowed),
@@ -2400,7 +2406,11 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       final_eligibility_capture_rate: verdict.final_eligibility_capture_rate ?? null,
       paper_capture_rate: verdict.paper_capture_rate ?? null,
       realized_capture_rate: verdict.realized_capture_rate ?? null,
-      mode_disabled_adjusted_final_eligibility_rate: verdict.mode_disabled_adjusted_final_eligibility_rate ?? null,
+      mode_disabled_adjusted_final_eligibility_rate: (
+        verdict.mode_disabled_adjusted_final_eligibility_rate
+        ?? verdict.paper_entry_proposal_readiness?.mode_disabled_adjusted_final_eligibility_rate
+        ?? null
+      ),
       paper_entry_proposal_readiness: verdict.paper_entry_proposal_readiness || null,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {
