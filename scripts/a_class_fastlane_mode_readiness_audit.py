@@ -203,13 +203,28 @@ def counter_value(value):
     return str(value)
 
 
+def signal_key(value):
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
 def load_final_entry_contract_events(db, since_ts, until_ts):
     if not table_exists(db, "paper_decision_events"):
         return {
             "available": False,
             "reason": "paper_decision_events_missing",
             "rows": 0,
+            "unique_signal_ids": 0,
             "hard_blockers": {},
+            "non_mode_hard_blockers": {},
+            "mode_disabled_rows": 0,
+            "mode_disabled_unique_signal_ids": 0,
+            "mode_disabled_only_rows": 0,
+            "mode_disabled_only_unique_signal_ids": 0,
+            "mode_disabled_plus_other_rows": 0,
+            "mode_disabled_plus_other_unique_signal_ids": 0,
+            "rows_without_hard_blockers": 0,
             "mode_status": {},
             "mode_action": {},
             "mode_reason": {},
@@ -228,6 +243,7 @@ def load_final_entry_contract_events(db, since_ts, until_ts):
         (since_ts, until_ts),
     ).fetchall()
     hard_blockers = Counter()
+    non_mode_hard_blockers = Counter()
     mode_status = Counter()
     mode_action = Counter()
     mode_reason = Counter()
@@ -235,12 +251,41 @@ def load_final_entry_contract_events(db, since_ts, until_ts):
     group_counts = Counter()
     expected_rr = Counter()
     spread = Counter()
+    final_entry_signal_ids = set()
+    mode_disabled_signal_ids = set()
+    mode_disabled_only_signal_ids = set()
+    mode_disabled_plus_other_signal_ids = set()
+    mode_disabled_rows = 0
+    mode_disabled_only_rows = 0
+    mode_disabled_plus_other_rows = 0
+    rows_without_hard_blockers = 0
     samples = []
     for row in rows:
         payload = jloads(row_value(row, "payload_json"))
+        sig_key = signal_key(row_value(row, "signal_id"))
+        if sig_key:
+            final_entry_signal_ids.add(sig_key)
         group_counts[(row_value(row, "event_type"), row_value(row, "decision"), row_value(row, "reason"))] += 1
-        for blocker in extract_hard_blockers(payload):
+        blockers = extract_hard_blockers(payload)
+        non_mode_blockers = [blocker for blocker in blockers if blocker != "mode_disabled"]
+        if not blockers:
+            rows_without_hard_blockers += 1
+        for blocker in blockers:
             hard_blockers[blocker] += 1
+        for blocker in non_mode_blockers:
+            non_mode_hard_blockers[blocker] += 1
+        if "mode_disabled" in blockers:
+            mode_disabled_rows += 1
+            if sig_key:
+                mode_disabled_signal_ids.add(sig_key)
+            if not non_mode_blockers:
+                mode_disabled_only_rows += 1
+                if sig_key:
+                    mode_disabled_only_signal_ids.add(sig_key)
+            else:
+                mode_disabled_plus_other_rows += 1
+                if sig_key:
+                    mode_disabled_plus_other_signal_ids.add(sig_key)
         state = mode_state_from_payload(payload)
         mode_status[counter_value(state.get("status"))] += 1
         mode_action[counter_value(state.get("action"))] += 1
@@ -261,7 +306,9 @@ def load_final_entry_contract_events(db, since_ts, until_ts):
                     "event_type": row_value(row, "event_type"),
                     "decision": row_value(row, "decision"),
                     "reason": row_value(row, "reason"),
-                    "hard_blockers": extract_hard_blockers(payload),
+                    "hard_blockers": blockers,
+                    "non_mode_hard_blockers": non_mode_blockers,
+                    "mode_disabled_only": "mode_disabled" in blockers and not non_mode_blockers,
                     "normalized_mode": payload.get("normalized_mode"),
                     "expected_rr": payload.get("expected_rr"),
                     "spread_pct": payload.get("spread_pct"),
@@ -276,7 +323,16 @@ def load_final_entry_contract_events(db, since_ts, until_ts):
     return {
         "available": True,
         "rows": len(rows),
+        "unique_signal_ids": len(final_entry_signal_ids),
         "hard_blockers": dict(hard_blockers.most_common()),
+        "non_mode_hard_blockers": dict(non_mode_hard_blockers.most_common()),
+        "mode_disabled_rows": mode_disabled_rows,
+        "mode_disabled_unique_signal_ids": len(mode_disabled_signal_ids),
+        "mode_disabled_only_rows": mode_disabled_only_rows,
+        "mode_disabled_only_unique_signal_ids": len(mode_disabled_only_signal_ids),
+        "mode_disabled_plus_other_rows": mode_disabled_plus_other_rows,
+        "mode_disabled_plus_other_unique_signal_ids": len(mode_disabled_plus_other_signal_ids),
+        "rows_without_hard_blockers": rows_without_hard_blockers,
         "mode_status": dict(mode_status.most_common()),
         "mode_action": dict(mode_action.most_common()),
         "mode_reason": dict(mode_reason.most_common()),
@@ -324,6 +380,8 @@ def raw_funnel_snapshot(raw_funnel):
         "raw_gold_silver_events": raw.get("raw_all_gold_silver_event_rows"),
         "evaluable_gold_silver_events": raw.get("evaluable_gold_silver_event_rows"),
         "raw_gold_silver_entered_events": raw.get("entered_events"),
+        "candidate_matched_any_events": (summary.get("candidate_layer") or {}).get("candidate_matched_any_events"),
+        "candidate_match_any_rate": (summary.get("candidate_layer") or {}).get("candidate_match_any_rate"),
         "decision_record_rate": decision.get("decision_record_rate"),
         "would_enter_rate": decision.get("would_enter_rate"),
         "entered_rate": decision.get("entered_rate"),
@@ -331,10 +389,78 @@ def raw_funnel_snapshot(raw_funnel):
         "would_enter_events": decision.get("would_enter_events"),
         "entered_events": decision.get("entered_events"),
         "paper_trades_entry_ts_window_count": bridge.get("paper_trades_entry_ts_window_count"),
+        "raw_signal_ids": raw_bridge.get("raw_signal_ids"),
+        "raw_signals_with_decision_record": raw_bridge.get("raw_signals_with_decision_record"),
+        "raw_signals_without_decision_record": raw_bridge.get("raw_signals_without_decision_record"),
         "raw_signals_with_pass_or_allow": raw_bridge.get("raw_signals_with_pass_or_allow"),
         "raw_signals_with_pending_entry": raw_bridge.get("raw_signals_with_pending_entry"),
         "raw_signals_with_final_entry_contract": raw_bridge.get("raw_signals_with_final_entry_contract"),
         "raw_signals_with_final_entry_block": raw_bridge.get("raw_signals_with_final_entry_block"),
+    }
+
+
+def build_capture_stage_rates(raw_snapshot, final_contract):
+    raw_events = safe_int(raw_snapshot.get("raw_gold_silver_events"), 0)
+    raw_signals = safe_int(raw_snapshot.get("raw_signal_ids"), 0) or raw_events
+    decision_records = safe_int(raw_snapshot.get("raw_signals_with_decision_record"), 0)
+    if not decision_records:
+        decision_records = safe_int(raw_snapshot.get("events_with_decision_record"), 0)
+    pass_or_allow = safe_int(raw_snapshot.get("raw_signals_with_pass_or_allow"), 0)
+    pending = safe_int(raw_snapshot.get("raw_signals_with_pending_entry"), 0)
+    final_entry_contract = safe_int(raw_snapshot.get("raw_signals_with_final_entry_contract"), 0)
+    if not final_entry_contract:
+        final_entry_contract = safe_int(final_contract.get("unique_signal_ids"), 0)
+    mode_disabled_only = safe_int(final_contract.get("mode_disabled_only_unique_signal_ids"), 0)
+    entered = safe_int(raw_snapshot.get("entered_events"), 0)
+    paper_committed = safe_int(raw_snapshot.get("paper_trades_entry_ts_window_count"), 0)
+    candidate_matched_any = safe_int(raw_snapshot.get("candidate_matched_any_events"), 0)
+    detector_rate = raw_snapshot.get("candidate_match_any_rate")
+    if detector_rate is None:
+        detector_rate = rate(candidate_matched_any, raw_events)
+    pending_without_final = max(0, pending - final_entry_contract)
+    final_without_mode_adjusted = max(0, final_entry_contract - mode_disabled_only)
+    mode_adjusted_rate = rate(mode_disabled_only, raw_signals)
+    return {
+        "denominator_raw_gold_silver_events": raw_events,
+        "denominator_raw_signal_ids": raw_signals,
+        "detector_capture_rate": detector_rate,
+        "decision_record_capture_rate": rate(decision_records, raw_signals),
+        "pass_allow_capture_rate": rate(pass_or_allow, raw_signals),
+        "pending_capture_rate": rate(pending, raw_signals),
+        "final_entry_contract_reach_rate": rate(final_entry_contract, raw_signals),
+        "mode_disabled_adjusted_final_eligibility_rate": mode_adjusted_rate,
+        "paper_capture_rate": rate(paper_committed, raw_signals),
+        "actual_entered_rate": rate(entered, raw_signals),
+        "events": {
+            "candidate_matched_any": candidate_matched_any,
+            "decision_records": decision_records,
+            "pass_or_allow": pass_or_allow,
+            "pending_entry": pending,
+            "final_entry_contract": final_entry_contract,
+            "mode_disabled_only_final_entry": mode_disabled_only,
+            "entered": entered,
+            "paper_committed": paper_committed,
+        },
+        "pending_to_final_entry_gap": {
+            "pending_entry_signal_ids": pending,
+            "final_entry_contract_signal_ids": final_entry_contract,
+            "pending_without_final_entry_contract": pending_without_final,
+            "pending_to_final_entry_contract_rate": rate(final_entry_contract, pending),
+            "pending_to_mode_adjusted_final_eligibility_rate": rate(mode_disabled_only, pending),
+        },
+        "mode_disabled_adjusted_final_eligibility": {
+            "status": (
+                "CAPTURE_READINESS_60_REACHED"
+                if mode_adjusted_rate is not None and mode_adjusted_rate >= 0.6
+                else "CAPTURE_READINESS_BELOW_60"
+            ),
+            "mode_disabled_only_unique_signal_ids": mode_disabled_only,
+            "final_entry_contract_unique_signal_ids": final_entry_contract,
+            "final_entry_contract_not_mode_adjusted_signal_ids": final_without_mode_adjusted,
+            "rate": mode_adjusted_rate,
+            "denominator_raw_signal_ids": raw_signals,
+            "definition": "raw gold/silver signals that reached final_entry_contract with mode_disabled as the only hard blocker",
+        },
     }
 
 
@@ -395,6 +521,7 @@ def build_report(args):
     failed = context_failed_conditions(context, volume_kline)
     classification = classify(runtime, final_contract, failed)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
+    capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "a_class_fastlane_mode_audit_24h",
@@ -424,6 +551,9 @@ def build_report(args):
             "volume_kline_audit_loaded": bool(volume_kline),
         },
         "raw_funnel_snapshot": raw_snapshot,
+        "capture_stage_rates": capture_stage_rates,
+        "pending_to_final_entry_gap": capture_stage_rates["pending_to_final_entry_gap"],
+        "mode_disabled_adjusted_final_eligibility": capture_stage_rates["mode_disabled_adjusted_final_eligibility"],
         "raw_gold_silver_entered_events": raw_snapshot.get("raw_gold_silver_entered_events"),
         "decision_layer": (raw_funnel.get("summary") or {}).get("decision_layer") or {},
         "entry_bridge_layer_summary": {
@@ -459,6 +589,9 @@ def compact_summary(report):
         "effective_runtime_mode_state": report.get("effective_runtime_mode_state"),
         "final_entry_contract_blocker_breakdown": report.get("final_entry_contract_blocker_breakdown"),
         "raw_funnel_snapshot": report.get("raw_funnel_snapshot"),
+        "capture_stage_rates": report.get("capture_stage_rates"),
+        "pending_to_final_entry_gap": report.get("pending_to_final_entry_gap"),
+        "mode_disabled_adjusted_final_eligibility": report.get("mode_disabled_adjusted_final_eligibility"),
     }
 
 
@@ -505,19 +638,40 @@ def self_test():
             "INSERT INTO paper_decision_events VALUES (?,?,?,?,?,?,?,?,?,?)",
             (now - 60, "1", "TOK", "TOK", "lc", "final_entry_contract", "entry_block", "BLOCK", "final_entry_hard_block", json.dumps(payload)),
         )
+        payload_mode_only = {
+            "hard_blockers": ["mode_disabled"],
+            "mode_state": {"status": "SHADOW", "action": "SHADOW", "reason": "cooldown_elapsed_requires_clean_windows"},
+            "normalized_mode": MODE_KEY,
+            "expected_rr": 2.4,
+            "spread_pct": 3,
+        }
+        db.execute(
+            "INSERT INTO paper_decision_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (now - 30, "2", "TOK2", "TOK2", "lc2", "final_entry_contract", "entry_block", "BLOCK", "final_entry_hard_block", json.dumps(payload_mode_only)),
+        )
         db.commit()
         db.close()
         write_json(raw_path, {
             "summary": {
                 "raw_denominator": {"raw_all_gold_silver_event_rows": 2, "entered_events": 0},
-                "decision_layer": {"would_enter_events": 1, "would_enter_rate": 0.5, "entered_events": 0, "entered_rate": 0.0},
+                "candidate_layer": {"candidate_matched_any_events": 2, "candidate_match_any_rate": 1.0},
+                "decision_layer": {
+                    "events_with_decision_record": 2,
+                    "decision_record_rate": 1.0,
+                    "would_enter_events": 1,
+                    "would_enter_rate": 0.5,
+                    "entered_events": 0,
+                    "entered_rate": 0.0,
+                },
                 "entry_bridge_layer": {
                     "paper_trades_entry_ts_window_count": 0,
                     "raw_signal_decision_bridge": {
+                        "raw_signal_ids": 2,
+                        "raw_signals_with_decision_record": 2,
                         "raw_signals_with_pass_or_allow": 1,
-                        "raw_signals_with_pending_entry": 1,
-                        "raw_signals_with_final_entry_contract": 1,
-                        "raw_signals_with_final_entry_block": 1,
+                        "raw_signals_with_pending_entry": 2,
+                        "raw_signals_with_final_entry_contract": 2,
+                        "raw_signals_with_final_entry_block": 2,
                     },
                 },
             }
@@ -539,6 +693,15 @@ def self_test():
         assert report["reason"] == "cooldown_elapsed_requires_clean_windows"
         assert report["clean_window_conditions"]["passed"] is False
         assert report["human_action_required"] is False
+        assert report["final_entry_contract"]["mode_disabled_rows"] == 2
+        assert report["final_entry_contract"]["mode_disabled_only_rows"] == 1
+        assert report["final_entry_contract"]["mode_disabled_plus_other_rows"] == 1
+        assert report["capture_stage_rates"]["detector_capture_rate"] == 1.0
+        assert report["capture_stage_rates"]["pending_capture_rate"] == 1.0
+        assert report["pending_to_final_entry_gap"]["pending_to_final_entry_contract_rate"] == 1.0
+        assert report["mode_disabled_adjusted_final_eligibility"]["mode_disabled_only_unique_signal_ids"] == 1
+        assert report["mode_disabled_adjusted_final_eligibility"]["rate"] == 0.5
+        assert report["mode_disabled_adjusted_final_eligibility"]["status"] == "CAPTURE_READINESS_BELOW_60"
         write_json(context_path, {"blockers": []})
         report = build_report(args)
         assert report["final_entry_status"] == "FUNNEL_BLOCKED_STUCK"

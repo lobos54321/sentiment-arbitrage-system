@@ -360,16 +360,52 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         final_entry.get("human_action_required")
     )
     promotion_allowed = False
+    capture_stage_rates = final_entry.get("capture_stage_rates") or {}
+    mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
+    current_capture_stage = final_entry.get("current_capture_stage")
+    top_blocker = blockers[0] if blockers else (
+        final_entry.get("reason") or classification
+    )
+    if classification == "BLOCKED_DATA":
+        next_action = "resolve_data_integrity_blocker"
+    elif classification == "BLOCKED_CONTEXT_COVERAGE":
+        next_action = "resolve_context_coverage_blocker"
+    elif classification == "FUNNEL_BLOCKED_EXPECTED":
+        next_action = "wait_clean_windows_or_fix_failed_context_coverage"
+    elif classification == "FUNNEL_BLOCKED_STUCK":
+        next_action = "human_review_a_class_shadow_state"
+    elif classification == "CAPTURE_DISCOVERY_HIT":
+        next_action = "freeze_hit_for_out_of_sample_validation"
+    elif classification == "DISCOVERY_WATCH":
+        next_action = "continue_shadow_discovery_and_watchlist_validation"
+    else:
+        next_action = "continue_capture_discovery"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "phase": "discovery_mesh",
         "current_commit": readiness_reports.get("current_commit"),
         "deployment_commit": readiness_reports.get("deployment_commit"),
+        "verdict": classification,
         "classification": classification,
+        "next_action": next_action,
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
         "human_action_required": human_action_required,
+        "current_capture_stage": current_capture_stage,
+        "detector_capture_rate": capture_stage_rates.get("detector_capture_rate"),
+        "decision_record_capture_rate": capture_stage_rates.get("decision_record_capture_rate"),
+        "decision_capture_rate": capture_stage_rates.get("pass_allow_capture_rate"),
+        "pending_capture_rate": capture_stage_rates.get("pending_capture_rate"),
+        "final_entry_contract_reach_rate": capture_stage_rates.get("final_entry_contract_reach_rate"),
+        "final_eligibility_capture_rate": (
+            mode_adjusted_final.get("rate")
+            if "rate" in mode_adjusted_final
+            else capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
+        ),
+        "paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
+        "realized_capture_rate": capture_stage_rates.get("realized_capture_rate"),
+        "top_blocker": top_blocker,
         "non_quote_sensitive_capture_discovery_allowed": non_quote_sensitive_capture_discovery_allowed,
         "quote_sensitive_slices_blocked": quote_sensitive_slices_blocked,
         "canary_increase_allowed": False,
@@ -634,6 +670,31 @@ def self_test():
     assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
+    stage_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "a_class_fastlane_mode_audit": {
+            "final_entry_status": "FUNNEL_BLOCKED_EXPECTED",
+            "reason": "cooldown_elapsed_requires_clean_windows",
+            "current_capture_stage": "mode_disabled_clean_window_pending",
+            "capture_stage_rates": {
+                "detector_capture_rate": 1.0,
+                "decision_record_capture_rate": 0.9,
+                "pass_allow_capture_rate": 0.5,
+                "pending_capture_rate": 0.3,
+                "final_entry_contract_reach_rate": 0.02,
+                "paper_capture_rate": 0.0,
+            },
+            "mode_disabled_adjusted_final_eligibility": {
+                "rate": 0.01,
+                "status": "CAPTURE_READINESS_BELOW_60",
+            },
+        }
+    })
+    assert stage_verdict["current_capture_stage"] == "mode_disabled_clean_window_pending"
+    assert stage_verdict["detector_capture_rate"] == 1.0
+    assert stage_verdict["decision_capture_rate"] == 0.5
+    assert stage_verdict["pending_capture_rate"] == 0.3
+    assert stage_verdict["final_eligibility_capture_rate"] == 0.01
+    assert stage_verdict["paper_capture_rate"] == 0.0
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
     quote_blocked = build_verdict({
