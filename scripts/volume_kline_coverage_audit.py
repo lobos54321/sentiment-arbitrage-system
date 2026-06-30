@@ -137,6 +137,45 @@ def breakdown(rows, predicate):
     return out
 
 
+def bucket_bar_count(value):
+    parsed = number(value)
+    if parsed is None:
+        return "missing"
+    count = int(parsed)
+    if count <= 0:
+        return "0"
+    if count == 1:
+        return "1"
+    if count == 2:
+        return "2"
+    if count < 5:
+        return "3_4"
+    if count < 10:
+        return "5_9"
+    return "gte_10"
+
+
+def bucket_signal_age(row, payload):
+    observed = number(row.get("observed_at"))
+    signal_ts = number(row.get("signal_ts"))
+    if signal_ts is None:
+        signal_ts = number(payload.get("signal_ts"))
+    if observed is None or signal_ts is None:
+        return "missing"
+    age = observed - signal_ts
+    if age < 0:
+        return "invalid_negative"
+    if age < 60:
+        return "lt_60s"
+    if age < 180:
+        return "60_180s"
+    if age < 300:
+        return "180_300s"
+    if age < 900:
+        return "300_900s"
+    return "gte_900s"
+
+
 def volume_context_audit(rows):
     den = len(rows)
     status_counts = Counter(value_status(payload, "volume_profile") for _row, payload in rows)
@@ -159,6 +198,7 @@ def volume_context_audit(rows):
         root_causes.append("volume_profile_unknown_from_insufficient_or_unclassified_kline")
     if not root_causes and blocker:
         root_causes.append("volume_profile_coverage_below_threshold")
+    unknown_rows = [(row, payload) for row, payload in rows if value_status(payload, "volume_profile") == "unknown"]
     return {
         "coverage_denominator_type": "signal_context_carrier_rows",
         "context_carrier_candidate_id": DEFAULT_CONTEXT_CARRIER,
@@ -179,6 +219,33 @@ def volume_context_audit(rows):
         "missing_or_unknown_breakdown": breakdown(rows, missing_or_unknown),
         "missing_breakdown": breakdown(rows, lambda _row, payload: value_status(payload, "volume_profile") == "missing"),
         "unknown_breakdown": breakdown(rows, lambda _row, payload: value_status(payload, "volume_profile") == "unknown"),
+        "unknown_diagnostics": {
+            "kline_bar_count_bucket_counts": dict(
+                Counter(bucket_bar_count(payload.get("kline_bar_count")) for _row, payload in unknown_rows).most_common()
+            ),
+            "signal_age_bucket_counts": dict(
+                Counter(bucket_signal_age(row, payload) for row, payload in unknown_rows).most_common()
+            ),
+            "volume_profile_reason_counts": dict(
+                Counter(payload_dim(payload, "volume_profile_reason") for _row, payload in unknown_rows).most_common()
+            ),
+            "kline_missing_reason_counts": dict(
+                Counter(payload_dim(payload, "kline_missing_reason") for _row, payload in unknown_rows).most_common()
+            ),
+            "unknown_samples": [
+                {
+                    "signal_id": row.get("signal_id"),
+                    "token_ca": row.get("token_ca"),
+                    "observed_at": row.get("observed_at"),
+                    "signal_ts": row.get("signal_ts"),
+                    "signal_age_bucket": bucket_signal_age(row, payload),
+                    "kline_bar_count": payload.get("kline_bar_count"),
+                    "volume_profile_reason": payload.get("volume_profile_reason"),
+                    "kline_missing_reason": payload.get("kline_missing_reason"),
+                }
+                for row, payload in unknown_rows[:20]
+            ],
+        },
     }
 
 
@@ -516,6 +583,7 @@ def compact_summary(report):
             "value_counts": volume.get("value_counts"),
             "blocker": volume.get("blocker"),
             "root_causes": volume.get("root_causes"),
+            "unknown_diagnostics": volume.get("unknown_diagnostics"),
         },
         "raw_gold_silver_kline": {
             "raw_all_gold_silver_event_rows": kline.get("raw_all_gold_silver_event_rows"),
