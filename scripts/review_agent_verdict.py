@@ -706,6 +706,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             blocker for blocker in actionable_blockers
             if blocker != "source_component_coverage_below_80pct"
         ]
+    context_clean_window_pending = bool(
+        quote_clean_window_pending
+        or lifecycle_clean_window_pending
+        or source_component_clean_window_pending
+    )
     next_highest_priority_blocker = first_blocker_priority(actionable_blockers)
     candidate_integrity_ok = (
         candidate_expected == EXPECTED_CANDIDATE_COUNT
@@ -791,7 +796,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     if classification == "BLOCKED_DATA":
         next_action = "resolve_data_integrity_blocker"
     elif classification == "BLOCKED_CONTEXT_COVERAGE":
-        if (
+        if context_clean_window_pending and not actionable_blockers:
+            next_action = "wait_for_context_clean_window_and_continue_shadow_oos_collection"
+        elif (
             volume_blocker_non_actionable
             and not actionable_blockers
         ):
@@ -1039,6 +1046,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "quote_clean_window_eta_iso": context_monitor_clean_window.get("estimated_clean_at_iso"),
         "quote_clean_window_seconds_remaining": context_monitor_clean_window.get("seconds_until_natural_clean_window"),
         "context_field_writer_fix_status": context_field_writer_fix_status,
+        "context_clean_window_pending": context_clean_window_pending,
+        "context_clean_window_eta_iso": context_monitor_clean_window.get("estimated_clean_at_iso"),
+        "context_clean_window_seconds_remaining": context_monitor_clean_window.get("seconds_until_natural_clean_window"),
         "lifecycle_clean_window_pending": lifecycle_clean_window_pending,
         "source_component_clean_window_pending": source_component_clean_window_pending,
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
@@ -1690,7 +1700,8 @@ def self_test():
     assert quote_pending_with_matured_volume_path["formal_volume_sensitive_slices_blocked"] is True
     assert quote_pending_with_matured_volume_path["volume_profile_blocker_state"]["classification"] == "SHADOW_MATURED_VOLUME_PATH_AVAILABLE"
     assert quote_pending_with_matured_volume_path["volume_profile_blocker_state"]["promotion_allowed"] is False
-    assert quote_pending_with_matured_volume_path["next_action"] == "continue_shadow_matured_volume_validation_without_formal_volume_promotion"
+    assert quote_pending_with_matured_volume_path["context_clean_window_pending"] is True
+    assert quote_pending_with_matured_volume_path["next_action"] == "wait_for_context_clean_window_and_continue_shadow_oos_collection"
     matured_volume_coverage_pending = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["volume_profile_coverage_below_80pct"]},
