@@ -631,7 +631,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "blocker",
                     "root_causes",
                     "missing_or_unknown_breakdown",
+                    "unknown_diagnostics",
                 )
+            } | {
+                "recent_windows": volume_kline_audit.get("volume_context_recent_windows") or {},
             },
             "raw_gold_silver_kline": {
                 key: (volume_kline_audit.get("raw_gold_silver_kline") or {}).get(key)

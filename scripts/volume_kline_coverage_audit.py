@@ -249,6 +249,34 @@ def volume_context_audit(rows):
     }
 
 
+def compact_volume_context_audit(audit):
+    diagnostics = audit.get("unknown_diagnostics") or {}
+    return {
+        "rows_scanned": audit.get("rows_scanned"),
+        "field_present_rate": audit.get("field_present_rate"),
+        "known_rate": audit.get("known_rate"),
+        "missing_rate": audit.get("missing_rate"),
+        "unknown_rate": audit.get("unknown_rate"),
+        "blocker": audit.get("blocker"),
+        "root_causes": audit.get("root_causes") or [],
+        "unknown_volume_profile_reason_counts": diagnostics.get("volume_profile_reason_counts") or {},
+        "unknown_kline_missing_reason_counts": diagnostics.get("kline_missing_reason_counts") or {},
+        "unknown_kline_bar_count_bucket_counts": diagnostics.get("kline_bar_count_bucket_counts") or {},
+    }
+
+
+def volume_context_recent_windows(rows, now_ts, windows_hours=(1, 2, 4, 6, 12, 24)):
+    out = {}
+    for hours in windows_hours:
+        since = int(now_ts) - int(hours * 3600)
+        subset = [
+            (row, payload) for row, payload in rows
+            if int(row.get("observed_at") or 0) >= since
+        ]
+        out[f"{hours}h"] = compact_volume_context_audit(volume_context_audit(subset))
+    return out
+
+
 def bucket_lag(value):
     if value is None:
         return "missing"
@@ -522,6 +550,7 @@ def build_report(args):
     try:
         context_rows = load_context_rows(paper, since_ts, args.context_carrier)
         volume = volume_context_audit(context_rows)
+        recent_volume = volume_context_recent_windows(context_rows, now_ts)
         kline = raw_kline_audit(raw, since_ts)
         h1_blocked = bool(volume.get("blocker") or kline.get("blocker"))
         root_causes = []
@@ -544,6 +573,7 @@ def build_report(args):
             "strategy_change_allowed": False,
             "canonical_backfill_performed": False,
             "volume_context": volume,
+            "volume_context_recent_windows": recent_volume,
             "raw_gold_silver_kline": kline,
             "overall": {
                 "classification": "DATA_BLOCKED_VOLUME_KLINE" if h1_blocked else "VOLUME_KLINE_HEALTHY_FOR_DISCOVERY",
@@ -584,6 +614,7 @@ def compact_summary(report):
             "blocker": volume.get("blocker"),
             "root_causes": volume.get("root_causes"),
             "unknown_diagnostics": volume.get("unknown_diagnostics"),
+            "recent_windows": report.get("volume_context_recent_windows") or {},
         },
         "raw_gold_silver_kline": {
             "raw_all_gold_silver_event_rows": kline.get("raw_all_gold_silver_event_rows"),
@@ -664,6 +695,8 @@ def self_test():
         assert report["volume_context"]["known_rows"] == 1
         assert report["volume_context"]["missing_rows"] == 1
         assert report["volume_context"]["unknown_rows"] == 1
+        assert report["volume_context_recent_windows"]["1h"]["rows_scanned"] == 3
+        assert report["volume_context_recent_windows"]["1h"]["field_present_rate"] == report["volume_context"]["field_present_rate"]
         assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_root_cause_counts"]["not_same_source_path"] == 1
@@ -671,6 +704,7 @@ def self_test():
         assert report["overall"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
         compact = compact_summary(report)
         assert compact["overall"]["promotion_allowed"] is False
+        assert "recent_windows" in compact["volume_context"]
     print("SELF_TEST_PASS volume_kline_coverage_audit")
 
 

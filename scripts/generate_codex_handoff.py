@@ -163,6 +163,46 @@ def build_handoff(verdict):
             if hint:
                 lines.append(f"- `{blocker}`: {hint}")
         lines.append("")
+    if any(blocker in {"volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"} for blocker in actionable):
+        volume_kline = verdict.get("volume_kline_root_cause_audit") or {}
+        volume_context = volume_kline.get("volume_context") or {}
+        raw_kline = volume_kline.get("raw_gold_silver_kline") or {}
+        compact_volume_kline = {
+            "overall": volume_kline.get("overall") or {},
+            "volume_context": {
+                key: volume_context.get(key)
+                for key in (
+                    "rows_scanned",
+                    "field_present_rate",
+                    "known_rate",
+                    "missing_rate",
+                    "unknown_rate",
+                    "blocker",
+                    "root_causes",
+                    "recent_windows",
+                )
+            },
+            "raw_gold_silver_kline": {
+                key: raw_kline.get(key)
+                for key in (
+                    "raw_all_gold_silver_event_rows",
+                    "kline_coverage_rate",
+                    "kline_covered_rows",
+                    "kline_uncovered_rows",
+                    "kline_uncovered_root_cause_counts",
+                    "low_confidence_research_audit",
+                    "blocker",
+                )
+            },
+        }
+        lines.extend([
+            "## Volume / Kline Root Cause",
+            "",
+            "```json",
+            json.dumps(compact_volume_kline, indent=2, sort_keys=True)[:12000],
+            "```",
+            "",
+        ])
     reconciliation = verdict.get("signal_identity_reconciliation") or {}
     if reconciliation:
         lines.extend([
@@ -533,11 +573,40 @@ def self_test():
         ],
         "actionable_blockers": ["volume_profile_coverage_below_80pct"],
         "next_highest_priority_blocker": "volume_profile_coverage_below_80pct",
+        "volume_kline_root_cause_audit": {
+            "overall": {
+                "classification": "DATA_BLOCKED_VOLUME_KLINE",
+                "root_causes": ["volume_profile_unknown_from_insufficient_or_unclassified_kline"],
+                "promotion_allowed": False,
+            },
+            "volume_context": {
+                "rows_scanned": 10,
+                "field_present_rate": 1.0,
+                "known_rate": 0.4,
+                "missing_rate": 0.0,
+                "unknown_rate": 0.6,
+                "blocker": "volume_profile_coverage_below_80pct",
+                "root_causes": ["volume_profile_unknown_from_insufficient_or_unclassified_kline"],
+                "recent_windows": {
+                    "1h": {"rows_scanned": 5, "field_present_rate": 1.0, "known_rate": 0.4, "unknown_rate": 0.6}
+                },
+            },
+            "raw_gold_silver_kline": {
+                "raw_all_gold_silver_event_rows": 8,
+                "kline_coverage_rate": 0.5,
+                "kline_covered_rows": 4,
+                "kline_uncovered_rows": 4,
+                "kline_uncovered_root_cause_counts": {"no_kline_for_token": 4},
+                "blocker": "kline_coverage_below_80pct",
+            },
+        },
     }
     text = build_handoff(quote_pending_volume_verdict)
     assert "handoff_needed: `true`" in text
     assert "next_highest_priority_blocker: `volume_profile_coverage_below_80pct`" in text
     assert "Required Fixes" in text
+    assert "Volume / Kline Root Cause" in text
+    assert "volume_profile_unknown_from_insufficient_or_unclassified_kline" in text
     assert "volume_profile_coverage_below_80pct" in text
     assert "`source_quote_clean_coverage_below_80pct`:" not in text
     verdict["blockers"] = []
