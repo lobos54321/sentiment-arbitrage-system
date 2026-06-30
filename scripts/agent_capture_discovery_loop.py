@@ -1292,6 +1292,19 @@ def run_reports(run_dir, args):
     ))
     if a_class_fastlane_path.exists():
         readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
+    diagnostics.append(run_report(
+        "runtime_health_snapshot_final",
+        [
+            "scripts/runtime_health_snapshot_audit.py",
+            "--data-dir", args.data_dir,
+            "--hours", str(primary_hours),
+            "--out", str(runtime_health_snapshot_path),
+        ],
+        runtime_health_snapshot_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if runtime_health_snapshot_path.exists():
+        readiness_paths["runtime_health_snapshot"] = runtime_health_snapshot_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,

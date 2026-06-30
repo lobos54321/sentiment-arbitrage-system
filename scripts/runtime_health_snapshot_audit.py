@@ -117,6 +117,22 @@ def tail_lines(path, max_bytes, max_lines):
     return text.splitlines()[-max_lines:]
 
 
+def line_timestamp(line, fallback_ts=None):
+    iso_match = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", line)
+    if iso_match:
+        return parse_ts(iso_match.group(0))
+    space_match = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", line)
+    if space_match:
+        return parse_ts(space_match.group(0))
+    return fallback_ts
+
+
+def timestamp_in_recent_window(ts, max_age_minutes):
+    if ts is None:
+        return True
+    return (now_ts() - ts) <= (float(max_age_minutes) * 60.0)
+
+
 def observer_log_section(data_dir, name, filename, args):
     path = Path(data_dir) / filename
     info = file_info(path)
@@ -139,17 +155,28 @@ def observer_log_section(data_dir, name, filename, args):
     nonzero_exit_count = 0
     last_exit_code = None
     last_exit_signal = None
+    last_ts = None
+    latest_warning_ts = None
     exit_re = re.compile(r"exited code=([^\s]+) signal=([^;\s]*)")
     for line in lines:
+        event_ts = line_timestamp(line, last_ts)
+        if event_ts is not None:
+            last_ts = event_ts
+        if not timestamp_in_recent_window(event_ts, args.observer_log_max_age_minutes):
+            continue
         lower = line.lower()
         if "database is locked" in lower:
             database_locked_count += 1
+            latest_warning_ts = event_ts or latest_warning_ts
         if "sqlite_busy" in lower or "database table is locked" in lower or "database schema is locked" in lower:
             sqlite_busy_count += 1
+            latest_warning_ts = event_ts or latest_warning_ts
         if "timeout after" in lower or "timed out" in lower:
             timeout_count += 1
+            latest_warning_ts = event_ts or latest_warning_ts
         if "spawn error" in lower:
             spawn_error_count += 1
+            latest_warning_ts = event_ts or latest_warning_ts
         match = exit_re.search(line)
         if match:
             code = match.group(1)
@@ -158,6 +185,7 @@ def observer_log_section(data_dir, name, filename, args):
             last_exit_signal = signal
             if code not in {"0", "None", "null"}:
                 nonzero_exit_count += 1
+                latest_warning_ts = event_ts or latest_warning_ts
     if database_locked_count or sqlite_busy_count:
         warnings.append(f"{warning_prefix}sqlite_lock_recent")
     if nonzero_exit_count:
@@ -175,6 +203,11 @@ def observer_log_section(data_dir, name, filename, args):
         "mtime_age_minutes": info.get("mtime_age_minutes"),
         "tail_lines_scanned": len(lines),
         "tail_bytes_scanned": min(info.get("size_bytes") or 0, args.observer_log_tail_bytes),
+        "max_age_minutes": args.observer_log_max_age_minutes,
+        "latest_warning_at": (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(latest_warning_ts))
+            if latest_warning_ts is not None else None
+        ),
         "database_locked_count": database_locked_count,
         "sqlite_busy_count": sqlite_busy_count,
         "nonzero_exit_count": nonzero_exit_count,
@@ -422,6 +455,7 @@ def self_test():
             signal_fail_minutes=45,
             observer_log_tail_lines=200,
             observer_log_tail_bytes=20000,
+            observer_log_max_age_minutes=120,
         )
         (root / "raw-path-observer.log").write_text(
             "[raw-path-observer-supervisor] exited code=1 signal=; next run in 120s\n"
@@ -469,6 +503,7 @@ def main():
     parser.add_argument("--signal-fail-minutes", type=float, default=45.0)
     parser.add_argument("--observer-log-tail-lines", type=int, default=240)
     parser.add_argument("--observer-log-tail-bytes", type=int, default=200000)
+    parser.add_argument("--observer-log-max-age-minutes", type=float, default=120.0)
     parser.add_argument("--out")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
