@@ -405,6 +405,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     promotion_allowed = False
     capture_stage_rates = final_entry.get("capture_stage_rates") or {}
+    upstream_gap = capture_stage_rates.get("upstream_funnel_gap") or final_entry.get("upstream_funnel_gap") or {}
     pending_to_final_gap = capture_stage_rates.get("pending_to_final_entry_gap") or final_entry.get("pending_to_final_entry_gap") or {}
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
@@ -450,6 +451,24 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         ),
         "paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
         "realized_capture_rate": capture_stage_rates.get("realized_capture_rate"),
+        "upstream_funnel_gap_summary": {
+            "raw_signal_ids": upstream_gap.get("raw_signal_ids"),
+            "decision_record_signal_ids": upstream_gap.get("decision_record_signal_ids"),
+            "pass_or_allow_signal_ids": upstream_gap.get("pass_or_allow_signal_ids"),
+            "pending_entry_signal_ids": upstream_gap.get("pending_entry_signal_ids"),
+            "no_decision_record": upstream_gap.get("no_decision_record"),
+            "decision_no_pass_or_allow": upstream_gap.get("decision_no_pass_or_allow"),
+            "pass_or_allow_without_pending_entry": upstream_gap.get("pass_or_allow_without_pending_entry"),
+            "total_upstream_gap": upstream_gap.get("total_upstream_gap"),
+            "decision_record_capture_rate": upstream_gap.get("decision_record_capture_rate"),
+            "pass_allow_capture_rate": upstream_gap.get("pass_allow_capture_rate"),
+            "pending_capture_rate": upstream_gap.get("pending_capture_rate"),
+            "upstream_gap_category_counts": upstream_gap.get("upstream_gap_category_counts") or {},
+            "upstream_gap_priority": upstream_gap.get("upstream_gap_priority") or {},
+            "automatic_runtime_change_allowed": False,
+            "strategy_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
         "entry_funnel_gap_summary": {
             "pending_entry_signal_ids": pending_to_final_gap.get("pending_entry_signal_ids"),
             "final_entry_contract_signal_ids": pending_to_final_gap.get("final_entry_contract_signal_ids"),
@@ -781,6 +800,33 @@ def self_test():
                 "pending_capture_rate": 0.3,
                 "final_entry_contract_reach_rate": 0.02,
                 "paper_capture_rate": 0.0,
+                "upstream_funnel_gap": {
+                    "raw_signal_ids": 10,
+                    "decision_record_signal_ids": 9,
+                    "pass_or_allow_signal_ids": 5,
+                    "pending_entry_signal_ids": 3,
+                    "no_decision_record": 1,
+                    "decision_no_pass_or_allow": 4,
+                    "pass_or_allow_without_pending_entry": 2,
+                    "total_upstream_gap": 7,
+                    "decision_record_capture_rate": 0.9,
+                    "pass_allow_capture_rate": 0.5,
+                    "pending_capture_rate": 0.3,
+                    "upstream_gap_category_counts": {
+                        "total_classified": 7,
+                        "categories": [{"category": "QUALITY_OR_TIMING_REJECT", "count": 4}],
+                    },
+                    "upstream_gap_priority": {
+                        "current_shortfall_to_60_pending": 3,
+                        "categories_ranked_by_optimistic_pending_gain": [
+                            {
+                                "category": "QUALITY_OR_TIMING_REJECT",
+                                "optimistic_pending_capture_rate_if_all_bridged": 0.7,
+                            }
+                        ],
+                        "promotion_allowed": False,
+                    },
+                },
             },
             "mode_disabled_adjusted_final_eligibility": {
                 "rate": 0.01,
@@ -794,6 +840,8 @@ def self_test():
     assert stage_verdict["pending_capture_rate"] == 0.3
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
     assert stage_verdict["paper_capture_rate"] == 0.0
+    assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
+    assert stage_verdict["upstream_funnel_gap_summary"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 3
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
     quote_blocked = build_verdict({

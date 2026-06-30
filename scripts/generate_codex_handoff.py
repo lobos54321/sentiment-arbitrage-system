@@ -241,6 +241,16 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    upstream_gap = verdict.get("upstream_funnel_gap_summary") or {}
+    if upstream_gap:
+        lines.extend([
+            "## Upstream Funnel Gap",
+            "",
+            "```json",
+            json.dumps(upstream_gap, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -368,6 +378,36 @@ def self_test():
                 "promotion_allowed": False,
             },
         },
+        "upstream_funnel_gap_summary": {
+            "raw_signal_ids": 20,
+            "decision_record_signal_ids": 12,
+            "pass_or_allow_signal_ids": 8,
+            "pending_entry_signal_ids": 5,
+            "no_decision_record": 8,
+            "decision_no_pass_or_allow": 4,
+            "pass_or_allow_without_pending_entry": 3,
+            "total_upstream_gap": 15,
+            "upstream_gap_category_counts": {
+                "total_classified": 15,
+                "categories": [
+                    {
+                        "category": "NO_DECISION_RECORD",
+                        "count": 8,
+                        "automatic_allowed_scope": "instrumentation, join, or observer audit",
+                    }
+                ],
+            },
+            "upstream_gap_priority": {
+                "current_shortfall_to_60_pending": 7,
+                "categories_ranked_by_optimistic_pending_gain": [
+                    {
+                        "category": "NO_DECISION_RECORD",
+                        "optimistic_pending_capture_rate_if_all_bridged": 0.65,
+                    }
+                ],
+                "promotion_allowed": False,
+            },
+        },
         "hypothesis_validation_audit": {
             "available": True,
             "overall": {
@@ -388,8 +428,11 @@ def self_test():
     assert "Quote Missing Root Cause" in text
     assert "Hypothesis Validation" in text
     assert "Entry Funnel Gap" in text
+    assert "Upstream Funnel Gap" in text
     assert "QUALITY_OR_TIMING_REJECT" in text
+    assert "NO_DECISION_RECORD" in text
     assert "readiness_gap_priority" in text
+    assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Readiness Summaries" in text
     verdict["blockers"] = []

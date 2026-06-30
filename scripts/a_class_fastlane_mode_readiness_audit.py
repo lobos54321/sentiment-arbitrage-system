@@ -401,6 +401,12 @@ def raw_funnel_snapshot(raw_funnel):
         "raw_signals_with_final_entry_mode_disabled": raw_bridge.get("raw_signals_with_final_entry_mode_disabled"),
         "raw_signals_with_final_entry_mode_disabled_only": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_only"),
         "raw_signals_with_final_entry_mode_disabled_plus_other": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_plus_other"),
+        "raw_signals_with_decision_no_pass_or_allow": raw_bridge.get("raw_signals_with_decision_no_pass_or_allow"),
+        "decision_no_pass_or_allow_reason_counts": raw_bridge.get("decision_no_pass_or_allow_reason_counts"),
+        "decision_no_pass_or_allow_examples": raw_bridge.get("decision_no_pass_or_allow_examples"),
+        "raw_signals_pass_or_allow_without_pending_entry": raw_bridge.get("raw_signals_pass_or_allow_without_pending_entry"),
+        "pass_or_allow_without_pending_entry_reason_counts": raw_bridge.get("pass_or_allow_without_pending_entry_reason_counts"),
+        "pass_or_allow_without_pending_entry_examples": raw_bridge.get("pass_or_allow_without_pending_entry_examples"),
         "raw_signals_pending_without_final_entry_contract": raw_bridge.get("raw_signals_pending_without_final_entry_contract"),
         "pending_without_final_entry_reason_counts": raw_bridge.get("pending_without_final_entry_reason_counts"),
         "pending_without_final_entry_examples": raw_bridge.get("pending_without_final_entry_examples"),
@@ -442,6 +448,25 @@ PENDING_GAP_CATEGORY_META = {
 }
 
 
+UPSTREAM_GAP_CATEGORY_META = {
+    "NO_DECISION_RECORD": {
+        "description": "The raw gold/silver signal had no decision event in the audited window.",
+        "automatic_allowed_scope": "instrumentation, join, or observer audit",
+        "human_approval_required_if_fix_requires": "changing runtime signal routing or executor behavior",
+    },
+    "POLICY_OR_SOURCE_PREREQUISITE": PENDING_GAP_CATEGORY_META["POLICY_OR_SOURCE_PREREQUISITE"],
+    "DATA_OR_MARKET_CONTEXT_BLOCK": PENDING_GAP_CATEGORY_META["DATA_OR_MARKET_CONTEXT_BLOCK"],
+    "MODE_SHADOW_OR_RATE_LIMIT": PENDING_GAP_CATEGORY_META["MODE_SHADOW_OR_RATE_LIMIT"],
+    "QUALITY_OR_TIMING_REJECT": PENDING_GAP_CATEGORY_META["QUALITY_OR_TIMING_REJECT"],
+    "SIGNAL_SUPERSEDED_OR_ABORTED": PENDING_GAP_CATEGORY_META["SIGNAL_SUPERSEDED_OR_ABORTED"],
+    "UNKNOWN_UPSTREAM_GAP": {
+        "description": "The audit could not classify the upstream decision/pass/pending gap deterministically.",
+        "automatic_allowed_scope": "instrumentation and evaluator audit",
+        "human_approval_required_if_fix_requires": "runtime behavior changes",
+    },
+}
+
+
 def classify_pending_gap_reason(row):
     component = str(row.get("component") or "").lower()
     event_type = str(row.get("event_type") or "").lower()
@@ -463,6 +488,39 @@ def classify_pending_gap_reason(row):
     if component in {"smart_entry", "scout_quality"} or decision in {"reject", "block", "watch_only"}:
         return "QUALITY_OR_TIMING_REJECT"
     return "UNKNOWN_PENDING_TO_FINAL_GAP"
+
+
+def classify_upstream_gap_reason(row, stage):
+    if stage == "no_decision_record":
+        return "NO_DECISION_RECORD"
+    component = str(row.get("component") or "").lower()
+    event_type = str(row.get("event_type") or "").lower()
+    decision = str(row.get("decision") or "").lower()
+    reason = str(row.get("reason") or "").lower()
+    if "gmgn_pre_seen_required" in reason or "direct_entry_disabled" in reason or "policy" in reason:
+        return "POLICY_OR_SOURCE_PREREQUISITE"
+    if (
+        "no_kline" in reason
+        or "low_volume" in reason
+        or "kline" in reason
+        or "quote" in reason
+        or "route" in reason
+        or "spread" in reason
+        or "stale" in reason
+    ):
+        return "DATA_OR_MARKET_CONTEXT_BLOCK"
+    if "shadow" in reason or "rate_limited" in reason or "canary" in reason or "mode" in reason:
+        return "MODE_SHADOW_OR_RATE_LIMIT"
+    if event_type == "entry_abort" or decision == "supersede" or "refresh" in reason:
+        return "SIGNAL_SUPERSEDED_OR_ABORTED"
+    if (
+        component in {"smart_entry", "scout_quality", "matrix_evaluator"}
+        or "quality" in reason
+        or "timing" in reason
+        or decision in {"reject", "block", "watch_only", "wait", "skip"}
+    ):
+        return "QUALITY_OR_TIMING_REJECT"
+    return "UNKNOWN_UPSTREAM_GAP"
 
 
 def categorize_pending_to_final_gap(reason_counts):
@@ -494,6 +552,68 @@ def categorize_pending_to_final_gap(reason_counts):
     rows = []
     for item in categories.values():
         item["share_of_pending_without_final"] = rate(item["count"], total)
+        rows.append(item)
+    rows.sort(key=lambda item: (-item["count"], item["category"]))
+    return {
+        "total_classified": total,
+        "categories": rows,
+        "automatic_runtime_change_allowed": False,
+        "strategy_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
+def categorize_upstream_funnel_gap(no_decision_count, decision_no_pass_counts, pass_without_pending_counts):
+    categories = {}
+
+    def add_category(category, count, reason_row=None, stage=None):
+        if count <= 0:
+            return
+        meta = UPSTREAM_GAP_CATEGORY_META[category]
+        bucket = categories.setdefault(
+            category,
+            {
+                "category": category,
+                "count": 0,
+                **meta,
+                "top_reasons": [],
+            },
+        )
+        bucket["count"] += count
+        if reason_row is not None and len(bucket["top_reasons"]) < 8:
+            bucket["top_reasons"].append(
+                {
+                    "stage": stage,
+                    "component": reason_row.get("component"),
+                    "event_type": reason_row.get("event_type"),
+                    "decision": reason_row.get("decision"),
+                    "reason": reason_row.get("reason"),
+                    "count": count,
+                }
+            )
+
+    add_category("NO_DECISION_RECORD", safe_int(no_decision_count, 0) or 0, stage="no_decision_record")
+    for row in decision_no_pass_counts or []:
+        count = safe_int(row.get("count"), 0) or 0
+        add_category(
+            classify_upstream_gap_reason(row, "decision_no_pass_or_allow"),
+            count,
+            reason_row=row,
+            stage="decision_no_pass_or_allow",
+        )
+    for row in pass_without_pending_counts or []:
+        count = safe_int(row.get("count"), 0) or 0
+        add_category(
+            classify_upstream_gap_reason(row, "pass_or_allow_without_pending_entry"),
+            count,
+            reason_row=row,
+            stage="pass_or_allow_without_pending_entry",
+        )
+
+    total = sum(item["count"] for item in categories.values())
+    rows = []
+    for item in categories.values():
+        item["share_of_upstream_gap"] = rate(item["count"], total)
         rows.append(item)
     rows.sort(key=lambda item: (-item["count"], item["category"]))
     return {
@@ -560,6 +680,59 @@ def readiness_gap_priority(raw_signals, mode_disabled_only, final_entry_contract
     }
 
 
+def upstream_gap_priority(raw_signals, pending, upstream_gap_categories):
+    target_count = int(math.ceil(float(raw_signals or 0) * 0.6)) if raw_signals else None
+    current_shortfall = None if target_count is None else max(0, target_count - int(pending or 0))
+    categories = []
+    for item in (upstream_gap_categories or {}).get("categories") or []:
+        count = safe_int(item.get("count"), 0) or 0
+        optimistic_pending = int(pending or 0) + count
+        categories.append(
+            {
+                "category": item.get("category"),
+                "count": count,
+                "share_of_upstream_gap": item.get("share_of_upstream_gap"),
+                "current_pending_entry_count": int(pending or 0),
+                "optimistic_pending_entry_count_if_all_bridged": optimistic_pending,
+                "optimistic_pending_capture_rate_if_all_bridged": rate(optimistic_pending, raw_signals),
+                "remaining_shortfall_to_60_pending_if_all_bridged": (
+                    None if target_count is None else max(0, target_count - optimistic_pending)
+                ),
+                "can_reach_60_pending_alone_under_optimistic_assumption": (
+                    False if target_count is None else optimistic_pending >= target_count
+                ),
+                "evidence_level": "optimistic_readiness_upper_bound_not_policy_change",
+                "requires_final_entry_contract_eval": True,
+                "promotion_allowed": False,
+                "automatic_allowed_scope": item.get("automatic_allowed_scope"),
+                "human_approval_required_if_fix_requires": item.get("human_approval_required_if_fix_requires"),
+                "top_reasons": item.get("top_reasons") or [],
+            }
+        )
+    categories.sort(
+        key=lambda item: (
+            item["remaining_shortfall_to_60_pending_if_all_bridged"]
+            if item["remaining_shortfall_to_60_pending_if_all_bridged"] is not None
+            else 10**9,
+            -item["count"],
+            item.get("category") or "",
+        )
+    )
+    return {
+        "target": "pending_capture_rate >= 0.60 before final_entry_contract readiness",
+        "denominator_raw_signal_ids": raw_signals,
+        "target_count_60pct": target_count,
+        "current_pending_entry_count": pending,
+        "current_shortfall_to_60_pending": current_shortfall,
+        "categories_ranked_by_optimistic_pending_gain": categories,
+        "interpretation": "Upper bounds only. Bridging upstream gaps would still require final_entry_contract evaluation; strategy, mode, gate, executor, and risk changes require human approval.",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+    }
+
+
 def build_capture_stage_rates(raw_snapshot, final_contract):
     raw_events = safe_int(raw_snapshot.get("raw_gold_silver_events"), 0)
     raw_signals = safe_int(raw_snapshot.get("raw_signal_ids"), 0) or raw_events
@@ -601,6 +774,15 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         final_entry_contract,
         pending_gap_categories,
     )
+    no_decision = safe_int(raw_snapshot.get("raw_signals_without_decision_record"), 0)
+    decision_no_pass = safe_int(raw_snapshot.get("raw_signals_with_decision_no_pass_or_allow"), 0)
+    pass_without_pending = safe_int(raw_snapshot.get("raw_signals_pass_or_allow_without_pending_entry"), 0)
+    upstream_categories = categorize_upstream_funnel_gap(
+        no_decision,
+        raw_snapshot.get("decision_no_pass_or_allow_reason_counts") or [],
+        raw_snapshot.get("pass_or_allow_without_pending_entry_reason_counts") or [],
+    )
+    upstream_priority = upstream_gap_priority(raw_signals, pending, upstream_categories)
     readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
     if scoped_mode_disabled_only_available:
         readiness_status = (
@@ -656,6 +838,34 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             or [],
             "pending_without_final_entry_category_counts": pending_gap_categories,
             "readiness_gap_priority": readiness_priority,
+        },
+        "upstream_funnel_gap": {
+            "raw_signal_ids": raw_signals,
+            "decision_record_signal_ids": decision_records,
+            "pass_or_allow_signal_ids": pass_or_allow,
+            "pending_entry_signal_ids": pending,
+            "no_decision_record": no_decision,
+            "decision_no_pass_or_allow": decision_no_pass,
+            "pass_or_allow_without_pending_entry": pass_without_pending,
+            "total_upstream_gap": no_decision + decision_no_pass + pass_without_pending,
+            "decision_record_capture_rate": rate(decision_records, raw_signals),
+            "pass_allow_capture_rate": rate(pass_or_allow, raw_signals),
+            "pending_capture_rate": rate(pending, raw_signals),
+            "decision_no_pass_or_allow_reason_counts": raw_snapshot.get("decision_no_pass_or_allow_reason_counts") or [],
+            "decision_no_pass_or_allow_examples": raw_snapshot.get("decision_no_pass_or_allow_examples") or [],
+            "pass_or_allow_without_pending_entry_reason_counts": raw_snapshot.get(
+                "pass_or_allow_without_pending_entry_reason_counts"
+            )
+            or [],
+            "pass_or_allow_without_pending_entry_examples": raw_snapshot.get(
+                "pass_or_allow_without_pending_entry_examples"
+            )
+            or [],
+            "upstream_gap_category_counts": upstream_categories,
+            "upstream_gap_priority": upstream_priority,
+            "automatic_runtime_change_allowed": False,
+            "strategy_change_allowed": False,
+            "paper_enablement_allowed": False,
         },
         "mode_disabled_adjusted_final_eligibility": {
             "status": readiness_status,
@@ -762,6 +972,7 @@ def build_report(args):
         },
         "raw_funnel_snapshot": raw_snapshot,
         "capture_stage_rates": capture_stage_rates,
+        "upstream_funnel_gap": capture_stage_rates["upstream_funnel_gap"],
         "pending_to_final_entry_gap": capture_stage_rates["pending_to_final_entry_gap"],
         "mode_disabled_adjusted_final_eligibility": capture_stage_rates["mode_disabled_adjusted_final_eligibility"],
         "raw_gold_silver_entered_events": raw_snapshot.get("raw_gold_silver_entered_events"),
@@ -770,6 +981,8 @@ def build_report(args):
             key: raw_snapshot.get(key)
             for key in (
                 "paper_trades_entry_ts_window_count",
+                "raw_signals_with_decision_record",
+                "raw_signals_without_decision_record",
                 "raw_signals_with_pass_or_allow",
                 "raw_signals_with_pending_entry",
                 "raw_signals_with_final_entry_contract",
@@ -800,6 +1013,7 @@ def compact_summary(report):
         "final_entry_contract_blocker_breakdown": report.get("final_entry_contract_blocker_breakdown"),
         "raw_funnel_snapshot": report.get("raw_funnel_snapshot"),
         "capture_stage_rates": report.get("capture_stage_rates"),
+        "upstream_funnel_gap": report.get("upstream_funnel_gap"),
         "pending_to_final_entry_gap": report.get("pending_to_final_entry_gap"),
         "mode_disabled_adjusted_final_eligibility": report.get("mode_disabled_adjusted_final_eligibility"),
     }
@@ -863,12 +1077,12 @@ def self_test():
         db.close()
         write_json(raw_path, {
             "summary": {
-                "raw_denominator": {"raw_all_gold_silver_event_rows": 2, "entered_events": 0},
-                "candidate_layer": {"candidate_matched_any_events": 2, "candidate_match_any_rate": 1.0},
+                "raw_denominator": {"raw_all_gold_silver_event_rows": 4, "entered_events": 0},
+                "candidate_layer": {"candidate_matched_any_events": 4, "candidate_match_any_rate": 1.0},
                 "decision_layer": {
-                    "events_with_decision_record": 2,
-                    "decision_record_rate": 1.0,
-                    "would_enter_events": 1,
+                    "events_with_decision_record": 3,
+                    "decision_record_rate": 0.75,
+                    "would_enter_events": 2,
                     "would_enter_rate": 0.5,
                     "entered_events": 0,
                     "entered_rate": 0.0,
@@ -878,15 +1092,28 @@ def self_test():
                 "entry_bridge_layer": {
                     "paper_trades_entry_ts_window_count": 0,
                     "raw_signal_decision_bridge": {
-                        "raw_signal_ids": 2,
-                        "raw_signals_with_decision_record": 2,
-                        "raw_signals_with_pass_or_allow": 1,
+                        "raw_signal_ids": 4,
+                        "raw_signals_with_decision_record": 3,
+                        "raw_signals_without_decision_record": 1,
+                        "raw_signals_with_pass_or_allow": 2,
                         "raw_signals_with_pending_entry": 2,
                         "raw_signals_with_final_entry_contract": 2,
                         "raw_signals_with_final_entry_block": 2,
                         "raw_signals_with_final_entry_mode_disabled": 2,
                         "raw_signals_with_final_entry_mode_disabled_only": 1,
                         "raw_signals_with_final_entry_mode_disabled_plus_other": 1,
+                        "raw_signals_with_decision_no_pass_or_allow": 1,
+                        "decision_no_pass_or_allow_reason_counts": [
+                            {
+                                "component": "smart_entry",
+                                "event_type": "timing_decision",
+                                "decision": "WATCH_ONLY",
+                                "reason": "timing_not_ready",
+                                "count": 1,
+                            }
+                        ],
+                        "raw_signals_pass_or_allow_without_pending_entry": 0,
+                        "pass_or_allow_without_pending_entry_reason_counts": [],
                         "raw_scoped_final_entry_hard_blockers": {
                             "mode_disabled": 2,
                             "expected_rr_below_2": 1,
@@ -916,11 +1143,16 @@ def self_test():
         assert report["final_entry_contract"]["mode_disabled_only_rows"] == 1
         assert report["final_entry_contract"]["mode_disabled_plus_other_rows"] == 1
         assert report["capture_stage_rates"]["detector_capture_rate"] == 1.0
-        assert report["capture_stage_rates"]["pending_capture_rate"] == 1.0
+        assert report["capture_stage_rates"]["decision_record_capture_rate"] == 0.75
+        assert report["capture_stage_rates"]["pending_capture_rate"] == 0.5
         assert report["capture_stage_rates"]["realized_capture_rate"] == 0.0
         assert report["pending_to_final_entry_gap"]["pending_to_final_entry_contract_rate"] == 1.0
+        assert report["upstream_funnel_gap"]["no_decision_record"] == 1
+        assert report["upstream_funnel_gap"]["decision_no_pass_or_allow"] == 1
+        assert report["upstream_funnel_gap"]["total_upstream_gap"] == 2
+        assert report["upstream_funnel_gap"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 1
         assert report["mode_disabled_adjusted_final_eligibility"]["mode_disabled_only_unique_signal_ids"] == 1
-        assert report["mode_disabled_adjusted_final_eligibility"]["rate"] == 0.5
+        assert report["mode_disabled_adjusted_final_eligibility"]["rate"] == 0.25
         assert report["mode_disabled_adjusted_final_eligibility"]["status"] == "CAPTURE_READINESS_BELOW_60"
         write_json(context_path, {"blockers": []})
         report = build_report(args)
