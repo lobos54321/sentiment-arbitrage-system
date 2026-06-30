@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import math
 import sqlite3
 import tempfile
 import time
@@ -40,6 +41,12 @@ def iso(ts):
 
 def rate(num, den):
     return None if not den else round(float(num) / float(den), 6)
+
+
+def rows_needed_to_reach_rate(present, denominator, target_rate=0.8):
+    if not denominator:
+        return None
+    return max(0, int(math.ceil(float(target_rate) * float(denominator))) - int(present or 0))
 
 
 def table_exists(db, name):
@@ -131,6 +138,9 @@ def presence_stats(rows, key):
         "not_applicable_rate": rate(not_applicable, den),
         "true_rate": rate(true_rows, den),
         "false_rate": rate(false_rows, den),
+        "target_present_rate": 0.8,
+        "present_rate_gap_to_80pct": None if not den else round(max(0.0, 0.8 - float(present) / float(den)), 6),
+        "rows_needed_to_80pct": rows_needed_to_reach_rate(present, den, 0.8),
     }
 
 
@@ -172,6 +182,11 @@ def field_presence_stats(rows, key, fallback_keys=()):
         "effective_present_rate": rate(effective_present, den),
         "missing_rate": rate(missing, den),
         "unknown_rate": rate(unknown, den),
+        "target_effective_present_rate": 0.8,
+        "effective_present_rate_gap_to_80pct": (
+            None if not den else round(max(0.0, 0.8 - float(effective_present) / float(den)), 6)
+        ),
+        "rows_needed_to_80pct": rows_needed_to_reach_rate(effective_present, den, 0.8),
     }
 
 

@@ -2431,6 +2431,50 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
           verdict.context_blocker_monitor.context_field_coverage_audit?.classification || null,
         context_field_blockers:
           verdict.context_blocker_monitor.context_field_coverage_audit?.blockers || [],
+        context_field_progress: verdict.context_blocker_monitor.context_field_coverage_audit ? {
+          lifecycle_profile: verdict.context_blocker_monitor.context_field_coverage_audit.lifecycle_profile ? {
+            effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.lifecycle_profile.effective_present_rate,
+            rows_needed_to_80pct:
+              verdict.context_blocker_monitor.context_field_coverage_audit.lifecycle_profile.rows_needed_to_80pct,
+            missing_rows:
+              verdict.context_blocker_monitor.context_field_coverage_audit.lifecycle_profile.missing_rows,
+            mature_effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.lifecycle_profile.mature_context?.effective_present_rate,
+          } : null,
+          source_component: verdict.context_blocker_monitor.context_field_coverage_audit.source_component ? {
+            effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.source_component.effective_present_rate,
+            rows_needed_to_80pct:
+              verdict.context_blocker_monitor.context_field_coverage_audit.source_component.rows_needed_to_80pct,
+            missing_rows:
+              verdict.context_blocker_monitor.context_field_coverage_audit.source_component.missing_rows,
+            mature_effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.source_component.mature_context?.effective_present_rate,
+          } : null,
+          volume_profile: verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile ? {
+            effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile.effective_present_rate,
+            rows_needed_to_80pct:
+              verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile.rows_needed_to_80pct,
+            missing_rows:
+              verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile.missing_rows,
+            unknown_rows:
+              verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile.unknown_rows,
+            mature_effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.volume_profile.mature_context?.effective_present_rate,
+          } : null,
+          markov_bucket: verdict.context_blocker_monitor.context_field_coverage_audit.markov_bucket ? {
+            effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.markov_bucket.effective_present_rate,
+            rows_needed_to_80pct:
+              verdict.context_blocker_monitor.context_field_coverage_audit.markov_bucket.rows_needed_to_80pct,
+            missing_rows:
+              verdict.context_blocker_monitor.context_field_coverage_audit.markov_bucket.missing_rows,
+            mature_effective_present_rate:
+              verdict.context_blocker_monitor.context_field_coverage_audit.markov_bucket.mature_context?.effective_present_rate,
+          } : null,
+        } : null,
         reconciled_warnings: verdict.context_blocker_monitor.reconciled_warnings || [],
       } : null,
       volume_profile_coverage: verdict.volume_profile_coverage || null,
