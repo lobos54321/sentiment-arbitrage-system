@@ -438,7 +438,7 @@ def finalize_stats(slice_stats, baseline_stats):
         precision_lift = None if precision is None or base_precision is None else round(precision - base_precision, 6)
         if stat["slice_signal_count"] < 20 or stat["slice_raw_gs_count"] < 3 or stat["candidate_match_count"] < 3:
             verdict = "TOO_SMALL"
-        elif (recall_lift or 0) > 0 and precision is not None and precision > 0:
+        elif (recall_lift or 0) > 0 and (precision_lift or 0) >= 0 and precision is not None and precision > 0:
             verdict = "MATURED_VOLUME_DISCOVERY_WATCH"
         else:
             verdict = "NO_SIGNAL"
