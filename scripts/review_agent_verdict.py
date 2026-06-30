@@ -18,6 +18,28 @@ SCHEMA_VERSION = "capture_discovery_reviewer_verdict.v5"
 EXPECTED_CANDIDATE_COUNT = 84
 EXPECTED_CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
 EXPECTED_QUOTE_CLEAN_DEFINITION = "source_or_executable_quote_only_no_signal_price"
+QUOTE_COVERAGE_BLOCKERS = {
+    "source_quote_clean_coverage_below_80pct",
+    "source_quote_executable_coverage_below_80pct",
+}
+BLOCKER_PRIORITY = [
+    "candidate_count_expected_not_84",
+    "candidate_count_observed_not_84",
+    "observation_coverage_below_99pct",
+    "raw_dog_rows_incomplete",
+    "signal_id_join_rate_below_99pct",
+    "raw_all_unjoined_not_fully_attributed",
+    "tests_failed",
+    "report_generation_failed",
+    "volume_profile_coverage_below_80pct",
+    "kline_coverage_below_80pct",
+    "source_quote_clean_coverage_below_80pct",
+    "source_quote_executable_coverage_below_80pct",
+    "schema_mixed_quote_sensitive_slices_blocked",
+    "context_schema_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+    "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked",
+    "markov_bucket_coverage_below_80pct",
+]
 
 H1_CANDIDATES = {
     "kline:active_mom20_first3",
@@ -80,6 +102,14 @@ def boolish(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def first_blocker_priority(blockers):
+    blocker_set = set(blockers or [])
+    for blocker in BLOCKER_PRIORITY:
+        if blocker in blocker_set:
+            return blocker
+    return sorted(blocker_set)[0] if blocker_set else None
 
 
 def top_slice_key(row):
@@ -343,6 +373,22 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             blocked_subtype = "NEEDS_NOT_APPLICABLE_CLASSIFICATION"
         else:
             blocked_subtype = "QUOTE_CONTEXT_COVERAGE"
+    quote_clean_window_pending = (
+        blocked_subtype == "CLEAN_V2_WINDOW_PENDING"
+        and (
+            context_monitor_overall.get("quote_writer_fix") == "VERIFIED_POST_DEPLOY"
+            or context_monitor_quote_smoke.get("classification") == "VERIFIED_POST_DEPLOY"
+        )
+        and (
+            context_monitor_overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING"
+            or context_monitor_clean_window.get("classification") == "QUOTE_CLEAN_WINDOW_PENDING"
+        )
+    )
+    actionable_blockers = [
+        blocker for blocker in blockers
+        if not (quote_clean_window_pending and blocker in QUOTE_COVERAGE_BLOCKERS)
+    ]
+    next_highest_priority_blocker = first_blocker_priority(actionable_blockers)
     candidate_integrity_ok = (
         candidate_expected == EXPECTED_CANDIDATE_COUNT
         and candidate_observed == EXPECTED_CANDIDATE_COUNT
@@ -417,7 +463,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     pending_to_final_gap = capture_stage_rates.get("pending_to_final_entry_gap") or final_entry.get("pending_to_final_entry_gap") or {}
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
-    top_blocker = blockers[0] if blockers else (
+    top_blocker = first_blocker_priority(blockers) if blockers else (
         final_entry.get("reason") or classification
     )
     if classification == "BLOCKED_DATA":
@@ -525,6 +571,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "hard_gate_change_allowed": False,
         "exit_gate_change_allowed": False,
         "blockers": blockers,
+        "actionable_blockers": actionable_blockers,
         "candidate_count_expected": candidate_expected,
         "candidate_count_observed": candidate_observed,
         "observation_coverage_pct": observation_coverage_pct,
@@ -720,7 +767,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "per_candidate_effectiveness_summary": readiness_reports.get("candidate_effectiveness") or {},
         "Markov_effectiveness_summary": readiness_reports.get("markov_effectiveness") or {},
         "two_d_cross_validity_summary": readiness_reports.get("capture_cross_validity") or {},
-        "next_highest_priority_blocker": readiness_reports.get("next_highest_priority_blocker"),
+        "next_highest_priority_blocker": next_highest_priority_blocker,
         "denominator_audit": capture.get("denominator_audit") or {},
         "raw_dog_observation_join": raw_join,
         "raw_all_dog_observation_join": capture.get("raw_all_dog_observation_join") or {},
@@ -993,6 +1040,40 @@ def self_test():
     assert monitor_reconciled_quote_blocked["context_blocker_monitor"]["available"] is True
     assert monitor_reconciled_quote_blocked["quote_writer_fix_status"] == "VERIFIED_POST_DEPLOY"
     assert monitor_reconciled_quote_blocked["quote_clean_window_status"] == "QUOTE_CLEAN_WINDOW_PENDING"
+    quote_pending_with_volume = build_verdict({
+        **capture,
+        "quote_context_coverage": {
+            **capture["quote_context_coverage"],
+            "source_quote_clean_present_rate": 0.6,
+            "source_quote_executable_present_rate": 0.6,
+        },
+        "quote_missing_root_cause": {
+            "quote_missing_rows_total": 4,
+            "missing_due_to_legacy_schema_count": 0,
+            "missing_due_to_writer_path_count": 4,
+            "missing_should_be_not_applicable_count": 0,
+            "missing_unknown_count": 0,
+            "dominant_root_cause": "v2_writer_path_missing_quote_fields",
+        },
+        "report_health": {"promotion_blockers": ["volume_profile_coverage_below_80pct"]},
+    }, tests={"passed": True}, readiness_reports={
+        "context_blocker_monitor": {
+            "overall_verdict": {
+                "quote_writer_fix": "VERIFIED_POST_DEPLOY",
+                "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
+            },
+            "task_a_post_deploy_quote_smoke_test": {
+                "classification": "VERIFIED_POST_DEPLOY",
+            },
+            "task_b_clean_window_monitor": {
+                "classification": "QUOTE_CLEAN_WINDOW_PENDING",
+            },
+        }
+    })
+    assert quote_pending_with_volume["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
+    assert "source_quote_clean_coverage_below_80pct" in quote_pending_with_volume["blockers"]
+    assert "source_quote_clean_coverage_below_80pct" not in quote_pending_with_volume["actionable_blockers"]
+    assert quote_pending_with_volume["next_highest_priority_blocker"] == "volume_profile_coverage_below_80pct"
     lifecycle_reconciled = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["lifecycle_profile_coverage_below_80pct"]},

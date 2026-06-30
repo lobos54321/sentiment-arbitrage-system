@@ -30,6 +30,8 @@ FIXABLE_BLOCKER_HINTS = {
     "quote_clean_definition_v2_coverage_below_95pct_quote_sensitive_slices_blocked": "Do not judge quote-sensitive candidates until quote_clean_definition v2 coverage is at least 95%.",
     "source_quote_clean_coverage_below_80pct": "Inspect quote context coverage audit and writer/source breakdowns; fix data/report wiring only, not entry policy.",
     "source_quote_executable_coverage_below_80pct": "Inspect executable quote context coverage audit and writer/source breakdowns; fix data/report wiring only, not gates or executor.",
+    "volume_profile_coverage_below_80pct": "Inspect volume/kline root-cause audit; fix context carrier, kline-derived volume classification, or report wiring only.",
+    "kline_coverage_below_80pct": "Inspect raw gold/silver kline coverage and low-confidence research split; fix data/source coverage or evaluator attribution only.",
     "candidate_count_observed_not_84": "Inspect candidate shadow observer coverage and catalog consistency.",
     "candidate_count_mismatch": "Inspect candidate shadow observer expected/observed candidate counts.",
     "observation_coverage_below_99pct": "Inspect per-signal observation coverage and missing candidate rows.",
@@ -73,7 +75,7 @@ def quote_clean_window_pending(verdict):
 
 
 def actionable_blockers(verdict):
-    blockers = list(verdict.get("blockers") or [])
+    blockers = list(verdict.get("actionable_blockers") or verdict.get("blockers") or [])
     if quote_clean_window_pending(verdict):
         blockers = [blocker for blocker in blockers if blocker not in QUOTE_COVERAGE_BLOCKERS]
     return blockers
@@ -522,6 +524,22 @@ def self_test():
     assert "not a writer-fix handoff" in text
     assert "Required Fixes" not in text
     assert "source_quote_clean_coverage_below_80pct" not in text
+    quote_pending_volume_verdict = {
+        **quote_pending_verdict,
+        "blockers": [
+            "source_quote_clean_coverage_below_80pct",
+            "source_quote_executable_coverage_below_80pct",
+            "volume_profile_coverage_below_80pct",
+        ],
+        "actionable_blockers": ["volume_profile_coverage_below_80pct"],
+        "next_highest_priority_blocker": "volume_profile_coverage_below_80pct",
+    }
+    text = build_handoff(quote_pending_volume_verdict)
+    assert "handoff_needed: `true`" in text
+    assert "next_highest_priority_blocker: `volume_profile_coverage_below_80pct`" in text
+    assert "Required Fixes" in text
+    assert "volume_profile_coverage_below_80pct" in text
+    assert "`source_quote_clean_coverage_below_80pct`:" not in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text
