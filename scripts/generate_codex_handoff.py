@@ -15,6 +15,10 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = "capture_discovery_codex_handoff.v4"
+QUOTE_COVERAGE_BLOCKERS = {
+    "source_quote_clean_coverage_below_80pct",
+    "source_quote_executable_coverage_below_80pct",
+}
 FIXABLE_BLOCKER_HINTS = {
     "raw_dog_rows_incomplete": "Fix raw dog row materialization or report input wiring before judging capture recall.",
     "raw_gold_silver_denominator_rows_truncated": "Ensure the raw dog JSON/API includes complete event rows or use --raw-db.",
@@ -51,14 +55,41 @@ def write_text(path, text):
     tmp.replace(target)
 
 
+def quote_clean_window_pending(verdict):
+    if verdict.get("blocked_subtype") != "CLEAN_V2_WINDOW_PENDING":
+        return False
+    writer_status = verdict.get("quote_writer_fix_status")
+    window_status = verdict.get("quote_clean_window_status")
+    if writer_status == "VERIFIED_POST_DEPLOY" and window_status == "QUOTE_CLEAN_WINDOW_PENDING":
+        return True
+    monitor = verdict.get("context_blocker_monitor") or {}
+    overall = monitor.get("overall_verdict") or {}
+    smoke = monitor.get("post_deploy_quote_smoke_test") or {}
+    window = monitor.get("clean_window_monitor") or {}
+    return (
+        (overall.get("quote_writer_fix") == "VERIFIED_POST_DEPLOY" or smoke.get("classification") == "VERIFIED_POST_DEPLOY")
+        and (overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING" or window.get("classification") == "QUOTE_CLEAN_WINDOW_PENDING")
+    )
+
+
+def actionable_blockers(verdict):
+    blockers = list(verdict.get("blockers") or [])
+    if quote_clean_window_pending(verdict):
+        blockers = [blocker for blocker in blockers if blocker not in QUOTE_COVERAGE_BLOCKERS]
+    return blockers
+
+
 def handoff_needed(verdict):
-    blockers = verdict.get("blockers") or []
-    return any(blocker in FIXABLE_BLOCKER_HINTS for blocker in blockers)
+    return any(blocker in FIXABLE_BLOCKER_HINTS for blocker in actionable_blockers(verdict))
 
 
 def build_handoff(verdict):
     blockers = verdict.get("blockers") or []
+    actionable = actionable_blockers(verdict)
     needed = handoff_needed(verdict)
+    display_next_blocker = verdict.get("next_highest_priority_blocker")
+    if quote_clean_window_pending(verdict) and display_next_blocker in QUOTE_COVERAGE_BLOCKERS:
+        display_next_blocker = actionable[0] if actionable else None
     lines = [
         "# Gold/Silver Capture Discovery Codex Handoff",
         "",
@@ -70,9 +101,12 @@ def build_handoff(verdict):
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
         f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
-        f"- next_highest_priority_blocker: `{verdict.get('next_highest_priority_blocker')}`",
+        f"- next_highest_priority_blocker: `{display_next_blocker}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
+        f"- quote_writer_fix_status: `{verdict.get('quote_writer_fix_status')}`",
+        f"- quote_clean_window_status: `{verdict.get('quote_clean_window_status')}`",
+        f"- quote_clean_window_eta_iso: `{verdict.get('quote_clean_window_eta_iso')}`",
         f"- handoff_needed: `{str(needed).lower()}`",
         "",
         "## Guardrails",
@@ -100,6 +134,19 @@ def build_handoff(verdict):
         f"- quote_clean_definition: `{json.dumps(quote, sort_keys=True)}`",
         "",
     ])
+    if quote_clean_window_pending(verdict):
+        lines.extend([
+            "## Quote Clean Window",
+            "",
+            "Post-deploy quote writer coverage is verified. The remaining quote blocker is from older rows still inside the rolling window, so this is not a writer-fix handoff.",
+            "",
+            f"- clean_window_status: `{verdict.get('quote_clean_window_status')}`",
+            f"- estimated_clean_at: `{verdict.get('quote_clean_window_eta_iso')}`",
+            f"- seconds_until_natural_clean_window: `{verdict.get('quote_clean_window_seconds_remaining')}`",
+            "",
+            "Next action: continue non-quote-sensitive discovery, wait for the clean window, then rerun AutoLoop before evaluating quote-sensitive slices.",
+            "",
+        ])
     if not needed:
         lines.extend([
             "## Next Action",
@@ -109,7 +156,7 @@ def build_handoff(verdict):
         ])
     else:
         lines.extend(["## Required Fixes", ""])
-        for blocker in blockers:
+        for blocker in actionable:
             hint = FIXABLE_BLOCKER_HINTS.get(blocker)
             if hint:
                 lines.append(f"- `{blocker}`: {hint}")
@@ -456,6 +503,25 @@ def self_test():
     assert "upstream_gap_priority" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Readiness Summaries" in text
+    quote_pending_verdict = {
+        **verdict,
+        "classification": "BLOCKED_CONTEXT_COVERAGE",
+        "blocked_subtype": "CLEAN_V2_WINDOW_PENDING",
+        "blockers": [
+            "source_quote_clean_coverage_below_80pct",
+            "source_quote_executable_coverage_below_80pct",
+        ],
+        "quote_writer_fix_status": "VERIFIED_POST_DEPLOY",
+        "quote_clean_window_status": "QUOTE_CLEAN_WINDOW_PENDING",
+        "quote_clean_window_eta_iso": "2026-07-01T00:31:02Z",
+        "quote_clean_window_seconds_remaining": 3600,
+    }
+    text = build_handoff(quote_pending_verdict)
+    assert "handoff_needed: `false`" in text
+    assert "Quote Clean Window" in text
+    assert "not a writer-fix handoff" in text
+    assert "Required Fixes" not in text
+    assert "source_quote_clean_coverage_below_80pct" not in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text

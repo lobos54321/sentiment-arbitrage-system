@@ -255,6 +255,14 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_monitor_quote_smoke = context_blocker_monitor.get("task_a_post_deploy_quote_smoke_test") or {}
     context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
     context_monitor_field_audit = context_blocker_monitor.get("task_d_context_field_coverage_audit") or {}
+    quote_writer_fix_status = (
+        context_monitor_overall.get("quote_writer_fix")
+        or context_monitor_quote_smoke.get("classification")
+    )
+    quote_clean_window_status = (
+        context_monitor_overall.get("rolling24_quote_status")
+        or context_monitor_clean_window.get("classification")
+    )
     blockers = list(report_health.get("promotion_blockers") or [])
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
@@ -555,6 +563,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "context_field_coverage_audit": context_monitor_field_audit,
             "reconciled_warnings": reconciled_context_warnings,
         },
+        "quote_writer_fix_status": quote_writer_fix_status,
+        "quote_clean_window_status": quote_clean_window_status,
+        "quote_clean_window_eta_iso": context_monitor_clean_window.get("estimated_clean_at_iso"),
+        "quote_clean_window_seconds_remaining": context_monitor_clean_window.get("seconds_until_natural_clean_window"),
         "volume_profile_coverage": readiness_reports.get("volume_profile_coverage") or {},
         "kline_coverage": readiness_reports.get("kline_coverage") or {},
         "volume_kline_root_cause_audit": {
@@ -979,6 +991,8 @@ def self_test():
     })
     assert monitor_reconciled_quote_blocked["blocked_subtype"] == "CLEAN_V2_WINDOW_PENDING"
     assert monitor_reconciled_quote_blocked["context_blocker_monitor"]["available"] is True
+    assert monitor_reconciled_quote_blocked["quote_writer_fix_status"] == "VERIFIED_POST_DEPLOY"
+    assert monitor_reconciled_quote_blocked["quote_clean_window_status"] == "QUOTE_CLEAN_WINDOW_PENDING"
     lifecycle_reconciled = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["lifecycle_profile_coverage_below_80pct"]},
