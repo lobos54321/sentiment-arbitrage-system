@@ -119,6 +119,11 @@ def build_handoff(verdict):
         f"- quote_writer_fix_status: `{verdict.get('quote_writer_fix_status')}`",
         f"- quote_clean_window_status: `{verdict.get('quote_clean_window_status')}`",
         f"- quote_clean_window_eta_iso: `{verdict.get('quote_clean_window_eta_iso')}`",
+        f"- context_field_writer_fix_status: `{verdict.get('context_field_writer_fix_status')}`",
+        f"- context_clean_window_pending: `{str(bool(verdict.get('context_clean_window_pending'))).lower()}`",
+        f"- context_clean_window_eta_iso: `{verdict.get('context_clean_window_eta_iso')}`",
+        f"- lifecycle_clean_window_pending: `{str(bool(verdict.get('lifecycle_clean_window_pending'))).lower()}`",
+        f"- source_component_clean_window_pending: `{str(bool(verdict.get('source_component_clean_window_pending'))).lower()}`",
         f"- current_capture_stage: `{verdict.get('current_capture_stage')}`",
         f"- mode_status: `{verdict.get('mode_status')}`",
         f"- mode_reason: `{verdict.get('mode_reason')}`",
@@ -172,6 +177,46 @@ def build_handoff(verdict):
             f"- seconds_until_natural_clean_window: `{verdict.get('quote_clean_window_seconds_remaining')}`",
             "",
             "Next action: continue non-quote-sensitive discovery, wait for the clean window, then rerun AutoLoop before evaluating quote-sensitive slices.",
+            "",
+        ])
+    if verdict.get("lifecycle_clean_window_pending") or verdict.get("source_component_clean_window_pending"):
+        monitor = verdict.get("context_blocker_monitor") or {}
+        field_audit = monitor.get("context_field_coverage_audit") or {}
+        lines.extend([
+            "## Context Field Clean Window",
+            "",
+            "Post-deploy lifecycle/source-component context writing is verified. The remaining lifecycle/source_component blockers are older rows still inside the rolling window, not a new writer-fix handoff.",
+            "",
+            f"- context_field_writer_fix_status: `{verdict.get('context_field_writer_fix_status')}`",
+            f"- context_clean_window_pending: `{str(bool(verdict.get('context_clean_window_pending'))).lower()}`",
+            f"- estimated_clean_at: `{verdict.get('context_clean_window_eta_iso')}`",
+            f"- seconds_until_natural_clean_window: `{verdict.get('context_clean_window_seconds_remaining')}`",
+            f"- lifecycle_clean_window_pending: `{str(bool(verdict.get('lifecycle_clean_window_pending'))).lower()}`",
+            f"- source_component_clean_window_pending: `{str(bool(verdict.get('source_component_clean_window_pending'))).lower()}`",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "context_field_status": field_audit.get("classification"),
+                    "blockers": field_audit.get("blockers") or [],
+                    "warnings": field_audit.get("warnings") or [],
+                    "lifecycle_profile": {
+                        "effective_present_rate": ((field_audit.get("lifecycle_profile") or {}).get("effective_present_rate")),
+                        "rows_needed_to_80pct": ((field_audit.get("lifecycle_profile") or {}).get("rows_needed_to_80pct")),
+                        "mature_effective_present_rate": (((field_audit.get("lifecycle_profile") or {}).get("mature_context") or {}).get("effective_present_rate")),
+                    },
+                    "source_component": {
+                        "effective_present_rate": ((field_audit.get("source_component") or {}).get("effective_present_rate")),
+                        "rows_needed_to_80pct": ((field_audit.get("source_component") or {}).get("rows_needed_to_80pct")),
+                        "mature_effective_present_rate": (((field_audit.get("source_component") or {}).get("mature_context") or {}).get("effective_present_rate")),
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            "```",
+            "",
+            "Next action: continue non-context-sensitive discovery, wait for the clean window, then rerun AutoLoop before evaluating lifecycle/source_component-sensitive slices.",
             "",
         ])
     if parallel_action:
@@ -521,8 +566,11 @@ def build_handoff(verdict):
             {
                 "volume_profile_coverage": verdict.get("volume_profile_coverage") or {},
                 "kline_coverage": verdict.get("kline_coverage") or {},
+                "lifecycle_clean_window_pending": verdict.get("lifecycle_clean_window_pending"),
                 "source_component_coverage": verdict.get("source_component_coverage") or {},
                 "source_component_clean_window_pending": verdict.get("source_component_clean_window_pending"),
+                "context_clean_window_pending": verdict.get("context_clean_window_pending"),
+                "context_clean_window_eta_iso": verdict.get("context_clean_window_eta_iso"),
                 "context_field_writer_fix_status": verdict.get("context_field_writer_fix_status"),
                 "volume_kline_root_cause_audit": verdict.get("volume_kline_root_cause_audit") or {},
                 "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
