@@ -430,6 +430,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "same_source_path_counts_uncovered",
                     "first_bar_lag_bucket_counts_uncovered",
                     "early_15m_complete_rate",
+                    "low_confidence_research_audit",
                     "primary_denominator_drop_reason_counts",
                     "blocker",
                 )

@@ -65,6 +65,14 @@ def truthy(value):
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def number(value):
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed
+
+
 def norm_text(value):
     if value is None:
         return "MISSING"
@@ -189,6 +197,25 @@ def bucket_lag(value):
     return "gt_900s"
 
 
+def bucket_baseline_lag(value):
+    parsed = number(value)
+    if parsed is None:
+        return "missing"
+    if parsed < 0:
+        return "invalid_negative"
+    if parsed <= 10:
+        return "high_le_10s"
+    if parsed <= 30:
+        return "medium_10_30s"
+    if parsed <= 60:
+        return "low_30_60s"
+    if parsed <= 120:
+        return "low_60_120s"
+    if parsed <= 300:
+        return "low_120_300s"
+    return "not_evaluable_gt_300s"
+
+
 def bucket_pct(value):
     if value is None:
         return "missing"
@@ -214,6 +241,8 @@ def kline_uncovered_root_cause(row):
         return "not_same_source_path"
     confidence = norm_text(row.get("baseline_confidence")).lower()
     if confidence not in {"high", "medium"}:
+        if confidence == "low":
+            return f"baseline_confidence_low_{bucket_baseline_lag(row.get('baseline_lag_sec'))}"
         return f"baseline_confidence_{confidence}"
     reason = norm_text(row.get("coverage_reason")).lower()
     if reason not in {"missing", "unknown", "covered"}:
@@ -267,6 +296,7 @@ def raw_kline_audit(raw_db, since_ts):
         "coverage_reason",
         "pool_found",
         "provider",
+        "baseline_lag_sec",
         "baseline_confidence",
         "same_source_path",
         "source_kind",
@@ -280,6 +310,7 @@ def raw_kline_audit(raw_db, since_ts):
         "early_15m_complete",
         "outlier_flag",
         "sustained_evaluable",
+        "time_to_sustained_peak_sec",
         "raw_primary_tier",
         "raw_sustained_tier",
     )
@@ -322,6 +353,21 @@ def raw_kline_audit(raw_db, since_ts):
 
     early_complete = sum(1 for row in rows if truthy(row.get("early_15m_complete")))
     uncovered_root_cause_counts = Counter(kline_uncovered_root_cause(row) for row in uncovered_rows)
+    low_confidence_rows = [row for row in rows if norm_text(row.get("baseline_confidence")).lower() == "low"]
+    low_confidence_uncovered_rows = [
+        row for row in uncovered_rows
+        if str(kline_uncovered_root_cause(row)).startswith("baseline_confidence_low")
+    ]
+    low_before_peak = 0
+    low_after_or_unknown_peak = 0
+    for row in low_confidence_uncovered_rows:
+        baseline_lag = number(row.get("baseline_lag_sec"))
+        peak_lag = number(row.get("time_to_sustained_peak_sec"))
+        if baseline_lag is not None and peak_lag is not None and baseline_lag <= peak_lag:
+            low_before_peak += 1
+        else:
+            low_after_or_unknown_peak += 1
+    confidence_adjusted_research_rows = len(covered_rows) + len(low_confidence_uncovered_rows)
     return {
         "available": True,
         "source": "raw_signal_outcomes",
@@ -335,6 +381,13 @@ def raw_kline_audit(raw_db, since_ts):
         "coverage_reason_counts": count("coverage_reason"),
         "coverage_reason_counts_uncovered": count("coverage_reason", uncovered_rows),
         "kline_uncovered_root_cause_counts": dict(uncovered_root_cause_counts.most_common()),
+        "baseline_confidence_policy": {
+            "high_lag_sec_max": 10,
+            "medium_lag_sec_max": 30,
+            "low_lag_sec_max": 300,
+            "formal_evaluable_confidence": ["high", "medium"],
+            "low_confidence_is_research_only": True,
+        },
         "baseline_confidence_counts": count("baseline_confidence"),
         "baseline_confidence_counts_uncovered": count("baseline_confidence", uncovered_rows),
         "same_source_path_counts_uncovered": dict(
@@ -351,6 +404,21 @@ def raw_kline_audit(raw_db, since_ts):
         "early_15m_complete_rows": early_complete,
         "early_15m_complete_rate": rate(early_complete, len(rows)),
         "early_15m_coverage_bucket_counts": dict(Counter(bucket_pct(row.get("early_15m_bar_coverage_pct")) for row in rows).most_common()),
+        "low_confidence_research_audit": {
+            "raw_gold_silver_low_confidence_rows": len(low_confidence_rows),
+            "low_confidence_uncovered_rows": len(low_confidence_uncovered_rows),
+            "low_confidence_baseline_lag_bucket_counts": dict(
+                Counter(bucket_baseline_lag(row.get("baseline_lag_sec")) for row in low_confidence_uncovered_rows).most_common()
+            ),
+            "low_confidence_first_bar_lag_bucket_counts": dict(
+                Counter(bucket_lag(row.get("first_bar_lag_sec")) for row in low_confidence_uncovered_rows).most_common()
+            ),
+            "low_confidence_baseline_before_sustained_peak_rows": low_before_peak,
+            "low_confidence_baseline_after_or_unknown_peak_rows": low_after_or_unknown_peak,
+            "confidence_adjusted_research_kline_covered_rows": confidence_adjusted_research_rows,
+            "confidence_adjusted_research_kline_coverage_rate": rate(confidence_adjusted_research_rows, len(rows)),
+            "note": "Research-only diagnostic. This does not change the formal high/medium evaluable denominator.",
+        },
         "primary_denominator_drop_reason_counts": dict(primary_drop.most_common()),
         "raw_uncovered_samples": [
             {
@@ -457,6 +525,7 @@ def compact_summary(report):
             "kline_uncovered_root_cause_counts": kline.get("kline_uncovered_root_cause_counts"),
             "first_bar_lag_bucket_counts_uncovered": kline.get("first_bar_lag_bucket_counts_uncovered"),
             "early_15m_complete_rate": kline.get("early_15m_complete_rate"),
+            "low_confidence_research_audit": kline.get("low_confidence_research_audit"),
             "blocker": kline.get("blocker"),
         },
     }
@@ -529,6 +598,7 @@ def self_test():
         assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_root_cause_counts"]["not_same_source_path"] == 1
+        assert report["raw_gold_silver_kline"]["low_confidence_research_audit"]["confidence_adjusted_research_kline_covered_rows"] == 1
         assert report["overall"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
         compact = compact_summary(report)
         assert compact["overall"]["promotion_allowed"] is False
