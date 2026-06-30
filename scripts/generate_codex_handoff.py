@@ -382,6 +382,24 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    candidate_improvement = verdict.get("candidate_improvement_opportunities_summary") or {}
+    if candidate_improvement:
+        compact_candidate_improvement = {
+            "opportunity_count": candidate_improvement.get("opportunity_count"),
+            "opportunity_type_counts": candidate_improvement.get("opportunity_type_counts") or {},
+            "blocked_context_opportunity_count": candidate_improvement.get("blocked_context_opportunity_count"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "top_opportunities": (candidate_improvement.get("top_opportunities") or [])[:5],
+        }
+        lines.extend([
+            "## Candidate Improvement Opportunities",
+            "",
+            "```json",
+            json.dumps(compact_candidate_improvement, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     entry_gap = verdict.get("entry_funnel_gap_summary") or {}
     readiness_shortfall = verdict.get("readiness_shortfall_summary") or {}
     paper_proposal = verdict.get("paper_entry_proposal_readiness") or {}
@@ -677,6 +695,7 @@ def self_test():
     assert "Quality / Timing Reject Research" in text
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
+    assert "Candidate Improvement Opportunities" in text
     assert "Readiness Summaries" in text
     assert "candidate_improvement_opportunities_summary" in text
     quote_pending_verdict = {
