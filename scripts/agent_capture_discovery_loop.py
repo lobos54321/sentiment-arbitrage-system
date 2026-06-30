@@ -43,6 +43,7 @@ REPORT_TEST_COMMANDS = (
     ("quality_timing_reject_research_self_test", ["scripts/quality_timing_reject_research_audit.py", "--self-test"]),
     ("candidate_downstream_readiness_self_test", ["scripts/candidate_downstream_readiness_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
+    ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
 )
@@ -1588,6 +1589,7 @@ def write_materialized_artifacts(
     tests=None,
     state="final",
     publish_latest=True,
+    refresh_oos_after_registry=False,
 ):
     diagnostics = diagnostics or []
     markov_paths = markov_paths or {}
@@ -1605,61 +1607,95 @@ def write_materialized_artifacts(
     capture = load_json(capture_path)
     pnl = load_json(pnl_path) if pnl_path and Path(pnl_path).exists() else None
     markov_reports = {name: load_json(path) for name, path in markov_paths.items() if Path(path).exists()}
-    readiness_reports = {}
-    for key, path in readiness_paths.items():
-        if path and Path(path).exists():
-            try:
-                readiness_reports[key] = load_json(path)
-            except Exception:
-                pass
-    context_report = readiness_reports.get("context_coverage") or {}
-    readiness_reports["current_commit"] = git_commit()
-    readiness_reports["deployment_commit"] = (
-        os.environ.get("ZEABUR_GIT_COMMIT_SHA")
-        or os.environ.get("ZEABUR_GIT_COMMIT")
-        or os.environ.get("ZEABUR_COMMIT_SHA")
-        or os.environ.get("COMMIT_SHA")
-        or os.environ.get("GIT_COMMIT")
-        or os.environ.get("SOURCE_VERSION")
-        or os.environ.get("GITHUB_SHA")
-        or readiness_reports["current_commit"]
-    )
-    if not readiness_reports["current_commit"]:
-        readiness_reports["current_commit"] = readiness_reports["deployment_commit"]
-    if not readiness_reports["deployment_commit"]:
-        readiness_reports["deployment_commit"] = readiness_reports["current_commit"]
-    readiness_reports["volume_profile_coverage"] = context_report.get("volume_profile_coverage") or {}
-    readiness_reports["kline_coverage"] = context_report.get("kline_coverage") or {}
-    readiness_reports["next_highest_priority_blocker"] = first_blocker_priority(
-        list((capture.get("report_health") or {}).get("promotion_blockers") or [])
-        + list(context_report.get("blockers") or [])
-    )
-    verdict = build_verdict(
-        capture,
-        pnl,
-        markov_reports,
-        tests=tests if tests.get("status") != "pending" else {},
-        readiness_reports=readiness_reports,
-    )
-    if any(not row.get("ok") for row in diagnostics):
-        verdict["blockers"] = sorted(set((verdict.get("blockers") or []) + ["report_generation_failed"]))
-        verdict["classification"] = "BLOCKED_DATA"
-        verdict["promotion_allowed"] = False
-    if state != "final":
-        verdict["blockers"] = sorted(set((verdict.get("blockers") or []) + [state]))
-        verdict["classification"] = "BLOCKED_DATA"
-        verdict["promotion_allowed"] = False
-    verdict["loop"] = {
-        "schema_version": SCHEMA_VERSION,
-        "run_id": rid,
-        "run_dir": str(run_dir),
-        "state": state,
-        "report_diagnostics": diagnostics,
-    }
+
+    def collect_readiness_reports():
+        reports = {}
+        for key, path in readiness_paths.items():
+            if path and Path(path).exists():
+                try:
+                    reports[key] = load_json(path)
+                except Exception:
+                    pass
+        context_report = reports.get("context_coverage") or {}
+        reports["current_commit"] = git_commit()
+        reports["deployment_commit"] = (
+            os.environ.get("ZEABUR_GIT_COMMIT_SHA")
+            or os.environ.get("ZEABUR_GIT_COMMIT")
+            or os.environ.get("ZEABUR_COMMIT_SHA")
+            or os.environ.get("COMMIT_SHA")
+            or os.environ.get("GIT_COMMIT")
+            or os.environ.get("SOURCE_VERSION")
+            or os.environ.get("GITHUB_SHA")
+            or reports["current_commit"]
+        )
+        if not reports["current_commit"]:
+            reports["current_commit"] = reports["deployment_commit"]
+        if not reports["deployment_commit"]:
+            reports["deployment_commit"] = reports["current_commit"]
+        reports["volume_profile_coverage"] = context_report.get("volume_profile_coverage") or {}
+        reports["kline_coverage"] = context_report.get("kline_coverage") or {}
+        reports["next_highest_priority_blocker"] = first_blocker_priority(
+            list((capture.get("report_health") or {}).get("promotion_blockers") or [])
+            + list(context_report.get("blockers") or [])
+        )
+        return reports
+
+    def build_loop_verdict():
+        verdict_payload = build_verdict(
+            capture,
+            pnl,
+            markov_reports,
+            tests=tests if tests.get("status") != "pending" else {},
+            readiness_reports=collect_readiness_reports(),
+        )
+        if any(not row.get("ok") for row in diagnostics):
+            verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + ["report_generation_failed"]))
+            verdict_payload["classification"] = "BLOCKED_DATA"
+            verdict_payload["promotion_allowed"] = False
+        if state != "final":
+            verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + [state]))
+            verdict_payload["classification"] = "BLOCKED_DATA"
+            verdict_payload["promotion_allowed"] = False
+        verdict_payload["loop"] = {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": rid,
+            "run_dir": str(run_dir),
+            "state": state,
+            "report_diagnostics": diagnostics,
+        }
+        return verdict_payload
+
+    verdict = build_loop_verdict()
 
     verdict_path = run_dir / "reviewer_verdict.json"
     write_json(verdict_path, verdict)
     registry = update_hypothesis_registry(args.registry, verdict, capture)
+    if refresh_oos_after_registry and state == "final":
+        oos_refresh_path = run_dir / "oos_readiness_probe_refresh.json"
+        probe_count = max(1, len(parse_oos_probe_hours(getattr(args, "oos_probe_hours", "")))) + 2
+        oos_timeout = max(int(args.report_timeout_sec), int(args.report_timeout_sec) * probe_count)
+        refresh_result = command_result(
+            "oos_readiness_probe_refresh",
+            [
+                "scripts/refresh_oos_readiness_probes.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
+                "--registry", str(args.registry),
+                "--run-dir", str(run_dir),
+                "--probe-hours", str(getattr(args, "oos_probe_hours", "")),
+                "--expected-candidates", str(args.expected_candidates),
+                "--max-scan-rows", str(args.max_scan_rows),
+                "--timeout-sec", str(args.report_timeout_sec),
+                "--out", str(oos_refresh_path),
+            ],
+            timeout=oos_timeout,
+        )
+        diagnostics.append(refresh_result)
+        if oos_refresh_path.exists():
+            readiness_paths["oos_readiness_probe_refresh"] = oos_refresh_path
+        verdict = build_loop_verdict()
+        write_json(verdict_path, verdict)
 
     handoff_text = build_handoff(verdict)
     handoff_path = run_dir / "codex_handoff.md"
@@ -1741,6 +1777,7 @@ def run_once(args):
         diagnostics=diagnostics,
         tests=tests,
         state="final",
+        refresh_oos_after_registry=True,
     )
     log_event("run_end", run_id=rid, classification=verdict.get("classification"), blockers=verdict.get("blockers") or [])
 
@@ -1906,6 +1943,10 @@ def self_test():
         assert "profile_diagnostics" in markov_summary
         assert "recommended_shadow_profiles" in markov_summary
         assert markov_summary["promotion_allowed"] is False
+        assert verdict["oos_probe_refresh_status"]["available"] is True
+        assert verdict["oos_probe_refresh_status"]["classification"] == "OOS_PROBES_REFRESHED"
+        assert verdict["oos_readiness_summary"]["available_probe_count"] >= 3
+        assert verdict["oos_readiness_summary"]["promotion_allowed"] is False
         latest_dir = Path(result["latest_verdict"]).parent
         registry = load_json(result["hypothesis_registry"])
         assert registry["schema_version"] == "hypothesis_registry.v2"
@@ -1972,6 +2013,7 @@ def self_test():
             "hypothesis_validation_audit_oos_probe_0p5h.json",
             "matured_volume_capture_cross_audit_oos_probe_1h.json",
             "hypothesis_validation_audit_oos_probe_1h.json",
+            "oos_readiness_probe_refresh.json",
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
         ]
