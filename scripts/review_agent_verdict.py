@@ -35,6 +35,11 @@ BLOCKER_PRIORITY = [
     "raw_all_unjoined_not_fully_attributed",
     "tests_failed",
     "report_generation_failed",
+    "runtime_signal_source_stale_fail_closed",
+    "runtime_signal_source_freshness_missing",
+    "runtime_paper_db_unavailable",
+    "runtime_paper_db_integrity_marker_exists",
+    "runtime_final_evidence_missing",
     "volume_profile_coverage_below_80pct",
     "kline_coverage_below_80pct",
     "source_quote_clean_coverage_below_80pct",
@@ -91,6 +96,7 @@ DERIVED_READINESS_SIBLINGS = {
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
+    "runtime_health_snapshot": "runtime_health_snapshot_24h.json",
     "context_blocker_monitor": "context_blocker_monitor_24h.json",
     "hypothesis_validation_oos_probe_0p1h": "hypothesis_validation_audit_oos_probe_0p1h.json",
     "hypothesis_validation_oos_probe_0p25h": "hypothesis_validation_audit_oos_probe_0p25h.json",
@@ -647,6 +653,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     context_monitor_clean_window = context_blocker_monitor.get("task_b_clean_window_monitor") or {}
     context_monitor_field_audit = context_blocker_monitor.get("task_d_context_field_coverage_audit") or {}
     context_monitor_field_smoke = context_blocker_monitor.get("task_e_post_deploy_context_field_smoke_test") or {}
+    runtime_health_snapshot = readiness_reports.get("runtime_health_snapshot") or {}
+    runtime_health_blockers = list(runtime_health_snapshot.get("blockers") or [])
+    runtime_health_warnings = list(runtime_health_snapshot.get("warnings") or [])
     quote_writer_fix_status = (
         context_monitor_overall.get("quote_writer_fix")
         or context_monitor_quote_smoke.get("classification")
@@ -660,6 +669,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         or context_monitor_field_smoke.get("classification")
     )
     blockers = list(report_health.get("promotion_blockers") or [])
+    blockers.extend(runtime_health_blockers)
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
     candidate_observed = coverage.get("candidate_count_observed")
@@ -828,6 +838,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "raw_all_unjoined_not_fully_attributed",
         "tests_failed",
         "report_generation_failed",
+        "runtime_signal_source_stale_fail_closed",
+        "runtime_signal_source_freshness_missing",
+        "runtime_paper_db_unavailable",
+        "runtime_paper_db_integrity_marker_exists",
+        "runtime_final_evidence_missing",
     }
     context_blockers = {
         "source_quote_clean_coverage_below_80pct",
@@ -1135,6 +1150,24 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_deploy_context_field_smoke_test": context_monitor_field_smoke,
             "reconciled_warnings": reconciled_context_warnings,
         },
+        "runtime_health_snapshot": {
+            "available": bool(runtime_health_snapshot),
+            "status": runtime_health_snapshot.get("status"),
+            "blockers": runtime_health_blockers,
+            "warnings": runtime_health_warnings,
+            "signal_source_freshness": runtime_health_snapshot.get("signal_source_freshness") or {},
+            "paper_review_snapshot": runtime_health_snapshot.get("paper_review_snapshot") or {},
+            "paper_fast_lane_health": runtime_health_snapshot.get("paper_fast_lane_health") or {},
+            "paper_db": runtime_health_snapshot.get("paper_db") or {},
+            "runtime_final_evidence": runtime_health_snapshot.get("runtime_final_evidence") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "runtime_health_status": runtime_health_snapshot.get("status"),
+        "runtime_health_blockers": runtime_health_blockers,
+        "runtime_health_warnings": runtime_health_warnings,
         "quote_writer_fix_status": quote_writer_fix_status,
         "quote_clean_window_status": quote_clean_window_status,
         "quote_clean_window_eta_iso": context_monitor_clean_window.get("estimated_clean_at_iso"),

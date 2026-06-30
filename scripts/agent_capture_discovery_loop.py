@@ -43,6 +43,7 @@ REPORT_TEST_COMMANDS = (
     ("quality_timing_reject_research_self_test", ["scripts/quality_timing_reject_research_audit.py", "--self-test"]),
     ("candidate_downstream_readiness_self_test", ["scripts/candidate_downstream_readiness_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
+    ("runtime_health_snapshot_self_test", ["scripts/runtime_health_snapshot_audit.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
@@ -965,6 +966,7 @@ def run_reports(run_dir, args):
     markov_effectiveness_path = run_dir / f"markov_effectiveness_{primary_hours}h.json"
     capture_cross_validity_path = run_dir / f"capture_cross_validity_{primary_hours}h.json"
     a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
+    runtime_health_snapshot_path = run_dir / f"runtime_health_snapshot_{primary_hours}h.json"
     context_blocker_monitor_path = run_dir / f"context_blocker_monitor_{primary_hours}h.json"
     volume_kline_audit_path = run_dir / f"volume_kline_coverage_audit_{primary_hours}h.json"
     matured_kline_recheck_path = run_dir / f"matured_kline_volume_recheck_audit_{primary_hours}h.json"
@@ -979,6 +981,19 @@ def run_reports(run_dir, args):
     }
     diagnostics = []
     readiness_paths = {}
+    diagnostics.append(run_report(
+        "runtime_health_snapshot",
+        [
+            "scripts/runtime_health_snapshot_audit.py",
+            "--data-dir", args.data_dir,
+            "--hours", str(primary_hours),
+            "--out", str(runtime_health_snapshot_path),
+        ],
+        runtime_health_snapshot_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if runtime_health_snapshot_path.exists():
+        readiness_paths["runtime_health_snapshot"] = runtime_health_snapshot_path
 
     db_ready = file_available(args.paper_db) and sqlite_has_table(args.paper_db, "candidate_shadow_observations")
     raw_ready = file_available(args.raw_db) and sqlite_has_table(args.raw_db, "raw_signal_outcomes")
@@ -986,12 +1001,12 @@ def run_reports(run_dir, args):
         capture = blocked_capture_report("paper_db_unavailable_or_missing_candidate_shadow_observations", args.paper_db, args.raw_db, primary_hours, args.expected_candidates)
         write_json(capture_path, capture)
         diagnostics.append({"name": "db_guard", "ok": False, "reason": "paper_db_unavailable_or_missing_candidate_shadow_observations"})
-        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": {}, "diagnostics": diagnostics}
+        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": readiness_paths, "diagnostics": diagnostics}
     if not raw_ready:
         capture = blocked_capture_report("raw_signal_outcomes_db_unavailable", args.paper_db, args.raw_db, primary_hours, args.expected_candidates)
         write_json(capture_path, capture)
         diagnostics.append({"name": "db_guard", "ok": False, "reason": "raw_signal_outcomes_db_unavailable"})
-        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": {}, "diagnostics": diagnostics}
+        return {"capture_primary": capture_path, "pnl": None, "markov": {}, "readiness": readiness_paths, "diagnostics": diagnostics}
 
     for hours, path in capture_paths.items():
         diagnostics.append(run_report(
@@ -1509,6 +1524,26 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         ),
         "```",
         "",
+        "## Runtime Health",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "status": verdict.get("runtime_health_status"),
+                "blockers": verdict.get("runtime_health_blockers") or [],
+                "warnings": verdict.get("runtime_health_warnings") or [],
+                "signal_source_freshness": (verdict.get("runtime_health_snapshot") or {}).get("signal_source_freshness") or {},
+                "paper_review_snapshot": (verdict.get("runtime_health_snapshot") or {}).get("paper_review_snapshot") or {},
+                "paper_fast_lane_health": (verdict.get("runtime_health_snapshot") or {}).get("paper_fast_lane_health") or {},
+                "paper_db": (verdict.get("runtime_health_snapshot") or {}).get("paper_db") or {},
+                "runtime_final_evidence": (verdict.get("runtime_health_snapshot") or {}).get("runtime_final_evidence") or {},
+                "promotion_allowed": False,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        "```",
+        "",
         "## Volume / Kline Coverage",
         "",
         "```json",
@@ -1913,6 +1948,34 @@ def create_self_test_dbs(root):
     )
     kline_db.commit()
     kline_db.close()
+    (root / "v27_read_models").mkdir(parents=True, exist_ok=True)
+    (root / "review-artifacts" / "live").mkdir(parents=True, exist_ok=True)
+    write_json(root / "v27_read_models" / "signal_source_freshness.json", {
+        "schema_version": "v1.signal_source_freshness_health",
+        "status": "ok",
+        "age_minutes": 1,
+        "warn_after_minutes": 15,
+        "fail_closed_after_minutes": 45,
+        "fail_closed": False,
+        "generated_at": now,
+        "latest_ts": now - 60,
+        "source": "local",
+        "total": 2,
+    })
+    write_json(root / "review-artifacts" / "live" / "paper_review_24h.json", {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "snapshot_id": "self_test",
+        "requested_hours": 24,
+        "materialized_hours": 24,
+    })
+    write_json(root / "paper-fast-lane-health.json", {
+        "schema_version": "self_test",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "worker_state": "scanned",
+        "paper_db_exists": True,
+    })
+    (root / "paper_trades.db").write_bytes(b"self-test")
+    (root / "runtime_final_evidence.jsonl").write_text("{}\n", encoding="utf-8")
     return paper, raw, kline
 
 
@@ -1924,6 +1987,7 @@ def self_test():
             paper_db=str(paper),
             raw_db=str(raw),
             kline_db=str(kline),
+            data_dir=str(root),
             hours=24,
             expected_candidates=2,
             out_root=str(root / "agent_runs"),
@@ -1962,6 +2026,10 @@ def self_test():
             "hypothesis_validation_audit",
             "low_confidence_research_capture_audit",
             "quality_timing_reject_research_audit",
+            "runtime_health_snapshot",
+            "runtime_health_status",
+            "runtime_health_blockers",
+            "runtime_health_warnings",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
             "per_candidate_effectiveness_summary",
@@ -2031,6 +2099,7 @@ def self_test():
             "capture_discovery_48h.json",
             "capture_discovery_72h.json",
             "raw_gold_silver_funnel_audit_24h.json",
+            "runtime_health_snapshot_24h.json",
             "a_class_fastlane_mode_audit_24h.json",
             "candidate_effectiveness_24h.json",
             "candidate_improvement_opportunities_24h.json",
@@ -2063,6 +2132,7 @@ def main():
     parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
     parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
     parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
+    parser.add_argument("--data-dir", default="/app/data")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
