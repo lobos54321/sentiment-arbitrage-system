@@ -2316,8 +2316,54 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const registry = safeReadAgentJson(paths.registry);
   const tests = safeReadAgentJson(paths.tests);
   const shadowDecisionBridge = safeReadAgentJson(paths.shadow_decision_bridge);
+  const qualityTimingResearch = safeReadAgentJson(paths.quality_timing_research);
   const runner = readAgentCaptureLoopRunnerStatus();
   const runtimeCommit = runtimeCommitFingerprint();
+  const compactQualityTimingResearch = (report) => {
+    if (!report) return null;
+    return {
+      available: !report.error_code,
+      verdict: report.verdict || null,
+      promotion_allowed: Boolean(report.promotion_allowed),
+      strategy_change_allowed: Boolean(report.strategy_change_allowed),
+      automatic_runtime_change_allowed: Boolean(report.automatic_runtime_change_allowed),
+      paper_enablement_allowed: Boolean(report.paper_enablement_allowed),
+      denominator: report.denominator || null,
+      candidate_match_attribution: report.candidate_match_attribution ? {
+        expected_candidates: report.candidate_match_attribution.expected_candidates,
+        candidate_observation_rows: report.candidate_match_attribution.candidate_observation_rows,
+        events_with_full_candidate_coverage:
+          report.candidate_match_attribution.events_with_full_candidate_coverage,
+        full_candidate_coverage_rate:
+          report.candidate_match_attribution.full_candidate_coverage_rate,
+        candidate_matched_any_events:
+          report.candidate_match_attribution.candidate_matched_any_events,
+        candidate_matched_any_rate:
+          report.candidate_match_attribution.candidate_matched_any_rate,
+        top_candidates: (report.candidate_match_attribution.top_candidates || []).slice(0, 10),
+        top_families: (report.candidate_match_attribution.top_families || []).slice(0, 10),
+      } : null,
+      stage_attribution: report.stage_attribution ? {
+        stage_counts: (report.stage_attribution.stage_counts || []).slice(0, 8),
+        reason_counts: (report.stage_attribution.reason_counts || []).slice(0, 10),
+      } : null,
+      context_attribution: report.context_attribution ? {
+        lifecycle_source_counts:
+          (report.context_attribution.lifecycle_source_counts || []).slice(0, 10),
+        markov_bucket_counts:
+          (report.context_attribution.markov_bucket_counts || []).slice(0, 8),
+        source_quote_clean_counts:
+          (report.context_attribution.source_quote_clean_counts || []).slice(0, 8),
+        source_quote_executable_counts:
+          (report.context_attribution.source_quote_executable_counts || []).slice(0, 8),
+      } : null,
+      shadow_only_next_actions: report.shadow_only_next_actions || [],
+      blockers: report.blockers || [],
+    };
+  };
+  const qualityTimingResearchSummary = compactQualityTimingResearch(
+    verdict?.quality_timing_reject_research_audit || qualityTimingResearch,
+  );
   const required = ['verdict', 'summary', 'handoff', 'registry'];
   const missingRequired = required.filter((name) => !artifacts[name]?.available);
   const payload = {
@@ -2539,6 +2585,7 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       } : null,
       upstream_funnel_gap_summary: verdict.upstream_funnel_gap_summary || null,
       shadow_decision_bridge_audit_summary: verdict.shadow_decision_bridge_audit_summary || null,
+      quality_timing_reject_research_audit: qualityTimingResearchSummary,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {
         candidate_count: verdict.per_candidate_effectiveness_summary.candidate_count,
