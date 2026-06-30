@@ -6205,6 +6205,174 @@ function livePaperReviewPath(hours) {
   return join(getLivePaperReviewDir(), `paper_review_${safeHours}h.json`);
 }
 
+function paperReviewSnapshotRefreshStatusPath() {
+  const raw = process.env.PAPER_REVIEW_SNAPSHOT_REFRESH_STATUS
+    || join(dirname(getPaperDbPath()), 'paper-review-snapshot-refresh-status.json');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function paperReviewSnapshotRefreshLogPath() {
+  const raw = process.env.PAPER_REVIEW_SNAPSHOT_REFRESH_LOG
+    || join(dirname(getPaperDbPath()), 'paper-review-snapshot-refresh.log');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+let paperReviewSnapshotRefreshRunner = {
+  running: false,
+  pid: null,
+  started_at: null,
+  run_id: null,
+};
+
+function readPaperReviewSnapshotRefreshStatus() {
+  const statusPath = paperReviewSnapshotRefreshStatusPath();
+  const status = safeReadAgentJson(statusPath);
+  if (!status || status.error_code) {
+    return {
+      schema_version: 'paper_review_snapshot_refresh_status.v1',
+      available: false,
+      running: Boolean(paperReviewSnapshotRefreshRunner.running && processIsAlive(paperReviewSnapshotRefreshRunner.pid)),
+      pid: paperReviewSnapshotRefreshRunner.pid || null,
+      status_path: statusPath,
+      log_path: paperReviewSnapshotRefreshLogPath(),
+      live_snapshot_health: readPaperReviewSnapshotHealth(),
+    };
+  }
+  const startedMs = Date.parse(status.started_at || '');
+  const ageMs = Number.isFinite(startedMs) ? Date.now() - startedMs : null;
+  const staleRunning = Boolean(status.running && ageMs != null && ageMs > 3 * 60 * 60 * 1000);
+  const running = Boolean(status.running && !staleRunning && processIsAlive(status.pid));
+  return {
+    ...status,
+    available: true,
+    running,
+    stale_running_status: staleRunning,
+    age_minutes: ageMs == null ? null : +(ageMs / 60000).toFixed(2),
+    pid_alive: processIsAlive(status.pid),
+    live_snapshot_health: readPaperReviewSnapshotHealth(),
+  };
+}
+
+function triggerPaperReviewSnapshotRefresh(url) {
+  const current = readPaperReviewSnapshotRefreshStatus();
+  if (current.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      runner: current,
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    };
+  }
+  const windows = sanitizeCaptureHours(url.searchParams.get('windows') || url.searchParams.get('hours') || '24', 24);
+  const limit = boundedIntParam(url, 'limit', 40, 1, 500);
+  const timeoutMs = boundedIntParam(url, 'timeout_sec', 1800, 60, 7200) * 1000;
+  const runId = `paper_review_${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}_${randomUUID().slice(0, 8)}`;
+  const startedAt = new Date().toISOString();
+  const statusPath = paperReviewSnapshotRefreshStatusPath();
+  const logPath = paperReviewSnapshotRefreshLogPath();
+  const lockPath = process.env.PAPER_REVIEW_SNAPSHOT_API_LOCK_FILE || '/tmp/paper_review_snapshot_api_refresh.lock';
+  const args = [
+    'scripts/paper_review_snapshot_worker.py',
+    '--paper-db', getPaperDbPath(),
+    '--out-dir', getLivePaperReviewDir(),
+    '--windows', windows,
+    '--limit', String(limit),
+    '--lock-file', lockPath,
+  ];
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  fs.mkdirSync(dirname(statusPath), { recursive: true });
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+  writeRedactedLogStream(logStream, `[paper-review-refresh] ${startedAt} start run_id=${runId} python3 ${args.join(' ')}\n`);
+  const child = spawn('python3', args, {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PYTHONUNBUFFERED: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  paperReviewSnapshotRefreshRunner = {
+    running: true,
+    pid: child.pid,
+    started_at: startedAt,
+    run_id: runId,
+  };
+  const baseStatus = {
+    schema_version: 'paper_review_snapshot_refresh_status.v1',
+    run_id: runId,
+    running: true,
+    pid: child.pid,
+    started_at: startedAt,
+    finished_at: null,
+    command: ['python3', ...args],
+    status_path: statusPath,
+    log_path: logPath,
+    live_dir: getLivePaperReviewDir(),
+    windows,
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
+    notes: [
+      'Read-only paper review snapshot materialization only.',
+      'Does not modify strategy, gates, A_CLASS, executor, wallet, or risk settings.',
+    ],
+  };
+  safeWriteAgentJson(statusPath, baseStatus);
+  child.stdout.on('data', (chunk) => writeRedactedLogStream(logStream, chunk));
+  child.stderr.on('data', (chunk) => writeRedactedLogStream(logStream, chunk));
+
+  let finished = false;
+  const finish = (error, code, signal, timedOut = false) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timeoutHandle);
+    const finishedAt = new Date().toISOString();
+    const status = {
+      ...baseStatus,
+      running: false,
+      finished_at: finishedAt,
+      exit_code: code ?? null,
+      signal: signal || null,
+      timed_out: Boolean(timedOut),
+      error: error ? error.message : null,
+      live_snapshot_health: readPaperReviewSnapshotHealth(),
+    };
+    paperReviewSnapshotRefreshRunner = {
+      running: false,
+      pid: child.pid,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      run_id: runId,
+    };
+    writeRedactedLogStream(logStream, `[paper-review-refresh] ${finishedAt} finish run_id=${runId} code=${code ?? ''} signal=${signal || ''} timed_out=${Boolean(timedOut)} error=${error?.message || ''}\n`);
+    try { safeWriteAgentJson(statusPath, status); } catch {}
+    try { logStream.end(); } catch {}
+  };
+  const timeoutHandle = setTimeout(() => {
+    try { child.kill('SIGTERM'); } catch {}
+    finish(new Error(`timeout_after_${Math.floor(timeoutMs / 1000)}s`), null, 'SIGTERM', true);
+  }, timeoutMs);
+  child.on('error', (error) => finish(error, null, null, false));
+  child.on('exit', (code, signal) => finish(code === 0 ? null : new Error(`exit_${code ?? signal}`), code, signal, false));
+
+  return {
+    accepted: true,
+    status: 'started',
+    runner: readPaperReviewSnapshotRefreshStatus(),
+    command: ['python3', ...args],
+    log_path: logPath,
+    status_path: statusPath,
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
+  };
+}
+
 function nearestLivePaperReviewHours(requestedHours) {
   const requested = Math.max(1, Number.parseInt(String(requestedHours || 24), 10) || 24);
   const windows = String(process.env.PAPER_REVIEW_WINDOWS || '2,8,12,24')
@@ -12126,6 +12294,38 @@ const server = http.createServer(async (req, res) => {
     } finally {
       try { if (releasePaperReport) releasePaperReport(); } catch {}
       try { if (paperDb) paperDb.close(); } catch {}
+    }
+    return;
+  } else if (url.pathname === '/api/paper/review-snapshot/refresh-status') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify({
+      schema_version: 'paper_review_snapshot_refresh_status_api.v1',
+      generated_at: new Date().toISOString(),
+      runner_status: readPaperReviewSnapshotRefreshStatus(),
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    }, null, 2));
+    return;
+  } else if (url.pathname === '/api/paper/review-snapshot/refresh') {
+    if (!checkAuth(req, url, res)) return;
+    if (!requirePost(req, res)) return;
+    try {
+      const result = triggerPaperReviewSnapshotRefresh(url);
+      res.writeHead(result.accepted ? 202 : 409, apiJsonHeaders());
+      res.end(JSON.stringify(result, null, 2));
+    } catch (error) {
+      res.writeHead(500, apiJsonHeaders());
+      res.end(JSON.stringify({
+        error: error.message,
+        error_code: 'paper_review_snapshot_refresh_failed',
+        promotion_allowed: false,
+        strategy_change_allowed: false,
+        automatic_runtime_change_allowed: false,
+        paper_enablement_allowed: false,
+      }, null, 2));
     }
     return;
   } else if (url.pathname === '/api/paper/review-snapshot') {
