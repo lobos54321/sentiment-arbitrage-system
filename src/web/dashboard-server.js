@@ -2517,6 +2517,28 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
         paper_enablement_allowed: Boolean(shadowDecisionBridge.paper_enablement_allowed),
       } : null,
       paper_entry_proposal_readiness: verdict.paper_entry_proposal_readiness || null,
+      stage2_entry_funnel_summary: verdict.stage2_entry_funnel_summary || null,
+      entry_funnel_gap_summary: verdict.entry_funnel_gap_summary ? {
+        pending_entry_signal_ids: verdict.entry_funnel_gap_summary.pending_entry_signal_ids,
+        final_entry_contract_signal_ids: verdict.entry_funnel_gap_summary.final_entry_contract_signal_ids,
+        pending_without_final_entry_contract:
+          verdict.entry_funnel_gap_summary.pending_without_final_entry_contract,
+        pending_to_final_entry_contract_rate:
+          verdict.entry_funnel_gap_summary.pending_to_final_entry_contract_rate,
+        pending_to_mode_adjusted_final_eligibility_rate:
+          verdict.entry_funnel_gap_summary.pending_to_mode_adjusted_final_eligibility_rate,
+        pending_without_final_entry_category_counts:
+          verdict.entry_funnel_gap_summary.pending_without_final_entry_category_counts || null,
+        readiness_gap_priority: verdict.entry_funnel_gap_summary.readiness_gap_priority || null,
+        automatic_runtime_change_allowed:
+          Boolean(verdict.entry_funnel_gap_summary.automatic_runtime_change_allowed),
+        strategy_change_allowed:
+          Boolean(verdict.entry_funnel_gap_summary.strategy_change_allowed),
+        paper_enablement_allowed:
+          Boolean(verdict.entry_funnel_gap_summary.paper_enablement_allowed),
+      } : null,
+      upstream_funnel_gap_summary: verdict.upstream_funnel_gap_summary || null,
+      shadow_decision_bridge_audit_summary: verdict.shadow_decision_bridge_audit_summary || null,
       final_entry_contract_blocker_breakdown: verdict.final_entry_contract_blocker_breakdown || null,
       per_candidate_effectiveness_summary: verdict.per_candidate_effectiveness_summary ? {
         candidate_count: verdict.per_candidate_effectiveness_summary.candidate_count,

@@ -895,6 +895,24 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     readiness_shortfall = final_entry.get("readiness_shortfall_summary") or {}
     paper_proposal_readiness = final_entry.get("paper_entry_proposal_readiness") or {}
+    shadow_decision_bridge = readiness_reports.get("shadow_decision_bridge_audit") or {}
+    shadow_bridge_denominator = shadow_decision_bridge.get("denominator") or {}
+    shadow_bridge_gap_count = as_int(
+        shadow_bridge_denominator.get("shadow_entry_hypotheses_matched_no_decision_bridge"),
+        0,
+    ) or 0
+    shadow_bridge_mirror_coverage = as_float(
+        shadow_bridge_denominator.get("mirror_event_coverage_vs_shadow_bridge_gap")
+    )
+    shadow_bridge_mirror_truncated = boolish(
+        shadow_bridge_denominator.get("mirror_event_truncated")
+    )
+    shadow_bridge_mirror_complete = bool(
+        shadow_bridge_gap_count > 0
+        and shadow_bridge_mirror_coverage is not None
+        and shadow_bridge_mirror_coverage >= 1.0
+        and not shadow_bridge_mirror_truncated
+    )
     largest_upstream_gap = readiness_shortfall.get("largest_upstream_gap_category") or {}
     largest_pending_gap = readiness_shortfall.get("largest_pending_to_final_gap_category") or {}
     parallel_next_action = None
@@ -902,8 +920,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     if largest_upstream_gap.get("category") == "NO_DECISION_RECORD":
         top_reasons = largest_upstream_gap.get("top_reasons") or []
         if any(row.get("reason") == "shadow_entry_hypotheses_matched_no_decision_bridge" for row in top_reasons):
-            parallel_next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
-            parallel_next_action_reason = "largest_upstream_gap_is_shadow_match_without_decision_bridge"
+            if shadow_bridge_mirror_complete and largest_pending_gap.get("category") == "QUALITY_OR_TIMING_REJECT":
+                parallel_next_action = "review_quality_timing_rejects_shadow_only"
+                parallel_next_action_reason = (
+                    "shadow_decision_bridge_mirror_complete;largest_pending_to_final_gap_is_quality_or_timing_reject"
+                )
+            elif shadow_bridge_mirror_complete:
+                parallel_next_action = "continue_shadow_decision_bridge_monitoring"
+                parallel_next_action_reason = "shadow_decision_bridge_mirror_complete"
+            else:
+                parallel_next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
+                parallel_next_action_reason = "largest_upstream_gap_is_shadow_match_without_decision_bridge"
         else:
             parallel_next_action = "audit_no_decision_record_bridge"
             parallel_next_action_reason = "largest_upstream_gap_is_no_decision_record"
@@ -1113,6 +1140,18 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "readiness_gap_priority": pending_to_final_gap.get("readiness_gap_priority") or {},
             "automatic_runtime_change_allowed": False,
             "strategy_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "shadow_decision_bridge_audit_summary": {
+            "available": bool(shadow_decision_bridge),
+            "status": shadow_decision_bridge.get("status"),
+            "shadow_bridge_gap_count": shadow_bridge_gap_count,
+            "mirror_event_count": shadow_bridge_denominator.get("mirror_event_count"),
+            "mirror_event_coverage_vs_shadow_bridge_gap": shadow_bridge_mirror_coverage,
+            "mirror_event_truncated": shadow_bridge_mirror_truncated,
+            "mirror_complete": shadow_bridge_mirror_complete,
+            "promotion_allowed": False,
+            "automatic_bridge_to_entry_allowed": False,
             "paper_enablement_allowed": False,
         },
         "top_blocker": top_blocker,
