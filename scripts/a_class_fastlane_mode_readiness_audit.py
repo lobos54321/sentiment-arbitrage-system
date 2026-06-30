@@ -408,6 +408,103 @@ def raw_funnel_snapshot(raw_funnel):
     }
 
 
+PENDING_GAP_CATEGORY_META = {
+    "POLICY_OR_SOURCE_PREREQUISITE": {
+        "description": "A direct-entry or source prerequisite prevented the pending signal from reaching final_entry_contract.",
+        "automatic_allowed_scope": "data/source-prerequisite audit only",
+        "human_approval_required_if_fix_requires": "enabling direct entry or relaxing prerequisite policy",
+    },
+    "DATA_OR_MARKET_CONTEXT_BLOCK": {
+        "description": "Missing or unfavorable kline/volume/context evidence prevented final-entry evaluation.",
+        "automatic_allowed_scope": "data coverage, writer, evaluator, or shadow-only context audit",
+        "human_approval_required_if_fix_requires": "relaxing market/context gates",
+    },
+    "MODE_SHADOW_OR_RATE_LIMIT": {
+        "description": "A shadow/rate-limit/canary mode condition prevented final-entry evaluation.",
+        "automatic_allowed_scope": "read-only mode readiness audit",
+        "human_approval_required_if_fix_requires": "resetting SHADOW, changing rate limits, or enabling paper/live execution",
+    },
+    "QUALITY_OR_TIMING_REJECT": {
+        "description": "The signal was rejected by quality or timing logic before final_entry_contract.",
+        "automatic_allowed_scope": "shadow-only candidate/evaluator analysis",
+        "human_approval_required_if_fix_requires": "changing strategy thresholds or timing policy",
+    },
+    "SIGNAL_SUPERSEDED_OR_ABORTED": {
+        "description": "The pending signal was superseded or aborted before final_entry_contract.",
+        "automatic_allowed_scope": "read-only duplicate/refresh attribution audit",
+        "human_approval_required_if_fix_requires": "changing signal refresh or abort policy",
+    },
+    "UNKNOWN_PENDING_TO_FINAL_GAP": {
+        "description": "The audit could not classify the pending-to-final gap deterministically.",
+        "automatic_allowed_scope": "instrumentation and evaluator audit",
+        "human_approval_required_if_fix_requires": "runtime behavior changes",
+    },
+}
+
+
+def classify_pending_gap_reason(row):
+    component = str(row.get("component") or "").lower()
+    event_type = str(row.get("event_type") or "").lower()
+    decision = str(row.get("decision") or "").lower()
+    reason = str(row.get("reason") or "").lower()
+    if "gmgn_pre_seen_required" in reason or "direct_entry_disabled" in reason:
+        return "POLICY_OR_SOURCE_PREREQUISITE"
+    if "no_kline" in reason or "low_volume" in reason or "kline" in reason:
+        return "DATA_OR_MARKET_CONTEXT_BLOCK"
+    if (
+        "shadow" in reason
+        or "rate_limited" in reason
+        or "canary" in reason
+        or component in {"entry_mode_quality", "revival_canary"}
+    ):
+        return "MODE_SHADOW_OR_RATE_LIMIT"
+    if event_type == "entry_abort" or decision == "supersede" or "refresh" in reason:
+        return "SIGNAL_SUPERSEDED_OR_ABORTED"
+    if component in {"smart_entry", "scout_quality"} or decision in {"reject", "block", "watch_only"}:
+        return "QUALITY_OR_TIMING_REJECT"
+    return "UNKNOWN_PENDING_TO_FINAL_GAP"
+
+
+def categorize_pending_to_final_gap(reason_counts):
+    categories = {}
+    for row in reason_counts or []:
+        category = classify_pending_gap_reason(row)
+        bucket = categories.setdefault(
+            category,
+            {
+                "category": category,
+                "count": 0,
+                **PENDING_GAP_CATEGORY_META[category],
+                "top_reasons": [],
+            },
+        )
+        count = safe_int(row.get("count"), 0) or 0
+        bucket["count"] += count
+        if len(bucket["top_reasons"]) < 8:
+            bucket["top_reasons"].append(
+                {
+                    "component": row.get("component"),
+                    "event_type": row.get("event_type"),
+                    "decision": row.get("decision"),
+                    "reason": row.get("reason"),
+                    "count": count,
+                }
+            )
+    total = sum(item["count"] for item in categories.values())
+    rows = []
+    for item in categories.values():
+        item["share_of_pending_without_final"] = rate(item["count"], total)
+        rows.append(item)
+    rows.sort(key=lambda item: (-item["count"], item["category"]))
+    return {
+        "total_classified": total,
+        "categories": rows,
+        "automatic_runtime_change_allowed": False,
+        "strategy_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_capture_stage_rates(raw_snapshot, final_contract):
     raw_events = safe_int(raw_snapshot.get("raw_gold_silver_events"), 0)
     raw_signals = safe_int(raw_snapshot.get("raw_signal_ids"), 0) or raw_events
@@ -433,9 +530,16 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     detector_rate = raw_snapshot.get("candidate_match_any_rate")
     if detector_rate is None:
         detector_rate = rate(candidate_matched_any, raw_events)
-    pending_without_final = max(0, pending - final_entry_contract)
+    exact_pending_without_final = safe_int(raw_snapshot.get("raw_signals_pending_without_final_entry_contract"), None)
+    pending_without_final = (
+        exact_pending_without_final
+        if exact_pending_without_final is not None
+        else max(0, pending - final_entry_contract)
+    )
     final_without_mode_adjusted = max(0, final_entry_contract - mode_disabled_only)
     mode_adjusted_rate = rate(mode_disabled_only, raw_signals) if scoped_mode_disabled_only_available else None
+    pending_reason_counts = raw_snapshot.get("pending_without_final_entry_reason_counts") or []
+    pending_gap_categories = categorize_pending_to_final_gap(pending_reason_counts)
     readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
     if scoped_mode_disabled_only_available:
         readiness_status = (
@@ -489,6 +593,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
                 "pending_without_final_entry_examples"
             )
             or [],
+            "pending_without_final_entry_category_counts": pending_gap_categories,
         },
         "mode_disabled_adjusted_final_eligibility": {
             "status": readiness_status,

@@ -231,6 +231,16 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    entry_gap = verdict.get("entry_funnel_gap_summary") or {}
+    if entry_gap:
+        lines.extend([
+            "## Entry Funnel Gap",
+            "",
+            "```json",
+            json.dumps(entry_gap, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -329,6 +339,24 @@ def self_test():
         },
         "H1_capture_metrics": {"status": "WATCH"},
         "H2_capture_metrics": {"status": "not_observed"},
+        "entry_funnel_gap_summary": {
+            "pending_entry_signal_ids": 10,
+            "final_entry_contract_signal_ids": 2,
+            "pending_without_final_entry_contract": 8,
+            "pending_without_final_entry_category_counts": {
+                "total_classified": 8,
+                "automatic_runtime_change_allowed": False,
+                "strategy_change_allowed": False,
+                "paper_enablement_allowed": False,
+                "categories": [
+                    {
+                        "category": "QUALITY_OR_TIMING_REJECT",
+                        "count": 5,
+                        "automatic_allowed_scope": "shadow-only candidate/evaluator analysis",
+                    }
+                ],
+            },
+        },
         "hypothesis_validation_audit": {
             "available": True,
             "overall": {
@@ -348,6 +376,8 @@ def self_test():
     assert "Quote Context Coverage" in text
     assert "Quote Missing Root Cause" in text
     assert "Hypothesis Validation" in text
+    assert "Entry Funnel Gap" in text
+    assert "QUALITY_OR_TIMING_REJECT" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Readiness Summaries" in text
     verdict["blockers"] = []

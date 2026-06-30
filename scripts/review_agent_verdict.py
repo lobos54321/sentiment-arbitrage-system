@@ -405,6 +405,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     promotion_allowed = False
     capture_stage_rates = final_entry.get("capture_stage_rates") or {}
+    pending_to_final_gap = capture_stage_rates.get("pending_to_final_entry_gap") or final_entry.get("pending_to_final_entry_gap") or {}
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
     top_blocker = blockers[0] if blockers else (
@@ -449,6 +450,19 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         ),
         "paper_capture_rate": capture_stage_rates.get("paper_capture_rate"),
         "realized_capture_rate": capture_stage_rates.get("realized_capture_rate"),
+        "entry_funnel_gap_summary": {
+            "pending_entry_signal_ids": pending_to_final_gap.get("pending_entry_signal_ids"),
+            "final_entry_contract_signal_ids": pending_to_final_gap.get("final_entry_contract_signal_ids"),
+            "pending_without_final_entry_contract": pending_to_final_gap.get("pending_without_final_entry_contract"),
+            "pending_to_final_entry_contract_rate": pending_to_final_gap.get("pending_to_final_entry_contract_rate"),
+            "pending_to_mode_adjusted_final_eligibility_rate": pending_to_final_gap.get("pending_to_mode_adjusted_final_eligibility_rate"),
+            "pending_without_final_entry_category_counts": (
+                pending_to_final_gap.get("pending_without_final_entry_category_counts") or {}
+            ),
+            "automatic_runtime_change_allowed": False,
+            "strategy_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
         "top_blocker": top_blocker,
         "non_quote_sensitive_capture_discovery_allowed": non_quote_sensitive_capture_discovery_allowed,
         "quote_sensitive_slices_blocked": quote_sensitive_slices_blocked,
