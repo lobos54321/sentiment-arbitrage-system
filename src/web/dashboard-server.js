@@ -2631,6 +2631,14 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       updated_at: registry.updated_at,
       promotion_allowed: Boolean(registry.promotion_allowed),
       hypothesis_keys: Object.keys(registry.hypotheses || {}),
+      shadow_only_quality_timing_watch_count:
+        Array.isArray(registry.shadow_only_quality_timing_watch)
+          ? registry.shadow_only_quality_timing_watch.length
+          : 0,
+      shadow_only_matured_volume_watch_count:
+        Array.isArray(registry.shadow_only_matured_volume_watch)
+          ? registry.shadow_only_matured_volume_watch.length
+          : 0,
       recent_run_count: Array.isArray(registry.recent_runs) ? registry.recent_runs.length : 0,
     } : { available: false },
     tests_summary: tests ? {

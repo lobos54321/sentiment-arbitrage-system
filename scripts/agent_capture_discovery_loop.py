@@ -1590,7 +1590,47 @@ def compact_matured_volume_hypothesis(row):
     }
 
 
-def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch):
+def compact_quality_timing_shadow_hypothesis(row):
+    cluster = row.get("cluster")
+    return {
+        "hypothesis_id": f"quality_timing:{cluster}",
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_quality_timing_reject_cluster",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "definition": {
+            "cluster": cluster,
+            "dominant_stage_filter": [
+                item.get("stage")
+                for item in (row.get("stage_counts") or [])
+                if item.get("stage")
+            ],
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+        },
+        "latest_metrics": {
+            key: row.get(key)
+            for key in (
+                "event_count",
+                "share_of_quality_timing_rejects",
+                "share_of_raw_all_gold_silver",
+                "unique_tokens",
+                "candidate_matched_any_rate",
+                "max_sustained_peak_pct_max",
+                "time_to_sustained_peak_sec_median",
+            )
+        },
+        "top_candidates": (row.get("top_candidates") or [])[:10],
+        "top_families": (row.get("top_families") or [])[:10],
+        "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:10],
+        "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+        "next_validation": row.get("next_validation")
+        or "repeat_same_cluster_in_clean_window_then_oos_if_it_generates_shadow_candidate_lift",
+    }
+
+
+def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch, quality_timing_watch=None):
     watchlist_keys = []
     for row in watchlist_hypotheses or []:
         if not isinstance(row, dict):
@@ -1610,9 +1650,19 @@ def stable_hypothesis_signature(*, watchlist_hypotheses, matured_volume_watch):
             "definition": row.get("definition") or {},
         })
     matured_keys = sorted(matured_keys, key=lambda item: item.get("hypothesis_id") or "")
+    quality_timing_keys = []
+    for row in quality_timing_watch or []:
+        if not isinstance(row, dict):
+            continue
+        quality_timing_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    quality_timing_keys = sorted(quality_timing_keys, key=lambda item: item.get("hypothesis_id") or "")
     return {
         "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
         "shadow_only_matured_volume_watch": matured_keys,
+        "shadow_only_quality_timing_watch": quality_timing_keys,
     }
 
 
@@ -1644,10 +1694,19 @@ def update_hypothesis_registry(path, verdict, capture):
         compact_matured_volume_hypothesis(row)
         for row in matured_volume_slices[:10]
     ]
+    quality_timing = verdict.get("quality_timing_reject_research_audit") or {}
+    quality_timing_review = quality_timing.get("shadow_only_review") or {}
+    quality_timing_opportunities = quality_timing_review.get("top_research_opportunities") or []
+    quality_timing_watch = [
+        compact_quality_timing_shadow_hypothesis(row)
+        for row in quality_timing_opportunities[:10]
+        if isinstance(row, dict) and row.get("cluster")
+    ]
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
         matured_volume_watch=matured_volume_watch,
+        quality_timing_watch=quality_timing_watch,
     )
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
@@ -1665,6 +1724,7 @@ def update_hypothesis_registry(path, verdict, capture):
         },
         "watchlist_hypotheses": watchlist_hypotheses,
         "shadow_only_matured_volume_watch": matured_volume_watch,
+        "shadow_only_quality_timing_watch": quality_timing_watch,
         "recent_runs": recent[-20:],
     }
     write_json(target, registry)
@@ -2321,6 +2381,7 @@ def self_test():
         registry = load_json(result["hypothesis_registry"])
         assert registry["schema_version"] == "hypothesis_registry.v2"
         assert "shadow_only_matured_volume_watch" in registry
+        assert "shadow_only_quality_timing_watch" in registry
         manual_registry_path = root / "manual_hypothesis_registry.json"
         manual_registry = update_hypothesis_registry(
             manual_registry_path,
@@ -2355,11 +2416,44 @@ def self_test():
                         }
                     ]
                 },
+                "quality_timing_reject_research_audit": {
+                    "shadow_only_review": {
+                        "top_research_opportunities": [
+                            {
+                                "cluster": "matrix_alignment_wait",
+                                "event_count": 7,
+                                "share_of_quality_timing_rejects": 0.2,
+                                "share_of_raw_all_gold_silver": 0.06,
+                                "unique_tokens": 6,
+                                "candidate_matched_any_rate": 1.0,
+                                "max_sustained_peak_pct_max": 9520.72,
+                                "time_to_sustained_peak_sec_median": 1049,
+                                "stage_counts": [
+                                    {"stage": "decision_no_pass_or_allow", "count": 7}
+                                ],
+                                "top_candidates": [
+                                    {"candidate_id": "entry_mode_registry:smart_entry_pullback_bounce", "family": "entry_mode_registry", "count": 7}
+                                ],
+                                "top_families": [
+                                    {"family": "entry_mode_registry", "count": 77}
+                                ],
+                                "top_lifecycle_source_contexts": [
+                                    {"lifecycle_profile": "ATH_SHALLOW_PULLBACK:PROBE", "source_component": "matrix_evaluator", "count": 1}
+                                ],
+                                "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                                "human_approval_required_if_fix_requires": "changing matrix alignment thresholds",
+                                "next_validation": "repeat_same_cluster_in_clean_window_then_oos_if_it_generates_shadow_candidate_lift",
+                            }
+                        ]
+                    }
+                },
             },
             {"watchlist_hypotheses": []},
         )
         assert manual_registry["shadow_only_matured_volume_watch"][0]["hypothesis_id"] == "matured_volume:entry_mode_registry:ath_flat_structure_tiny_scout:building"
         assert manual_registry["shadow_only_matured_volume_watch"][0]["promotion_allowed"] is False
+        assert manual_registry["shadow_only_quality_timing_watch"][0]["hypothesis_id"] == "quality_timing:matrix_alignment_wait"
+        assert manual_registry["shadow_only_quality_timing_watch"][0]["promotion_allowed"] is False
         required_artifacts = [
             "capture_discovery_24h.json",
             "capture_discovery_48h.json",
