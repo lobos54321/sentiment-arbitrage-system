@@ -37,6 +37,7 @@ REPORT_TEST_COMMANDS = (
     ("virtual_markov_self_test", ["scripts/build_candidate_virtual_markov.py", "--self-test"]),
     ("volume_kline_audit_self_test", ["scripts/volume_kline_coverage_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
+    ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
 )
@@ -668,6 +669,22 @@ def run_reports(run_dir, args):
     ))
     if low_confidence_research_path.exists():
         readiness_paths["low_confidence_research_capture_audit"] = low_confidence_research_path
+    diagnostics.append(run_report(
+        "a_class_fastlane_mode_readiness_audit",
+        [
+            "scripts/a_class_fastlane_mode_readiness_audit.py",
+            "--db", args.paper_db,
+            "--raw-funnel", str(raw_funnel_path),
+            "--context-coverage", str(context_coverage_path),
+            "--volume-kline-audit", str(volume_kline_audit_path),
+            "--hours", str(primary_hours),
+            "--out", str(a_class_fastlane_path),
+        ],
+        a_class_fastlane_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if a_class_fastlane_path.exists():
+        readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
     if int(args.quote_fix_deploy_ts or 0) > 0:
         diagnostics.append(run_report(
             "context_blocker_monitor",
