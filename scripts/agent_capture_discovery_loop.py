@@ -255,6 +255,15 @@ def pct_to_rate(value):
         return None
 
 
+def safe_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def write_derived_report(path, payload):
     payload = {
         "generated_at": utc_now(),
@@ -424,6 +433,82 @@ def build_candidate_effectiveness_report(capture, downstream=None):
             "Capture-first classifications are discovery-only and do not imply entry promotion.",
             "Downstream rates are conditional on candidate-matched raw gold/silver signal_ids.",
             "PnL is intentionally not used as the primary candidate-effectiveness criterion.",
+        ],
+    }
+
+
+def count_for_root(rows, root_cause):
+    for row in rows or []:
+        if row.get("root_cause") == root_cause:
+            return safe_int(row.get("count"), 0)
+    return 0
+
+
+def build_shadow_decision_bridge_audit(raw_funnel):
+    """Extract the shadow-entry match/no-decision bridge gap into a focused artifact."""
+    summary = raw_funnel.get("summary") or {}
+    entry_bridge = summary.get("entry_bridge_layer") or {}
+    raw_bridge = entry_bridge.get("raw_signal_decision_bridge") or {}
+    no_decision_subroots = raw_bridge.get("no_decision_record_subroot_cause_counts") or []
+    no_decision_roots = raw_bridge.get("no_decision_record_root_cause_counts") or []
+    shadow_count = count_for_root(
+        no_decision_subroots,
+        "shadow_entry_hypotheses_matched_no_decision_bridge",
+    )
+    raw_signal_ids = safe_int(raw_bridge.get("raw_signal_ids"), 0)
+    no_decision_count = safe_int(raw_bridge.get("raw_signals_without_decision_record"), 0)
+    status = "NO_SHADOW_DECISION_BRIDGE_GAP"
+    next_action = "continue_capture_discovery"
+    if shadow_count > 0:
+        status = "SHADOW_DECISION_BRIDGE_AUDIT_REQUIRED"
+        next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
+    return {
+        "schema_version": "shadow_decision_bridge_audit.v1",
+        "report_type": "shadow_decision_bridge_audit_24h",
+        "status": status,
+        "next_action": next_action,
+        "root_cause": "shadow_entry_hypotheses_matched_no_decision_bridge",
+        "denominator": {
+            "raw_signal_ids": raw_signal_ids,
+            "raw_signals_without_decision_record": no_decision_count,
+            "shadow_entry_hypotheses_matched_no_decision_bridge": shadow_count,
+            "shadow_bridge_gap_rate_vs_raw_signal_ids": safe_rate(shadow_count, raw_signal_ids),
+            "shadow_bridge_gap_share_of_no_decision": safe_rate(shadow_count, no_decision_count),
+        },
+        "no_decision_record_root_cause_counts": no_decision_roots,
+        "no_decision_record_subroot_cause_counts": no_decision_subroots,
+        "family_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_family_counts") or [],
+        "candidate_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_candidate_counts") or [],
+        "reason_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_reason_counts") or [],
+        "signal_examples": raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples") or [],
+        "nearby_signal_id_mismatch_count": count_for_root(
+            no_decision_subroots,
+            "token_time_decision_nearby_signal_id_mismatch",
+        ),
+        "missing_signal_id_decision_count": count_for_root(
+            no_decision_subroots,
+            "token_time_decision_missing_signal_id",
+        ),
+        "allowed_scope": [
+            "read-only decision bridge attribution audit",
+            "evaluator/report/dashboard artifact improvements",
+            "shadow-only candidate/context instrumentation",
+        ],
+        "forbidden_scope": [
+            "strategy change",
+            "entry policy change",
+            "hard/exit gate change",
+            "final_entry_contract change",
+            "A_CLASS mode reset or enablement",
+            "paper/live executor enablement",
+            "canary/risk increase",
+        ],
+        "promotion_allowed": False,
+        "paper_enablement_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "notes": [
+            "This report is extracted from raw_gold_silver_funnel_audit and does not rescan or mutate trading state.",
+            "A shadow match without a decision record is a bridge/instrumentation finding, not promotion evidence.",
         ],
     }
 
@@ -974,6 +1059,7 @@ def run_reports(run_dir, args):
     }
     pnl_path = run_dir / f"pnl_cross_secondary_{primary_hours}h.json"
     raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{primary_hours}h.json"
+    shadow_decision_bridge_path = run_dir / f"shadow_decision_bridge_audit_{primary_hours}h.json"
     candidate_downstream_path = run_dir / f"candidate_downstream_readiness_{primary_hours}h.json"
     context_coverage_path = run_dir / f"context_coverage_audit_{primary_hours}h.json"
     candidate_effectiveness_path = run_dir / f"candidate_effectiveness_{primary_hours}h.json"
@@ -1122,6 +1208,11 @@ def run_reports(run_dir, args):
             raw_funnel = load_json(raw_funnel_path)
         else:
             raw_funnel = {}
+        write_derived_report(
+            shadow_decision_bridge_path,
+            build_shadow_decision_bridge_audit(raw_funnel),
+        )
+        readiness_paths["shadow_decision_bridge_audit"] = shadow_decision_bridge_path
         write_derived_report(a_class_fastlane_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
         readiness_paths["a_class_fastlane_mode_audit"] = a_class_fastlane_path
         # Backward-compatible alias for older readers.
@@ -1136,6 +1227,8 @@ def run_reports(run_dir, args):
             readiness_paths[f"capture_{hours}h"] = path
     if raw_funnel_path.exists():
         readiness_paths["raw_gold_silver_funnel_audit"] = raw_funnel_path
+    if shadow_decision_bridge_path.exists():
+        readiness_paths["shadow_decision_bridge_audit"] = shadow_decision_bridge_path
     diagnostics.append(run_report(
         "volume_kline_coverage_audit",
         [
@@ -1448,6 +1541,9 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- deployment_commit: `{verdict.get('deployment_commit')}`",
         f"- verdict: `{verdict.get('classification')}`",
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
+        f"- next_action: `{verdict.get('next_action')}`",
+        f"- parallel_next_action: `{verdict.get('parallel_next_action')}`",
+        f"- parallel_next_action_reason: `{verdict.get('parallel_next_action_reason')}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
         f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
         f"- strategy_change_allowed: `{str(bool(verdict.get('strategy_change_allowed'))).lower()}`",
@@ -2129,6 +2225,7 @@ def self_test():
             "capture_discovery_48h.json",
             "capture_discovery_72h.json",
             "raw_gold_silver_funnel_audit_24h.json",
+            "shadow_decision_bridge_audit_24h.json",
             "runtime_health_snapshot_24h.json",
             "a_class_fastlane_mode_audit_24h.json",
             "candidate_effectiveness_24h.json",
