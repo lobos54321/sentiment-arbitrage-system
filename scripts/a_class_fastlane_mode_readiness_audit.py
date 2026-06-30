@@ -396,6 +396,10 @@ def raw_funnel_snapshot(raw_funnel):
         "raw_signals_with_pending_entry": raw_bridge.get("raw_signals_with_pending_entry"),
         "raw_signals_with_final_entry_contract": raw_bridge.get("raw_signals_with_final_entry_contract"),
         "raw_signals_with_final_entry_block": raw_bridge.get("raw_signals_with_final_entry_block"),
+        "raw_signals_with_final_entry_mode_disabled": raw_bridge.get("raw_signals_with_final_entry_mode_disabled"),
+        "raw_signals_with_final_entry_mode_disabled_only": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_only"),
+        "raw_signals_with_final_entry_mode_disabled_plus_other": raw_bridge.get("raw_signals_with_final_entry_mode_disabled_plus_other"),
+        "raw_scoped_final_entry_hard_blockers": raw_bridge.get("raw_scoped_final_entry_hard_blockers"),
     }
 
 
@@ -407,10 +411,16 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         decision_records = safe_int(raw_snapshot.get("events_with_decision_record"), 0)
     pass_or_allow = safe_int(raw_snapshot.get("raw_signals_with_pass_or_allow"), 0)
     pending = safe_int(raw_snapshot.get("raw_signals_with_pending_entry"), 0)
-    final_entry_contract = safe_int(raw_snapshot.get("raw_signals_with_final_entry_contract"), 0)
-    if not final_entry_contract:
+    raw_final_entry_contract = raw_snapshot.get("raw_signals_with_final_entry_contract")
+    final_entry_contract = safe_int(raw_final_entry_contract, 0)
+    if raw_final_entry_contract is None:
         final_entry_contract = safe_int(final_contract.get("unique_signal_ids"), 0)
-    mode_disabled_only = safe_int(final_contract.get("mode_disabled_only_unique_signal_ids"), 0)
+    scoped_mode_disabled_only_available = raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_only") is not None
+    mode_disabled_only = (
+        safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_only"), 0)
+        if scoped_mode_disabled_only_available
+        else 0
+    )
     entered = safe_int(raw_snapshot.get("entered_events"), 0)
     paper_committed = safe_int(raw_snapshot.get("paper_trades_entry_ts_window_count"), 0)
     candidate_matched_any = safe_int(raw_snapshot.get("candidate_matched_any_events"), 0)
@@ -419,7 +429,14 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         detector_rate = rate(candidate_matched_any, raw_events)
     pending_without_final = max(0, pending - final_entry_contract)
     final_without_mode_adjusted = max(0, final_entry_contract - mode_disabled_only)
-    mode_adjusted_rate = rate(mode_disabled_only, raw_signals)
+    mode_adjusted_rate = rate(mode_disabled_only, raw_signals) if scoped_mode_disabled_only_available else None
+    readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
+    if scoped_mode_disabled_only_available:
+        readiness_status = (
+            "CAPTURE_READINESS_60_REACHED"
+            if mode_adjusted_rate is not None and mode_adjusted_rate >= 0.6
+            else "CAPTURE_READINESS_BELOW_60"
+        )
     return {
         "denominator_raw_gold_silver_events": raw_events,
         "denominator_raw_signal_ids": raw_signals,
@@ -438,6 +455,8 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "pending_entry": pending,
             "final_entry_contract": final_entry_contract,
             "mode_disabled_only_final_entry": mode_disabled_only,
+            "mode_disabled_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled"), 0),
+            "mode_disabled_plus_other_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_plus_other"), 0),
             "entered": entered,
             "paper_committed": paper_committed,
         },
@@ -449,17 +468,18 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "pending_to_mode_adjusted_final_eligibility_rate": rate(mode_disabled_only, pending),
         },
         "mode_disabled_adjusted_final_eligibility": {
-            "status": (
-                "CAPTURE_READINESS_60_REACHED"
-                if mode_adjusted_rate is not None and mode_adjusted_rate >= 0.6
-                else "CAPTURE_READINESS_BELOW_60"
-            ),
+            "status": readiness_status,
+            "raw_scoped_blockers_available": scoped_mode_disabled_only_available,
             "mode_disabled_only_unique_signal_ids": mode_disabled_only,
             "final_entry_contract_unique_signal_ids": final_entry_contract,
             "final_entry_contract_not_mode_adjusted_signal_ids": final_without_mode_adjusted,
             "rate": mode_adjusted_rate,
             "denominator_raw_signal_ids": raw_signals,
             "definition": "raw gold/silver signals that reached final_entry_contract with mode_disabled as the only hard blocker",
+            "raw_scoped_final_entry_hard_blockers": raw_snapshot.get("raw_scoped_final_entry_hard_blockers") or {},
+            "unscoped_window_mode_disabled_only_unique_signal_ids": safe_int(
+                final_contract.get("mode_disabled_only_unique_signal_ids"), 0
+            ),
         },
     }
 
@@ -672,6 +692,13 @@ def self_test():
                         "raw_signals_with_pending_entry": 2,
                         "raw_signals_with_final_entry_contract": 2,
                         "raw_signals_with_final_entry_block": 2,
+                        "raw_signals_with_final_entry_mode_disabled": 2,
+                        "raw_signals_with_final_entry_mode_disabled_only": 1,
+                        "raw_signals_with_final_entry_mode_disabled_plus_other": 1,
+                        "raw_scoped_final_entry_hard_blockers": {
+                            "mode_disabled": 2,
+                            "expected_rr_below_2": 1,
+                        },
                     },
                 },
             }

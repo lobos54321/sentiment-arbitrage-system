@@ -519,6 +519,10 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
         "raw_signals_with_pending_entry": 0,
         "raw_signals_with_final_entry_contract": 0,
         "raw_signals_with_final_entry_block": 0,
+        "raw_signals_with_final_entry_mode_disabled": 0,
+        "raw_signals_with_final_entry_mode_disabled_only": 0,
+        "raw_signals_with_final_entry_mode_disabled_plus_other": 0,
+        "raw_scoped_final_entry_hard_blockers": {},
         "component_decision_reason_counts": [],
     }
     if not raw_signal_ids or not table_exists(paper_db, "paper_decision_events"):
@@ -527,7 +531,7 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
     raw_id_set = set(raw_signal_ids or [])
     window_rows = paper_db.execute(
         """
-        SELECT signal_id, component, event_type, decision, reason
+        SELECT signal_id, component, event_type, decision, reason, payload_json
         FROM paper_decision_events
         WHERE event_ts >= ? AND event_ts <= ?
           AND signal_id IS NOT NULL
@@ -550,6 +554,10 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
     pending = set()
     final_contract = set()
     final_block = set()
+    final_mode_disabled = set()
+    final_mode_disabled_only = set()
+    final_mode_disabled_plus_other = set()
+    raw_scoped_final_blockers = Counter()
     for signal_id, signal_rows in by_signal.items():
         for row in signal_rows:
             event_type = str(row["event_type"] or "").lower()
@@ -561,6 +569,17 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
                 pending.add(signal_id)
             if component == "final_entry_contract":
                 final_contract.add(signal_id)
+                payload = jloads(row["payload_json"])
+                blockers = _extract_hard_blockers(payload)
+                non_mode_blockers = [blocker for blocker in blockers if blocker != "mode_disabled"]
+                for blocker in blockers:
+                    raw_scoped_final_blockers[blocker] += 1
+                if "mode_disabled" in blockers:
+                    final_mode_disabled.add(signal_id)
+                    if non_mode_blockers:
+                        final_mode_disabled_plus_other.add(signal_id)
+                    else:
+                        final_mode_disabled_only.add(signal_id)
                 if event_type == "entry_block" or decision == "BLOCK":
                     final_block.add(signal_id)
 
@@ -573,6 +592,10 @@ def load_raw_signal_decision_bridge(paper_db, raw_signal_ids, since_ts, until_ts
             "raw_signals_with_pending_entry": len(pending & raw_id_set),
             "raw_signals_with_final_entry_contract": len(final_contract & raw_id_set),
             "raw_signals_with_final_entry_block": len(final_block & raw_id_set),
+            "raw_signals_with_final_entry_mode_disabled": len(final_mode_disabled & raw_id_set),
+            "raw_signals_with_final_entry_mode_disabled_only": len(final_mode_disabled_only & raw_id_set),
+            "raw_signals_with_final_entry_mode_disabled_plus_other": len(final_mode_disabled_plus_other & raw_id_set),
+            "raw_scoped_final_entry_hard_blockers": dict(raw_scoped_final_blockers.most_common()),
             "component_decision_reason_counts": [
                 {
                     "component": key[0],
@@ -1158,6 +1181,10 @@ def compact_stdout_summary(report, out_path=None):
                 "raw_signals_with_pending_entry",
                 "raw_signals_with_final_entry_contract",
                 "raw_signals_with_final_entry_block",
+                "raw_signals_with_final_entry_mode_disabled",
+                "raw_signals_with_final_entry_mode_disabled_only",
+                "raw_signals_with_final_entry_mode_disabled_plus_other",
+                "raw_scoped_final_entry_hard_blockers",
             )
         },
         "final_entry_contract": {
