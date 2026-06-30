@@ -400,6 +400,37 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    markov_information = verdict.get("Markov_effectiveness_summary") or {}
+    if markov_information:
+        compact_markov_information = {
+            "status": markov_information.get("status"),
+            "next_action": markov_information.get("next_action"),
+            "usage": markov_information.get("usage"),
+            "promotion_allowed": False,
+            "total_green_buckets": markov_information.get("total_green_buckets"),
+            "total_yellow_buckets": markov_information.get("total_yellow_buckets"),
+            "total_insufficient_buckets": markov_information.get("total_insufficient_buckets"),
+            "non_informative_reasons": markov_information.get("non_informative_reasons") or {},
+            "recommended_shadow_profiles": (markov_information.get("recommended_shadow_profiles") or [])[:8],
+            "profile_diagnostics": {
+                name: {
+                    "status": row.get("status"),
+                    "closed_virtual_rows": row.get("closed_virtual_rows"),
+                    "keys_emitted": row.get("keys_emitted"),
+                    "bucket_counts": row.get("bucket_counts") or {},
+                    "context_blockers_affecting_profile": row.get("context_blockers_affecting_profile") or [],
+                }
+                for name, row in sorted((markov_information.get("profile_diagnostics") or {}).items())
+            },
+        }
+        lines.extend([
+            "## Markov Information Value",
+            "",
+            "```json",
+            json.dumps(compact_markov_information, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     entry_gap = verdict.get("entry_funnel_gap_summary") or {}
     readiness_shortfall = verdict.get("readiness_shortfall_summary") or {}
     paper_proposal = verdict.get("paper_entry_proposal_readiness") or {}
@@ -545,7 +576,32 @@ def self_test():
         "final_entry_contract_blocker_breakdown": {},
         "per_candidate_effectiveness_summary": {"candidate_count": 84},
         "candidate_improvement_opportunities_summary": {"opportunity_count": 2},
-        "Markov_effectiveness_summary": {"status": "insufficient_or_uninformative"},
+        "Markov_effectiveness_summary": {
+            "status": "insufficient_or_uninformative",
+            "next_action": "run_or_review_coarse_non_quote_non_kline_profiles_before_claiming_markov_value",
+            "usage": "research_only_markov_information_value",
+            "total_green_buckets": 0,
+            "total_yellow_buckets": 0,
+            "total_insufficient_buckets": 0,
+            "non_informative_reasons": {"kline": "closed_rows_exist_but_no_bucket_reached_min_closed"},
+            "recommended_shadow_profiles": [
+                {
+                    "profile": "candidate_source",
+                    "key_dimensions": ["candidate_id", "source_component"],
+                    "status": "recommended_to_run",
+                    "blocked_by": [],
+                }
+            ],
+            "profile_diagnostics": {
+                "kline": {
+                    "status": "profile_over_fragmented_or_min_closed_not_met",
+                    "closed_virtual_rows": 10,
+                    "keys_emitted": 0,
+                    "bucket_counts": {},
+                    "context_blockers_affecting_profile": ["kline_coverage_below_80pct"],
+                }
+            },
+        },
         "two_d_cross_validity_summary": {"valid_cross_count": 0},
         "quote_context_coverage": {
             "coverage_denominator_type": "signal_context_carrier_rows",
@@ -696,6 +752,8 @@ def self_test():
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "Candidate Improvement Opportunities" in text
+    assert "Markov Information Value" in text
+    assert "candidate_source" in text
     assert "Readiness Summaries" in text
     assert "candidate_improvement_opportunities_summary" in text
     quote_pending_verdict = {

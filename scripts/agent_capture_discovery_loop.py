@@ -553,32 +553,203 @@ def build_markov_effectiveness_report(markov_reports, capture):
     total_green = 0
     total_yellow = 0
     total_insufficient = 0
+    profile_diagnostics = {}
+    non_informative_reasons = {}
+    context_blockers = [
+        blocker for blocker in ((capture.get("report_health") or {}).get("promotion_blockers") or [])
+        if "coverage" in str(blocker) or "schema" in str(blocker)
+    ]
+
+    def as_int(value, default=0):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def profile_context_blockers(dimensions):
+        blockers = []
+        dims = set(dimensions or [])
+        if "source_quote_clean" in dims or "source_quote_executable" in dims:
+            blockers.extend(
+                blocker for blocker in context_blockers
+                if "quote" in str(blocker)
+            )
+        if "volume_profile" in dims:
+            blockers.extend(
+                blocker for blocker in context_blockers
+                if "volume_profile" in str(blocker)
+            )
+        if "candle_pattern" in dims or "fbr_time_legal" in dims or "fbr_lookahead_warning" in dims:
+            blockers.extend(
+                blocker for blocker in context_blockers
+                if "kline" in str(blocker)
+            )
+        if "lifecycle_profile" in dims:
+            blockers.extend(
+                blocker for blocker in context_blockers
+                if "lifecycle_profile" in str(blocker)
+            )
+        return sorted(set(blockers))
+
+    def diagnose_profile(name, report):
+        coverage = report.get("coverage") or {}
+        counts = coverage.get("bucket_counts") or {}
+        dimensions = report.get("key_dimensions") or []
+        closed_virtual_rows = as_int(coverage.get("closed_virtual_rows"))
+        keys_emitted = as_int(coverage.get("keys_emitted"))
+        green = as_int(counts.get("green"))
+        yellow = as_int(counts.get("yellow"))
+        red = as_int(counts.get("red"))
+        insufficient = as_int(counts.get("insufficient"))
+        informative = green + yellow
+        blockers = profile_context_blockers(dimensions)
+        if not closed_virtual_rows:
+            status = "no_closed_virtual_rows"
+            reason = "no_virtual_closed_rows_in_window"
+        elif keys_emitted == 0:
+            status = "profile_over_fragmented_or_min_closed_not_met"
+            reason = "closed_rows_exist_but_no_bucket_reached_min_closed"
+        elif informative:
+            status = "informative_discovery_only"
+            reason = "has_yellow_or_green_research_bucket"
+        elif red:
+            status = "red_only_no_positive_bucket"
+            reason = "all_emitted_buckets_are_red"
+        elif insufficient:
+            status = "insufficient_only"
+            reason = "all_emitted_buckets_are_insufficient"
+        else:
+            status = "empty_no_markov_keys"
+            reason = "no_bucket_counts_available"
+        if blockers and status != "informative_discovery_only":
+            reason = f"{reason}_with_context_coverage_blockers"
+        return {
+            "profile": report.get("profile") or name,
+            "key_dimensions": dimensions,
+            "closed_virtual_rows": closed_virtual_rows,
+            "keys_emitted": keys_emitted,
+            "bucket_counts": counts,
+            "green_buckets": green,
+            "yellow_buckets": yellow,
+            "red_buckets": red,
+            "insufficient_buckets": insufficient,
+            "informative_bucket_count": informative,
+            "status": status,
+            "non_informative_reason": reason if not informative else None,
+            "context_blockers_affecting_profile": blockers,
+            "usage": report.get("usage") or "discovery_only",
+            "promotion_allowed": False,
+        }
+
     for name, report in sorted(markov_reports.items()):
         coverage = report.get("coverage") or {}
         counts = coverage.get("bucket_counts") or {}
-        total_green += int(counts.get("green") or 0)
-        total_yellow += int(counts.get("yellow") or 0)
-        total_insufficient += int(counts.get("insufficient") or 0)
+        diagnostic = diagnose_profile(name, report)
+        profile_diagnostics[name] = diagnostic
+        if diagnostic["non_informative_reason"]:
+            non_informative_reasons[name] = diagnostic["non_informative_reason"]
+        total_green += diagnostic["green_buckets"]
+        total_yellow += diagnostic["yellow_buckets"]
+        total_insufficient += diagnostic["insufficient_buckets"]
         profiles[name] = {
             "schema_version": report.get("schema_version"),
             "profile": report.get("profile") or name,
+            "key_dimensions": report.get("key_dimensions") or [],
             "bucket_counts": counts,
             "coverage": coverage,
             "usage": report.get("usage") or "discovery_only",
         }
-    status = "informative_discovery_only" if total_green or total_yellow else "insufficient_or_uninformative"
+    observed_profiles = set(markov_reports)
+    recommended_shadow_profiles = [
+        {
+            "profile": "candidate_lifecycle",
+            "key_dimensions": ["candidate_id", "lifecycle_profile"],
+            "status": "observed" if "candidate_lifecycle" in observed_profiles else "recommended_to_run",
+            "blocked_by": [
+                blocker for blocker in context_blockers
+                if "lifecycle_profile" in str(blocker)
+            ],
+        },
+        {
+            "profile": "candidate_source",
+            "key_dimensions": ["candidate_id", "source_component"],
+            "status": "observed" if "candidate_source" in observed_profiles else "recommended_to_run",
+            "blocked_by": [],
+        },
+        {
+            "profile": "candidate_signal_type",
+            "key_dimensions": ["candidate_id", "signal_type"],
+            "status": "observed" if "candidate_signal_type" in observed_profiles else "recommended_to_run",
+            "blocked_by": [],
+        },
+        {
+            "profile": "candidate_lifecycle_source",
+            "key_dimensions": ["candidate_id", "lifecycle_profile", "source_component"],
+            "status": "observed" if "candidate_lifecycle_source" in observed_profiles else "recommended_to_run",
+            "blocked_by": [
+                blocker for blocker in context_blockers
+                if "lifecycle_profile" in str(blocker)
+            ],
+        },
+        {
+            "profile": "candidate_volume",
+            "key_dimensions": ["candidate_id", "volume_profile"],
+            "status": (
+                "blocked_until_volume_profile_coverage_gte_80pct"
+                if any("volume_profile" in str(blocker) for blocker in context_blockers)
+                else ("observed" if "candidate_volume" in observed_profiles else "recommended_to_run")
+            ),
+            "blocked_by": [
+                blocker for blocker in context_blockers
+                if "volume_profile" in str(blocker)
+            ],
+        },
+        {
+            "profile": "candidate_quote",
+            "key_dimensions": ["candidate_id", "source_quote_clean"],
+            "status": (
+                "blocked_until_quote_context_coverage_gte_80pct"
+                if any("quote" in str(blocker) for blocker in context_blockers)
+                else ("observed" if "candidate_quote" in observed_profiles else "recommended_to_run")
+            ),
+            "blocked_by": [
+                blocker for blocker in context_blockers
+                if "quote" in str(blocker)
+            ],
+        },
+    ]
+    if total_green or total_yellow:
+        status = "informative_discovery_only"
+        next_action = "keep_markov_discovery_only_and_require_capture_oos_before_promotion"
+    elif any(row["keys_emitted"] == 0 and row["closed_virtual_rows"] for row in profile_diagnostics.values()):
+        status = "profile_fragmented_or_uninformative"
+        next_action = "run_or_review_coarse_non_quote_non_kline_profiles_before_claiming_markov_value"
+    elif any(row["red_buckets"] for row in profile_diagnostics.values()):
+        status = "red_only_non_informative"
+        next_action = "do_not_use_markov_as_positive_evidence; keep as discovery_risk_context_only"
+    else:
+        status = "insufficient_or_uninformative"
+        next_action = "collect_more_closed_virtual_rows_and_keep_markov_out_of_promotion"
     return {
-        "schema_version": "markov_effectiveness_report.v1",
+        "schema_version": "markov_effectiveness_report.v2",
         "report_type": "markov_effectiveness_24h",
         "status": status,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window",
+        "usage": "research_only_markov_information_value",
+        "promotion_allowed": False,
         "markov_used_for_promotion": False,
         "total_green_buckets": total_green,
         "total_yellow_buckets": total_yellow,
         "total_insufficient_buckets": total_insufficient,
         "profiles": profiles,
-        "context_blockers": [
-            blocker for blocker in ((capture.get("report_health") or {}).get("promotion_blockers") or [])
-            if "coverage" in str(blocker) or "schema" in str(blocker)
+        "profile_diagnostics": profile_diagnostics,
+        "non_informative_reasons": non_informative_reasons,
+        "recommended_shadow_profiles": recommended_shadow_profiles,
+        "context_blockers": context_blockers,
+        "notes": [
+            "This report explains Markov information value only. It never promotes candidates or changes runtime policy.",
+            "Quote, volume, and kline-sensitive profiles stay blocked while their coverage is below the configured threshold.",
         ],
     }
 
@@ -1607,7 +1778,7 @@ def self_test():
             out_root=str(root / "agent_runs"),
             handoff_dir=str(root / "agent_handoffs"),
             registry=str(root / "hypothesis_registry.json"),
-            markov_profiles="runtime,kline",
+            markov_profiles="runtime,kline,candidate_lifecycle,candidate_source,candidate_signal_type,candidate_lifecycle_source",
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
@@ -1652,6 +1823,11 @@ def self_test():
         ]
         missing = [field for field in required_verdict_fields if field not in verdict]
         assert not missing, missing
+        markov_summary = verdict["Markov_effectiveness_summary"]
+        assert markov_summary["usage"] == "research_only_markov_information_value"
+        assert "profile_diagnostics" in markov_summary
+        assert "recommended_shadow_profiles" in markov_summary
+        assert markov_summary["promotion_allowed"] is False
         latest_dir = Path(result["latest_verdict"]).parent
         registry = load_json(result["hypothesis_registry"])
         assert registry["schema_version"] == "hypothesis_registry.v2"
@@ -1728,7 +1904,7 @@ def main():
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
     parser.add_argument("--handoff-dir", default=DEFAULT_HANDOFF_DIR)
     parser.add_argument("--registry", default=DEFAULT_REGISTRY)
-    parser.add_argument("--markov-profiles", default="runtime,kline")
+    parser.add_argument("--markov-profiles", default="runtime,kline,candidate_lifecycle,candidate_source,candidate_signal_type,candidate_lifecycle_source")
     parser.add_argument("--report-timeout-sec", type=int, default=600)
     parser.add_argument("--test-timeout-sec", type=int, default=120)
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)

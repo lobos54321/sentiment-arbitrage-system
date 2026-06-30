@@ -39,6 +39,31 @@ PROFILES = {
         "source_resonance_state",
         "source_quote_clean",
     ),
+    "candidate_lifecycle": (
+        "candidate_id",
+        "lifecycle_profile",
+    ),
+    "candidate_source": (
+        "candidate_id",
+        "source_component",
+    ),
+    "candidate_signal_type": (
+        "candidate_id",
+        "signal_type",
+    ),
+    "candidate_lifecycle_source": (
+        "candidate_id",
+        "lifecycle_profile",
+        "source_component",
+    ),
+    "candidate_volume": (
+        "candidate_id",
+        "volume_profile",
+    ),
+    "candidate_quote": (
+        "candidate_id",
+        "source_quote_clean",
+    ),
 }
 
 
@@ -194,6 +219,9 @@ def self_test():
         assert out["buckets"][0]["bucket"] == "green"
         assert out["buckets"][0]["candidate_id"] == "cand"
         assert out["profile"] == "kline"
+        out = build(str(path), 1, 20, 10, "candidate_lifecycle")
+        assert out["profile"] == "candidate_lifecycle"
+        assert out["buckets"][0]["bucket"] == "green"
     print("SELF_TEST_PASS candidate_virtual_markov")
 
 
