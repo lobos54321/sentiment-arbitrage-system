@@ -1330,9 +1330,16 @@ def update_hypothesis_registry(path, verdict, capture):
         "capture_judgment_counts": verdict.get("capture_judgment_counts") or {},
     })
     matured_volume = verdict.get("matured_volume_capture_cross_audit") or {}
+    matured_volume_slices = (
+        matured_volume.get("top_watch_slices")
+        or [
+            row for row in (matured_volume.get("top_slices") or [])
+            if row.get("verdict") == "MATURED_VOLUME_DISCOVERY_WATCH"
+        ]
+    )
     matured_volume_watch = [
         compact_matured_volume_hypothesis(row)
-        for row in (matured_volume.get("top_watch_slices") or [])[:10]
+        for row in matured_volume_slices[:10]
     ]
     registry = {
         "schema_version": "hypothesis_registry.v2",
@@ -1914,7 +1921,7 @@ def self_test():
                 "H1_capture_metrics": {},
                 "H2_capture_metrics": {},
                 "matured_volume_capture_cross_audit": {
-                    "top_watch_slices": [
+                    "top_slices": [
                         {
                             "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
                             "dimension": "matured_volume_profile",
@@ -1928,6 +1935,12 @@ def self_test():
                             "recall_lift_vs_candidate_baseline": 0.131579,
                             "precision_lift_vs_candidate_baseline": 0.017009,
                             "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                        },
+                        {
+                            "candidate_id": "kline:active_mom20_first3",
+                            "dimension": "matured_volume_profile",
+                            "slice_value": "building",
+                            "verdict": "NO_SIGNAL",
                         }
                     ]
                 },
