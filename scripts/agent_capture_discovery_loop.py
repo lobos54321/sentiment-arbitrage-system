@@ -949,10 +949,25 @@ def parse_oos_probe_hours(value):
     return hours
 
 
+def parse_capture_hours(value, primary_hours):
+    hours = {int(primary_hours)}
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            parsed = int(float(item))
+        except ValueError:
+            continue
+        if parsed > 0:
+            hours.add(parsed)
+    return sorted(hours)
+
+
 def run_reports(run_dir, args):
     primary_hours = int(args.hours)
     capture_path = run_dir / f"capture_discovery_{primary_hours}h.json"
-    capture_hours = sorted({primary_hours, 24, 48, 72})
+    capture_hours = parse_capture_hours(getattr(args, "capture_hours", "24,48,72"), primary_hours)
     capture_paths = {
         hours: run_dir / f"capture_discovery_{hours}h.json"
         for hours in capture_hours
@@ -1998,6 +2013,7 @@ def self_test():
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
             oos_probe_hours="0.25,0.5,1",
+            capture_hours="24,48,72",
             quote_fix_deploy_ts=int(time.time()) - 3600,
         )
         result = run_once(args)
@@ -2134,6 +2150,11 @@ def main():
     parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
     parser.add_argument("--data-dir", default="/app/data")
     parser.add_argument("--hours", type=int, default=24)
+    parser.add_argument(
+        "--capture-hours",
+        default="24,48,72",
+        help="Comma-separated capture discovery windows. Default keeps the full 24/48/72 evaluator set.",
+    )
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
     parser.add_argument("--handoff-dir", default=DEFAULT_HANDOFF_DIR)
