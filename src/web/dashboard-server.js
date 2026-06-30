@@ -2315,14 +2315,18 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
   const registry = safeReadAgentJson(paths.registry);
   const tests = safeReadAgentJson(paths.tests);
   const runner = readAgentCaptureLoopRunnerStatus();
+  const runtimeCommit = runtimeCommitFingerprint();
   const required = ['verdict', 'summary', 'handoff', 'registry'];
   const missingRequired = required.filter((name) => !artifacts[name]?.available);
   const payload = {
     schema_version: 'agent_capture_discovery_latest.v1',
     generated_at: new Date().toISOString(),
     phase: 'discovery_mesh',
-    current_commit: verdict?.current_commit || null,
-    deployment_commit: verdict?.deployment_commit || null,
+    current_commit: runtimeCommit,
+    deployment_commit: runtimeCommit,
+    runtime_commit: runtimeCommit,
+    artifact_current_commit: verdict?.current_commit || null,
+    artifact_deployment_commit: verdict?.deployment_commit || null,
     latest_dir: join(getAgentRunsRoot(), 'latest'),
     handoff_dir: getAgentHandoffsDir(),
     required_artifacts_complete: missingRequired.length === 0,
@@ -2333,6 +2337,8 @@ function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
       classification: verdict.classification,
       blocked_subtype: verdict.blocked_subtype,
       next_action: verdict.next_action || null,
+      parallel_next_action: verdict.parallel_next_action || null,
+      parallel_next_action_reason: verdict.parallel_next_action_reason || null,
       top_blocker: verdict.top_blocker || verdict.next_highest_priority_blocker || null,
       actionable_blockers: verdict.actionable_blockers || [],
       context_clean_window_eta_iso: verdict.context_clean_window_eta_iso || null,

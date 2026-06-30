@@ -895,6 +895,21 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     mode_adjusted_final = final_entry.get("mode_disabled_adjusted_final_eligibility") or {}
     readiness_shortfall = final_entry.get("readiness_shortfall_summary") or {}
     paper_proposal_readiness = final_entry.get("paper_entry_proposal_readiness") or {}
+    largest_upstream_gap = readiness_shortfall.get("largest_upstream_gap_category") or {}
+    largest_pending_gap = readiness_shortfall.get("largest_pending_to_final_gap_category") or {}
+    parallel_next_action = None
+    parallel_next_action_reason = None
+    if largest_upstream_gap.get("category") == "NO_DECISION_RECORD":
+        top_reasons = largest_upstream_gap.get("top_reasons") or []
+        if any(row.get("reason") == "shadow_entry_hypotheses_matched_no_decision_bridge" for row in top_reasons):
+            parallel_next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
+            parallel_next_action_reason = "largest_upstream_gap_is_shadow_match_without_decision_bridge"
+        else:
+            parallel_next_action = "audit_no_decision_record_bridge"
+            parallel_next_action_reason = "largest_upstream_gap_is_no_decision_record"
+    elif largest_pending_gap.get("category") == "QUALITY_OR_TIMING_REJECT":
+        parallel_next_action = "review_quality_timing_rejects_shadow_only"
+        parallel_next_action_reason = "largest_pending_to_final_gap_is_quality_or_timing_reject"
     stage2_flat = final_entry.get("stage2_flat_summary") or {}
     current_capture_stage = final_entry.get("current_capture_stage")
     top_formal_blocker = first_blocker_priority(blockers) if blockers else (
@@ -933,6 +948,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "verdict": classification,
         "classification": classification,
         "next_action": next_action,
+        "parallel_next_action": parallel_next_action,
+        "parallel_next_action_reason": parallel_next_action_reason,
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
         "human_action_required": human_action_required,
