@@ -1086,6 +1086,13 @@ def extract_signal_features(row, kline_features, source_features=None):
         "signal_price": signal_price,
         "signal_price_seen": bool(signal_price and signal_price > 0),
         "signal_price_positive": bool(signal_price and signal_price > 0),
+        "source_quote_clean": False,
+        "source_quote_clean_seen": False,
+        "source_quote_executable": False,
+        "source_quote_executable_proxy": False,
+        "quote_context_applicable": True,
+        "source_quote_context_applicable": True,
+        "quote_context_writer_path": "candidate_shadow_observer:inferred",
         "super_index": super_index,
         "status_has_reclaim": "RECLAIM" in status,
         "status_has_no_kline": "KLINE" in status or "UNKNOWN_DATA" in status,
@@ -1379,6 +1386,9 @@ def payload_for(features, candidate, matched, reason):
         "source_quote_clean_seen",
         "source_quote_executable",
         "source_quote_executable_proxy",
+        "quote_context_applicable",
+        "source_quote_context_applicable",
+        "quote_context_writer_path",
         "source_entry_quote_fail_seen",
         "matrix_bucket",
         "markov_available",
@@ -1956,6 +1966,47 @@ def self_test():
     )
     assert clean_match is True
     assert clean_reason == "runtime_source_quote_clean"
+    inferred_features = extract_signal_features(
+        {
+            "id": 99,
+            "token_ca": "NOQUOTECA",
+            "symbol": "NOQUOTE",
+            "timestamp": 1_772_000_000_000,
+            "receive_ts": 1_772_000_000_000,
+            "signal_type": "NEW_TRENDING",
+            "is_ath": 0,
+            "market_cap": 12000,
+            "holders": 150,
+            "volume_24h": 50000,
+            "top10_pct": 24,
+            "ai_confidence": 70,
+            "ai_narrative_tier": "A",
+            "narrative_score": 1.0,
+            "description": "Price: $0.001 Super Index: 120 MC: $12K",
+            "raw_message": "",
+            "hard_gate_status": "PASS",
+            "signal_source": "premium_channel_ath",
+        },
+        {},
+        {},
+    )
+    inferred_payload = payload_for(
+        inferred_features,
+        {"candidate_id": "current_all", "family": "base", "mode_meta": None},
+        True,
+        "all_signals_denominator",
+    )
+    assert inferred_features["signal_price_seen"] is True
+    assert inferred_payload["source_quote_clean"] is False
+    assert inferred_payload["source_quote_clean_seen"] is False
+    assert inferred_payload["source_quote_executable"] is False
+    assert inferred_payload["source_quote_executable_proxy"] is False
+    assert inferred_payload["quote_context_applicable"] is True
+    assert inferred_payload["source_quote_context_applicable"] is True
+    assert inferred_payload["quote_context_writer_path"] == "candidate_shadow_observer:inferred"
+    no_quote_match, no_quote_reason = eval_base_candidate("notath_quote_clean", inferred_features)
+    assert no_quote_match is False
+    assert no_quote_reason == "missing_runtime_source_quote_clean"
     registry = {
         "modes": {f"mode_{idx:02d}": {"tier": "shadow_watch_only", "route": "MIXED", "family": "primary"} for idx in range(35)}
     }
