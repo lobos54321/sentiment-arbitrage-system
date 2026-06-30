@@ -494,11 +494,6 @@ def build_shadow_decision_bridge_audit(raw_funnel):
     )
     raw_signal_ids = safe_int(raw_bridge.get("raw_signal_ids"), 0)
     no_decision_count = safe_int(raw_bridge.get("raw_signals_without_decision_record"), 0)
-    status = "NO_SHADOW_DECISION_BRIDGE_GAP"
-    next_action = "continue_capture_discovery"
-    if shadow_count > 0:
-        status = "SHADOW_DECISION_BRIDGE_AUDIT_REQUIRED"
-        next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
     current_decision_count = max(0, raw_signal_ids - no_decision_count)
     optimistic_decision_count = min(raw_signal_ids, current_decision_count + shadow_count)
     remaining_no_decision_after_shadow = max(0, no_decision_count - shadow_count)
@@ -518,6 +513,18 @@ def build_shadow_decision_bridge_audit(raw_funnel):
         or len(mirror_events) < source_signal_count
         or len(mirror_events) < shadow_count
     )
+    mirror_complete = bool(shadow_count > 0 and not mirror_truncated and len(mirror_events) >= shadow_count)
+    status = "NO_SHADOW_DECISION_BRIDGE_GAP"
+    next_action = "continue_capture_discovery"
+    mirror_status = "NO_MIRROR_NEEDED"
+    if shadow_count > 0 and mirror_complete:
+        status = "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE"
+        next_action = "continue_shadow_decision_bridge_monitoring"
+        mirror_status = "READ_ONLY_EVIDENCE_MIRROR_COMPLETE"
+    elif shadow_count > 0:
+        status = "SHADOW_DECISION_BRIDGE_AUDIT_REQUIRED"
+        next_action = "audit_shadow_entry_hypotheses_matched_no_decision_bridge"
+        mirror_status = "RECOMMENDED_READ_ONLY_INSTRUMENTATION"
     return {
         "schema_version": "shadow_decision_bridge_audit.v1",
         "report_type": "shadow_decision_bridge_audit_24h",
@@ -565,7 +572,7 @@ def build_shadow_decision_bridge_audit(raw_funnel):
         },
         "read_only_evidence_mirror": {
             "schema_version": "shadow_decision_evidence_mirror.v1",
-            "status": "RECOMMENDED_READ_ONLY_INSTRUMENTATION" if shadow_count > 0 else "NO_MIRROR_NEEDED",
+            "status": mirror_status,
             "purpose": (
                 "Record that the shadow mesh saw raw gold/silver opportunities when production decision "
                 "events were absent, without changing entry policy or paper/live execution."
@@ -2604,6 +2611,11 @@ def self_test():
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
         shadow_bridge = load_json(latest_dir / "shadow_decision_bridge_audit_24h.json")
+        assert shadow_bridge["status"] in {
+            "NO_SHADOW_DECISION_BRIDGE_GAP",
+            "SHADOW_DECISION_BRIDGE_AUDIT_REQUIRED",
+            "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
+        }
         assert "mirror_events" in shadow_bridge
         assert "mirror_event_examples" in shadow_bridge
         assert "mirror_event_count" in shadow_bridge["denominator"]
