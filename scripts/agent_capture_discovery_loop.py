@@ -52,6 +52,11 @@ REPORT_TEST_COMMANDS = (
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
 )
 
+DEFAULT_MARKOV_PROFILES = (
+    "runtime,kline,candidate_lifecycle,candidate_source,candidate_signal_type,"
+    "candidate_lifecycle_source,candidate_volume,candidate_quote"
+)
+
 
 def utc_now():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2676,7 +2681,7 @@ def self_test():
             out_root=str(root / "agent_runs"),
             handoff_dir=str(root / "agent_handoffs"),
             registry=str(root / "hypothesis_registry.json"),
-            markov_profiles="runtime,kline,candidate_lifecycle,candidate_source,candidate_signal_type,candidate_lifecycle_source",
+            markov_profiles=DEFAULT_MARKOV_PROFILES,
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=2_000_000,
@@ -2904,7 +2909,7 @@ def main():
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
     parser.add_argument("--handoff-dir", default=DEFAULT_HANDOFF_DIR)
     parser.add_argument("--registry", default=DEFAULT_REGISTRY)
-    parser.add_argument("--markov-profiles", default="runtime,kline,candidate_lifecycle,candidate_source,candidate_signal_type,candidate_lifecycle_source")
+    parser.add_argument("--markov-profiles", default=DEFAULT_MARKOV_PROFILES)
     parser.add_argument("--report-timeout-sec", type=int, default=600)
     parser.add_argument("--test-timeout-sec", type=int, default=120)
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
