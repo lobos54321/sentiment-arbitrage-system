@@ -665,6 +665,41 @@ def quality_timing_context_blockers(row, context_eligibility):
     return blockers
 
 
+def improvement_queue_priority(item):
+    source_priority = {
+        "quality_timing_reject_cluster": 0,
+        "quality_timing_candidate_probe": 1,
+        "filtered_winner_dossier": 2,
+        "strategy_memory_missing_shadow_candidate": 3,
+        "clean_2d_capture_cross_slice": 4,
+        "derive_context_filtered_shadow_candidate": 5,
+        "refine_potential_entry_hypothesis_with_context": 6,
+    }
+    stage_priority = {
+        "pass_allow_capture": 0,
+        "pending_capture": 1,
+        "final_eligibility": 2,
+        "mode_disabled_adjusted_final_eligibility": 3,
+        "detector_capture": 4,
+        "detector_or_context_capture": 5,
+    }
+    evidence = item.get("evidence") or {}
+    event_count = safe_float(
+        evidence.get("event_count")
+        or evidence.get("cluster_event_count")
+        or evidence.get("matched_gold_silver_events")
+        or evidence.get("candidate_cluster_match_count")
+        or 0,
+        0,
+    )
+    return (
+        source_priority.get(item.get("hypothesis_source"), 50),
+        stage_priority.get(item.get("expected_capture_stage_improved"), 50),
+        -float(event_count or 0),
+        str(item.get("candidate_id") or ""),
+    )
+
+
 def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     candidate_improvement = reports.get("candidate_improvement") or {}
     strategy_memory_validation = reports.get("strategy_memory_validation") or {}
@@ -796,6 +831,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
                 "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
                 "next_action": "track_candidate_within_quality_timing_cluster_shadow_only",
             })
+    items = sorted(items, key=improvement_queue_priority)
     status_counts = Counter(row.get("hypothesis_source") for row in items)
     return {
         "schema_version": "shadow_candidate_improvement_queue.v1",
