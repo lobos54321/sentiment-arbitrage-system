@@ -588,6 +588,44 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    strategy_memory = verdict.get("strategy_memory_ingestion_summary") or {}
+    if strategy_memory:
+        lines.extend([
+            "## Strategy Memory",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": strategy_memory.get("available"),
+                    "strategy_memory_hypotheses_count": strategy_memory.get("strategy_memory_hypotheses_count"),
+                    "mapped_to_existing_candidates": strategy_memory.get("mapped_to_existing_candidates"),
+                    "missing_shadow_candidates": strategy_memory.get("missing_shadow_candidates"),
+                    "rejected_future_data_hypotheses": strategy_memory.get("rejected_future_data_hypotheses"),
+                    "top_10_shadow_hypotheses": strategy_memory.get("top_10_shadow_hypotheses") or [],
+                    "filtered_winner_count": strategy_memory.get("filtered_winner_count"),
+                    "exit_policy_variants_tested": strategy_memory.get("exit_policy_variants_tested"),
+                    "delay_replay_done": strategy_memory.get("delay_replay_done"),
+                    "paper_trades_db_available": strategy_memory.get("paper_trades_db_available"),
+                    "evidence_level": "historical_memory",
+                    "allowed_use": "shadow_only",
+                    "promotion_allowed": False,
+                    "candidate_catalog_change_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "missing_shadow_candidate_handoffs": (
+                        strategy_memory.get("missing_shadow_candidate_handoffs") or []
+                    )[:8],
+                    "exit_only_hypotheses": (
+                        strategy_memory.get("exit_only_hypotheses") or []
+                    )[:8],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     lines.extend([
         "## Readiness Summaries",
         "",
@@ -960,6 +998,30 @@ def self_test():
                 }
             ],
         },
+        "strategy_memory_ingestion_summary": {
+            "available": True,
+            "strategy_memory_hypotheses_count": 2,
+            "mapped_to_existing_candidates": 1,
+            "missing_shadow_candidates": 1,
+            "rejected_future_data_hypotheses": 2,
+            "top_10_shadow_hypotheses": ["SM-TEST-ENTRY", "SM-EXIT-TEST"],
+            "filtered_winner_count": 3,
+            "exit_policy_variants_tested": 2,
+            "delay_replay_done": True,
+            "paper_trades_db_available": True,
+            "promotion_allowed": False,
+            "allowed_use": "shadow_only",
+            "evidence_level": "historical_memory",
+            "missing_shadow_candidate_handoffs": [
+                {
+                    "hypothesis_id": "SM-EXIT-TEST",
+                    "mapping_status": "missing_exit_shadow_sim_only",
+                    "allowed_action": "generate_codex_handoff_only",
+                    "promotion_allowed": False,
+                }
+            ],
+            "exit_only_hypotheses": ["SM-EXIT-TEST"],
+        },
     }
     text = build_handoff(verdict)
     assert "handoff_needed: `true`" in text
@@ -995,6 +1057,9 @@ def self_test():
     assert "Candidate Improvement Opportunities" in text
     assert "Markov Information Value" in text
     assert "candidate_source" in text
+    assert "Strategy Memory" in text
+    assert "SM-EXIT-TEST" in text
+    assert "generate_codex_handoff_only" in text
     assert "Readiness Summaries" in text
     assert "context_clean_window_progress" in text
     assert "candidate_improvement_opportunities_summary" in text

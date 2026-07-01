@@ -47,6 +47,7 @@ REPORT_TEST_COMMANDS = (
     ("candidate_downstream_readiness_self_test", ["scripts/candidate_downstream_readiness_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("runtime_health_snapshot_self_test", ["scripts/runtime_health_snapshot_audit.py", "--self-test"]),
+    ("strategy_memory_audit_self_test", ["scripts/offline_strategy_memory_audit.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
@@ -281,6 +282,254 @@ def write_derived_report(path, payload):
     }
     write_json(path, payload)
     return path
+
+
+def strategy_memory_artifact_dirs(args):
+    dirs = []
+    env_dir = os.environ.get("STRATEGY_MEMORY_ARTIFACT_DIR")
+    if env_dir:
+        dirs.append(Path(env_dir))
+    if getattr(args, "strategy_memory_dir", None):
+        dirs.append(Path(args.strategy_memory_dir))
+    data_dir = Path(args.data_dir)
+    dirs.extend([
+        data_dir / "strategy_memory_local",
+        data_dir / "strategy_memory",
+        data_dir,
+    ])
+    seen = set()
+    out = []
+    for directory in dirs:
+        resolved = directory.expanduser()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(resolved)
+    return out
+
+
+def find_strategy_memory_artifact(args, filename):
+    for directory in strategy_memory_artifact_dirs(args):
+        path = directory / filename
+        if path.exists():
+            return path
+    return None
+
+
+def load_optional_strategy_json(args, filename, *, required_keys=()):
+    path = find_strategy_memory_artifact(args, filename)
+    if not path:
+        return None, None
+    payload = load_json(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{filename} must be a JSON object")
+    missing = [key for key in required_keys if key not in payload]
+    if missing:
+        raise ValueError(f"{filename} missing required keys: {missing}")
+    return payload, path
+
+
+def strategy_memory_requires_paper_db(hypothesis):
+    hid = str(hypothesis.get("id") or hypothesis.get("hypothesis_id") or "").upper()
+    family = str(hypothesis.get("strategy_family") or "").lower()
+    required_features = {str(item).lower() for item in (hypothesis.get("required_features") or [])}
+    paper_features = {
+        "candidate_matches",
+        "decision_status",
+        "pending_status",
+        "final_entry_status",
+        "entry_price",
+        "peak_pct",
+        "time_path_or_kline",
+        "decision_ts",
+    }
+    return bool(
+        hid.startswith("SM-EXIT")
+        or "EXIT" in hid
+        or "EXECUTION-DELAY" in hid
+        or "FILTERED-WINNER" in hid
+        or "exit" in family
+        or "delay" in family
+        or "filtered winner" in family
+        or required_features.intersection(paper_features)
+    )
+
+
+def is_strategy_memory_exit_only(hypothesis, mapping_row):
+    hid = str(hypothesis.get("id") or hypothesis.get("hypothesis_id") or "").upper()
+    family = str(hypothesis.get("strategy_family") or "").lower()
+    mapping_status = str((mapping_row or {}).get("mapping_status") or "")
+    return bool(hid.startswith("SM-EXIT") or "exit" in family or mapping_status == "missing_exit_shadow_sim_only")
+
+
+def compact_strategy_memory_hypothesis(hypothesis, mapping_row, *, paper_db_available):
+    hid = hypothesis.get("id") or hypothesis.get("hypothesis_id")
+    future_features = list(hypothesis.get("future_or_posthoc_features") or [])
+    blocked_contexts = list((mapping_row or {}).get("blocked_contexts") or [])
+    rejected_future_data = bool(
+        future_features
+        or (mapping_row or {}).get("requires_future_data_conversion")
+        or "future_data_features_must_be_labels_only" in blocked_contexts
+    )
+    exit_only = is_strategy_memory_exit_only(hypothesis, mapping_row)
+    requires_paper = strategy_memory_requires_paper_db(hypothesis)
+    evidence_incomplete = bool(requires_paper and not paper_db_available)
+    return {
+        "hypothesis_id": hid,
+        "name": hypothesis.get("name"),
+        "strategy_family": hypothesis.get("strategy_family"),
+        "priority": hypothesis.get("priority"),
+        "allowed_use": "shadow_only",
+        "promotion_allowed": False,
+        "evidence_level": "historical_memory",
+        "historical_pnl_is_promotion_evidence": False,
+        "same_window_discovery_is_promotion_evidence": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "candidate_catalog_change_allowed": False,
+        "mapping_status": (mapping_row or {}).get("mapping_status"),
+        "mapped_existing_candidate_ids": ((mapping_row or {}).get("existing_candidate_ids") or [])[:24],
+        "blocked_contexts": blocked_contexts,
+        "missing_shadow_candidate_handoff_required": str((mapping_row or {}).get("mapping_status") or "").startswith("missing_"),
+        "rejected_future_data": rejected_future_data,
+        "future_or_posthoc_features": future_features,
+        "requires_paper_trades_db": requires_paper,
+        "evidence_incomplete": evidence_incomplete,
+        "evidence_incomplete_reason": "paper_trades_db_unavailable" if evidence_incomplete else None,
+        "route": "exit_policy_shadow_simulator_only" if exit_only else "strategy_memory_shadow_context_only",
+        "exit_only": exit_only,
+        "next_validation_required": hypothesis.get("next_validation_required"),
+        "entry_definition": hypothesis.get("entry_definition"),
+        "exit_definition": hypothesis.get("exit_definition"),
+        "required_features": hypothesis.get("required_features") or [],
+        "time_legal_features": hypothesis.get("time_legal_features") or [],
+        "known_risks": hypothesis.get("known_risks") or [],
+    }
+
+
+def build_strategy_memory_ingestion_summary(args, out_path):
+    hypotheses, hypotheses_path = load_optional_strategy_json(
+        args,
+        "strategy_memory_hypotheses.json",
+        required_keys=("hypotheses",),
+    )
+    paper_db_available = file_available(args.paper_db) and sqlite_has_table(args.paper_db, "candidate_shadow_observations")
+    if not hypotheses_path:
+        summary = {
+            "schema_version": "strategy_memory_ingestion_summary.v1",
+            "report_type": "strategy_memory_ingestion_summary",
+            "generated_at": utc_now(),
+            "available": False,
+            "reason": "strategy_memory_hypotheses_json_not_present",
+            "artifact_search_dirs": [str(path) for path in strategy_memory_artifact_dirs(args)],
+            "paper_trades_db_available": paper_db_available,
+            "promotion_allowed": False,
+            "allowed_use": "shadow_only",
+            "evidence_level": "historical_memory",
+        }
+        write_json(out_path, summary)
+        return summary
+    if not isinstance(hypotheses.get("hypotheses"), list):
+        raise ValueError("strategy_memory_hypotheses.json field hypotheses must be a list")
+
+    mapping, mapping_path = load_optional_strategy_json(
+        args,
+        "strategy_memory_candidate_mapping.json",
+        required_keys=("mappings",),
+    )
+    if mapping is not None and not isinstance(mapping.get("mappings"), list):
+        raise ValueError("strategy_memory_candidate_mapping.json field mappings must be a list")
+    queue, queue_path = load_optional_strategy_json(args, "strategy_memory_prioritized_queue.json")
+    dossier, dossier_path = load_optional_strategy_json(args, "filtered_winner_dossier_24h.json")
+    exit_report, exit_report_path = load_optional_strategy_json(args, "exit_policy_shadow_simulator_24h.json")
+    delay_report, delay_report_path = load_optional_strategy_json(args, "execution_delay_adjusted_replay_24h.json")
+
+    mapping = mapping or {}
+    mapping_by_id = {row.get("hypothesis_id"): row for row in mapping.get("mappings", []) if isinstance(row, dict)}
+    rows = [
+        compact_strategy_memory_hypothesis(row, mapping_by_id.get(row.get("id")), paper_db_available=paper_db_available)
+        for row in hypotheses.get("hypotheses", [])
+        if isinstance(row, dict)
+    ]
+    rows.sort(key=lambda row: safe_int(row.get("priority"), 0), reverse=True)
+    missing_handoffs = [
+        {
+            "hypothesis_id": row.get("hypothesis_id"),
+            "strategy_family": row.get("strategy_family"),
+            "mapping_status": row.get("mapping_status"),
+            "route": row.get("route"),
+            "allowed_action": "generate_codex_handoff_only",
+            "candidate_catalog_change_allowed": False,
+            "promotion_allowed": False,
+        }
+        for row in rows
+        if row.get("missing_shadow_candidate_handoff_required")
+    ]
+    rejected_future = [row for row in rows if row.get("rejected_future_data")]
+    evidence_incomplete = [row for row in rows if row.get("evidence_incomplete")]
+    top_ids = [row.get("hypothesis_id") for row in rows[:10]]
+    summary = {
+        "schema_version": "strategy_memory_ingestion_summary.v1",
+        "report_type": "strategy_memory_ingestion_summary",
+        "generated_at": utc_now(),
+        "available": True,
+        "artifact_source_dir": str(hypotheses_path.parent),
+        "artifact_paths": {
+            "strategy_memory_hypotheses": str(hypotheses_path),
+            "strategy_memory_candidate_mapping": str(mapping_path) if mapping_path else None,
+            "strategy_memory_prioritized_queue": str(queue_path) if queue_path else None,
+            "filtered_winner_dossier": str(dossier_path) if dossier_path else None,
+            "exit_policy_shadow_simulator": str(exit_report_path) if exit_report_path else None,
+            "execution_delay_adjusted_replay": str(delay_report_path) if delay_report_path else None,
+        },
+        "strategy_memory_hypotheses_count": hypotheses.get("hypotheses_count", len(rows)),
+        "mapped_to_existing_candidates": mapping.get("mapped_to_existing_candidates", 0),
+        "missing_shadow_candidates": mapping.get("missing_shadow_candidates", len(missing_handoffs)),
+        "rejected_future_data_hypotheses": mapping.get(
+            "rejected_future_data_hypotheses",
+            hypotheses.get("rejected_future_data_hypotheses_count", len(rejected_future)),
+        ),
+        "top_10_shadow_hypotheses": top_ids,
+        "top_10_shadow_hypothesis_details": [
+            {
+                "hypothesis_id": row.get("hypothesis_id"),
+                "name": row.get("name"),
+                "strategy_family": row.get("strategy_family"),
+                "priority": row.get("priority"),
+                "mapping_status": row.get("mapping_status"),
+                "route": row.get("route"),
+                "rejected_future_data": row.get("rejected_future_data"),
+                "evidence_incomplete": row.get("evidence_incomplete"),
+                "promotion_allowed": False,
+            }
+            for row in rows[:10]
+        ],
+        "filtered_winner_count": (dossier or {}).get("filtered_winner_count", 0),
+        "exit_policy_variants_tested": (exit_report or {}).get("exit_policy_variants_tested", 0),
+        "delay_replay_done": bool((delay_report or {}).get("delay_replay_done")),
+        "paper_trades_db_available": paper_db_available,
+        "evidence_incomplete_hypotheses": len(evidence_incomplete),
+        "missing_shadow_candidate_handoffs": missing_handoffs,
+        "exit_only_hypotheses": [row.get("hypothesis_id") for row in rows if row.get("exit_only")],
+        "allowed_use": "shadow_only",
+        "promotion_allowed": False,
+        "evidence_level": "historical_memory",
+        "candidate_catalog_change_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "hypotheses": rows,
+        "notes": [
+            "Strategy Memory artifacts are historical-memory discovery context only.",
+            "Missing shadow candidates are handoff-only; candidate catalog is not modified automatically.",
+            "Future/posthoc features are labels only and are rejected as entry evidence.",
+            "Exit-only hypotheses are routed to exit_policy_shadow_simulator only.",
+        ],
+    }
+    write_json(out_path, summary)
+    return summary
 
 
 def build_context_coverage_report(capture):
@@ -1228,6 +1477,7 @@ def run_reports(run_dir, args):
     hypothesis_validation_path = run_dir / f"hypothesis_validation_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
     quality_timing_research_path = run_dir / f"quality_timing_reject_research_audit_{primary_hours}h.json"
+    strategy_memory_ingestion_path = run_dir / "strategy_memory_ingestion_summary.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -1235,6 +1485,37 @@ def run_reports(run_dir, args):
     }
     diagnostics = []
     readiness_paths = {}
+    try:
+        build_strategy_memory_ingestion_summary(args, strategy_memory_ingestion_path)
+        readiness_paths["strategy_memory_ingestion_summary"] = strategy_memory_ingestion_path
+        diagnostics.append({
+            "name": "strategy_memory_ingestion_summary",
+            "ok": True,
+            "duration_sec": None,
+            "output": str(strategy_memory_ingestion_path),
+        })
+    except Exception as exc:
+        diagnostics.append({
+            "name": "strategy_memory_ingestion_summary",
+            "ok": False,
+            "error": repr(exc),
+            "duration_sec": None,
+        })
+        capture = blocked_capture_report(
+            "strategy_memory_artifact_schema_invalid",
+            args.paper_db,
+            args.raw_db,
+            primary_hours,
+            args.expected_candidates,
+        )
+        write_json(capture_path, capture)
+        return {
+            "capture_primary": capture_path,
+            "pnl": None,
+            "markov": {},
+            "readiness": readiness_paths,
+            "diagnostics": diagnostics,
+        }
     diagnostics.append(run_report(
         "runtime_health_snapshot",
         [
@@ -2004,7 +2285,77 @@ def stable_hypothesis_signature(
     }
 
 
-def update_hypothesis_registry(path, verdict, capture):
+def compact_strategy_memory_registry(summary):
+    summary = summary or {}
+    hypotheses = []
+    for row in summary.get("hypotheses") or []:
+        if not isinstance(row, dict):
+            continue
+        hypotheses.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "name": row.get("name"),
+            "strategy_family": row.get("strategy_family"),
+            "priority": row.get("priority"),
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "evidence_level": "historical_memory",
+            "historical_pnl_is_promotion_evidence": False,
+            "same_window_discovery_is_promotion_evidence": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "candidate_catalog_change_allowed": False,
+            "mapping_status": row.get("mapping_status"),
+            "mapped_existing_candidate_ids": row.get("mapped_existing_candidate_ids") or [],
+            "blocked_contexts": row.get("blocked_contexts") or [],
+            "rejected_future_data": bool(row.get("rejected_future_data")),
+            "future_or_posthoc_features": row.get("future_or_posthoc_features") or [],
+            "requires_paper_trades_db": bool(row.get("requires_paper_trades_db")),
+            "evidence_incomplete": bool(row.get("evidence_incomplete")),
+            "evidence_incomplete_reason": row.get("evidence_incomplete_reason"),
+            "route": row.get("route"),
+            "exit_only": bool(row.get("exit_only")),
+            "missing_shadow_candidate_handoff_required": bool(row.get("missing_shadow_candidate_handoff_required")),
+            "next_validation_required": row.get("next_validation_required"),
+        })
+    return {
+        "schema_version": "strategy_memory_registry_namespace.v1",
+        "updated_at": utc_now(),
+        "available": bool(summary.get("available")),
+        "allowed_use": "shadow_only",
+        "promotion_allowed": False,
+        "evidence_level": "historical_memory",
+        "candidate_catalog_change_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "summary": {
+            key: summary.get(key)
+            for key in (
+                "strategy_memory_hypotheses_count",
+                "mapped_to_existing_candidates",
+                "missing_shadow_candidates",
+                "rejected_future_data_hypotheses",
+                "top_10_shadow_hypotheses",
+                "filtered_winner_count",
+                "exit_policy_variants_tested",
+                "delay_replay_done",
+                "paper_trades_db_available",
+                "evidence_incomplete_hypotheses",
+            )
+        } | {
+            "promotion_allowed": False,
+            "allowed_use": "shadow_only",
+            "evidence_level": "historical_memory",
+        },
+        "missing_shadow_candidate_handoffs": summary.get("missing_shadow_candidate_handoffs") or [],
+        "exit_only_hypotheses": summary.get("exit_only_hypotheses") or [],
+        "source_artifacts": summary.get("artifact_paths") or {},
+        "hypotheses": hypotheses,
+    }
+
+
+def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=None):
     target = Path(path)
     if target.exists():
         try:
@@ -2068,6 +2419,7 @@ def update_hypothesis_registry(path, verdict, capture):
         "shadow_only_matured_volume_watch": matured_volume_watch,
         "shadow_only_quality_timing_watch": quality_timing_watch,
         "shadow_only_quality_timing_candidate_probes": quality_timing_candidate_probes,
+        "strategy_memory": compact_strategy_memory_registry(strategy_memory_summary),
         "recent_runs": recent[-20:],
     }
     write_json(target, registry)
@@ -2265,6 +2617,16 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         )[:12000],
         "```",
         "",
+        "## Strategy Memory",
+        "",
+        "```json",
+        json.dumps(
+            verdict.get("strategy_memory_ingestion_summary") or {},
+            indent=2,
+            sort_keys=True,
+        )[:12000],
+        "```",
+        "",
         "## H1/H2",
         "",
         f"- H1 status: `{(verdict.get('H1_capture_metrics') or {}).get('status')}`",
@@ -2411,7 +2773,14 @@ def write_materialized_artifacts(
 
     verdict = build_loop_verdict()
     verdict_path = run_dir / "reviewer_verdict.json"
-    registry = update_hypothesis_registry(args.registry, verdict, capture)
+    strategy_memory_summary = {}
+    strategy_memory_path = readiness_paths.get("strategy_memory_ingestion_summary")
+    if strategy_memory_path and Path(strategy_memory_path).exists():
+        try:
+            strategy_memory_summary = load_json(strategy_memory_path)
+        except Exception:
+            strategy_memory_summary = {}
+    registry = update_hypothesis_registry(args.registry, verdict, capture, strategy_memory_summary)
     quality_timing_report = {}
     quality_timing_path = readiness_paths.get("quality_timing_reject_research_audit")
     if quality_timing_path and Path(quality_timing_path).exists():
@@ -2662,6 +3031,100 @@ def create_self_test_dbs(root):
         "worker_state": "scanned",
         "paper_db_exists": True,
     })
+    strategy_memory_dir = root / "strategy_memory_local"
+    strategy_memory_dir.mkdir(parents=True, exist_ok=True)
+    write_json(strategy_memory_dir / "strategy_memory_hypotheses.json", {
+        "schema_version": "strategy_memory_hypotheses.v1",
+        "hypotheses_count": 2,
+        "promotion_allowed": False,
+        "hypotheses": [
+            {
+                "id": "SM-TEST-ENTRY",
+                "name": "Self-test entry memory",
+                "strategy_family": "ATH1 early scout",
+                "priority": 90,
+                "entry_definition": "shadow-only self test",
+                "exit_definition": "none",
+                "required_features": ["ath_stage", "market_cap"],
+                "time_legal_features": ["ath_stage_at_signal"],
+                "future_or_posthoc_features": ["future_peak"],
+                "known_risks": ["self-test future label"],
+                "next_validation_required": "shadow_only_oos",
+                "allowed_use": "shadow_only",
+                "promotion_allowed": False,
+            },
+            {
+                "id": "SM-EXIT-TEST",
+                "name": "Self-test exit memory",
+                "strategy_family": "Exit policy variants",
+                "priority": 80,
+                "entry_definition": "entry unchanged",
+                "exit_definition": "exit simulator only",
+                "required_features": ["entry_price", "peak_pct"],
+                "time_legal_features": ["post_entry_kline_only_for_exit_simulation"],
+                "future_or_posthoc_features": ["best_exit_after_peak"],
+                "known_risks": ["exit proxy"],
+                "next_validation_required": "exit_policy_shadow_simulator",
+                "allowed_use": "shadow_only",
+                "promotion_allowed": False,
+            },
+        ],
+    })
+    write_json(strategy_memory_dir / "strategy_memory_candidate_mapping.json", {
+        "schema_version": "strategy_memory_candidate_mapping.v1",
+        "hypotheses_count": 2,
+        "mapped_to_existing_candidates": 1,
+        "missing_shadow_candidates": 1,
+        "rejected_future_data_hypotheses": 2,
+        "promotion_allowed": False,
+        "mappings": [
+            {
+                "hypothesis_id": "SM-TEST-ENTRY",
+                "mapping_status": "partial_existing_context",
+                "existing_candidate_ids": ["current_all"],
+                "blocked_contexts": ["future_data_features_must_be_labels_only"],
+                "requires_future_data_conversion": True,
+                "allowed_use": "shadow_only",
+                "promotion_allowed": False,
+            },
+            {
+                "hypothesis_id": "SM-EXIT-TEST",
+                "mapping_status": "missing_exit_shadow_sim_only",
+                "existing_candidate_ids": [],
+                "blocked_contexts": ["kline_or_exit_path_required"],
+                "requires_future_data_conversion": True,
+                "allowed_use": "shadow_only",
+                "promotion_allowed": False,
+            },
+        ],
+    })
+    write_json(strategy_memory_dir / "strategy_memory_prioritized_queue.json", {
+        "schema_version": "offline_strategy_memory_audit.v1",
+        "strategy_memory_hypotheses_count": 2,
+        "mapped_to_existing_candidates": 1,
+        "missing_shadow_candidates": 1,
+        "rejected_future_data_hypotheses": 2,
+        "top_10_shadow_hypotheses": ["SM-TEST-ENTRY", "SM-EXIT-TEST"],
+        "promotion_allowed": False,
+    })
+    write_json(strategy_memory_dir / "filtered_winner_dossier_24h.json", {
+        "schema_version": "filtered_winner_dossier.v1",
+        "filtered_winner_count": 3,
+        "promotion_allowed": False,
+        "allowed_use": "shadow_only",
+    })
+    write_json(strategy_memory_dir / "exit_policy_shadow_simulator_24h.json", {
+        "schema_version": "exit_policy_shadow_simulator.v1",
+        "exit_policy_variants_tested": 2,
+        "promotion_allowed": False,
+        "allowed_use": "shadow_only",
+    })
+    write_json(strategy_memory_dir / "execution_delay_adjusted_replay_24h.json", {
+        "schema_version": "execution_delay_adjusted_replay.v1",
+        "delay_replay_done": True,
+        "promotion_allowed": False,
+        "allowed_use": "shadow_only",
+    })
     (root / "paper_trades.db").write_bytes(b"self-test")
     (root / "runtime_final_evidence.jsonl").write_text("{}\n", encoding="utf-8")
     return paper, raw, kline
@@ -2681,6 +3144,7 @@ def self_test():
             out_root=str(root / "agent_runs"),
             handoff_dir=str(root / "agent_handoffs"),
             registry=str(root / "hypothesis_registry.json"),
+            strategy_memory_dir=str(root / "strategy_memory_local"),
             markov_profiles=DEFAULT_MARKOV_PROFILES,
             report_timeout_sec=60,
             test_timeout_sec=60,
@@ -2746,6 +3210,18 @@ def self_test():
         assert "shadow_only_matured_volume_watch" in registry
         assert "shadow_only_quality_timing_watch" in registry
         assert "shadow_only_quality_timing_candidate_probes" in registry
+        assert "strategy_memory" in registry
+        assert registry["strategy_memory"]["promotion_allowed"] is False
+        assert registry["strategy_memory"]["allowed_use"] == "shadow_only"
+        assert registry["strategy_memory"]["evidence_level"] == "historical_memory"
+        assert registry["strategy_memory"]["summary"]["strategy_memory_hypotheses_count"] == 2
+        assert len(registry["strategy_memory"]["hypotheses"]) == 2
+        assert registry["strategy_memory"]["hypotheses"][0]["promotion_allowed"] is False
+        assert any(
+            row["route"] == "exit_policy_shadow_simulator_only"
+            for row in registry["strategy_memory"]["hypotheses"]
+        )
+        assert registry["strategy_memory"]["missing_shadow_candidate_handoffs"][0]["allowed_action"] == "generate_codex_handoff_only"
         manual_registry_path = root / "manual_hypothesis_registry.json"
         manual_registry = update_hypothesis_registry(
             manual_registry_path,
@@ -2855,6 +3331,7 @@ def self_test():
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
             "quality_timing_candidate_probe_validation_24h.json",
+            "strategy_memory_ingestion_summary.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
@@ -2890,6 +3367,17 @@ def self_test():
         assert quality_probe_validation["oos_readiness_queue"]["promotion_allowed"] is False
         assert quality_probe_validation["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
         assert "probe_validations" in quality_probe_validation
+        strategy_memory = load_json(latest_dir / "strategy_memory_ingestion_summary.json")
+        assert strategy_memory["promotion_allowed"] is False
+        assert strategy_memory["allowed_use"] == "shadow_only"
+        assert strategy_memory["evidence_level"] == "historical_memory"
+        assert strategy_memory["strategy_memory_hypotheses_count"] == 2
+        assert strategy_memory["mapped_to_existing_candidates"] == 1
+        assert strategy_memory["missing_shadow_candidates"] == 1
+        assert strategy_memory["rejected_future_data_hypotheses"] == 2
+        assert strategy_memory["paper_trades_db_available"] is True
+        assert strategy_memory["missing_shadow_candidate_handoffs"][0]["allowed_action"] == "generate_codex_handoff_only"
+        assert any(row["route"] == "exit_policy_shadow_simulator_only" for row in strategy_memory["hypotheses"])
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
 
@@ -2899,6 +3387,11 @@ def main():
     parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
     parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
     parser.add_argument("--data-dir", default="/app/data")
+    parser.add_argument(
+        "--strategy-memory-dir",
+        default=None,
+        help="Optional Strategy Memory artifact directory. Defaults to data-dir strategy_memory_local/strategy_memory.",
+    )
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument(
         "--capture-hours",

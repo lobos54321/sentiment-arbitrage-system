@@ -96,6 +96,7 @@ DERIVED_READINESS_SIBLINGS = {
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
+    "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
     "shadow_decision_bridge_audit": "shadow_decision_bridge_audit_24h.json",
     "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
     "runtime_health_snapshot": "runtime_health_snapshot_24h.json",
@@ -1026,6 +1027,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
+    strategy_memory_ingestion = readiness_reports.get("strategy_memory_ingestion_summary") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -1740,6 +1742,36 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 quality_timing_probe_validation.get("top_repeated_probes") or []
             )[:10],
         },
+        "strategy_memory_ingestion_summary": {
+            "available": bool(strategy_memory_ingestion.get("available")),
+            "schema_version": strategy_memory_ingestion.get("schema_version"),
+            "report_type": strategy_memory_ingestion.get("report_type"),
+            "artifact_source_dir": strategy_memory_ingestion.get("artifact_source_dir"),
+            "strategy_memory_hypotheses_count": strategy_memory_ingestion.get("strategy_memory_hypotheses_count", 0),
+            "mapped_to_existing_candidates": strategy_memory_ingestion.get("mapped_to_existing_candidates", 0),
+            "missing_shadow_candidates": strategy_memory_ingestion.get("missing_shadow_candidates", 0),
+            "rejected_future_data_hypotheses": strategy_memory_ingestion.get("rejected_future_data_hypotheses", 0),
+            "top_10_shadow_hypotheses": strategy_memory_ingestion.get("top_10_shadow_hypotheses") or [],
+            "filtered_winner_count": strategy_memory_ingestion.get("filtered_winner_count", 0),
+            "exit_policy_variants_tested": strategy_memory_ingestion.get("exit_policy_variants_tested", 0),
+            "delay_replay_done": boolish(strategy_memory_ingestion.get("delay_replay_done")),
+            "paper_trades_db_available": boolish(strategy_memory_ingestion.get("paper_trades_db_available")),
+            "evidence_incomplete_hypotheses": strategy_memory_ingestion.get("evidence_incomplete_hypotheses", 0),
+            "missing_shadow_candidate_handoffs": (
+                strategy_memory_ingestion.get("missing_shadow_candidate_handoffs") or []
+            )[:12],
+            "exit_only_hypotheses": (
+                strategy_memory_ingestion.get("exit_only_hypotheses") or []
+            )[:12],
+            "allowed_use": "shadow_only",
+            "evidence_level": "historical_memory",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "candidate_catalog_change_allowed": False,
+            "notes": strategy_memory_ingestion.get("notes") or [],
+        },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
             (readiness_reports.get("a_class_fastlane_mode_audit") or {}).get("final_entry_contract_blocker_breakdown")
@@ -1857,6 +1889,8 @@ def self_test():
     assert verdict["low_confidence_research_capture_audit"]["available"] is False
     assert verdict["quality_timing_reject_research_audit"]["available"] is False
     assert verdict["quality_timing_candidate_probe_validation"]["available"] is False
+    assert verdict["strategy_memory_ingestion_summary"]["available"] is False
+    assert verdict["strategy_memory_ingestion_summary"]["promotion_allowed"] is False
     env_commit_key = "ZEABUR_GIT_COMMIT_SHA"
     old_env_commit = os.environ.get(env_commit_key)
     os.environ[env_commit_key] = "env_commit_fixture"
