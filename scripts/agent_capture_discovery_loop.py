@@ -1311,7 +1311,86 @@ def build_markov_effectiveness_report(markov_reports, capture):
     }
 
 
-def build_capture_cross_validity_report(capture, context_report):
+def downstream_global_rates(candidate_downstream):
+    candidate_downstream = candidate_downstream or {}
+    denominator = safe_int(candidate_downstream.get("raw_gold_silver_signal_denominator"), 0) or 0
+    stage_counts = candidate_downstream.get("stage_counts") or {}
+    return {
+        "decision_rate": safe_rate(stage_counts.get("decision"), denominator),
+        "pass_allow_rate": safe_rate(stage_counts.get("pass_allow"), denominator),
+        "pending_rate": safe_rate(stage_counts.get("pending"), denominator),
+        "final_entry_rate": safe_rate(stage_counts.get("final_entry"), denominator),
+        "mode_disabled_adjusted_final_eligibility_rate": safe_rate(
+            stage_counts.get("final_mode_disabled_only"),
+            denominator,
+        ),
+        "paper_committed_rate": safe_rate(stage_counts.get("paper_committed"), denominator),
+    }
+
+
+def candidate_downstream_index(candidate_downstream):
+    rows = []
+    candidate_downstream = candidate_downstream or {}
+    rows.extend(candidate_downstream.get("all_candidates") or [])
+    rows.extend(candidate_downstream.get("top_candidates") or [])
+    out = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("candidate_id") and row.get("candidate_id") not in out:
+            out[row.get("candidate_id")] = row
+    return out
+
+
+def round_lift(value, baseline):
+    if value is None or baseline is None:
+        return None
+    return round(float(value) - float(baseline), 6)
+
+
+def downstream_proxy_for_candidate(candidate_id, downstream_by_candidate, global_rates):
+    row = downstream_by_candidate.get(candidate_id) or {}
+    if not row:
+        return {
+            "downstream_lift_available": False,
+            "downstream_lift_scope": "unavailable",
+            "downstream_lift_unavailable_reason": "candidate_downstream_readiness_missing",
+            "decision_lift": None,
+            "pass_allow_lift": None,
+            "pending_lift": None,
+            "final_entry_lift": None,
+            "mode_adjusted_final_eligibility_lift": None,
+            "paper_capture_lift": None,
+        }
+    decision_rate = row.get("decision_record_rate_after_match")
+    pass_allow_rate = row.get("pass_allow_rate_after_match")
+    pending_rate = row.get("pending_rate_after_match")
+    final_rate = row.get("final_entry_contract_rate_after_match")
+    mode_adjusted_rate = row.get("mode_disabled_adjusted_final_eligibility_rate_after_match")
+    paper_rate = row.get("paper_trade_committed_rate_after_match")
+    return {
+        "downstream_lift_available": True,
+        "downstream_lift_scope": "candidate_level_after_match_proxy_not_slice_specific",
+        "downstream_slice_join_required_for_promotion_evidence": True,
+        "decision_capture_rate_after_match": decision_rate,
+        "pass_allow_capture_rate_after_match": pass_allow_rate,
+        "pending_capture_rate_after_match": pending_rate,
+        "final_entry_rate_after_match": final_rate,
+        "mode_adjusted_final_eligibility_rate_after_match": mode_adjusted_rate,
+        "paper_capture_rate_after_match": paper_rate,
+        "decision_lift": round_lift(decision_rate, global_rates.get("decision_rate")),
+        "pass_allow_lift": round_lift(pass_allow_rate, global_rates.get("pass_allow_rate")),
+        "pending_lift": round_lift(pending_rate, global_rates.get("pending_rate")),
+        "final_entry_lift": round_lift(final_rate, global_rates.get("final_entry_rate")),
+        "mode_adjusted_final_eligibility_lift": round_lift(
+            mode_adjusted_rate,
+            global_rates.get("mode_disabled_adjusted_final_eligibility_rate"),
+        ),
+        "paper_capture_lift": round_lift(paper_rate, global_rates.get("paper_committed_rate")),
+        "candidate_downstream_classification": row.get("classification"),
+        "matched_raw_gs_signals_after_match": row.get("matched_raw_gs_signals"),
+    }
+
+
+def build_capture_cross_validity_report(capture, context_report, candidate_downstream=None):
     quote_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_clean_present_rate") or 0)
     quote_exec_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_executable_present_rate") or 0)
     source_component_rate = ((context_report.get("source_component_coverage") or {}).get("effective_present_rate"))
@@ -1319,6 +1398,8 @@ def build_capture_cross_validity_report(capture, context_report):
         source_component_rate = ((context_report.get("source_component_coverage") or {}).get("coverage_rate") or 0)
     volume_rate = ((context_report.get("volume_profile_coverage") or {}).get("coverage_rate") or 0)
     kline_rate = ((context_report.get("kline_coverage") or {}).get("coverage_rate") or 0)
+    downstream_by_candidate = candidate_downstream_index(candidate_downstream)
+    global_rates = downstream_global_rates(candidate_downstream)
     valid = []
     invalid = []
     for row in capture.get("context_slices") or []:
@@ -1342,8 +1423,12 @@ def build_capture_cross_validity_report(capture, context_report):
             "match_recall_event": row.get("match_recall_event"),
             "match_precision_event": row.get("match_precision_event"),
             "recall_lift_vs_candidate_baseline": row.get("recall_lift_vs_candidate_baseline"),
+            "precision_lift_vs_candidate_baseline": row.get("precision_lift_vs_candidate_baseline"),
             "valid": not reasons,
             "invalid_reasons": reasons,
+            "data_blockers": reasons,
+            "pnl_secondary_status": "secondary_pnl_report_required_not_used_for_capture_cross",
+            **downstream_proxy_for_candidate(row.get("candidate_id"), downstream_by_candidate, global_rates),
         }
         (valid if not reasons else invalid).append(item)
     return {
@@ -1363,7 +1448,15 @@ def build_capture_cross_validity_report(capture, context_report):
             "volume_sensitive_requires_present_rate_gte": 0.8,
             "kline_sensitive_requires_coverage_rate_gte": 0.8,
             "pnl_is_secondary": True,
+            "downstream_lift_scope": "candidate_level_after_match_proxy_not_slice_specific",
+            "slice_level_downstream_join_required_for_promotion_evidence": True,
         },
+        "downstream_global_rates": global_rates,
+        "notes": [
+            "Downstream lifts in this report are candidate-level after-match proxies attached to each slice.",
+            "They are useful for discovery ranking but are not slice-specific promotion evidence until a raw observation to decision join is added.",
+            "promotion_allowed remains false.",
+        ],
     }
 
 
@@ -1702,7 +1795,7 @@ def run_reports(run_dir, args):
         markov_reports = {name: load_json(path) for name, path in successful_markov.items() if Path(path).exists()}
         write_derived_report(markov_effectiveness_path, build_markov_effectiveness_report(markov_reports, capture))
         readiness_paths["markov_effectiveness"] = markov_effectiveness_path
-        capture_cross_validity = build_capture_cross_validity_report(capture, context_report)
+        capture_cross_validity = build_capture_cross_validity_report(capture, context_report, downstream)
         write_derived_report(capture_cross_validity_path, capture_cross_validity)
         readiness_paths["capture_cross_validity"] = capture_cross_validity_path
         write_derived_report(
@@ -3573,6 +3666,23 @@ def self_test():
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
+        capture_cross_validity = load_json(latest_dir / "capture_cross_validity_24h.json")
+        assert capture_cross_validity["criteria"]["downstream_lift_scope"] == (
+            "candidate_level_after_match_proxy_not_slice_specific"
+        )
+        assert capture_cross_validity["criteria"]["slice_level_downstream_join_required_for_promotion_evidence"] is True
+        if capture_cross_validity.get("valid_top_crosses"):
+            first_cross = capture_cross_validity["valid_top_crosses"][0]
+            assert "decision_lift" in first_cross
+            assert "pass_allow_lift" in first_cross
+            assert "pending_lift" in first_cross
+            assert "final_entry_lift" in first_cross
+            assert "mode_adjusted_final_eligibility_lift" in first_cross
+            assert first_cross["downstream_lift_scope"] in {
+                "candidate_level_after_match_proxy_not_slice_specific",
+                "unavailable",
+            }
+            assert first_cross["pnl_secondary_status"] == "secondary_pnl_report_required_not_used_for_capture_cross"
         shadow_bridge = load_json(latest_dir / "shadow_decision_bridge_audit_24h.json")
         assert shadow_bridge["status"] in {
             "NO_SHADOW_DECISION_BRIDGE_GAP",
