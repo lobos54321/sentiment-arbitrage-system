@@ -1806,7 +1806,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 )
             },
         },
-        "oos_readiness_summary": oos_readiness_summary,
+        "oos_readiness_summary": oos_readiness_summary_v3 or oos_readiness_summary,
         "oos_probe_refresh_status": compact_oos_probe_refresh(oos_probe_refresh),
         "low_confidence_research_capture_audit": {
             "available": bool(low_confidence_audit),
