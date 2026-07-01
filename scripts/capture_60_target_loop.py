@@ -36,6 +36,7 @@ STATUS_BLOCKED = "BLOCKED_UNKNOWN"
 REQUIRED_FILES = {
     "capture": "capture_discovery_24h.json",
     "raw_funnel": "raw_gold_silver_funnel_audit_24h.json",
+    "shadow_decision_bridge": "shadow_decision_bridge_audit_24h.json",
     "candidate_downstream": "candidate_downstream_readiness_24h.json",
     "context_coverage": "context_coverage_audit_24h.json",
     "context_blocker_monitor": "context_blocker_monitor_24h.json",
@@ -58,6 +59,7 @@ V3_OUTPUT_FILES = {
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -559,6 +561,233 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
     }
 
 
+def count_stage(rows, stage_name):
+    return sum(
+        safe_int(row.get("count"), 0)
+        for row in rows or []
+        if row.get("stage") == stage_name
+    )
+
+
+def top_stage_reasons(rows, stage_name, limit=12):
+    return [
+        row for row in rows or []
+        if row.get("stage") == stage_name
+    ][:limit]
+
+
+def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, context_eligibility):
+    """Explain the current gap from raw gold/silver events to pass/allow.
+
+    This is deliberately an audit artifact, not a policy artifact. It merges
+    the shadow decision bridge report with decision-no-pass quality/timing
+    evidence so the loop can target the first below-60% stage without touching
+    production decision logic.
+    """
+    stage_counts = stage_metrics.get("stage_counts") or {}
+    raw_den = safe_int(stage_counts.get("raw_gold_silver_denominator"), 0)
+    target = safe_int(stage_counts.get("target_60_count"), 0)
+    pass_allow_count = safe_int((stage_counts.get("pass_allow_capture") or {}).get("count"), 0)
+    additional_needed = max(0, target - pass_allow_count)
+    pending_dropoff = pending_audit.get("dropoff_counts") or {}
+    upstream = pending_audit.get("upstream_funnel_gap") or {}
+
+    shadow_bridge = reports.get("shadow_decision_bridge") or {}
+    shadow_den = shadow_bridge.get("denominator") or {}
+    shadow_bridge_count = safe_int(
+        shadow_den.get("shadow_entry_hypotheses_matched_no_decision_bridge"),
+        0,
+    )
+    shadow_review_items = [
+        {
+            "candidate_id": row.get("candidate_id"),
+            "candidate_family": row.get("family"),
+            "event_count": row.get("count"),
+            "status": "SHADOW_MATCHED_NO_DECISION_BRIDGE",
+            "next_action": "review_shadow_decision_bridge_instrumentation_without_entry_policy_change",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        for row in (shadow_bridge.get("candidate_counts") or [])[:12]
+        if isinstance(row, dict)
+    ]
+
+    quality_timing = reports.get("quality_timing_reject_research") or {}
+    stage_attribution = quality_timing.get("stage_attribution") or {}
+    qt_stage_rows = stage_attribution.get("stage_counts") or []
+    qt_reason_rows = stage_attribution.get("reason_counts") or []
+    qt_review = (quality_timing.get("shadow_only_review") or {})
+    qt_decision_no_pass = count_stage(qt_stage_rows, "decision_no_pass_or_allow")
+    qt_pass_no_pending = count_stage(qt_stage_rows, "pass_or_allow_without_pending_entry")
+    qt_pending_no_final = count_stage(qt_stage_rows, "pending_without_final_entry_contract")
+    qt_review_items = []
+    for row in qt_review.get("top_research_opportunities") or []:
+        if not isinstance(row, dict):
+            continue
+        dominant_stage = (row.get("stage_counts") or [{}])[0].get("stage")
+        if dominant_stage not in {"decision_no_pass_or_allow", "pass_or_allow_without_pending_entry"}:
+            continue
+        qt_review_items.append({
+            "cluster": row.get("cluster"),
+            "dominant_stage": dominant_stage,
+            "event_count": row.get("event_count"),
+            "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
+            "unique_tokens": row.get("unique_tokens"),
+            "top_candidates": (row.get("top_candidates") or [])[:5],
+            "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:5],
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+            "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    candidate_downstream = reports.get("candidate_downstream") or {}
+    downstream_candidates = []
+    for row in candidate_downstream.get("top_candidates") or []:
+        if not isinstance(row, dict):
+            continue
+        downstream_candidates.append({
+            "candidate_id": row.get("candidate_id"),
+            "candidate_family": row.get("family"),
+            "classification": row.get("classification"),
+            "matched_raw_gs_signals": row.get("matched_raw_gs_signals"),
+            "raw_gs_recall": row.get("raw_gs_recall"),
+            "match_precision": row.get("match_precision"),
+            "decision_record_rate_after_match": row.get("decision_record_rate_after_match"),
+            "pass_allow_rate_after_match": row.get("pass_allow_rate_after_match"),
+            "pending_rate_after_match": row.get("pending_rate_after_match"),
+            "mode_disabled_adjusted_final_eligibility_rate_after_match": (
+                row.get("mode_disabled_adjusted_final_eligibility_rate_after_match")
+            ),
+            "promotion_allowed": False,
+        })
+
+    potential_sources = {
+        "shadow_matched_no_decision_bridge_upper_bound": shadow_bridge_count,
+        "decision_no_pass_or_allow_upper_bound": safe_int(
+            upstream.get("decision_no_pass_or_allow")
+            or pending_dropoff.get("decision_no_pass_allow"),
+            0,
+        ),
+        "quality_timing_decision_no_pass_or_allow_upper_bound": qt_decision_no_pass,
+        "pass_allow_without_pending_not_part_of_pass_allow_shortfall": safe_int(
+            upstream.get("pass_or_allow_without_pending_entry")
+            or pending_dropoff.get("pass_allow_no_pending"),
+            0,
+        ),
+    }
+    explained_upper_bound = (
+        potential_sources["shadow_matched_no_decision_bridge_upper_bound"]
+        + potential_sources["decision_no_pass_or_allow_upper_bound"]
+    )
+    if shadow_bridge_count and shadow_bridge.get("status") != "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE":
+        next_action = "complete_shadow_decision_bridge_read_only_mirror"
+    elif qt_decision_no_pass:
+        next_action = "review_decision_no_pass_quality_timing_clusters_shadow_only"
+    elif potential_sources["decision_no_pass_or_allow_upper_bound"]:
+        next_action = "decompose_decision_no_pass_reasons_shadow_only"
+    else:
+        next_action = "continue_pass_allow_capture_monitoring"
+
+    blocked_dimensions = context_eligibility.get("blocked_dimensions") or []
+    clean_dimensions = context_eligibility.get("clean_dimensions") or []
+    return {
+        "schema_version": "pass_allow_capture_gap_audit.v1",
+        "report_type": "pass_allow_capture_gap_audit",
+        "generated_at": utc_now(),
+        "phase": "discovery_readiness",
+        "evidence_level": "discovery_same_window",
+        "usage": "read_only_pass_allow_gap_targeting",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "runtime_effect": "none",
+        "target_gap": {
+            "raw_gold_silver_denominator": raw_den,
+            "target_capture_rate": TARGET_RATE,
+            "target_60_count": target,
+            "current_pass_allow_count": pass_allow_count,
+            "current_pass_allow_rate": (stage_counts.get("pass_allow_capture") or {}).get("rate"),
+            "additional_pass_allow_events_needed_to_60": additional_needed,
+        },
+        "dropoff_counts": {
+            "no_decision": safe_int(
+                upstream.get("no_decision_record") or pending_dropoff.get("no_decision"),
+                0,
+            ),
+            "decision_no_pass_allow": potential_sources["decision_no_pass_or_allow_upper_bound"],
+            "pass_allow_no_pending": potential_sources["pass_allow_without_pending_not_part_of_pass_allow_shortfall"],
+            "pending_no_final_entry": safe_int(pending_dropoff.get("pending_no_final_entry"), 0),
+            "final_entry_no_paper": safe_int(pending_dropoff.get("final_entry_no_paper"), 0),
+        },
+        "gap_source_upper_bounds": potential_sources,
+        "gap_explainability": {
+            "combined_shadow_bridge_and_decision_no_pass_upper_bound": explained_upper_bound,
+            "covers_current_pass_allow_gap_if_all_resolved": explained_upper_bound >= additional_needed if additional_needed else True,
+            "events_contributing_to_60pct_gap_upper_bound": min(explained_upper_bound, additional_needed),
+            "residual_pass_allow_gap_after_upper_bound": max(0, additional_needed - explained_upper_bound),
+            "interpretation": (
+                "Upper bound only. It does not prove any rejected or missing-decision event should be traded."
+            ),
+        },
+        "shadow_decision_bridge": {
+            "status": shadow_bridge.get("status"),
+            "root_cause": shadow_bridge.get("root_cause"),
+            "shadow_bridge_count": shadow_bridge_count,
+            "mirror_event_coverage_vs_shadow_bridge_gap": shadow_den.get("mirror_event_coverage_vs_shadow_bridge_gap"),
+            "mirror_event_truncated": shadow_den.get("mirror_event_truncated"),
+            "review_queue": shadow_review_items,
+        },
+        "decision_no_pass_quality_timing": {
+            "quality_timing_report_verdict": quality_timing.get("verdict"),
+            "quality_timing_decision_no_pass_or_allow_events": qt_decision_no_pass,
+            "quality_timing_pass_or_allow_without_pending_events": qt_pass_no_pending,
+            "quality_timing_pending_without_final_events": qt_pending_no_final,
+            "decision_no_pass_reason_counts": top_stage_reasons(
+                qt_reason_rows,
+                "decision_no_pass_or_allow",
+            ),
+            "pass_allow_without_pending_reason_counts": top_stage_reasons(
+                qt_reason_rows,
+                "pass_or_allow_without_pending_entry",
+            ),
+            "review_queue": qt_review_items[:12],
+        },
+        "candidate_downstream_watch": downstream_candidates[:12],
+        "context_constraints": {
+            "clean_dimensions": clean_dimensions,
+            "blocked_dimensions": blocked_dimensions,
+            "blocked_dimensions_excluded_from_this_audit": blocked_dimensions,
+            "rule": "Do not use blocked quote/kline/Markov dimensions for promotion or OOS evidence.",
+        },
+        "next_action": next_action,
+        "allowed_scope": [
+            "read-only evaluator/report improvements",
+            "shadow-only candidate or context instrumentation",
+            "hypothesis registry entries for clean-window/OOS validation",
+        ],
+        "forbidden_scope": [
+            "strategy change",
+            "entry policy change",
+            "hard gate relaxation",
+            "exit gate change",
+            "final_entry_contract change",
+            "A_CLASS mode reset or enablement",
+            "paper/live executor enablement",
+            "canary or risk increase",
+        ],
+        "notes": [
+            "This audit targets the first below-60% stage: pass_allow_capture.",
+            "All counts are discovery/readiness evidence. No row authorizes a runtime policy change.",
+        ],
+    }
+
+
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     return {
         "schema_version": "final_entry_readiness_audit.v1",
@@ -934,6 +1163,12 @@ def assemble_reports(run_dir, out_dir=None):
     pending_audit = build_pending_to_final_entry_audit(reports.get("a_class") or {})
     reports["pending_to_final_entry_audit"] = pending_audit
     gap_report = build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit)
+    pass_allow_gap_audit = build_pass_allow_capture_gap_audit(
+        stage_metrics,
+        pending_audit,
+        reports,
+        context_eligibility,
+    )
     final_entry_readiness = build_final_entry_readiness_audit(reports.get("a_class") or {}, stage_metrics, pending_audit)
     strategy_memory_capture = build_strategy_memory_capture_validation(reports)
     shadow_queue = build_shadow_candidate_improvement_queue(reports, context_eligibility)
@@ -942,6 +1177,7 @@ def assemble_reports(run_dir, out_dir=None):
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
         "context_dimension_eligibility": context_eligibility,
+        "pass_allow_capture_gap_audit": pass_allow_gap_audit,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
@@ -964,6 +1200,7 @@ def assemble_reports(run_dir, out_dir=None):
             "biggest_gap_stage": gap_report.get("biggest_gap_stage"),
             "additional_count_needed_to_60": gap_report.get("additional_count_needed_to_60"),
             "next_best_allowed_action": gap_report.get("next_best_allowed_action"),
+            "pass_allow_gap_next_action": pass_allow_gap_audit.get("next_action"),
             "context_blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
             "strategy_memory_hypotheses_count": strategy_memory_capture.get("hypotheses_count"),
             "shadow_candidate_queue_count": shadow_queue.get("queue_count"),

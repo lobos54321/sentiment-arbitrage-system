@@ -117,6 +117,7 @@ DERIVED_READINESS_SIBLINGS = {
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1112,6 +1113,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     shadow_bridge_candidate_counts = (shadow_decision_bridge.get("candidate_counts") or [])[:10]
     shadow_bridge_family_counts = (shadow_decision_bridge.get("family_counts") or [])[:10]
     shadow_bridge_reason_counts = (shadow_decision_bridge.get("reason_counts") or [])[:10]
+    pass_allow_gap_audit = readiness_reports.get("pass_allow_capture_gap_audit") or {}
     shadow_bridge_review_queue_items = []
     for row in shadow_bridge_candidate_counts[:10]:
         if not isinstance(row, dict):
@@ -1505,6 +1507,21 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "review_queue": shadow_bridge_review_queue,
             "promotion_allowed": False,
             "automatic_bridge_to_entry_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "pass_allow_capture_gap_audit": {
+            "available": bool(pass_allow_gap_audit),
+            "next_action": pass_allow_gap_audit.get("next_action"),
+            "target_gap": pass_allow_gap_audit.get("target_gap") or {},
+            "dropoff_counts": pass_allow_gap_audit.get("dropoff_counts") or {},
+            "gap_source_upper_bounds": pass_allow_gap_audit.get("gap_source_upper_bounds") or {},
+            "gap_explainability": pass_allow_gap_audit.get("gap_explainability") or {},
+            "shadow_decision_bridge": pass_allow_gap_audit.get("shadow_decision_bridge") or {},
+            "decision_no_pass_quality_timing": pass_allow_gap_audit.get("decision_no_pass_quality_timing") or {},
+            "context_constraints": pass_allow_gap_audit.get("context_constraints") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         },
         "quality_timing_shadow_review_queue": quality_timing_shadow_review_queue,
