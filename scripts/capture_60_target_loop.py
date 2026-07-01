@@ -3855,7 +3855,7 @@ def self_test():
         assert "volume" in monitor["global_blocked_dimensions_not_required_by_frozen_definitions"]
         post_freeze_summary = build_oos_summary(run_dir, reports={
             "pass_allow_60_post_freeze_oos_validation": {
-                "schema_version": "pass_allow_60_post_freeze_oos_validation.v2",
+                "schema_version": "pass_allow_60_post_freeze_oos_validation.v3",
                 "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
                 "next_action": "continue_collecting_post_freeze_oos_window",
                 "raw_gold_silver_event_rows": 0,
@@ -3871,7 +3871,7 @@ def self_test():
             }
         })
         post_freeze = post_freeze_summary["pass_allow_60_post_freeze_oos_validation"]
-        assert post_freeze["schema_version"] == "pass_allow_60_post_freeze_oos_validation.v2"
+        assert post_freeze["schema_version"] == "pass_allow_60_post_freeze_oos_validation.v3"
         assert post_freeze["raw_gold_silver_rows_since_eval_start_unfiltered"] == 0
         assert post_freeze["all_raw_rows_since_eval_start"] == 4
         assert post_freeze["latest_raw_signal_age_sec"] == 90

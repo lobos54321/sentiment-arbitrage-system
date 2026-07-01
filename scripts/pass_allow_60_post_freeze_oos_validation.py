@@ -34,7 +34,7 @@ from quality_timing_reject_research_audit import (
 )
 
 
-SCHEMA_VERSION = "pass_allow_60_post_freeze_oos_validation.v2"
+SCHEMA_VERSION = "pass_allow_60_post_freeze_oos_validation.v3"
 DEFAULT_EXPECTED_CANDIDATES = 84
 DEFAULT_MIN_RAW_EVENTS = 10
 DEFAULT_MIN_SELECTED_EVENTS = 3
@@ -470,7 +470,11 @@ def build_oos_data_availability(
     post_freeze_source_activity=None,
 ):
     min_raw_events = int(args.min_raw_events)
+    source_activity = post_freeze_source_activity or {}
+    all_raw_since_freeze = source_activity.get("all_raw_rows_since_eval_start")
     root_causes = []
+    if all_raw_since_freeze == 0:
+        root_causes.append("no_post_freeze_raw_signal_rows")
     if raw_count == 0:
         root_causes.append("no_post_freeze_raw_gold_silver_events")
     elif raw_count < min_raw_events:
@@ -485,7 +489,9 @@ def build_oos_data_availability(
         else "unavailable"
     )
     classification = (
-        "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_SIGNALS"
+        if all_raw_since_freeze == 0
+        else "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         if raw_count == 0
         else "OOS_DATA_BELOW_MIN_RAW_EVENTS"
         if raw_count < min_raw_events
@@ -494,7 +500,9 @@ def build_oos_data_availability(
         else "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
     )
     next_action = (
-        "continue_collecting_post_freeze_raw_gold_silver_events"
+        "wait_for_post_freeze_raw_signal_rows"
+        if classification == "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_SIGNALS"
+        else "continue_collecting_post_freeze_raw_gold_silver_events"
         if classification == "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         else "continue_collecting_until_min_oos_raw_events"
         if classification == "OOS_DATA_BELOW_MIN_RAW_EVENTS"
@@ -507,8 +515,12 @@ def build_oos_data_availability(
         "root_causes": root_causes,
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": min_raw_events,
+        "all_raw_rows_since_eval_start": all_raw_since_freeze,
+        "raw_signal_rows_seen_after_freeze": (
+            None if all_raw_since_freeze is None else int(all_raw_since_freeze or 0)
+        ),
         "post_freeze_usable_hours": post_freeze_usable_hours,
-        "post_freeze_source_activity": post_freeze_source_activity or {},
+        "post_freeze_source_activity": source_activity,
         "candidate_observation_meta": observation_meta or {},
         "candidate_observation_effective_status": candidate_observation_effective_status,
         "next_action": next_action,
@@ -853,6 +865,27 @@ def run_self_test():
             "not_applicable_no_raw_signal_ids"
         )
         assert zero_availability["root_causes"] == ["no_post_freeze_raw_gold_silver_events"]
+        no_raw_availability = build_oos_data_availability(
+            0,
+            args,
+            {"available": False, "reason": "missing_signal_ids_or_table"},
+            0,
+            {
+                "available": True,
+                "all_raw_rows_since_eval_start": 0,
+                "raw_gold_silver_rows_since_eval_start_unfiltered": 0,
+                "latest_raw_signal_age_sec": 900,
+            },
+        )
+        assert no_raw_availability["classification"] == (
+            "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_SIGNALS"
+        )
+        assert no_raw_availability["next_action"] == "wait_for_post_freeze_raw_signal_rows"
+        assert no_raw_availability["root_causes"] == [
+            "no_post_freeze_raw_signal_rows",
+            "no_post_freeze_raw_gold_silver_events",
+        ]
+        assert no_raw_availability["raw_signal_rows_seen_after_freeze"] == 0
     print("self-test passed")
 
 
