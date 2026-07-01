@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v4"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v5"
 QUOTE_COVERAGE_BLOCKERS = {
     "source_quote_clean_coverage_below_80pct",
     "source_quote_executable_coverage_below_80pct",
@@ -139,6 +139,9 @@ def build_handoff(verdict):
         f"- final_eligibility_capture_rate: `{verdict.get('final_eligibility_capture_rate')}`",
         f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
         f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
+        f"- capture_60_biggest_gap_stage: `{(verdict.get('capture_60_target_loop') or {}).get('biggest_gap_stage')}`",
+        f"- capture_60_additional_count_needed: `{(verdict.get('capture_60_target_loop') or {}).get('additional_count_needed_to_60')}`",
+        f"- capture_60_next_best_allowed_action: `{(verdict.get('capture_60_target_loop') or {}).get('next_best_allowed_action')}`",
         f"- handoff_needed: `{str(needed).lower()}`",
         "",
         "## Guardrails",
@@ -158,6 +161,39 @@ def build_handoff(verdict):
         f"- mesh_eligible_signal_id_join_rate: `{verdict.get('mesh_eligible_signal_id_join_rate')}`",
         "",
     ]
+    if verdict.get("capture_60_target_loop"):
+        lines.extend([
+            "## Capture 60 Target Loop",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "capture_60_target_loop": verdict.get("capture_60_target_loop") or {},
+                    "context_dimension_eligibility": {
+                        key: (verdict.get("context_dimension_eligibility") or {}).get(key)
+                        for key in (
+                            "status_counts",
+                            "clean_dimensions",
+                            "blocked_dimensions",
+                        )
+                    },
+                    "pending_to_final_entry_audit_v3": verdict.get("pending_to_final_entry_audit_v3") or {},
+                    "shadow_candidate_improvement_queue": {
+                        key: (verdict.get("shadow_candidate_improvement_queue") or {}).get(key)
+                        for key in (
+                            "queue_count",
+                            "source_counts",
+                            "promotion_allowed",
+                        )
+                    },
+                    "oos_readiness_summary_v3": verdict.get("oos_readiness_summary_v3") or {},
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     quote = verdict.get("quote_clean_definition") or {}
     lines.extend([
         "## Schema / Quote State",

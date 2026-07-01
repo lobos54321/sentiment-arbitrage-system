@@ -49,6 +49,7 @@ REPORT_TEST_COMMANDS = (
     ("runtime_health_snapshot_self_test", ["scripts/runtime_health_snapshot_audit.py", "--self-test"]),
     ("strategy_memory_audit_self_test", ["scripts/offline_strategy_memory_audit.py", "--self-test"]),
     ("strategy_memory_validation_self_test", ["scripts/strategy_memory_validation.py", "--self-test"]),
+    ("capture_60_target_loop_self_test", ["scripts/capture_60_target_loop.py", "--self-test"]),
     ("autoloop_lightweight_reconciliation_self_test", ["scripts/autoloop_lightweight_reconciliation.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
@@ -2558,6 +2559,9 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- final_eligibility_capture_rate: `{verdict.get('final_eligibility_capture_rate')}`",
         f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
         f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
+        f"- capture_60_biggest_gap_stage: `{(verdict.get('capture_60_target_loop') or {}).get('biggest_gap_stage')}`",
+        f"- capture_60_additional_count_needed: `{(verdict.get('capture_60_target_loop') or {}).get('additional_count_needed_to_60')}`",
+        f"- capture_60_next_best_allowed_action: `{(verdict.get('capture_60_target_loop') or {}).get('next_best_allowed_action')}`",
         "",
         "## Integrity",
         "",
@@ -2686,6 +2690,40 @@ def build_run_summary(verdict, paths, diagnostics, tests):
             indent=2,
             sort_keys=True,
         ),
+        "```",
+        "",
+        "## Capture 60 Target Loop",
+        "",
+        "```json",
+        json.dumps(
+            {
+                "capture_60_target_loop": verdict.get("capture_60_target_loop") or {},
+                "context_dimension_eligibility": {
+                    key: (verdict.get("context_dimension_eligibility") or {}).get(key)
+                    for key in (
+                        "available",
+                        "status_counts",
+                        "clean_dimensions",
+                        "blocked_dimensions",
+                        "promotion_allowed",
+                    )
+                },
+                "pending_to_final_entry_audit_v3": verdict.get("pending_to_final_entry_audit_v3") or {},
+                "final_entry_readiness_audit_v3": verdict.get("final_entry_readiness_audit_v3") or {},
+                "shadow_candidate_improvement_queue": {
+                    key: (verdict.get("shadow_candidate_improvement_queue") or {}).get(key)
+                    for key in (
+                        "available",
+                        "queue_count",
+                        "source_counts",
+                        "promotion_allowed",
+                    )
+                },
+                "oos_readiness_summary_v3": verdict.get("oos_readiness_summary_v3") or {},
+            },
+            indent=2,
+            sort_keys=True,
+        )[:12000],
         "```",
         "",
         "## A_CLASS / Final Entry",
@@ -2927,6 +2965,33 @@ def write_materialized_artifacts(
         }
         return verdict_payload
 
+    def run_capture_60_target_artifacts():
+        result = command_result(
+            "capture_60_target_loop",
+            [
+                "scripts/capture_60_target_loop.py",
+                "--run-dir", str(run_dir),
+                "--out-dir", str(run_dir),
+            ],
+            timeout=max(60, int(args.report_timeout_sec)),
+        )
+        diagnostics.append(result)
+        v3_outputs = {
+            "capture_60_gap_report": "capture_60_gap_report.json",
+            "capture_stage_metrics": "capture_stage_metrics.json",
+            "context_dimension_eligibility": "context_dimension_eligibility.json",
+            "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
+            "final_entry_readiness_audit": "final_entry_readiness_audit.json",
+            "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
+            "shadow_candidate_improvement_queue": "shadow_candidate_improvement_queue.json",
+            "oos_readiness_summary": "oos_readiness_summary.json",
+        }
+        for key, filename in v3_outputs.items():
+            path = run_dir / filename
+            if path.exists():
+                readiness_paths[key] = path
+        return result
+
     verdict = build_loop_verdict()
     verdict_path = run_dir / "reviewer_verdict.json"
     strategy_memory_summary = {}
@@ -2978,6 +3043,11 @@ def write_materialized_artifacts(
         diagnostics.append(refresh_result)
         if oos_refresh_path.exists():
             readiness_paths["oos_readiness_probe_refresh"] = oos_refresh_path
+        run_capture_60_target_artifacts()
+        verdict = build_loop_verdict()
+        write_json(verdict_path, verdict)
+    elif state == "final":
+        run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
 
@@ -3459,6 +3529,14 @@ def self_test():
         assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["promotion_allowed"] is False
         assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["strategy_change_allowed"] is False
         required_artifacts = [
+            "capture_60_gap_report.json",
+            "capture_stage_metrics.json",
+            "context_dimension_eligibility.json",
+            "pending_to_final_entry_audit.json",
+            "final_entry_readiness_audit.json",
+            "strategy_memory_capture_validation.json",
+            "shadow_candidate_improvement_queue.json",
+            "oos_readiness_summary.json",
             "capture_discovery_24h.json",
             "capture_discovery_48h.json",
             "capture_discovery_72h.json",

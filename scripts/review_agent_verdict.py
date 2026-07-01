@@ -114,6 +114,14 @@ DERIVED_READINESS_SIBLINGS = {
     "matured_volume_cross_oos_probe_0p5h": "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
     "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
+    "capture_60_gap_report": "capture_60_gap_report.json",
+    "capture_stage_metrics": "capture_stage_metrics.json",
+    "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
+    "final_entry_readiness_audit": "final_entry_readiness_audit.json",
+    "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
+    "shadow_candidate_improvement_queue": "shadow_candidate_improvement_queue.json",
+    "oos_readiness_summary_v3": "oos_readiness_summary.json",
 }
 
 
@@ -1036,16 +1044,36 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     strategy_memory_filtered_bridge = readiness_reports.get("strategy_memory_filtered_winner_bridge") or {}
     strategy_memory_exit_summary = readiness_reports.get("strategy_memory_exit_shadow_summary") or {}
     strategy_memory_delay_summary = readiness_reports.get("strategy_memory_delay_replay_summary") or {}
+    capture_60_gap_report = readiness_reports.get("capture_60_gap_report") or {}
+    capture_stage_metrics_v3 = readiness_reports.get("capture_stage_metrics") or {}
+    context_dimension_eligibility = readiness_reports.get("context_dimension_eligibility") or {}
+    pending_to_final_entry_audit_v3 = readiness_reports.get("pending_to_final_entry_audit") or {}
+    final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
+    strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
+    shadow_candidate_improvement_queue = readiness_reports.get("shadow_candidate_improvement_queue") or {}
+    oos_readiness_summary_v3 = readiness_reports.get("oos_readiness_summary_v3") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
+    v3_biggest_gap_stage = capture_60_gap_report.get("biggest_gap_stage")
+    v3_mode_adjusted_rate = as_float(
+        capture_60_gap_report.get("mode_disabled_adjusted_final_eligibility_rate")
+    )
+    v3_pending_no_final = as_int(
+        ((pending_to_final_entry_audit_v3.get("dropoff_counts") or {}).get("pending_no_final_entry")),
+        0,
+    ) or 0
     if any(blocker in data_blockers for blocker in blockers):
         classification = "BLOCKED_DATA"
     elif any(blocker in context_blockers for blocker in blockers):
         classification = "BLOCKED_CONTEXT_COVERAGE"
+    elif v3_mode_adjusted_rate is not None and v3_mode_adjusted_rate >= 0.6:
+        classification = "CAPTURE_READINESS_60_REACHED"
+    elif v3_biggest_gap_stage in {"final_eligibility", "mode_disabled_adjusted_final_eligibility"} and v3_pending_no_final > 0:
+        classification = "FUNNEL_DROPOFF_PENDING_TO_FINAL"
     elif final_entry_status == "FUNNEL_BLOCKED_STUCK":
-        classification = "FUNNEL_BLOCKED_STUCK"
+        classification = "A_CLASS_STUCK_REVIEW_REQUIRED"
     elif final_entry_status == "FUNNEL_BLOCKED_EXPECTED":
-        classification = "FUNNEL_BLOCKED_EXPECTED"
+        classification = "A_CLASS_EXPECTED_SHADOW"
     elif (capture_counts.get("DISCOVERY_HIT") or 0) > 0:
         classification = "CAPTURE_DISCOVERY_HIT"
     elif (capture_counts.get("WATCH") or 0) > 0:
@@ -1202,10 +1230,14 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             next_action = volume_profile_state.get("next_action")
         else:
             next_action = "resolve_context_coverage_blocker"
-    elif classification == "FUNNEL_BLOCKED_EXPECTED":
+    elif classification == "FUNNEL_DROPOFF_PENDING_TO_FINAL":
+        next_action = "audit_pending_to_final_entry_dropoff_shadow_only"
+    elif classification == "A_CLASS_EXPECTED_SHADOW":
         next_action = "wait_clean_windows_or_fix_failed_context_coverage"
-    elif classification == "FUNNEL_BLOCKED_STUCK":
+    elif classification == "A_CLASS_STUCK_REVIEW_REQUIRED":
         next_action = "human_review_a_class_shadow_state"
+    elif classification == "CAPTURE_READINESS_60_REACHED":
+        next_action = "prepare_paper_entry_proposal_for_human_review_without_enabling_runtime"
     elif classification == "CAPTURE_DISCOVERY_HIT":
         next_action = "freeze_hit_for_out_of_sample_validation"
     elif classification == "DISCOVERY_WATCH":
@@ -1223,6 +1255,77 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "next_action": next_action,
         "parallel_next_action": parallel_next_action,
         "parallel_next_action_reason": parallel_next_action_reason,
+        "capture_60_target_loop": {
+            "available": bool(capture_60_gap_report),
+            "target_capture_rate": capture_60_gap_report.get("target_capture_rate"),
+            "raw_gold_silver_denominator": capture_60_gap_report.get("raw_gold_silver_denominator"),
+            "target_60_count": capture_60_gap_report.get("target_60_count"),
+            "biggest_gap_stage": capture_60_gap_report.get("biggest_gap_stage"),
+            "additional_count_needed_to_60": capture_60_gap_report.get("additional_count_needed_to_60"),
+            "next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
+            "detector_capture_rate": capture_60_gap_report.get("detector_capture_rate"),
+            "decision_capture_rate": capture_60_gap_report.get("decision_capture_rate"),
+            "pass_allow_capture_rate": capture_60_gap_report.get("pass_allow_capture_rate"),
+            "pending_capture_rate": capture_60_gap_report.get("pending_capture_rate"),
+            "final_eligibility_rate": capture_60_gap_report.get("final_eligibility_rate"),
+            "mode_disabled_adjusted_final_eligibility_rate": capture_60_gap_report.get(
+                "mode_disabled_adjusted_final_eligibility_rate"
+            ),
+            "paper_capture_rate": capture_60_gap_report.get("paper_capture_rate"),
+            "realized_capture_rate": capture_60_gap_report.get("realized_capture_rate"),
+            "promotion_allowed": False,
+        },
+        "capture_stage_metrics_v3": {
+            "available": bool(capture_stage_metrics_v3),
+            "stage_counts": capture_stage_metrics_v3.get("stage_counts") or {},
+            "largest_stage_dropoff": capture_stage_metrics_v3.get("largest_stage_dropoff") or {},
+            "promotion_allowed": False,
+        },
+        "context_dimension_eligibility": {
+            "available": bool(context_dimension_eligibility),
+            "status_counts": context_dimension_eligibility.get("status_counts") or {},
+            "clean_dimensions": context_dimension_eligibility.get("clean_dimensions") or [],
+            "blocked_dimensions": context_dimension_eligibility.get("blocked_dimensions") or [],
+            "dimensions": context_dimension_eligibility.get("dimensions") or {},
+            "promotion_allowed": False,
+        },
+        "pending_to_final_entry_audit_v3": {
+            "available": bool(pending_to_final_entry_audit_v3),
+            "dropoff_counts": pending_to_final_entry_audit_v3.get("dropoff_counts") or {},
+            "pending_no_final_entry_classification": (
+                pending_to_final_entry_audit_v3.get("pending_no_final_entry_classification") or {}
+            ),
+            "promotion_allowed": False,
+        },
+        "final_entry_readiness_audit_v3": {
+            "available": bool(final_entry_readiness_audit_v3),
+            "final_entry_status": final_entry_readiness_audit_v3.get("final_entry_status"),
+            "reason": final_entry_readiness_audit_v3.get("reason"),
+            "human_action_required": boolish(final_entry_readiness_audit_v3.get("human_action_required")),
+            "paper_entry_proposal_readiness": final_entry_readiness_audit_v3.get("paper_entry_proposal_readiness") or {},
+            "promotion_allowed": False,
+        },
+        "strategy_memory_capture_validation": {
+            "available": bool(strategy_memory_capture_validation),
+            "hypotheses_count": strategy_memory_capture_validation.get("hypotheses_count", 0),
+            "status_counts": strategy_memory_capture_validation.get("status_counts") or {},
+            "top_hypotheses": (strategy_memory_capture_validation.get("hypotheses") or [])[:12],
+            "promotion_allowed": False,
+        },
+        "shadow_candidate_improvement_queue": {
+            "available": bool(shadow_candidate_improvement_queue),
+            "queue_count": shadow_candidate_improvement_queue.get("queue_count", 0),
+            "source_counts": shadow_candidate_improvement_queue.get("source_counts") or {},
+            "top_items": (shadow_candidate_improvement_queue.get("top_items") or [])[:12],
+            "promotion_allowed": False,
+        },
+        "oos_readiness_summary_v3": {
+            "available": bool(oos_readiness_summary_v3),
+            "classification": oos_readiness_summary_v3.get("classification"),
+            "available_probe_count": oos_readiness_summary_v3.get("available_probe_count"),
+            "sufficient_probe_count": oos_readiness_summary_v3.get("sufficient_probe_count"),
+            "promotion_allowed": False,
+        },
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
         "human_action_required": human_action_required,
