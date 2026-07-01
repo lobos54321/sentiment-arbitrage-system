@@ -724,6 +724,191 @@ def quality_timing_cluster_action(cluster):
     return actions.get(cluster, actions["other_quality_timing_reject"])
 
 
+def median_value(values):
+    nums = sorted(
+        safe_float(value)
+        for value in values
+        if safe_float(value) is not None
+    )
+    if not nums:
+        return None
+    mid = len(nums) // 2
+    if len(nums) % 2:
+        return nums[mid]
+    return round((nums[mid - 1] + nums[mid]) / 2, 6)
+
+
+def peak_lag_band(seconds):
+    value = safe_float(seconds)
+    if value is None:
+        return "unknown_peak_lag"
+    if value <= 60:
+        return "peak_within_60s"
+    if value <= 300:
+        return "peak_1m_to_5m"
+    if value <= 900:
+        return "peak_5m_to_15m"
+    return "peak_after_15m"
+
+
+def build_pending_momentum_decay_review(clusters, quality_timing, context_eligibility):
+    cluster_row = next(
+        (
+            row for row in clusters or []
+            if row.get("cluster") == "momentum_fading_or_negative_trend"
+        ),
+        {},
+    )
+    opportunities = {
+        row.get("cluster"): row
+        for row in ((quality_timing.get("shadow_only_review") or {}).get("top_research_opportunities") or [])
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    opportunity = opportunities.get("momentum_fading_or_negative_trend") or {}
+    examples = [
+        row for row in (quality_timing.get("top_examples") or [])
+        if isinstance(row, dict)
+        and (
+            row.get("shadow_review_cluster") == "momentum_fading_or_negative_trend"
+            or ((row.get("attribution") or {}).get("reason") in {"momentum_fading", "negative_trend"})
+        )
+    ]
+    example_peak_lags = [
+        row.get("time_to_sustained_peak_sec")
+        for row in examples
+        if safe_float(row.get("time_to_sustained_peak_sec")) is not None
+    ]
+    median_peak_lag = (
+        safe_float(opportunity.get("time_to_sustained_peak_sec_median"))
+        if opportunity.get("time_to_sustained_peak_sec_median") is not None
+        else median_value(example_peak_lags)
+    )
+    band_counts = Counter(peak_lag_band(value) for value in example_peak_lags)
+    if median_peak_lag is None:
+        recheck_window = "PEAK_LAG_EVIDENCE_INCOMPLETE"
+        next_action = "collect_pending_momentum_decay_peak_lag_examples"
+    elif median_peak_lag > 300:
+        recheck_window = "RECHECK_WINDOW_EXISTS_BEFORE_SUSTAINED_PEAK"
+        next_action = "validate_pending_momentum_decay_recheck_window_shadow_only"
+    elif median_peak_lag > 60:
+        recheck_window = "SHORT_RECHECK_WINDOW_BEFORE_SUSTAINED_PEAK"
+        next_action = "validate_short_pending_momentum_decay_recheck_window_shadow_only"
+    else:
+        recheck_window = "LIKELY_TOO_LATE_FOR_RECHECK"
+        next_action = "monitor_momentum_decay_rejects_without_policy_change"
+
+    top_candidates = (opportunity.get("top_candidates") or cluster_row.get("top_candidates") or [])
+    top_families = Counter(
+        str(row.get("family") or "unknown")
+        for row in top_candidates
+        if isinstance(row, dict)
+    )
+    selected_probes = []
+    base_evidence = {
+        "cluster": "momentum_fading_or_negative_trend",
+        "event_count": safe_int(cluster_row.get("event_count") or opportunity.get("event_count"), 0),
+        "time_to_sustained_peak_sec_median": median_peak_lag,
+        "recheck_window_classification": recheck_window,
+    }
+    if recheck_window in {
+        "RECHECK_WINDOW_EXISTS_BEFORE_SUSTAINED_PEAK",
+        "SHORT_RECHECK_WINDOW_BEFORE_SUSTAINED_PEAK",
+    }:
+        selected_probes.append({
+            "probe_id": "pending_momentum_decay:timeboxed_recheck_window",
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_entry_ts",
+                "momentum_decay_reason",
+                "recheck_ts",
+                "time_to_sustained_peak_sec",
+            ],
+            "next_action": "track_timeboxed_momentum_decay_recheck_shadow_only",
+            "evidence": base_evidence,
+        })
+    if top_families.get("kline"):
+        selected_probes.append({
+            "probe_id": "pending_momentum_decay:kline_confirmation_recheck",
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_entry_ts",
+                "momentum_decay_reason",
+                "kline_candidate_id",
+                "feature_available_at_ts",
+            ],
+            "next_action": "track_kline_confirmed_momentum_decay_recheck_shadow_only",
+            "evidence": {**base_evidence, "kline_candidate_family_count": top_families.get("kline")},
+        })
+    if top_families.get("entry_mode_registry"):
+        selected_probes.append({
+            "probe_id": "pending_momentum_decay:entry_mode_registry_recheck",
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_entry_ts",
+                "momentum_decay_reason",
+                "entry_mode_candidate_id",
+                "lifecycle_profile",
+            ],
+            "next_action": "track_entry_mode_momentum_decay_recheck_shadow_only",
+            "evidence": {
+                **base_evidence,
+                "entry_mode_registry_candidate_family_count": top_families.get("entry_mode_registry"),
+            },
+        })
+
+    for probe in selected_probes:
+        probe.update({
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "human_approval_required_if_fix_requires": (
+                "changing momentum/trend thresholds, entry policy, final_entry_contract, "
+                "A_CLASS mode, executor, paper enablement, or risk"
+            ),
+        })
+
+    return {
+        "schema_version": "pending_momentum_decay_review.v1",
+        "report_type": "pending_momentum_decay_review",
+        "evidence_level": "discovery_same_window_shadow_timing_attribution",
+        "cluster": "momentum_fading_or_negative_trend",
+        "event_count": base_evidence["event_count"],
+        "unique_tokens": opportunity.get("unique_tokens"),
+        "share_of_raw_all_gold_silver": opportunity.get("share_of_raw_all_gold_silver"),
+        "share_of_quality_timing_rejects": opportunity.get("share_of_quality_timing_rejects"),
+        "time_to_sustained_peak_sec_median": median_peak_lag,
+        "max_sustained_peak_pct_max": opportunity.get("max_sustained_peak_pct_max"),
+        "example_count": len(examples),
+        "example_peak_lag_band_counts": dict(band_counts),
+        "recheck_window_classification": recheck_window,
+        "top_candidates": top_candidates[:12],
+        "top_families": [
+            {"family": family, "count": count}
+            for family, count in top_families.most_common()
+        ],
+        "top_lifecycle_source_contexts": (
+            opportunity.get("top_lifecycle_source_contexts")
+            or cluster_row.get("top_lifecycle_source_contexts")
+            or []
+        )[:8],
+        "context_blockers": quality_timing_context_blockers(opportunity, context_eligibility)
+        if opportunity
+        else [],
+        "selected_shadow_probes": selected_probes,
+        "next_action": next_action,
+        "interpretation": (
+            "This only identifies whether momentum-fading gold/silver misses had a possible shadow recheck window. "
+            "It does not prove the original momentum/trend reject was wrong or safe to trade."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_stale_before_final_review(pending_audit, reports, context_eligibility):
     """Decompose the stale/timing pending->final bucket using read-only QT evidence."""
 
@@ -832,6 +1017,11 @@ def build_stale_before_final_review(pending_audit, reports, context_eligibility)
         if len(examples) >= 8:
             break
 
+    momentum_decay_review = build_pending_momentum_decay_review(
+        clusters,
+        quality_timing,
+        context_eligibility,
+    )
     return {
         "schema_version": "pending_to_final_stale_before_final_review.v1",
         "report_type": "pending_to_final_stale_before_final_review",
@@ -847,8 +1037,11 @@ def build_stale_before_final_review(pending_audit, reports, context_eligibility)
         "selected_upper_bound_event_count": cumulative,
         "covers_stale_before_final_upper_bound": cumulative >= stale_count if stale_count else True,
         "top_examples": examples,
+        "momentum_decay_review": momentum_decay_review,
         "next_action": (
-            selected[0]["next_action"]
+            momentum_decay_review.get("next_action")
+            if momentum_decay_review.get("event_count")
+            else selected[0]["next_action"]
             if selected
             else "continue_pending_stale_before_final_monitoring"
         ),
@@ -1574,12 +1767,13 @@ def improvement_queue_priority(item):
         "quality_timing_reject_cluster": 0,
         "quality_timing_candidate_probe": 1,
         "pending_to_final_stale_before_final_cluster": 2,
-        "pending_to_final_transition_dropoff_category": 3,
-        "filtered_winner_dossier": 4,
-        "strategy_memory_missing_shadow_candidate": 5,
-        "clean_2d_capture_cross_slice": 6,
-        "derive_context_filtered_shadow_candidate": 7,
-        "refine_potential_entry_hypothesis_with_context": 8,
+        "pending_momentum_decay_shadow_probe": 3,
+        "pending_to_final_transition_dropoff_category": 4,
+        "filtered_winner_dossier": 5,
+        "strategy_memory_missing_shadow_candidate": 6,
+        "clean_2d_capture_cross_slice": 7,
+        "derive_context_filtered_shadow_candidate": 8,
+        "refine_potential_entry_hypothesis_with_context": 9,
     }
     stage_priority = {
         "pass_allow_capture": 0,
@@ -1758,6 +1952,29 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
                     "adjacent_count_loss_pending_to_final"
                 ),
             },
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "next_action": row.get("next_action"),
+        })
+    momentum_decay_review = stale_review.get("momentum_decay_review") or {}
+    for row in momentum_decay_review.get("selected_shadow_probes") or []:
+        if not isinstance(row, dict):
+            continue
+        probe_id = row.get("probe_id")
+        items.append({
+            "candidate_id": probe_id,
+            "hypothesis_source": "pending_momentum_decay_shadow_probe",
+            "expected_capture_stage_improved": row.get("expected_capture_stage_improved") or "final_eligibility",
+            "required_features": row.get("required_features") or [],
+            "time_legal_status": "shadow_recheck_window_time_legal_not_proven",
+            "context_blockers": momentum_decay_review.get("context_blockers") or [],
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "evidence": row.get("evidence") or {},
             "human_approval_required_if_fix_requires": row.get(
                 "human_approval_required_if_fix_requires"
             ),
@@ -2157,7 +2374,16 @@ def create_self_test_run(root):
                     "share_of_raw_all_gold_silver": 0.2,
                     "unique_tokens": 1,
                     "candidate_matched_any_rate": 1.0,
+                    "time_to_sustained_peak_sec_median": 795,
                     "stage_counts": [{"stage": "pending_without_final_entry_contract", "count": 1}],
+                    "top_candidates": [
+                        {"candidate_id": "kline:first_bar_return_filters", "family": "kline", "count": 1},
+                        {
+                            "candidate_id": "entry_mode_registry:smart_entry_pullback_bounce",
+                            "family": "entry_mode_registry",
+                            "count": 1,
+                        },
+                    ],
                     "top_lifecycle_source_contexts": [
                         {
                             "lifecycle_profile": "FIRST_PUMP:PROBE",
@@ -2281,6 +2507,10 @@ def self_test():
         assert stale_review["promotion_allowed"] is False
         assert stale_review["stale_before_final_event_count"] == 1
         assert stale_review["selected_clusters_to_cover_stale_before_final_upper_bound"][0]["cluster"] == "momentum_fading_or_negative_trend"
+        momentum_review = stale_review["momentum_decay_review"]
+        assert momentum_review["promotion_allowed"] is False
+        assert momentum_review["recheck_window_classification"] == "RECHECK_WINDOW_EXISTS_BEFORE_SUSTAINED_PEAK"
+        assert len(momentum_review["selected_shadow_probes"]) == 3
         strategy = load_json(run_dir / "strategy_memory_capture_validation.json")
         assert strategy["promotion_allowed"] is False
         assert strategy["hypotheses_count"] == 1
@@ -2289,6 +2519,7 @@ def self_test():
         assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
         assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
+        assert queue["source_counts"]["pending_momentum_decay_shadow_probe"] == 3
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
         assert queue["top_opportunities"] == queue["top_items"]
         assert any(
@@ -2305,6 +2536,12 @@ def self_test():
         assert any(
             item.get("candidate_id") == "pending_to_final_stale:momentum_fading_or_negative_trend"
             and item.get("expected_capture_stage_improved") == "final_eligibility"
+            and item.get("promotion_allowed") is False
+            for item in queue["top_items"]
+        )
+        assert any(
+            item.get("candidate_id") == "pending_momentum_decay:timeboxed_recheck_window"
+            and item.get("hypothesis_source") == "pending_momentum_decay_shadow_probe"
             and item.get("promotion_allowed") is False
             for item in queue["top_items"]
         )
