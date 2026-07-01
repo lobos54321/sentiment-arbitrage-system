@@ -96,6 +96,7 @@ DERIVED_READINESS_SIBLINGS = {
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
+    "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
     "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
     "strategy_memory_validation": "strategy_memory_validation_24h.json",
@@ -1198,6 +1199,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
+    decision_no_pass_watch_validation = (
+        readiness_reports.get("decision_no_pass_quality_timing_watch_validation") or {}
+    )
     pending_momentum_decay_validation = readiness_reports.get("pending_momentum_decay_recheck_validation") or {}
     strategy_memory_ingestion = readiness_reports.get("strategy_memory_ingestion_summary") or {}
     strategy_memory_validation = readiness_reports.get("strategy_memory_validation") or {}
@@ -2100,6 +2104,23 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "top_repeated_probes": (
                 quality_timing_probe_validation.get("top_repeated_probes") or []
+            )[:10],
+        },
+        "decision_no_pass_quality_timing_watch_validation": {
+            "available": bool(decision_no_pass_watch_validation),
+            "classification": decision_no_pass_watch_validation.get("classification"),
+            "next_action": decision_no_pass_watch_validation.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": decision_no_pass_watch_validation.get("denominator") or {},
+            "status_counts": decision_no_pass_watch_validation.get("status_counts") or {},
+            "oos_readiness_queue": (
+                decision_no_pass_watch_validation.get("oos_readiness_queue") or {}
+            ),
+            "top_repeated_clusters": (
+                decision_no_pass_watch_validation.get("top_repeated_clusters") or []
             )[:10],
         },
         "pending_momentum_decay_recheck_validation": {

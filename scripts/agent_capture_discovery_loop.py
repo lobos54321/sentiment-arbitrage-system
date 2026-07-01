@@ -2426,6 +2426,224 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
     }
 
 
+def build_decision_no_pass_quality_timing_watch_validation(registry, decision_no_pass_review):
+    """Validate registered decision-no-pass timing clusters against current v3 review.
+
+    This sits one layer above candidate-level quality/timing probes. It tracks
+    whether the pass/allow gap clusters selected by ``capture_60_target_loop``
+    remain visible in the latest same-window report. Repeated clusters can be
+    held for clean-window/OOS review, but this artifact never authorizes
+    strategy, policy, gate, A_CLASS, executor, paper, or risk changes.
+    """
+    registry = registry or {}
+    decision_no_pass_review = decision_no_pass_review or {}
+    watches = list(registry.get("shadow_only_decision_no_pass_quality_timing_watch") or [])
+    current_clusters = {
+        row.get("cluster"): row
+        for row in (decision_no_pass_review.get("clusters") or [])
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    selected_clusters = {
+        row.get("cluster"): row
+        for row in (
+            decision_no_pass_review.get(
+                "selected_clusters_to_cover_current_pass_allow_gap_upper_bound"
+            )
+            or []
+        )
+        if isinstance(row, dict) and row.get("cluster")
+    }
+
+    rows = []
+    for watch in watches:
+        definition = watch.get("definition") or {}
+        cluster = definition.get("cluster")
+        current = current_clusters.get(cluster) or {}
+        selected = selected_clusters.get(cluster) or {}
+        status = "NOT_OBSERVED_CURRENT_WINDOW"
+        if selected:
+            status = "REPEATED_SELECTED_CLUSTER"
+        elif current:
+            status = "CLUSTER_REPEATED_NOT_SELECTED"
+        rows.append({
+            "hypothesis_id": watch.get("hypothesis_id"),
+            "status": status,
+            "scope": "shadow_only_decision_no_pass_quality_timing_cluster",
+            "evidence_level": "discovery_same_window_cluster_validation",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "definition": {
+                "cluster": cluster,
+                "stage": definition.get("stage") or "decision_no_pass_or_allow",
+                "suggested_shadow_only_action": definition.get("suggested_shadow_only_action"),
+            },
+            "current_window": {
+                "cluster_repeated": bool(current),
+                "cluster_selected_for_pass_allow_gap": bool(selected),
+                "decision_no_pass_event_count": current.get("decision_no_pass_event_count"),
+                "events_contributing_to_gap_upper_bound": (
+                    selected.get("events_contributing_to_gap_upper_bound")
+                ),
+                "cumulative_events_contributing_to_gap_upper_bound": (
+                    selected.get("cumulative_events_contributing_to_gap_upper_bound")
+                ),
+                "share_of_raw_gold_silver": current.get("share_of_raw_gold_silver"),
+                "share_of_current_pass_allow_gap_upper_bound": (
+                    current.get("share_of_current_pass_allow_gap_upper_bound")
+                ),
+                "unique_tokens": current.get("unique_tokens"),
+                "candidate_matched_any_rate": current.get("candidate_matched_any_rate"),
+                "max_sustained_peak_pct_max": current.get("max_sustained_peak_pct_max"),
+                "time_to_sustained_peak_sec_median": (
+                    current.get("time_to_sustained_peak_sec_median")
+                ),
+                "context_blockers": current.get("context_blockers") or [],
+            },
+            "next_validation": (
+                "continue_shadow_only_cluster_tracking_until_clean_window_then_oos"
+            ),
+        })
+
+    status_counts = Counter(row.get("status") for row in rows)
+    repeated_rows = [
+        row for row in rows
+        if row.get("status") == "REPEATED_SELECTED_CLUSTER"
+    ]
+    shifted_rows = [
+        row for row in rows
+        if row.get("status") == "CLUSTER_REPEATED_NOT_SELECTED"
+    ]
+    repeated_rows = sorted(
+        repeated_rows,
+        key=lambda row: (
+            safe_int((row.get("current_window") or {}).get("decision_no_pass_event_count"), 0),
+            safe_int((row.get("current_window") or {}).get("unique_tokens"), 0),
+        ),
+        reverse=True,
+    )
+    if not watches:
+        classification = "NO_REGISTERED_DECISION_NO_PASS_QUALITY_TIMING_WATCH"
+        next_action = "register_selected_decision_no_pass_quality_timing_clusters_from_current_review"
+    elif repeated_rows:
+        classification = "DECISION_NO_PASS_QUALITY_TIMING_WATCH_REPEATED_SAME_WINDOW"
+        next_action = "continue_cluster_tracking_until_clean_window_then_oos"
+    elif shifted_rows:
+        classification = "DECISION_NO_PASS_QUALITY_TIMING_CLUSTERS_REPEATED_NOT_SELECTED"
+        next_action = "refresh_selected_cluster_watch_if_pass_allow_gap_shifted"
+    else:
+        classification = "DECISION_NO_PASS_QUALITY_TIMING_WATCH_NOT_REPEATED_CURRENT_WINDOW"
+        next_action = "continue_monitoring_registered_decision_no_pass_quality_timing_watch"
+
+    denominator = {
+        "registered_watch_count": len(watches),
+        "current_cluster_count": len(current_clusters),
+        "current_selected_cluster_count": len(selected_clusters),
+        "validated_watch_count": len(rows),
+        "repeated_selected_cluster_count": status_counts.get("REPEATED_SELECTED_CLUSTER", 0),
+        "cluster_repeated_not_selected_count": status_counts.get(
+            "CLUSTER_REPEATED_NOT_SELECTED",
+            0,
+        ),
+        "not_observed_current_window_count": status_counts.get(
+            "NOT_OBSERVED_CURRENT_WINDOW",
+            0,
+        ),
+        "repeated_selected_cluster_rate": safe_rate(
+            status_counts.get("REPEATED_SELECTED_CLUSTER", 0),
+            len(watches),
+        ),
+    }
+    oos_items = []
+    for row in repeated_rows:
+        definition = row.get("definition") or {}
+        current_window = row.get("current_window") or {}
+        oos_items.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+            "scope": "shadow_only_decision_no_pass_quality_timing_cluster",
+            "cluster": definition.get("cluster"),
+            "stage": definition.get("stage"),
+            "current_window": {
+                "decision_no_pass_event_count": (
+                    current_window.get("decision_no_pass_event_count")
+                ),
+                "events_contributing_to_gap_upper_bound": (
+                    current_window.get("events_contributing_to_gap_upper_bound")
+                ),
+                "share_of_current_pass_allow_gap_upper_bound": (
+                    current_window.get("share_of_current_pass_allow_gap_upper_bound")
+                ),
+                "unique_tokens": current_window.get("unique_tokens"),
+                "candidate_matched_any_rate": current_window.get("candidate_matched_any_rate"),
+                "max_sustained_peak_pct_max": current_window.get("max_sustained_peak_pct_max"),
+                "time_to_sustained_peak_sec_median": (
+                    current_window.get("time_to_sustained_peak_sec_median")
+                ),
+                "context_blockers": current_window.get("context_blockers") or [],
+            },
+            "readiness_gates": {
+                "same_window_repeated": True,
+                "context_clean_window_required": True,
+                "non_overlapping_oos_required": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "next_action": "evaluate_cluster_in_next_clean_non_overlapping_window",
+        })
+
+    return {
+        "schema_version": "decision_no_pass_quality_timing_watch_validation.v1",
+        "report_type": "decision_no_pass_quality_timing_watch_validation_24h",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window_cluster_validation",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "registered_watch_count": denominator["registered_watch_count"],
+        "current_cluster_count": denominator["current_cluster_count"],
+        "current_selected_cluster_count": denominator["current_selected_cluster_count"],
+        "validated_watch_count": denominator["validated_watch_count"],
+        "repeated_selected_cluster_count": denominator["repeated_selected_cluster_count"],
+        "repeated_selected_cluster_rate": denominator["repeated_selected_cluster_rate"],
+        "denominator": denominator,
+        "status_counts": dict(status_counts),
+        "oos_readiness_queue": {
+            "classification": (
+                "DECISION_NO_PASS_QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+                if oos_items
+                else "DECISION_NO_PASS_QUALITY_TIMING_OOS_QUEUE_EMPTY"
+            ),
+            "queue_count": len(oos_items),
+            "pending_clean_window_count": len(oos_items),
+            "ready_for_runtime_change_count": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "items": oos_items[:12],
+            "notes": [
+                "Queue is read-only and shadow-only.",
+                "Repeated decision-no-pass clusters are pass/allow gap evidence, not promotion evidence.",
+                "This queue does not authorize strategy, gate, A_CLASS, executor, paper, or risk changes.",
+            ],
+        },
+        "top_repeated_clusters": repeated_rows[:12],
+        "watch_validations": rows,
+        "notes": [
+            "Read-only validation of selected pass/allow gap quality/timing clusters.",
+            "Repeated same-window clusters must wait for clean-window and non-overlapping OOS validation.",
+        ],
+    }
+
+
 def compact_pending_momentum_decay_probe(row):
     probe_id = row.get("probe_id")
     return {
@@ -3524,6 +3742,9 @@ def write_materialized_artifacts(
     quality_timing_probe_validation_path = (
         run_dir / f"quality_timing_candidate_probe_validation_{int(args.hours)}h.json"
     )
+    decision_no_pass_watch_validation_path = (
+        run_dir / f"decision_no_pass_quality_timing_watch_validation_{int(args.hours)}h.json"
+    )
     pending_momentum_decay_validation_path = (
         run_dir / f"pending_momentum_decay_recheck_validation_{int(args.hours)}h.json"
     )
@@ -3537,11 +3758,30 @@ def write_materialized_artifacts(
                 return {}
         return {}
 
+    def load_decision_no_pass_review():
+        decision_path = readiness_paths.get("decision_no_pass_quality_timing_review")
+        if decision_path and Path(decision_path).exists():
+            try:
+                return load_json(decision_path)
+            except Exception:
+                return {}
+        return {}
+
     write_json(
         quality_timing_probe_validation_path,
         build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
     )
     readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+    write_json(
+        decision_no_pass_watch_validation_path,
+        build_decision_no_pass_quality_timing_watch_validation(
+            registry,
+            load_decision_no_pass_review(),
+        ),
+    )
+    readiness_paths["decision_no_pass_quality_timing_watch_validation"] = (
+        decision_no_pass_watch_validation_path
+    )
     write_json(
         pending_momentum_decay_validation_path,
         build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
@@ -3592,6 +3832,16 @@ def write_materialized_artifacts(
             build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
         )
         readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+        write_json(
+            decision_no_pass_watch_validation_path,
+            build_decision_no_pass_quality_timing_watch_validation(
+                registry,
+                load_decision_no_pass_review(),
+            ),
+        )
+        readiness_paths["decision_no_pass_quality_timing_watch_validation"] = (
+            decision_no_pass_watch_validation_path
+        )
         write_json(
             pending_momentum_decay_validation_path,
             build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
@@ -4214,6 +4464,7 @@ def self_test():
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
             "quality_timing_candidate_probe_validation_24h.json",
+            "decision_no_pass_quality_timing_watch_validation_24h.json",
             "pending_momentum_decay_recheck_validation_24h.json",
             "strategy_memory_ingestion_summary.json",
             "strategy_memory_validation_24h.json",
@@ -4278,6 +4529,17 @@ def self_test():
         assert quality_probe_validation["oos_readiness_queue"]["promotion_allowed"] is False
         assert quality_probe_validation["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
         assert "probe_validations" in quality_probe_validation
+        decision_watch_validation = load_json(
+            latest_dir / "decision_no_pass_quality_timing_watch_validation_24h.json"
+        )
+        assert decision_watch_validation["promotion_allowed"] is False
+        assert decision_watch_validation["strategy_change_allowed"] is False
+        assert decision_watch_validation["automatic_runtime_change_allowed"] is False
+        assert decision_watch_validation["paper_enablement_allowed"] is False
+        assert "denominator" in decision_watch_validation
+        assert "watch_validations" in decision_watch_validation
+        assert "oos_readiness_queue" in decision_watch_validation
+        assert decision_watch_validation["oos_readiness_queue"]["promotion_allowed"] is False
         pending_momentum_validation = load_json(latest_dir / "pending_momentum_decay_recheck_validation_24h.json")
         assert pending_momentum_validation["promotion_allowed"] is False
         assert pending_momentum_validation["strategy_change_allowed"] is False

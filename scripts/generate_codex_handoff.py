@@ -681,6 +681,36 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    decision_no_pass_watch_validation = verdict.get("decision_no_pass_quality_timing_watch_validation") or {}
+    if decision_no_pass_watch_validation:
+        lines.extend([
+            "## Decision No-Pass Quality / Timing Watch Validation",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": decision_no_pass_watch_validation.get("available"),
+                    "classification": decision_no_pass_watch_validation.get("classification"),
+                    "next_action": decision_no_pass_watch_validation.get("next_action"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "denominator": decision_no_pass_watch_validation.get("denominator") or {},
+                    "status_counts": decision_no_pass_watch_validation.get("status_counts") or {},
+                    "oos_readiness_queue": (
+                        decision_no_pass_watch_validation.get("oos_readiness_queue") or {}
+                    ),
+                    "top_repeated_clusters": (
+                        decision_no_pass_watch_validation.get("top_repeated_clusters") or []
+                    )[:8],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     pending_momentum_decay_validation = verdict.get("pending_momentum_decay_recheck_validation") or {}
     if pending_momentum_decay_validation:
         lines.extend([
@@ -785,6 +815,7 @@ def build_handoff(verdict):
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
+                "decision_no_pass_quality_timing_watch_validation": verdict.get("decision_no_pass_quality_timing_watch_validation") or {},
                 "pending_momentum_decay_recheck_validation": verdict.get("pending_momentum_decay_recheck_validation") or {},
                 "quality_timing_shadow_review_queue": verdict.get("quality_timing_shadow_review_queue") or {},
                 "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
