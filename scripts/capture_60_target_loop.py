@@ -1845,9 +1845,19 @@ def build_pass_allow_60_closure_plan(
 
     capture_cross = reports.get("capture_cross") or {}
     clean_dimension_groups = set(context_eligibility.get("clean_dimensions") or [])
+    blocked_dimension_groups = set(context_eligibility.get("blocked_dimensions") or [])
     allowed_dimension_statuses = {"CLEAN", "CORE_METADATA_ALLOWED"}
     clean_cross_items = []
     blocked_cross_items = []
+    def canonical_dimension_group(dimension, dimension_group):
+        if dimension_group:
+            return dimension_group
+        if dimension == "volume_profile":
+            return "volume"
+        if dimension in {"candle_pattern", "fbr_time_legal", "kline_available", "kline_coverage"}:
+            return "kline"
+        return dimension
+
     for row in capture_cross.get("valid_top_crosses") or []:
         if not isinstance(row, dict):
             continue
@@ -1857,16 +1867,30 @@ def build_pass_allow_60_closure_plan(
         if pass_allow_lift <= 0:
             continue
         dimension = row.get("dimension")
-        dimension_group = row.get("dimension_group") or dimension
+        dimension_group = canonical_dimension_group(dimension, row.get("dimension_group"))
         dimension_status = row.get("dimension_eligibility_status")
         data_blockers = row.get("data_blockers") or []
         invalid_reasons = row.get("invalid_reasons") or []
+        globally_blocked = dimension_group in blocked_dimension_groups
         dimension_allowed = (
-            dimension_status in allowed_dimension_statuses
-            or (dimension_group in clean_dimension_groups and not dimension_status)
-            or dimension_group in clean_dimension_groups
+            not globally_blocked
+            and (
+                dimension_status in allowed_dimension_statuses
+                or (dimension_group in clean_dimension_groups and not dimension_status)
+                or dimension_group in clean_dimension_groups
+            )
         )
         if data_blockers or invalid_reasons or not dimension_allowed:
+            context_blockers = (
+                data_blockers
+                or invalid_reasons
+                or [f"{dimension_group or dimension or 'dimension'}_not_clean_for_capture_cross"]
+            )
+            if globally_blocked:
+                context_blockers = sorted(set(
+                    context_blockers
+                    + [f"{dimension_group}_blocked_by_context_dimension_eligibility"]
+                ))
             blocked_cross_items.append({
                 "plan_item_id": (
                     f"blocked_2d_research:{row.get('candidate_id')}:{dimension}={row.get('slice_value')}"
@@ -1883,11 +1907,7 @@ def build_pass_allow_60_closure_plan(
                 "pass_allow_lift": row.get("pass_allow_lift"),
                 "data_blockers": data_blockers,
                 "invalid_reasons": invalid_reasons,
-                "context_blockers": (
-                    data_blockers
-                    or invalid_reasons
-                    or [f"{dimension_group or dimension or 'dimension'}_not_clean_for_capture_cross"]
-                ),
+                "context_blockers": context_blockers,
                 "status": "RESEARCH_ONLY_CONTEXT_BLOCKED",
                 "excluded_from_residual_gap_coverage": True,
                 "promotion_allowed": False,
@@ -3594,7 +3614,7 @@ def create_self_test_run(root):
                 "candidate_id": "kline:active_mom20_first3",
                 "dimension": "volume_profile",
                 "dimension_group": "volume",
-                "dimension_eligibility_status": "BLOCKED_UNKNOWN",
+                "dimension_eligibility_status": "CLEAN",
                 "slice_value": "mixed",
                 "judgment": "WATCH",
                 "matched_gold_silver_events": 9,
