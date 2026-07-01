@@ -1844,27 +1844,68 @@ def build_pass_allow_60_closure_plan(
         })
 
     capture_cross = reports.get("capture_cross") or {}
+    clean_dimension_groups = set(context_eligibility.get("clean_dimensions") or [])
+    allowed_dimension_statuses = {"CLEAN", "CORE_METADATA_ALLOWED"}
     clean_cross_items = []
+    blocked_cross_items = []
     for row in capture_cross.get("valid_top_crosses") or []:
         if not isinstance(row, dict):
-            continue
-        if row.get("data_blockers") or row.get("invalid_reasons"):
             continue
         if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
             continue
         pass_allow_lift = safe_float(row.get("pass_allow_lift"), 0.0)
         if pass_allow_lift <= 0:
             continue
+        dimension = row.get("dimension")
+        dimension_group = row.get("dimension_group") or dimension
+        dimension_status = row.get("dimension_eligibility_status")
+        data_blockers = row.get("data_blockers") or []
+        invalid_reasons = row.get("invalid_reasons") or []
+        dimension_allowed = (
+            dimension_status in allowed_dimension_statuses
+            or (dimension_group in clean_dimension_groups and not dimension_status)
+            or dimension_group in clean_dimension_groups
+        )
+        if data_blockers or invalid_reasons or not dimension_allowed:
+            blocked_cross_items.append({
+                "plan_item_id": (
+                    f"blocked_2d_research:{row.get('candidate_id')}:{dimension}={row.get('slice_value')}"
+                ),
+                "evidence_source": "capture_cross_validity_24h",
+                "candidate_id": row.get("candidate_id"),
+                "family": row.get("family"),
+                "dimension": dimension,
+                "dimension_group": dimension_group,
+                "dimension_eligibility_status": dimension_status,
+                "slice_value": row.get("slice_value"),
+                "judgment": row.get("judgment"),
+                "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+                "pass_allow_lift": row.get("pass_allow_lift"),
+                "data_blockers": data_blockers,
+                "invalid_reasons": invalid_reasons,
+                "context_blockers": (
+                    data_blockers
+                    or invalid_reasons
+                    or [f"{dimension_group or dimension or 'dimension'}_not_clean_for_capture_cross"]
+                ),
+                "status": "RESEARCH_ONLY_CONTEXT_BLOCKED",
+                "excluded_from_residual_gap_coverage": True,
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            })
+            continue
         clean_cross_items.append({
             "plan_item_id": (
-                f"clean_2d:{row.get('candidate_id')}:{row.get('dimension')}={row.get('slice_value')}"
+                f"clean_2d:{row.get('candidate_id')}:{dimension}={row.get('slice_value')}"
             ),
             "evidence_source": "capture_cross_validity_24h",
             "candidate_id": row.get("candidate_id"),
             "family": row.get("family"),
-            "dimension": row.get("dimension"),
-            "dimension_group": row.get("dimension_group"),
-            "dimension_eligibility_status": row.get("dimension_eligibility_status"),
+            "dimension": dimension,
+            "dimension_group": dimension_group,
+            "dimension_eligibility_status": dimension_status,
             "slice_value": row.get("slice_value"),
             "judgment": row.get("judgment"),
             "matched_gold_silver_events": row.get("matched_gold_silver_events"),
@@ -1904,6 +1945,14 @@ def build_pass_allow_60_closure_plan(
         ),
         reverse=True,
     )[:20]
+    blocked_cross_items = sorted(
+        blocked_cross_items,
+        key=lambda row: (
+            safe_float(row.get("pass_allow_lift"), 0.0),
+            safe_float(row.get("matched_gold_silver_events"), 0.0),
+        ),
+        reverse=True,
+    )[:20]
 
     shadow_pass_allow_items = []
     for row in shadow_queue.get("top_items") or shadow_queue.get("top_opportunities") or []:
@@ -1940,6 +1989,10 @@ def build_pass_allow_60_closure_plan(
         safe_int(row.get("matched_gold_silver_events"), 0)
         for row in clean_cross_items
     )
+    blocked_2d_research_non_dedup_upper_bound = sum(
+        safe_int(row.get("matched_gold_silver_events"), 0)
+        for row in blocked_cross_items
+    )
     clean_2d_max_single_slice = max(
         [safe_int(row.get("matched_gold_silver_events"), 0) for row in clean_cross_items] or [0]
     )
@@ -1971,6 +2024,25 @@ def build_pass_allow_60_closure_plan(
                 "downstream_lift_scope": row.get("downstream_lift_scope"),
             }
             for row in clean_cross_items[:5]
+        ],
+        "blocked_2d_research_slice_count": len(blocked_cross_items),
+        "blocked_2d_research_non_dedup_upper_bound_event_count": (
+            blocked_2d_research_non_dedup_upper_bound
+        ),
+        "blocked_2d_research_upper_bound_excluded_from_residual": True,
+        "blocked_2d_research_top_items": [
+            {
+                "plan_item_id": row.get("plan_item_id"),
+                "candidate_id": row.get("candidate_id"),
+                "dimension": row.get("dimension"),
+                "dimension_group": row.get("dimension_group"),
+                "dimension_eligibility_status": row.get("dimension_eligibility_status"),
+                "slice_value": row.get("slice_value"),
+                "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+                "pass_allow_lift": row.get("pass_allow_lift"),
+                "context_blockers": row.get("context_blockers") or [],
+            }
+            for row in blocked_cross_items[:5]
         ],
         "shadow_queue_pass_allow_item_count": len(shadow_pass_allow_items),
         "shadow_queue_non_dedup_upper_bound_event_count": shadow_queue_non_dedup_upper_bound,
@@ -2013,10 +2085,12 @@ def build_pass_allow_60_closure_plan(
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
         "caveat": (
-            "Supplemental tracks are intentionally non-deduped upper bounds. They show where to "
-            "continue shadow-only/OOS collection for the residual pass_allow gap; they do not prove "
-            "runtime capture improvement and cannot justify strategy, gate, final_entry_contract, "
-            "A_CLASS, executor, paper/live, canary, or risk changes."
+            "Supplemental formal tracks are intentionally non-deduped upper bounds and include only "
+            "clean/core-metadata slices plus shadow queue items. Blocked volume/kline/context slices "
+            "are reported separately as research-only and are excluded from residual coverage. These "
+            "fields show where to continue shadow-only/OOS collection; they do not prove runtime "
+            "capture improvement and cannot justify strategy, gate, final_entry_contract, A_CLASS, "
+            "executor, paper/live, canary, or risk changes."
         ),
     }
 
@@ -2034,7 +2108,7 @@ def build_pass_allow_60_closure_plan(
         next_action = "continue_pass_allow_reason_decomposition"
 
     return {
-        "schema_version": "pass_allow_60_closure_plan.v3",
+        "schema_version": "pass_allow_60_closure_plan.v4",
         "report_type": "pass_allow_60_closure_plan",
         "generated_at": utc_now(),
         "phase": "discovery_readiness",
@@ -2079,6 +2153,15 @@ def build_pass_allow_60_closure_plan(
             "shadow_queue_pass_allow_items": {
                 "count": len(shadow_pass_allow_items),
                 "items": shadow_pass_allow_items,
+            },
+            "blocked_2d_pass_allow_lift_research_slices": {
+                "count": len(blocked_cross_items),
+                "items": blocked_cross_items,
+                "caveat": (
+                    "Research-only diagnostics for slices whose context dimension is blocked or whose "
+                    "row carries data blockers. These are excluded from formal residual gap coverage "
+                    "and cannot support OOS or promotion evidence until the dimension is clean."
+                ),
             },
         },
         "context_constraints": {
@@ -3506,6 +3589,17 @@ def create_self_test_run(root):
                 "final_entry_rate_after_match": 0.0,
                 "mode_adjusted_final_eligibility_rate_after_match": 0.0,
                 "match_precision_event": 0.3,
+            },
+            {
+                "candidate_id": "kline:active_mom20_first3",
+                "dimension": "volume_profile",
+                "dimension_group": "volume",
+                "dimension_eligibility_status": "BLOCKED_UNKNOWN",
+                "slice_value": "mixed",
+                "judgment": "WATCH",
+                "matched_gold_silver_events": 9,
+                "pass_allow_lift": 0.5,
+                "match_precision_event": 0.4,
             }
         ]
     }
@@ -3588,16 +3682,21 @@ def self_test():
         assert pass_allow_gap["promotion_allowed"] is False
         closure_plan = load_json(run_dir / "pass_allow_60_closure_plan.json")
         assert closure_plan["promotion_allowed"] is False
-        assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v3"
+        assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v4"
         assert closure_plan["classification"] == "PASS_ALLOW_60_CLOSURE_NOT_NEEDED"
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         residual_tracks = closure_plan["residual_gap_supplemental_tracks"]
         assert residual_tracks["residual_gap_after_selected_clusters"] == 0
         assert residual_tracks["clean_2d_pass_allow_lift_slice_count"] == 1
         assert residual_tracks["clean_2d_positive_pass_allow_lift_count"] == 1
+        assert residual_tracks["clean_2d_non_dedup_upper_bound_event_count"] == 3
+        assert residual_tracks["blocked_2d_research_slice_count"] == 1
+        assert residual_tracks["blocked_2d_research_non_dedup_upper_bound_event_count"] == 9
+        assert residual_tracks["blocked_2d_research_upper_bound_excluded_from_residual"] is True
         assert residual_tracks["supplemental_tracks_can_cover_residual_upper_bound"] is True
         assert residual_tracks["promotion_allowed"] is False
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
+        assert closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["count"] == 1
         clean_2d_item = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]
         assert clean_2d_item["pass_allow_lift"] == 0.25
         assert clean_2d_item["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id"
