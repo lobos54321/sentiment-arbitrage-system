@@ -364,6 +364,7 @@ def quote_window_pending_reconciliation(context_monitor):
     monitor_overall = context_monitor.get("overall_verdict") or {}
     monitor_task_b = (
         context_monitor.get("task_b_rolling_24h_quote_clean_window")
+        or context_monitor.get("task_b_clean_window_monitor")
         or context_monitor.get("task_b")
         or {}
     )
@@ -408,10 +409,15 @@ def context_failed_conditions(context, volume_kline, context_monitor=None):
     monitor_overall = context_monitor.get("overall_verdict") or {}
     monitor_task_b = (
         context_monitor.get("task_b_rolling_24h_quote_clean_window")
+        or context_monitor.get("task_b_clean_window_monitor")
         or context_monitor.get("task_b")
         or {}
     )
-    monitor_task_d = context_monitor.get("task_d_context_field_coverage_audit") or {}
+    monitor_task_d = (
+        context_monitor.get("task_d_context_field_coverage_audit")
+        or context_monitor.get("task_d")
+        or {}
+    )
     monitor_blockers = set(monitor_task_d.get("blockers") or [])
     quote_window_pending = monitor_overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING"
     quote_pending_reconciliation = quote_window_pending_reconciliation(context_monitor)
@@ -1362,12 +1368,22 @@ def build_report(args):
             "overall_verdict": context_monitor.get("overall_verdict") or {},
             "quote_clean_window": (
                 context_monitor.get("task_b_rolling_24h_quote_clean_window")
+                or context_monitor.get("task_b_clean_window_monitor")
                 or context_monitor.get("task_b")
                 or {}
             ),
             "quote_clean_window_reconciliation": quote_reconciliation,
-            "context_field_coverage": context_monitor.get("task_d_context_field_coverage_audit") or {},
-            "post_deploy_context_smoke": context_monitor.get("task_e_context_field_post_deploy_smoke") or {},
+            "context_field_coverage": (
+                context_monitor.get("task_d_context_field_coverage_audit")
+                or context_monitor.get("task_d")
+                or {}
+            ),
+            "post_deploy_context_smoke": (
+                context_monitor.get("task_e_context_field_post_deploy_smoke")
+                or context_monitor.get("task_e_post_deploy_context_field_smoke_test")
+                or context_monitor.get("task_e")
+                or {}
+            ),
         },
         "raw_funnel_snapshot": raw_snapshot,
         "capture_stage_rates": capture_stage_rates,
@@ -1700,6 +1716,35 @@ def self_test():
         assert "quote_clean_window_pending" in reconciled_conditions
         assert "source_component_clean_window_pending" in failed_conditions
         assert report["clean_window_monitor"]["quote_clean_window_reconciliation"]["reconciled"] is True
+        write_json(context_monitor_path, {
+            "overall_verdict": {
+                "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
+                "context_field_writer_fix": "VERIFIED_POST_DEPLOY",
+                "quote_writer_fix": "VERIFIED_POST_DEPLOY",
+            },
+            "task_b_clean_window_monitor": {
+                "estimated_clean_at_iso": "2030-01-01T00:00:00Z",
+                "pre_fix_rows_remaining": 10,
+                "post_fix_rows": 10,
+                "quote_coverage_rolling24": {
+                    "rows_scanned": 100,
+                    "source_quote_clean_present_rate": 1.0,
+                    "source_quote_executable_present_rate": 1.0,
+                    "source_quote_clean_missing_rows": 0,
+                    "source_quote_executable_missing_rows": 0,
+                },
+            },
+            "task_d_context_field_coverage_audit": {
+                "blockers": [
+                    "lifecycle_profile_coverage_below_80pct",
+                ]
+            },
+        })
+        report = build_report(args)
+        failed_conditions = {row["condition"] for row in report["clean_window_failed_conditions"]}
+        assert "quote_clean_window_pending" not in failed_conditions
+        assert "lifecycle_profile_clean_window_pending" in failed_conditions
+        assert report["clean_window_monitor"]["quote_clean_window_reconciliation"]["rows_scanned"] == 100
         args.context_blocker_monitor = None
         write_json(context_path, {"blockers": []})
         report = build_report(args)
