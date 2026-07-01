@@ -681,6 +681,39 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    pending_momentum_decay_validation = verdict.get("pending_momentum_decay_recheck_validation") or {}
+    if pending_momentum_decay_validation:
+        lines.extend([
+            "## Pending Momentum Decay Recheck Validation",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": pending_momentum_decay_validation.get("available"),
+                    "classification": pending_momentum_decay_validation.get("classification"),
+                    "next_action": pending_momentum_decay_validation.get("next_action"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "denominator": pending_momentum_decay_validation.get("denominator") or {},
+                    "status_counts": pending_momentum_decay_validation.get("status_counts") or {},
+                    "current_momentum_decay_review": (
+                        pending_momentum_decay_validation.get("current_momentum_decay_review") or {}
+                    ),
+                    "oos_readiness_queue": (
+                        pending_momentum_decay_validation.get("oos_readiness_queue") or {}
+                    ),
+                    "top_repeated_probes": (
+                        pending_momentum_decay_validation.get("top_repeated_probes") or []
+                    )[:8],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     strategy_memory = verdict.get("strategy_memory") or {}
     strategy_memory_ingestion = verdict.get("strategy_memory_ingestion_summary") or {}
     strategy_memory_validation = verdict.get("strategy_memory_validation") or {}
@@ -752,6 +785,7 @@ def build_handoff(verdict):
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
+                "pending_momentum_decay_recheck_validation": verdict.get("pending_momentum_decay_recheck_validation") or {},
                 "quality_timing_shadow_review_queue": verdict.get("quality_timing_shadow_review_queue") or {},
                 "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
                 "pass_allow_capture_gap_audit": verdict.get("pass_allow_capture_gap_audit") or {},

@@ -2426,6 +2426,231 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
     }
 
 
+def compact_pending_momentum_decay_probe(row):
+    probe_id = row.get("probe_id")
+    return {
+        "hypothesis_id": f"pending_momentum_decay_probe:{hypothesis_id_part(probe_id)}",
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_pending_momentum_decay_recheck_probe",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "definition": {
+            "probe_id": probe_id,
+            "cluster": ((row.get("evidence") or {}).get("cluster") or "momentum_fading_or_negative_trend"),
+            "expected_capture_stage_improved": row.get("expected_capture_stage_improved"),
+            "required_features": row.get("required_features") or [],
+        },
+        "latest_metrics": {
+            "event_count": (row.get("evidence") or {}).get("event_count"),
+            "time_to_sustained_peak_sec_median": (
+                (row.get("evidence") or {}).get("time_to_sustained_peak_sec_median")
+            ),
+            "recheck_window_classification": (
+                (row.get("evidence") or {}).get("recheck_window_classification")
+            ),
+        },
+        "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+        "next_validation": row.get("next_action")
+        or "validate_pending_momentum_decay_recheck_window_shadow_only",
+    }
+
+
+def build_pending_momentum_decay_probe_validation(registry, pending_to_final_audit):
+    """Validate registered pending momentum decay probes against current v3 audit.
+
+    This remains shadow-only timing attribution. A repeated recheck window can
+    feed OOS readiness, but it must not authorize threshold, policy, gate,
+    A_CLASS, executor, paper, or risk changes.
+    """
+    registry = registry or {}
+    pending_to_final_audit = pending_to_final_audit or {}
+    probes = list(registry.get("shadow_only_pending_momentum_decay_probes") or [])
+    stale_review = pending_to_final_audit.get("stale_before_final_review") or {}
+    momentum = stale_review.get("momentum_decay_review") or {}
+    current_probes = {
+        row.get("probe_id"): row
+        for row in (momentum.get("selected_shadow_probes") or [])
+        if isinstance(row, dict) and row.get("probe_id")
+    }
+    cluster_repeated = safe_int(momentum.get("event_count"), 0) > 0
+
+    rows = []
+    for probe in probes:
+        definition = probe.get("definition") or {}
+        probe_id = definition.get("probe_id")
+        current = current_probes.get(probe_id) or {}
+        status = "NOT_OBSERVED_CURRENT_WINDOW"
+        if current:
+            status = "REPEATED_SHADOW_PROBE"
+        elif cluster_repeated:
+            status = "CLUSTER_REPEATED_PROBE_NOT_SELECTED"
+        rows.append({
+            "hypothesis_id": probe.get("hypothesis_id"),
+            "status": status,
+            "scope": "shadow_only_pending_momentum_decay_recheck_probe",
+            "evidence_level": "discovery_same_window_probe_validation",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "definition": {
+                "probe_id": probe_id,
+                "cluster": definition.get("cluster"),
+                "expected_capture_stage_improved": definition.get("expected_capture_stage_improved"),
+                "required_features": definition.get("required_features") or [],
+            },
+            "current_window": {
+                "cluster_repeated": cluster_repeated,
+                "probe_repeated": bool(current),
+                "event_count": momentum.get("event_count"),
+                "unique_tokens": momentum.get("unique_tokens"),
+                "share_of_raw_all_gold_silver": momentum.get("share_of_raw_all_gold_silver"),
+                "share_of_quality_timing_rejects": momentum.get("share_of_quality_timing_rejects"),
+                "time_to_sustained_peak_sec_median": momentum.get("time_to_sustained_peak_sec_median"),
+                "max_sustained_peak_pct_max": momentum.get("max_sustained_peak_pct_max"),
+                "recheck_window_classification": momentum.get("recheck_window_classification"),
+                "example_peak_lag_band_counts": momentum.get("example_peak_lag_band_counts") or {},
+                "context_blockers": momentum.get("context_blockers") or [],
+            },
+            "next_validation": "continue_shadow_only_recheck_tracking_until_clean_window_then_oos",
+        })
+
+    status_counts = Counter(row.get("status") for row in rows)
+    repeated_rows = [row for row in rows if row.get("status") == "REPEATED_SHADOW_PROBE"]
+    if not probes:
+        classification = "NO_REGISTERED_PENDING_MOMENTUM_DECAY_PROBES"
+        next_action = "register_pending_momentum_decay_shadow_probes_from_current_audit"
+    elif repeated_rows:
+        classification = "PENDING_MOMENTUM_DECAY_PROBES_REPEATED_SAME_WINDOW"
+        next_action = "continue_shadow_probe_tracking_until_clean_window_then_oos"
+    elif cluster_repeated:
+        classification = "PENDING_MOMENTUM_DECAY_CLUSTER_REPEATED_PROBES_SHIFTED"
+        next_action = "refresh_pending_momentum_decay_shadow_probes_from_current_audit"
+    else:
+        classification = "PENDING_MOMENTUM_DECAY_PROBES_NOT_REPEATED_CURRENT_WINDOW"
+        next_action = "continue_monitoring_pending_momentum_decay_shadow_probes"
+
+    denominator = {
+        "registered_probe_count": len(probes),
+        "current_cluster_event_count": safe_int(momentum.get("event_count"), 0),
+        "current_cluster_unique_tokens": safe_int(momentum.get("unique_tokens"), 0),
+        "current_selected_probe_count": len(current_probes),
+        "validated_probe_count": len(rows),
+        "repeated_probe_count": status_counts.get("REPEATED_SHADOW_PROBE", 0),
+        "cluster_repeated_probe_not_selected_count": status_counts.get(
+            "CLUSTER_REPEATED_PROBE_NOT_SELECTED",
+            0,
+        ),
+        "not_observed_current_window_count": status_counts.get(
+            "NOT_OBSERVED_CURRENT_WINDOW",
+            0,
+        ),
+        "repeated_probe_rate": safe_rate(
+            status_counts.get("REPEATED_SHADOW_PROBE", 0),
+            len(probes),
+        ),
+    }
+    oos_items = []
+    for row in repeated_rows:
+        current_window = row.get("current_window") or {}
+        oos_items.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+            "scope": "shadow_only_pending_momentum_decay_recheck_probe",
+            "probe_id": (row.get("definition") or {}).get("probe_id"),
+            "cluster": (row.get("definition") or {}).get("cluster"),
+            "current_window": {
+                "event_count": current_window.get("event_count"),
+                "unique_tokens": current_window.get("unique_tokens"),
+                "time_to_sustained_peak_sec_median": (
+                    current_window.get("time_to_sustained_peak_sec_median")
+                ),
+                "recheck_window_classification": (
+                    current_window.get("recheck_window_classification")
+                ),
+                "share_of_raw_all_gold_silver": (
+                    current_window.get("share_of_raw_all_gold_silver")
+                ),
+                "share_of_quality_timing_rejects": (
+                    current_window.get("share_of_quality_timing_rejects")
+                ),
+            },
+            "readiness_gates": {
+                "same_window_repeated": True,
+                "context_clean_window_required": True,
+                "non_overlapping_oos_required": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "next_action": "evaluate_recheck_probe_in_next_clean_non_overlapping_window",
+        })
+
+    return {
+        "schema_version": "pending_momentum_decay_probe_validation.v1",
+        "report_type": "pending_momentum_decay_recheck_validation_24h",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window_probe_validation",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "registered_probe_count": denominator["registered_probe_count"],
+        "current_cluster_event_count": denominator["current_cluster_event_count"],
+        "current_cluster_unique_tokens": denominator["current_cluster_unique_tokens"],
+        "validated_probe_count": denominator["validated_probe_count"],
+        "repeated_probe_count": denominator["repeated_probe_count"],
+        "repeated_probe_rate": denominator["repeated_probe_rate"],
+        "denominator": denominator,
+        "status_counts": dict(status_counts),
+        "current_momentum_decay_review": {
+            key: momentum.get(key)
+            for key in (
+                "event_count",
+                "unique_tokens",
+                "share_of_raw_all_gold_silver",
+                "share_of_quality_timing_rejects",
+                "time_to_sustained_peak_sec_median",
+                "max_sustained_peak_pct_max",
+                "recheck_window_classification",
+                "next_action",
+            )
+        },
+        "oos_readiness_queue": {
+            "classification": (
+                "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+                if oos_items
+                else "PENDING_MOMENTUM_DECAY_OOS_QUEUE_EMPTY"
+            ),
+            "queue_count": len(oos_items),
+            "pending_clean_window_count": len(oos_items),
+            "ready_for_runtime_change_count": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "items": oos_items[:12],
+            "notes": [
+                "Queue is read-only and shadow-only.",
+                "Repeated probes only mean the same timing pattern is still visible.",
+                "This queue does not authorize threshold, gate, A_CLASS, executor, paper, or risk changes.",
+            ],
+        },
+        "top_repeated_probes": repeated_rows[:12],
+        "probe_validations": rows,
+        "notes": [
+            "Read-only validation of pending momentum decay recheck probes.",
+            "Same-window repeat is discovery evidence only; OOS validation and human approval are required before any promotion.",
+        ],
+    }
+
+
 def stable_hypothesis_signature(
     *,
     watchlist_hypotheses,
@@ -2433,6 +2658,7 @@ def stable_hypothesis_signature(
     quality_timing_watch=None,
     quality_timing_candidate_probes=None,
     decision_no_pass_quality_timing_watch=None,
+    pending_momentum_decay_probes=None,
 ):
     watchlist_keys = []
     for row in watchlist_hypotheses or []:
@@ -2486,12 +2712,25 @@ def stable_hypothesis_signature(
         decision_no_pass_keys,
         key=lambda item: item.get("hypothesis_id") or "",
     )
+    pending_momentum_keys = []
+    for row in pending_momentum_decay_probes or []:
+        if not isinstance(row, dict):
+            continue
+        pending_momentum_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    pending_momentum_keys = sorted(
+        pending_momentum_keys,
+        key=lambda item: item.get("hypothesis_id") or "",
+    )
     return {
         "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
         "shadow_only_matured_volume_watch": matured_keys,
         "shadow_only_quality_timing_watch": quality_timing_keys,
         "shadow_only_quality_timing_candidate_probes": quality_timing_probe_keys,
         "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_keys,
+        "shadow_only_pending_momentum_decay_probes": pending_momentum_keys,
     }
 
 
@@ -2713,6 +2952,34 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
     )
     if not decision_no_pass_quality_timing_watch and previous_decision_no_pass_quality_timing_watch and decision_review_empty_or_missing:
         decision_no_pass_quality_timing_watch = previous_decision_no_pass_quality_timing_watch
+    pending_audit = verdict.get("pending_to_final_entry_audit") or {}
+    momentum_decay_review = (
+        (pending_audit.get("stale_before_final_review") or {}).get("momentum_decay_review")
+        or {}
+    )
+    pending_momentum_decay_probes = [
+        compact_pending_momentum_decay_probe(row)
+        for row in (momentum_decay_review.get("selected_shadow_probes") or [])
+        if isinstance(row, dict) and row.get("probe_id")
+    ]
+    previous_pending_momentum_decay_probes = [
+        row
+        for row in (registry.get("shadow_only_pending_momentum_decay_probes") or [])
+        if isinstance(row, dict) and row.get("hypothesis_id")
+    ]
+    momentum_review_empty_or_missing = (
+        not pending_momentum_decay_probes
+        and (
+            not pending_audit
+            or verdict.get("autoloop_execution_status") == "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC"
+        )
+    )
+    if (
+        not pending_momentum_decay_probes
+        and previous_pending_momentum_decay_probes
+        and momentum_review_empty_or_missing
+    ):
+        pending_momentum_decay_probes = previous_pending_momentum_decay_probes
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
@@ -2720,6 +2987,7 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         quality_timing_watch=quality_timing_watch,
         quality_timing_candidate_probes=quality_timing_candidate_probes,
         decision_no_pass_quality_timing_watch=decision_no_pass_quality_timing_watch,
+        pending_momentum_decay_probes=pending_momentum_decay_probes,
     )
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
@@ -2756,6 +3024,7 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         "shadow_only_quality_timing_watch": quality_timing_watch,
         "shadow_only_quality_timing_candidate_probes": quality_timing_candidate_probes,
         "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_quality_timing_watch,
+        "shadow_only_pending_momentum_decay_probes": pending_momentum_decay_probes,
         "strategy_memory": compact_strategy_memory_registry(strategy_memory_summary),
         "recent_runs": recent[-20:],
     }
@@ -3251,11 +3520,29 @@ def write_materialized_artifacts(
     quality_timing_probe_validation_path = (
         run_dir / f"quality_timing_candidate_probe_validation_{int(args.hours)}h.json"
     )
+    pending_momentum_decay_validation_path = (
+        run_dir / f"pending_momentum_decay_recheck_validation_{int(args.hours)}h.json"
+    )
+
+    def load_pending_to_final_report():
+        pending_path = readiness_paths.get("pending_to_final_entry_audit")
+        if pending_path and Path(pending_path).exists():
+            try:
+                return load_json(pending_path)
+            except Exception:
+                return {}
+        return {}
+
     write_json(
         quality_timing_probe_validation_path,
         build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
     )
     readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+    write_json(
+        pending_momentum_decay_validation_path,
+        build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
+    )
+    readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
     verdict = build_loop_verdict()
     write_json(verdict_path, verdict)
     if refresh_oos_after_registry and state == "final":
@@ -3301,6 +3588,11 @@ def write_materialized_artifacts(
             build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
         )
         readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+        write_json(
+            pending_momentum_decay_validation_path,
+            build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
+        )
+        readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
 
@@ -3690,6 +3982,7 @@ def self_test():
         assert "shadow_only_quality_timing_watch" in registry
         assert "shadow_only_quality_timing_candidate_probes" in registry
         assert "shadow_only_decision_no_pass_quality_timing_watch" in registry
+        assert "shadow_only_pending_momentum_decay_probes" in registry
         assert "strategy_memory" in registry
         assert registry["strategy_memory"]["promotion_allowed"] is False
         assert registry["strategy_memory"]["allowed_use"] == "shadow_only"
@@ -3917,6 +4210,7 @@ def self_test():
             "low_confidence_research_capture_audit_24h.json",
             "quality_timing_reject_research_audit_24h.json",
             "quality_timing_candidate_probe_validation_24h.json",
+            "pending_momentum_decay_recheck_validation_24h.json",
             "strategy_memory_ingestion_summary.json",
             "strategy_memory_validation_24h.json",
             "strategy_memory_filtered_winner_bridge.json",
@@ -3980,6 +4274,15 @@ def self_test():
         assert quality_probe_validation["oos_readiness_queue"]["promotion_allowed"] is False
         assert quality_probe_validation["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
         assert "probe_validations" in quality_probe_validation
+        pending_momentum_validation = load_json(latest_dir / "pending_momentum_decay_recheck_validation_24h.json")
+        assert pending_momentum_validation["promotion_allowed"] is False
+        assert pending_momentum_validation["strategy_change_allowed"] is False
+        assert pending_momentum_validation["automatic_runtime_change_allowed"] is False
+        assert pending_momentum_validation["paper_enablement_allowed"] is False
+        assert "denominator" in pending_momentum_validation
+        assert "probe_validations" in pending_momentum_validation
+        assert "oos_readiness_queue" in pending_momentum_validation
+        assert pending_momentum_validation["oos_readiness_queue"]["promotion_allowed"] is False
         strategy_memory = load_json(latest_dir / "strategy_memory_ingestion_summary.json")
         assert strategy_memory["promotion_allowed"] is False
         assert strategy_memory["allowed_use"] == "shadow_only"

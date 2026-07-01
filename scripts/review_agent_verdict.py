@@ -96,6 +96,7 @@ DERIVED_READINESS_SIBLINGS = {
     "low_confidence_research_capture_audit": "low_confidence_research_capture_audit_24h.json",
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
+    "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
     "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
     "strategy_memory_validation": "strategy_memory_validation_24h.json",
     "strategy_memory_filtered_winner_bridge": "strategy_memory_filtered_winner_bridge.json",
@@ -1197,6 +1198,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     low_confidence_audit = readiness_reports.get("low_confidence_research_capture_audit") or {}
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
+    pending_momentum_decay_validation = readiness_reports.get("pending_momentum_decay_recheck_validation") or {}
     strategy_memory_ingestion = readiness_reports.get("strategy_memory_ingestion_summary") or {}
     strategy_memory_validation = readiness_reports.get("strategy_memory_validation") or {}
     strategy_memory_filtered_bridge = readiness_reports.get("strategy_memory_filtered_winner_bridge") or {}
@@ -2098,6 +2100,26 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "top_repeated_probes": (
                 quality_timing_probe_validation.get("top_repeated_probes") or []
+            )[:10],
+        },
+        "pending_momentum_decay_recheck_validation": {
+            "available": bool(pending_momentum_decay_validation),
+            "classification": pending_momentum_decay_validation.get("classification"),
+            "next_action": pending_momentum_decay_validation.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": pending_momentum_decay_validation.get("denominator") or {},
+            "status_counts": pending_momentum_decay_validation.get("status_counts") or {},
+            "current_momentum_decay_review": (
+                pending_momentum_decay_validation.get("current_momentum_decay_review") or {}
+            ),
+            "oos_readiness_queue": (
+                pending_momentum_decay_validation.get("oos_readiness_queue") or {}
+            ),
+            "top_repeated_probes": (
+                pending_momentum_decay_validation.get("top_repeated_probes") or []
             )[:10],
         },
         "strategy_memory_ingestion_summary": {

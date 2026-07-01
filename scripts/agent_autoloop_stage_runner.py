@@ -573,6 +573,7 @@ def collect_paths(args, run_dir):
         "low_confidence_research_capture_audit": f"low_confidence_research_capture_audit_{hours}h.json",
         "quality_timing_reject_research_audit": f"quality_timing_reject_research_audit_{hours}h.json",
         "context_blocker_monitor": f"context_blocker_monitor_{hours}h.json",
+        "pending_momentum_decay_recheck_validation": f"pending_momentum_decay_recheck_validation_{hours}h.json",
         "strategy_memory_validation": "strategy_memory_validation_24h.json",
         "strategy_memory_filtered_winner_bridge": "strategy_memory_filtered_winner_bridge.json",
         "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
