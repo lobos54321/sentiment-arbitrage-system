@@ -1005,6 +1005,40 @@ def a_class_summary(db, since_ts, limit):
     }
 
 
+def skipped_a_class_p0_discovery_summary(reason):
+    return {
+        "available": False,
+        "status": "evidence_unavailable",
+        "reason": reason,
+        "skipped": True,
+        "quote_clean_gold_silver_seen_count": 0,
+        "quote_clean_gold_silver_would_enter_count": 0,
+        "would_enter_no_route_rate": None,
+        "would_enter_trapped_rate": None,
+        "unknown_data_rate": None,
+        "outlier_trimmed_would_rr": None,
+        "source_breakdown": {},
+        "source_component_breakdown": {},
+        "hydrate_outcome_breakdown": {},
+        "observed_hydrate_outcome_breakdown": {},
+        "denominator_exclusion_breakdown": {},
+        "hydrate_outcome_exclusion_breakdown": {},
+        "unknown_reason_breakdown": {},
+        "missed_blockers": [],
+        "discovery_exit": {
+            "available": False,
+            "advisory": "SHADOW_CONTINUE",
+            "advisory_action": "SHADOW_CONTINUE",
+            "advisory_only": True,
+            "requires_human_approval": True,
+            "reason": reason,
+            "pass": False,
+            "blockers": [reason],
+        },
+        "expected_rr_detail": {},
+    }
+
+
 def a_class_p0_discovery_summary(db, since_ts, until_ts):
     try:
         summary = build_a_class_p0_discovery(db, since_ts=since_ts, until_ts=until_ts)
@@ -1591,7 +1625,7 @@ def route_health_summary(db, since_ts, limit):
     }
 
 
-def build_snapshot(db, hours, limit):
+def build_snapshot(db, hours, limit, *, p0_discovery_mode="skip"):
     now_ts = int(time.time())
     since_ts = now_ts - int(hours * 3600)
     generated_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1626,10 +1660,24 @@ def build_snapshot(db, hours, limit):
         "route_health": timed_section("route_health", lambda: route_health_summary(db, since_ts, max(limit, 120))),
         "dog_catch_goal": timed_section("dog_catch_goal", lambda: dog_catch_goal_summary(db, since_ts)),
     }
-    discovery = timed_section(
-        "a_class_p0_discovery",
-        lambda: a_class_p0_discovery_summary(db, since_ts, now_ts),
-    )
+    normalized_p0_mode = str(p0_discovery_mode or "skip").strip().lower()
+    snapshot["snapshot_freshness_policy"] = {
+        "a_class_p0_discovery_mode": normalized_p0_mode,
+        "notes": [
+            "paper review snapshots are read-only observability artifacts",
+            "full A_CLASS P0 discovery can be run separately when needed",
+        ],
+    }
+    if normalized_p0_mode == "full":
+        discovery = timed_section(
+            "a_class_p0_discovery",
+            lambda: a_class_p0_discovery_summary(db, since_ts, now_ts),
+        )
+    else:
+        discovery = timed_section(
+            "a_class_p0_discovery",
+            lambda: skipped_a_class_p0_discovery_summary("p0_discovery_skipped_for_snapshot_freshness"),
+        )
     snapshot["a_class_p0_discovery"] = discovery
     ai_review = timed_section(
         "ai_strategy_review",
@@ -1677,7 +1725,7 @@ def run_once(args):
     try:
         for hours in args.windows:
             started = time.time()
-            snapshot = build_snapshot(db, hours, args.limit)
+            snapshot = build_snapshot(db, hours, args.limit, p0_discovery_mode=args.a_class_p0_discovery_mode)
             snapshot["query_ms"] = int((time.time() - started) * 1000)
             out = Path(args.out_dir) / f"paper_review_{hours}h.json"
             write_atomic(out, snapshot)
@@ -1693,6 +1741,12 @@ def main():
     parser.add_argument("--windows", default=os.environ.get("PAPER_REVIEW_WINDOWS", "2,8,12,24"))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("PAPER_REVIEW_SNAPSHOT_LIMIT", "40")))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("PAPER_REVIEW_SNAPSHOT_INTERVAL_SEC", "300")))
+    parser.add_argument(
+        "--a-class-p0-discovery-mode",
+        choices=("skip", "full"),
+        default=os.environ.get("PAPER_REVIEW_A_CLASS_P0_DISCOVERY_MODE", "skip"),
+        help="Use 'skip' for freshness-first materialized snapshots; use 'full' for the legacy heavy advisory section.",
+    )
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--lock-file", default=os.environ.get("PAPER_REVIEW_SNAPSHOT_LOCK_FILE", "/tmp/paper_review_snapshot.lock"))
     args = parser.parse_args()
