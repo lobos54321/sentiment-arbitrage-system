@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import tempfile
 import time
@@ -17,6 +18,22 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = "runtime_health_snapshot_audit.v1"
+
+
+def env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def paper_fast_lane_enabled(args):
+    raw = str(getattr(args, "paper_fast_lane_enabled", "auto") or "auto").strip().lower()
+    if raw in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return env_flag("PAPER_FAST_LANE_ENABLED", False)
 
 
 def utc_now() -> str:
@@ -304,6 +321,24 @@ def paper_fast_lane_section(data_dir, args):
     info = file_info(path, ts_fields=("updated_at", "heartbeat_at"))
     raw = info.get("raw") or {}
     age = latest_age_from_json_or_mtime(info, "updated_at", "heartbeat_at")
+    enabled = paper_fast_lane_enabled(args)
+    if not enabled:
+        return {
+            "available": info.get("available"),
+            "enabled": False,
+            "path": str(path),
+            "status": "disabled_not_applicable",
+            "updated_at": raw.get("updated_at"),
+            "heartbeat_at": raw.get("heartbeat_at"),
+            "worker_state": raw.get("worker_state"),
+            "paper_db_exists": raw.get("paper_db_exists"),
+            "age_minutes": age,
+            "max_age_minutes": args.paper_fast_lane_max_age_minutes,
+            "warnings": [],
+            "notes": [
+                "PAPER_FAST_LANE_ENABLED is false or unset; stale paper-fast-lane-health.json is not a runtime health warning.",
+            ],
+        }
     warnings = []
     if not info.get("available"):
         warnings.append("runtime_paper_fast_lane_health_missing")
@@ -311,6 +346,7 @@ def paper_fast_lane_section(data_dir, args):
         warnings.append("runtime_paper_fast_lane_health_stale")
     return {
         "available": info.get("available"),
+        "enabled": True,
         "path": str(path),
         "status": "ok" if info.get("available") and not warnings else "stale_or_missing",
         "updated_at": raw.get("updated_at"),
@@ -450,6 +486,7 @@ def self_test():
             hours=24,
             paper_review_max_age_minutes=30,
             paper_fast_lane_max_age_minutes=30,
+            paper_fast_lane_enabled="true",
             runtime_final_evidence_max_age_minutes=60,
             signal_warn_minutes=15,
             signal_fail_minutes=45,
@@ -489,6 +526,10 @@ def self_test():
         assert blocked["status"] == "blocked"
         assert "runtime_signal_source_stale_fail_closed" in blocked["blockers"]
         assert "runtime_paper_db_integrity_marker_exists" in blocked["blockers"]
+        args.paper_fast_lane_enabled = "false"
+        disabled = build_report(args)
+        assert disabled["paper_fast_lane_health"]["status"] == "disabled_not_applicable"
+        assert "runtime_paper_fast_lane_health_stale" not in disabled["warnings"]
     print("SELF_TEST_PASS runtime_health_snapshot_audit")
 
 
@@ -498,6 +539,12 @@ def main():
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--paper-review-max-age-minutes", type=float, default=30.0)
     parser.add_argument("--paper-fast-lane-max-age-minutes", type=float, default=30.0)
+    parser.add_argument(
+        "--paper-fast-lane-enabled",
+        choices=("auto", "true", "false"),
+        default=os.environ.get("RUNTIME_HEALTH_PAPER_FAST_LANE_ENABLED", "auto"),
+        help="Use auto to follow PAPER_FAST_LANE_ENABLED; false treats stale health as not applicable.",
+    )
     parser.add_argument("--runtime-final-evidence-max-age-minutes", type=float, default=60.0)
     parser.add_argument("--signal-warn-minutes", type=float, default=15.0)
     parser.add_argument("--signal-fail-minutes", type=float, default=45.0)
