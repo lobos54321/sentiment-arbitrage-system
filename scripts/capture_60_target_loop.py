@@ -1095,12 +1095,16 @@ def build_context_dimension_eligibility(reports):
         monitor_overall.get("quote_writer_fix") == "VERIFIED_POST_DEPLOY"
         or quote_smoke.get("classification") == "VERIFIED_POST_DEPLOY"
     )
-    quote_pending = (
+    quote_monitor_pending = (
         monitor_overall.get("rolling24_quote_status") == "QUOTE_CLEAN_WINDOW_PENDING"
         or clean_window.get("classification") == "QUOTE_CLEAN_WINDOW_PENDING"
-        or (quote_writer_verified and quote_rate < 0.8)
     )
     quote_writer_bug = quote_root.get("dominant_root_cause") == "v2_writer_path_missing_quote_fields"
+    quote_pending_reconciled = bool(quote_monitor_pending and quote_rate >= 0.8 and not quote_writer_bug)
+    quote_pending = bool(
+        (quote_monitor_pending and quote_rate < 0.8)
+        or (quote_writer_verified and quote_rate < 0.8)
+    )
     field_writer_verified = field_smoke.get("classification") == "VERIFIED_POST_DEPLOY" or monitor_overall.get("context_field_writer_fix") == "VERIFIED_POST_DEPLOY"
 
     source_rate = coverage_rate(context_report.get("source_component_coverage") or {})
@@ -1110,13 +1114,23 @@ def build_context_dimension_eligibility(reports):
     markov_diag = markov.get("profile_diagnostics") or {}
     markov_informative = any((row or {}).get("informative_bucket_count", 0) for row in markov_diag.values())
     markov_blocked = bool(markov.get("context_blockers") or markov.get("non_informative_reasons"))
+    quote_status = dimension_status_from_rate(quote_rate, pending=quote_pending, writer_bug=quote_writer_bug)
+    quote_blockers = sorted(blocker for blocker in blockers if "quote" in blocker or "schema" in blocker)
+    quote_evidence = dict(quote_cov)
+    quote_evidence.update({
+        "quote_writer_verified": bool(quote_writer_verified),
+        "quote_monitor_pending": bool(quote_monitor_pending),
+        "quote_clean_window_pending_reconciled_by_current_coverage": quote_pending_reconciled,
+        "active_quote_context_blockers": quote_blockers if quote_status != STATUS_CLEAN else [],
+        "stale_or_reconciled_quote_context_blockers": quote_blockers if quote_status == STATUS_CLEAN else [],
+    })
     dimensions = {
         "quote-sensitive": {
-            "status": dimension_status_from_rate(quote_rate, pending=quote_pending, writer_bug=quote_writer_bug),
+            "status": quote_status,
             "eligible_for_capture_cross": quote_rate >= 0.8 and not quote_writer_bug,
             "coverage_rate": quote_rate,
-            "blockers": sorted(blocker for blocker in blockers if "quote" in blocker or "schema" in blocker),
-            "evidence": quote_cov,
+            "blockers": quote_blockers if quote_status != STATUS_CLEAN else [],
+            "evidence": quote_evidence,
         },
         "source_component": {
             "status": dimension_status_from_rate(source_rate, pending=field_writer_verified and source_rate is not None and source_rate < 0.8),
@@ -2760,6 +2774,14 @@ def create_self_test_run(root):
         "kline_coverage": {"coverage_rate": 0.47, "blocker": "kline_coverage_below_80pct"},
         "blockers": ["volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"],
     }
+    context_blocker_monitor = {
+        "overall_verdict": {
+            "quote_writer_fix": "VERIFIED_POST_DEPLOY",
+            "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
+        },
+        "task_a_post_deploy_quote_smoke_test": {"classification": "VERIFIED_POST_DEPLOY"},
+        "task_b_clean_window_monitor": {"classification": "QUOTE_CLEAN_WINDOW_PENDING"},
+    }
     a_class = {
         "final_entry_status": "FUNNEL_BLOCKED_EXPECTED",
         "current_capture_stage": "mode_disabled_clean_window_pending",
@@ -2987,6 +3009,7 @@ def create_self_test_run(root):
     fixtures = {
         "capture": capture,
         "context_coverage": context,
+        "context_blocker_monitor": context_blocker_monitor,
         "a_class": a_class,
         "strategy_memory_validation": strategy_validation,
         "strategy_memory_ingestion": ingestion,
@@ -3067,6 +3090,15 @@ def self_test():
         assert freeze_registry["items"][0]["definition_fingerprint"]
         assert freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
         context = load_json(run_dir / "context_dimension_eligibility.json")
+        assert context["dimensions"]["quote-sensitive"]["status"] == STATUS_CLEAN
+        assert context["dimensions"]["quote-sensitive"]["eligible_for_capture_cross"] is True
+        assert "quote-sensitive" not in context["blocked_dimensions"]
+        assert (
+            context["dimensions"]["quote-sensitive"]["evidence"][
+                "quote_clean_window_pending_reconciled_by_current_coverage"
+            ]
+            is True
+        )
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
