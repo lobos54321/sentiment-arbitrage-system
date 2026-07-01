@@ -145,6 +145,10 @@ def load_sibling_readiness_reports(capture_path, existing=None):
     context_report = reports.get("context_coverage") or {}
     reports.setdefault("volume_profile_coverage", context_report.get("volume_profile_coverage") or {})
     reports.setdefault("kline_coverage", context_report.get("kline_coverage") or {})
+    if "oos_readiness_summary_v3" in reports and "oos_readiness_summary" not in reports:
+        reports["oos_readiness_summary"] = reports["oos_readiness_summary_v3"]
+    if "oos_readiness_summary" in reports and "oos_readiness_summary_v3" not in reports:
+        reports["oos_readiness_summary_v3"] = reports["oos_readiness_summary"]
     return reports
 
 
@@ -1053,7 +1057,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
     shadow_candidate_improvement_queue = readiness_reports.get("shadow_candidate_improvement_queue") or {}
-    oos_readiness_summary_v3 = readiness_reports.get("oos_readiness_summary_v3") or {}
+    oos_readiness_summary_v3 = (
+        readiness_reports.get("oos_readiness_summary_v3")
+        or readiness_reports.get("oos_readiness_summary")
+        or oos_readiness_summary
+        or {}
+    )
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     v3_biggest_gap_stage = capture_60_gap_report.get("biggest_gap_stage")
@@ -2979,6 +2988,9 @@ def self_test():
         assert sibling_verdict["oos_readiness_summary"]["promotion_allowed"] is False
         assert sibling_verdict["oos_readiness_summary"]["probes"][-1]["probe"] == "0p333h"
         assert sibling_verdict["oos_readiness_summary"]["probes"][-1]["source"] == "oos_readiness_probe_refresh"
+        assert sibling_verdict["oos_readiness_summary_v3"]["available"] is True
+        assert sibling_verdict["oos_readiness_summary_v3"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
+        assert sibling_verdict["oos_readiness_summary_v3"]["available_probe_count"] == 2
         assert sibling_verdict["oos_probe_refresh_status"]["available"] is True
         assert sibling_verdict["oos_probe_refresh_status"]["failed_command_count"] == 0
         assert sibling_verdict["oos_probe_refresh_status"]["probes"][0]["probe"] == "0p1h"
