@@ -1868,13 +1868,25 @@ def build_pass_allow_60_closure_plan(
             "slice_value": row.get("slice_value"),
             "judgment": row.get("judgment"),
             "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+            "slice_downstream_signal_count": row.get("slice_downstream_signal_count"),
+            "downstream_lift_scope": row.get("downstream_lift_scope"),
+            "downstream_slice_join_available": row.get("downstream_slice_join_available"),
+            "downstream_slice_join_required_for_promotion_evidence": (
+                row.get("downstream_slice_join_required_for_promotion_evidence")
+            ),
             "match_recall_event": row.get("match_recall_event"),
             "match_precision_event": row.get("match_precision_event"),
             "pass_allow_capture_rate_after_match": row.get("pass_allow_capture_rate_after_match"),
             "pass_allow_lift": row.get("pass_allow_lift"),
+            "decision_capture_rate_after_match": row.get("decision_capture_rate_after_match"),
             "decision_lift": row.get("decision_lift"),
+            "pending_capture_rate_after_match": row.get("pending_capture_rate_after_match"),
             "pending_lift": row.get("pending_lift"),
+            "final_entry_rate_after_match": row.get("final_entry_rate_after_match"),
             "final_entry_lift": row.get("final_entry_lift"),
+            "mode_adjusted_final_eligibility_rate_after_match": (
+                row.get("mode_adjusted_final_eligibility_rate_after_match")
+            ),
             "mode_adjusted_final_eligibility_lift": row.get("mode_adjusted_final_eligibility_lift"),
             "status": "DISCOVERY_SAME_WINDOW_ONLY",
             "next_action": "freeze_same_definition_for_clean_window_oos_if_repeated",
@@ -1937,7 +1949,7 @@ def build_pass_allow_60_closure_plan(
         next_action = "continue_pass_allow_reason_decomposition"
 
     return {
-        "schema_version": "pass_allow_60_closure_plan.v1",
+        "schema_version": "pass_allow_60_closure_plan.v2",
         "report_type": "pass_allow_60_closure_plan",
         "generated_at": utc_now(),
         "phase": "discovery_readiness",
@@ -1972,8 +1984,10 @@ def build_pass_allow_60_closure_plan(
                 "count": len(clean_cross_items),
                 "items": clean_cross_items,
                 "caveat": (
-                    "These are candidate-level downstream lift proxies attached to clean slices; "
-                    "they require repeated clean-window evidence and OOS validation."
+                    "These are slice-level matched gold/silver signal_id downstream overlays when "
+                    "downstream_lift_scope=slice_level_matched_gold_silver_signal_id; otherwise "
+                    "they remain candidate-level proxies. All require repeated clean-window evidence "
+                    "and OOS validation."
                 ),
             },
             "shadow_queue_pass_allow_items": {
@@ -2052,10 +2066,21 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
                     "decision_no_pass_event_count",
                     "events_contributing_to_current_60pct_gap_upper_bound",
                     "matched_gold_silver_events",
+                    "slice_downstream_signal_count",
+                    "downstream_lift_scope",
+                    "downstream_slice_join_available",
                     "match_recall_event",
                     "match_precision_event",
+                    "decision_lift",
                     "pass_allow_lift",
+                    "pending_lift",
+                    "final_entry_lift",
+                    "mode_adjusted_final_eligibility_lift",
+                    "decision_capture_rate_after_match",
                     "pass_allow_capture_rate_after_match",
+                    "pending_capture_rate_after_match",
+                    "final_entry_rate_after_match",
+                    "mode_adjusted_final_eligibility_rate_after_match",
                     "event_count",
                     "events_contributing_to_60pct_gap_upper_bound",
                 )
@@ -2112,6 +2137,7 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
                 "slice_value": row.get("slice_value"),
                 "judgment": row.get("judgment"),
                 "expected_capture_stage_improved": "pass_allow_capture",
+                "downstream_lift_scope": row.get("downstream_lift_scope"),
             },
         )
 
@@ -2468,6 +2494,49 @@ def improvement_queue_priority(item):
     )
 
 
+def clean_cross_expected_capture_stage(row):
+    """Pick the earliest improved capture stage for a clean 2D slice.
+
+    The queue is discovery-only, but the expected stage still matters: a slice
+    that improves pass/allow should be reviewed before a slice that only
+    improves generic detector recall.
+    """
+    if safe_float(row.get("pass_allow_lift"), 0.0) > 0:
+        return "pass_allow_capture"
+    if safe_float(row.get("pending_lift"), 0.0) > 0:
+        return "pending_capture"
+    if (
+        safe_float(row.get("final_entry_lift"), 0.0) > 0
+        or safe_float(row.get("mode_adjusted_final_eligibility_lift"), 0.0) > 0
+    ):
+        return "final_eligibility"
+    if safe_float(row.get("decision_lift"), 0.0) > 0:
+        return "decision_capture"
+    return "detector_capture"
+
+
+def clean_cross_downstream_evidence(row):
+    return {
+        "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+        "slice_downstream_signal_count": row.get("slice_downstream_signal_count"),
+        "downstream_lift_scope": row.get("downstream_lift_scope"),
+        "downstream_slice_join_available": row.get("downstream_slice_join_available"),
+        "decision_capture_rate_after_match": row.get("decision_capture_rate_after_match"),
+        "pass_allow_capture_rate_after_match": row.get("pass_allow_capture_rate_after_match"),
+        "pending_capture_rate_after_match": row.get("pending_capture_rate_after_match"),
+        "final_entry_rate_after_match": row.get("final_entry_rate_after_match"),
+        "mode_adjusted_final_eligibility_rate_after_match": (
+            row.get("mode_adjusted_final_eligibility_rate_after_match")
+        ),
+        "decision_lift": row.get("decision_lift"),
+        "pass_allow_lift": row.get("pass_allow_lift"),
+        "pending_lift": row.get("pending_lift"),
+        "final_entry_lift": row.get("final_entry_lift"),
+        "mode_adjusted_final_eligibility_lift": row.get("mode_adjusted_final_eligibility_lift"),
+        "paper_capture_lift": row.get("paper_capture_lift"),
+    }
+
+
 def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     candidate_improvement = reports.get("candidate_improvement") or {}
     strategy_memory_validation = reports.get("strategy_memory_validation") or {}
@@ -2512,10 +2581,11 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
         core_allowed = dimension_status == "CORE_METADATA_ALLOWED"
         if dimension_group and dimension_group not in clean_dimensions and not core_allowed:
             continue
+        expected_stage = clean_cross_expected_capture_stage(row)
         items.append({
             "candidate_id": row.get("candidate_id"),
             "hypothesis_source": "clean_2d_capture_cross_slice",
-            "expected_capture_stage_improved": "detector_capture",
+            "expected_capture_stage_improved": expected_stage,
             "required_features": [dimension] if dimension else [],
             "time_legal_status": "context_slice_time_legal_not_proven",
             "dimension_group": dimension_group,
@@ -2526,7 +2596,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "evidence": {
                 "recall_lift": row.get("recall_lift_vs_candidate_baseline"),
                 "precision_lift": row.get("precision_lift_vs_candidate_baseline"),
-                "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+                **clean_cross_downstream_evidence(row),
             },
             "next_action": "track_same_definition_in_next_clean_window_then_oos_if_repeated",
         })
@@ -2717,7 +2787,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     status_counts = Counter(row.get("hypothesis_source") for row in items)
     top_items = items[:75]
     return {
-        "schema_version": "shadow_candidate_improvement_queue.v1",
+        "schema_version": "shadow_candidate_improvement_queue.v2",
         "report_type": "shadow_candidate_improvement_queue",
         "generated_at": utc_now(),
         "promotion_allowed": False,
@@ -3314,9 +3384,22 @@ def create_self_test_run(root):
                 "slice_value": "matrix_evaluator",
                 "judgment": "WATCH",
                 "matched_gold_silver_events": 3,
+                "slice_downstream_signal_count": 3,
+                "downstream_lift_scope": "slice_level_matched_gold_silver_signal_id",
+                "downstream_slice_join_available": True,
+                "downstream_slice_join_required_for_promotion_evidence": False,
                 "recall_lift_vs_candidate_baseline": 0.1,
+                "precision_lift_vs_candidate_baseline": 0.05,
+                "decision_lift": 0.1,
                 "pass_allow_lift": 0.25,
+                "pending_lift": 0.2,
+                "final_entry_lift": 0.0,
+                "mode_adjusted_final_eligibility_lift": 0.0,
+                "decision_capture_rate_after_match": 1.0,
                 "pass_allow_capture_rate_after_match": 0.75,
+                "pending_capture_rate_after_match": 0.5,
+                "final_entry_rate_after_match": 0.0,
+                "mode_adjusted_final_eligibility_rate_after_match": 0.0,
                 "match_precision_event": 0.3,
             }
         ]
@@ -3400,10 +3483,14 @@ def self_test():
         assert pass_allow_gap["promotion_allowed"] is False
         closure_plan = load_json(run_dir / "pass_allow_60_closure_plan.json")
         assert closure_plan["promotion_allowed"] is False
+        assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v2"
         assert closure_plan["classification"] == "PASS_ALLOW_60_CLOSURE_NOT_NEEDED"
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
-        assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]["pass_allow_lift"] == 0.25
+        clean_2d_item = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]
+        assert clean_2d_item["pass_allow_lift"] == 0.25
+        assert clean_2d_item["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id"
+        assert clean_2d_item["slice_downstream_signal_count"] == 3
         freeze_registry = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
@@ -3474,8 +3561,10 @@ def self_test():
         assert strategy["hypotheses_count"] == 1
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
+        assert queue["schema_version"] == "shadow_candidate_improvement_queue.v2"
         assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
+        assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 1
         assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
         assert queue["source_counts"]["pending_momentum_decay_shadow_probe"] == 3
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
@@ -3501,6 +3590,14 @@ def self_test():
             item.get("candidate_id") == "pending_momentum_decay:timeboxed_recheck_window"
             and item.get("hypothesis_source") == "pending_momentum_decay_shadow_probe"
             and item.get("promotion_allowed") is False
+            for item in queue["top_items"]
+        )
+        assert any(
+            item.get("candidate_id") == "current_all"
+            and item.get("hypothesis_source") == "clean_2d_capture_cross_slice"
+            and item.get("expected_capture_stage_improved") == "pass_allow_capture"
+            and (item.get("evidence") or {}).get("downstream_lift_scope") == "slice_level_matched_gold_silver_signal_id"
+            and (item.get("evidence") or {}).get("slice_downstream_signal_count") == 3
             for item in queue["top_items"]
         )
         oos = load_json(run_dir / "oos_readiness_summary.json")
