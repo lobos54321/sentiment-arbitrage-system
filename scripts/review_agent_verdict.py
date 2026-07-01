@@ -1282,6 +1282,32 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "capture_stage_metrics_v3": {
             "available": bool(capture_stage_metrics_v3),
             "stage_counts": capture_stage_metrics_v3.get("stage_counts") or {},
+            "raw_gold_silver_denominator": capture_stage_metrics_v3.get("raw_gold_silver_denominator"),
+            "target_60_count": capture_stage_metrics_v3.get("target_60_count"),
+            "detector_capture_count": capture_stage_metrics_v3.get("detector_capture_count"),
+            "detector_capture_rate": capture_stage_metrics_v3.get("detector_capture_rate"),
+            "decision_capture_count": capture_stage_metrics_v3.get("decision_capture_count"),
+            "decision_capture_rate": capture_stage_metrics_v3.get("decision_capture_rate"),
+            "pass_allow_capture_count": capture_stage_metrics_v3.get("pass_allow_capture_count"),
+            "pass_allow_capture_rate": capture_stage_metrics_v3.get("pass_allow_capture_rate"),
+            "pending_capture_count": capture_stage_metrics_v3.get("pending_capture_count"),
+            "pending_capture_rate": capture_stage_metrics_v3.get("pending_capture_rate"),
+            "final_eligibility_count": capture_stage_metrics_v3.get("final_eligibility_count"),
+            "final_eligibility_rate": capture_stage_metrics_v3.get("final_eligibility_rate"),
+            "final_eligibility_capture_count": capture_stage_metrics_v3.get("final_eligibility_capture_count"),
+            "final_eligibility_capture_rate": capture_stage_metrics_v3.get("final_eligibility_capture_rate"),
+            "mode_disabled_adjusted_final_eligibility_count": capture_stage_metrics_v3.get(
+                "mode_disabled_adjusted_final_eligibility_count"
+            ),
+            "mode_disabled_adjusted_final_eligibility_rate": capture_stage_metrics_v3.get(
+                "mode_disabled_adjusted_final_eligibility_rate"
+            ),
+            "paper_trade_intent_count": capture_stage_metrics_v3.get("paper_trade_intent_count"),
+            "paper_trade_intent_rate": capture_stage_metrics_v3.get("paper_trade_intent_rate"),
+            "paper_capture_count": capture_stage_metrics_v3.get("paper_capture_count"),
+            "paper_capture_rate": capture_stage_metrics_v3.get("paper_capture_rate"),
+            "realized_capture_count": capture_stage_metrics_v3.get("realized_capture_count"),
+            "realized_capture_rate": capture_stage_metrics_v3.get("realized_capture_rate"),
             "largest_stage_dropoff": capture_stage_metrics_v3.get("largest_stage_dropoff") or {},
             "promotion_allowed": False,
         },

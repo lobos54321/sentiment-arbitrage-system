@@ -293,7 +293,7 @@ def next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_aud
 def build_capture_stage_metrics(a_class):
     stage_counts = compact_stage_counts(a_class)
     shortfall = (a_class or {}).get("readiness_shortfall_summary") or {}
-    return {
+    payload = {
         "schema_version": "capture_stage_metrics.v1",
         "report_type": "capture_stage_metrics",
         "generated_at": utc_now(),
@@ -308,6 +308,38 @@ def build_capture_stage_metrics(a_class):
             "While A_CLASS is SHADOW, mode-disabled-adjusted final eligibility is readiness evidence, not paper capture.",
         ],
     }
+    payload.update({
+        "raw_gold_silver_denominator": stage_counts.get("raw_gold_silver_denominator"),
+        "raw_gold_silver_event_denominator": stage_counts.get("raw_gold_silver_event_denominator"),
+        "target_60_count": stage_counts.get("target_60_count"),
+        "detector_capture_count": (stage_counts.get("detector_capture") or {}).get("count"),
+        "detector_capture_rate": (stage_counts.get("detector_capture") or {}).get("rate"),
+        "decision_capture_count": (stage_counts.get("decision_capture") or {}).get("count"),
+        "decision_capture_rate": (stage_counts.get("decision_capture") or {}).get("rate"),
+        "pass_allow_capture_count": (stage_counts.get("pass_allow_capture") or {}).get("count"),
+        "pass_allow_capture_rate": (stage_counts.get("pass_allow_capture") or {}).get("rate"),
+        "pending_capture_count": (stage_counts.get("pending_capture") or {}).get("count"),
+        "pending_capture_rate": (stage_counts.get("pending_capture") or {}).get("rate"),
+        "final_eligibility_count": (stage_counts.get("final_eligibility") or {}).get("count"),
+        "final_eligibility_rate": (stage_counts.get("final_eligibility") or {}).get("rate"),
+        "final_eligibility_capture_count": (stage_counts.get("final_eligibility") or {}).get("count"),
+        "final_eligibility_capture_rate": (stage_counts.get("final_eligibility") or {}).get("rate"),
+        "mode_disabled_adjusted_final_eligibility_count": (
+            stage_counts.get("mode_disabled_adjusted_final_eligibility") or {}
+        ).get("count"),
+        "mode_disabled_adjusted_final_eligibility_rate": (
+            stage_counts.get("mode_disabled_adjusted_final_eligibility") or {}
+        ).get("rate"),
+        "paper_trade_intent_count": (stage_counts.get("paper_trade_intent") or {}).get("count"),
+        "paper_trade_intent_rate": (stage_counts.get("paper_trade_intent") or {}).get("rate"),
+        "paper_capture_count": (stage_counts.get("paper_capture") or {}).get("count"),
+        "paper_capture_rate": (stage_counts.get("paper_capture") or {}).get("rate"),
+        "realized_capture_count": (stage_counts.get("realized_capture") or {}).get("count"),
+        "realized_capture_rate": (stage_counts.get("realized_capture") or {}).get("rate"),
+        "actual_entered_count": (stage_counts.get("actual_entered") or {}).get("count"),
+        "actual_entered_rate": (stage_counts.get("actual_entered") or {}).get("rate"),
+    })
+    return payload
 
 
 def build_pending_to_final_entry_audit(a_class):
@@ -1628,6 +1660,23 @@ def self_test():
         assert gap["next_best_allowed_action"] == (
             "audit_pass_allow_to_pending_bridge_shadow_only_with_blocked_context_dimensions_excluded"
         )
+        stage_metrics = load_json(run_dir / "capture_stage_metrics.json")
+        assert stage_metrics["raw_gold_silver_denominator"] == 5
+        assert stage_metrics["target_60_count"] == 3
+        assert stage_metrics["detector_capture_count"] == 5
+        assert stage_metrics["detector_capture_rate"] == 1.0
+        assert stage_metrics["decision_capture_count"] == 4
+        assert stage_metrics["decision_capture_rate"] == 0.8
+        assert stage_metrics["pass_allow_capture_count"] == 3
+        assert stage_metrics["pass_allow_capture_rate"] == 0.6
+        assert stage_metrics["pending_capture_count"] == 2
+        assert stage_metrics["pending_capture_rate"] == 0.4
+        assert stage_metrics["final_eligibility_count"] == 1
+        assert stage_metrics["final_eligibility_capture_rate"] == 0.2
+        assert stage_metrics["mode_disabled_adjusted_final_eligibility_count"] == 1
+        assert stage_metrics["mode_disabled_adjusted_final_eligibility_rate"] == 0.2
+        assert stage_metrics["paper_capture_count"] == 0
+        assert stage_metrics["paper_capture_rate"] == 0.0
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
