@@ -122,6 +122,7 @@ DERIVED_READINESS_SIBLINGS = {
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+    "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1285,6 +1286,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     pass_allow_gap_audit = readiness_reports.get("pass_allow_capture_gap_audit") or {}
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
+    pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
     pass_allow_60_closure_tracks = pass_allow_60_closure_plan.get("closure_tracks") or {}
     pass_allow_60_dnp_clusters = (
         pass_allow_60_closure_tracks.get("decision_no_pass_quality_timing_clusters") or {}
@@ -1552,11 +1554,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pass_allow_60_closure_oos_queue_count": (
                 oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue_count")
             ),
+            "pass_allow_60_oos_frozen_definition_count": (
+                oos_readiness_summary_v3.get("pass_allow_60_oos_frozen_definition_count")
+            ),
             "next_pass_allow_60_closure_oos_action": (
                 oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
             ),
             "pass_allow_60_closure_oos_queue": (
                 oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue") or {}
+            ),
+            "pass_allow_60_oos_freeze_registry": (
+                oos_readiness_summary_v3.get("pass_allow_60_oos_freeze_registry") or {}
             ),
             "promotion_allowed": False,
         },
@@ -1796,6 +1804,18 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 "items": (pass_allow_60_shadow_queue.get("items") or [])[:12],
             },
             "context_constraints": pass_allow_60_closure_plan.get("context_constraints") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "pass_allow_60_oos_freeze_registry": {
+            "available": bool(pass_allow_60_oos_freeze_registry),
+            "classification": pass_allow_60_oos_freeze_registry.get("classification"),
+            "frozen_definition_count": pass_allow_60_oos_freeze_registry.get("frozen_definition_count"),
+            "source_counts": pass_allow_60_oos_freeze_registry.get("source_counts") or {},
+            "oos_requirements": pass_allow_60_oos_freeze_registry.get("oos_requirements") or {},
+            "items": (pass_allow_60_oos_freeze_registry.get("items") or [])[:12],
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,

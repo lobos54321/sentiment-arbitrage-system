@@ -10,6 +10,7 @@ executors, wallets, canary settings, or risk settings.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import tempfile
@@ -63,6 +64,7 @@ V3_OUTPUT_FILES = {
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+    "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1914,6 +1916,154 @@ def build_pass_allow_60_closure_plan(
     }
 
 
+def stable_fingerprint(payload):
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan):
+    """Freeze current pass/allow closure hypotheses for future OOS checks."""
+    tracks = pass_allow_closure_plan.get("closure_tracks") or {}
+    target_gap = pass_allow_closure_plan.get("target_gap") or {}
+    items = []
+
+    def append_item(source, source_item, freeze_definition, expected_stage="pass_allow_capture"):
+        if not source_item:
+            return
+        fingerprint = stable_fingerprint(freeze_definition)
+        items.append({
+            "freeze_id": f"pass_allow_60:{source}:{fingerprint}",
+            "source": source,
+            "source_plan_item_id": source_item.get("plan_item_id"),
+            "expected_capture_stage_improved": expected_stage,
+            "definition_fingerprint": fingerprint,
+            "freeze_definition": freeze_definition,
+            "current_window_evidence": {
+                key: source_item.get(key)
+                for key in (
+                    "decision_no_pass_event_count",
+                    "events_contributing_to_current_60pct_gap_upper_bound",
+                    "matched_gold_silver_events",
+                    "match_recall_event",
+                    "match_precision_event",
+                    "pass_allow_lift",
+                    "pass_allow_capture_rate_after_match",
+                    "event_count",
+                    "events_contributing_to_60pct_gap_upper_bound",
+                )
+                if source_item.get(key) is not None
+            },
+            "status": "FROZEN_PENDING_CLEAN_NON_OVERLAPPING_OOS",
+            "oos_requirements": {
+                "definition_must_match_fingerprint": True,
+                "train_window_must_not_overlap_eval_window": True,
+                "overlap": False,
+                "context_clean_window_required": True,
+                "same_window_evidence_is_not_promotion_evidence": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    for row in (tracks.get("decision_no_pass_quality_timing_clusters") or {}).get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        append_item(
+            "decision_no_pass_quality_timing_cluster",
+            row,
+            {
+                "cluster": row.get("cluster"),
+                "expected_capture_stage_improved": "pass_allow_capture",
+                "required_match": {
+                    "quality_timing_cluster": row.get("cluster"),
+                    "stage": "decision_no_pass_or_allow",
+                },
+                "top_candidate_ids": [
+                    item.get("candidate_id")
+                    for item in row.get("top_candidates") or []
+                    if item.get("candidate_id")
+                ],
+                "top_lifecycle_source_contexts": row.get("top_lifecycle_source_contexts") or [],
+            },
+        )
+
+    for row in (tracks.get("clean_2d_pass_allow_lift_slices") or {}).get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        append_item(
+            "clean_2d_pass_allow_lift_slice",
+            row,
+            {
+                "candidate_id": row.get("candidate_id"),
+                "dimension": row.get("dimension"),
+                "dimension_group": row.get("dimension_group"),
+                "dimension_eligibility_status": row.get("dimension_eligibility_status"),
+                "slice_value": row.get("slice_value"),
+                "judgment": row.get("judgment"),
+                "expected_capture_stage_improved": "pass_allow_capture",
+            },
+        )
+
+    for row in (tracks.get("shadow_queue_pass_allow_items") or {}).get("items") or []:
+        if not isinstance(row, dict):
+            continue
+        append_item(
+            "shadow_queue_pass_allow_item",
+            row,
+            {
+                "candidate_id": row.get("candidate_id"),
+                "hypothesis_source": row.get("hypothesis_source"),
+                "expected_capture_stage_improved": row.get("expected_capture_stage_improved"),
+                "required_features": row.get("required_features") or [],
+                "time_legal_status": row.get("time_legal_status"),
+                "context_blockers": row.get("context_blockers") or [],
+            },
+            expected_stage=row.get("expected_capture_stage_improved") or "pass_allow_capture",
+        )
+
+    source_counts = Counter(row.get("source") for row in items)
+    additional_needed = safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0)
+    if additional_needed <= 0:
+        classification = "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
+    elif items:
+        classification = "PASS_ALLOW_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+    else:
+        classification = "PASS_ALLOW_60_OOS_FREEZE_EMPTY"
+    return {
+        "schema_version": "pass_allow_60_oos_freeze_registry.v1",
+        "report_type": "pass_allow_60_oos_freeze_registry",
+        "generated_at": utc_now(),
+        "phase": "discovery_readiness",
+        "evidence_level": "same_window_definitions_frozen_for_future_oos",
+        "usage": "read_only_oos_definition_registry",
+        "classification": classification,
+        "source_closure_plan_classification": pass_allow_closure_plan.get("classification"),
+        "target_gap": target_gap,
+        "frozen_definition_count": len(items),
+        "source_counts": dict(source_counts),
+        "items": items,
+        "oos_requirements": {
+            "train_window_must_not_overlap_eval_window": True,
+            "overlap": False,
+            "definition_fingerprint_required": True,
+            "context_clean_window_required": True,
+            "promotion_allowed": False,
+            "human_approval_required_before_promotion": True,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Definitions are frozen for future validation only.",
+            "A matching fingerprint in a non-overlapping clean eval window is required before any OOS claim.",
+        ],
+    }
+
+
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     return {
         "schema_version": "final_entry_readiness_audit.v1",
@@ -2374,6 +2524,9 @@ def build_oos_summary(run_dir, reports=None):
     pass_allow_closure_plan = (
         (input_reports or {}).get("pass_allow_60_closure_plan") or {}
     )
+    pass_allow_freeze_registry = (
+        (input_reports or {}).get("pass_allow_60_oos_freeze_registry") or {}
+    )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
     qt_queue_count = safe_int(
         quality_timing_probe_validation.get("oos_readiness_queue_count")
@@ -2482,6 +2635,22 @@ def build_oos_summary(run_dir, reports=None):
         summary["pass_allow_60_closure_oos_queue_count"] = queue_count
         if queue_count:
             summary["next_pass_allow_60_closure_oos_action"] = next_action
+    if pass_allow_freeze_registry:
+        summary["pass_allow_60_oos_freeze_registry"] = {
+            "available": True,
+            "classification": pass_allow_freeze_registry.get("classification"),
+            "frozen_definition_count": pass_allow_freeze_registry.get("frozen_definition_count"),
+            "source_counts": pass_allow_freeze_registry.get("source_counts") or {},
+            "oos_requirements": pass_allow_freeze_registry.get("oos_requirements") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["pass_allow_60_oos_frozen_definition_count"] = safe_int(
+            pass_allow_freeze_registry.get("frozen_definition_count"),
+            0,
+        )
     return summary
 
 
@@ -2523,6 +2692,8 @@ def assemble_reports(run_dir, out_dir=None):
         context_eligibility,
     )
     reports["pass_allow_60_closure_plan"] = pass_allow_closure_plan
+    pass_allow_freeze_registry = build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan)
+    reports["pass_allow_60_oos_freeze_registry"] = pass_allow_freeze_registry
     oos_summary = build_oos_summary(run_dir, reports)
     payloads = {
         "capture_60_gap_report": gap_report,
@@ -2531,6 +2702,7 @@ def assemble_reports(run_dir, out_dir=None):
         "pass_allow_capture_gap_audit": pass_allow_gap_audit,
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
+        "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
@@ -2557,6 +2729,10 @@ def assemble_reports(run_dir, out_dir=None):
             "decision_no_pass_review_next_action": decision_no_pass_review.get("next_action"),
             "pass_allow_60_closure_classification": pass_allow_closure_plan.get("classification"),
             "pass_allow_60_closure_next_action": pass_allow_closure_plan.get("next_action"),
+            "pass_allow_60_oos_freeze_classification": pass_allow_freeze_registry.get("classification"),
+            "pass_allow_60_oos_frozen_definition_count": (
+                pass_allow_freeze_registry.get("frozen_definition_count")
+            ),
             "context_blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
             "strategy_memory_hypotheses_count": strategy_memory_capture.get("hypotheses_count"),
             "shadow_candidate_queue_count": shadow_queue.get("queue_count"),
@@ -2884,6 +3060,12 @@ def self_test():
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]["pass_allow_lift"] == 0.25
+        freeze_registry = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
+        assert freeze_registry["promotion_allowed"] is False
+        assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
+        assert freeze_registry["frozen_definition_count"] >= 1
+        assert freeze_registry["items"][0]["definition_fingerprint"]
+        assert freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
@@ -2951,6 +3133,8 @@ def self_test():
             "PASS_ALLOW_60_CLOSURE_OOS_NOT_NEEDED"
         )
         assert oos["pass_allow_60_closure_oos_queue_count"] >= 1
+        assert oos["pass_allow_60_oos_freeze_registry"]["available"] is True
+        assert oos["pass_allow_60_oos_frozen_definition_count"] >= 1
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
 

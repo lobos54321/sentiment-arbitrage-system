@@ -822,6 +822,7 @@ def build_handoff(verdict):
                 "pass_allow_capture_gap_audit": verdict.get("pass_allow_capture_gap_audit") or {},
                 "decision_no_pass_quality_timing_review": verdict.get("decision_no_pass_quality_timing_review") or {},
                 "pass_allow_60_closure_plan": verdict.get("pass_allow_60_closure_plan") or {},
+                "pass_allow_60_oos_freeze_registry": verdict.get("pass_allow_60_oos_freeze_registry") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
