@@ -2994,9 +2994,23 @@ def build_oos_summary(run_dir, reports=None):
     if pass_allow_post_freeze_validation:
         summary["pass_allow_60_post_freeze_oos_validation"] = {
             "available": True,
+            "schema_version": pass_allow_post_freeze_validation.get("schema_version"),
             "classification": pass_allow_post_freeze_validation.get("classification"),
             "next_action": pass_allow_post_freeze_validation.get("next_action"),
             "raw_gold_silver_event_rows": pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows"),
+            "raw_gold_silver_rows_since_eval_start_unfiltered": (
+                pass_allow_post_freeze_validation.get("raw_gold_silver_rows_since_eval_start_unfiltered")
+            ),
+            "all_raw_rows_since_eval_start": (
+                pass_allow_post_freeze_validation.get("all_raw_rows_since_eval_start")
+            ),
+            "latest_raw_signal_age_sec": pass_allow_post_freeze_validation.get("latest_raw_signal_age_sec"),
+            "latest_raw_gold_silver_age_sec": (
+                pass_allow_post_freeze_validation.get("latest_raw_gold_silver_age_sec")
+            ),
+            "latest_raw_gold_silver_lag_sec_before_eval_start": (
+                pass_allow_post_freeze_validation.get("latest_raw_gold_silver_lag_sec_before_eval_start")
+            ),
             "global_pass_allow_count": pass_allow_post_freeze_validation.get("global_pass_allow_count"),
             "global_pass_allow_rate": pass_allow_post_freeze_validation.get("global_pass_allow_rate"),
             "frozen_definition_count": pass_allow_post_freeze_validation.get("frozen_definition_count"),
@@ -3623,6 +3637,28 @@ def self_test():
         assert monitor["definition_context_blocked_count"] == 0
         assert "quote-sensitive" not in monitor["global_blocked_dimensions"]
         assert "volume" in monitor["global_blocked_dimensions_not_required_by_frozen_definitions"]
+        post_freeze_summary = build_oos_summary(run_dir, reports={
+            "pass_allow_60_post_freeze_oos_validation": {
+                "schema_version": "pass_allow_60_post_freeze_oos_validation.v2",
+                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
+                "next_action": "continue_collecting_post_freeze_oos_window",
+                "raw_gold_silver_event_rows": 0,
+                "raw_gold_silver_rows_since_eval_start_unfiltered": 0,
+                "all_raw_rows_since_eval_start": 4,
+                "latest_raw_signal_age_sec": 90,
+                "latest_raw_gold_silver_age_sec": 900,
+                "latest_raw_gold_silver_lag_sec_before_eval_start": 600,
+                "post_freeze_usable_hours": 0.3,
+                "validated_definition_count": 45,
+                "repeat_watch_count": 0,
+                "promotion_allowed": False,
+            }
+        })
+        post_freeze = post_freeze_summary["pass_allow_60_post_freeze_oos_validation"]
+        assert post_freeze["schema_version"] == "pass_allow_60_post_freeze_oos_validation.v2"
+        assert post_freeze["raw_gold_silver_rows_since_eval_start_unfiltered"] == 0
+        assert post_freeze["all_raw_rows_since_eval_start"] == 4
+        assert post_freeze["latest_raw_signal_age_sec"] == 90
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
