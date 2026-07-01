@@ -186,6 +186,11 @@ def build_handoff(verdict):
                             "promotion_allowed",
                         )
                     },
+                    "shadow_candidate_improvement_top_items": (
+                        (verdict.get("shadow_candidate_improvement_queue") or {}).get("top_items")
+                        or (verdict.get("shadow_candidate_improvement_queue") or {}).get("top_opportunities")
+                        or []
+                    )[:5],
                     "oos_readiness_summary_v3": verdict.get("oos_readiness_summary_v3") or {},
                 },
                 indent=2,
@@ -759,6 +764,14 @@ def self_test():
         "deployment_commit": "abc",
         "human_action_required": False,
         "next_highest_priority_blocker": "source_quote_clean_coverage_below_80pct",
+        "capture_60_target_loop": {
+            "raw_gold_silver_denominator": 10,
+            "target_60_count": 6,
+            "biggest_gap_stage": "pass_allow_capture",
+            "additional_count_needed_to_60": 1,
+            "next_best_allowed_action": "audit_decision_bridge_and_quality_timing_shadow_only",
+            "promotion_allowed": False,
+        },
         "non_quote_sensitive_capture_discovery_allowed": True,
         "quote_sensitive_slices_blocked": True,
         "volume_profile_coverage": {"coverage_rate": 1.0},
@@ -767,6 +780,20 @@ def self_test():
         "final_entry_contract_blocker_breakdown": {},
         "per_candidate_effectiveness_summary": {"candidate_count": 84},
         "candidate_improvement_opportunities_summary": {"opportunity_count": 2},
+        "shadow_candidate_improvement_queue": {
+            "queue_count": 1,
+            "source_counts": {"quality_timing_reject_cluster": 1},
+            "promotion_allowed": False,
+            "top_items": [
+                {
+                    "candidate_id": "quality_timing:notath_upstream_skip",
+                    "hypothesis_source": "quality_timing_reject_cluster",
+                    "expected_capture_stage_improved": "pass_allow_capture",
+                    "next_action": "track_notath_upstream_skip_shadow_probe",
+                    "promotion_allowed": False,
+                }
+            ],
+        },
         "Markov_effectiveness_summary": {
             "status": "insufficient_or_uninformative",
             "next_action": "run_or_review_coarse_non_quote_non_kline_profiles_before_claiming_markov_value",
@@ -1111,6 +1138,8 @@ def self_test():
     assert "Readiness Summaries" in text
     assert "context_clean_window_progress" in text
     assert "candidate_improvement_opportunities_summary" in text
+    assert "shadow_candidate_improvement_top_items" in text
+    assert "quality_timing:notath_upstream_skip" in text
     quote_pending_verdict = {
         **verdict,
         "classification": "BLOCKED_CONTEXT_COVERAGE",

@@ -1298,6 +1298,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             })
     items = sorted(items, key=improvement_queue_priority)
     status_counts = Counter(row.get("hypothesis_source") for row in items)
+    top_items = items[:75]
     return {
         "schema_version": "shadow_candidate_improvement_queue.v1",
         "report_type": "shadow_candidate_improvement_queue",
@@ -1308,7 +1309,8 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
         "paper_enablement_allowed": False,
         "queue_count": len(items),
         "source_counts": dict(status_counts),
-        "top_items": items[:75],
+        "top_items": top_items,
+        "top_opportunities": top_items,
         "strategy_memory_status_counts": strategy_memory_validation.get("status_counts") or {},
         "pending_to_final_dominant_category": (
             (pending_audit.get("pending_no_final_entry_classification") or {}).get("dominant_category")
@@ -1690,6 +1692,7 @@ def self_test():
         assert queue["promotion_allowed"] is False
         assert queue["queue_count"] >= 2
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 1
+        assert queue["top_opportunities"] == queue["top_items"]
         assert any(
             item.get("candidate_id") == "quality_timing:matrix_alignment_wait"
             and item.get("expected_capture_stage_improved") == "pass_allow_capture"
