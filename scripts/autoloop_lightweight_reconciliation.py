@@ -125,6 +125,52 @@ def publish_latest(run_dir, latest_dir, handoff_out):
     }
 
 
+def denominator_from_capture(report):
+    denominator = (report or {}).get("raw_gold_silver_denominator") or {}
+    if isinstance(denominator, dict):
+        return int(denominator.get("event_rows") or denominator.get("unique_tokens") or 0)
+    try:
+        return int(denominator or 0)
+    except Exception:
+        return 0
+
+
+def publish_eligibility(run_dir):
+    run_path = Path(run_dir)
+    capture = safe_load(run_path / "capture_discovery_24h.json", {}) or {}
+    capture_60 = safe_load(run_path / "capture_60_gap_report.json", {}) or {}
+    capture_denominator = denominator_from_capture(capture)
+    capture_60_denominator = int(capture_60.get("raw_gold_silver_denominator") or 0)
+    required_outputs = (
+        "capture_60_gap_report.json",
+        "capture_stage_metrics.json",
+        "context_dimension_eligibility.json",
+        "pending_to_final_entry_audit.json",
+        "final_entry_readiness_audit.json",
+        "strategy_memory_capture_validation.json",
+        "shadow_candidate_improvement_queue.json",
+        "capture_cross_validity_24h.json",
+        "markov_effectiveness_24h.json",
+        "oos_readiness_summary.json",
+        "reviewer_verdict.json",
+        "run_summary.md",
+        "codex_handoff.md",
+    )
+    missing = [name for name in required_outputs if not (run_path / name).exists()]
+    blockers = []
+    if capture_denominator > 0 and capture_60_denominator <= 0:
+        blockers.append("capture_60_denominator_zero_while_capture_denominator_positive")
+    if missing:
+        blockers.append("missing_required_outputs")
+    return {
+        "eligible": not blockers,
+        "blockers": blockers,
+        "missing_required_outputs": missing,
+        "capture_denominator": capture_denominator,
+        "capture_60_denominator": capture_60_denominator,
+    }
+
+
 def update_run_summary(path, verdict):
     target = Path(path)
     old = target.read_text(encoding="utf-8") if target.exists() else "# Gold/Silver Capture AutoLoop Summary\n"
@@ -311,7 +357,19 @@ def reconcile(args):
     update_run_summary(summary_path, verdict)
     publish_result = None
     if args.publish_latest:
-        publish_result = publish_latest(run_dir, args.latest_dir, args.handoff_out)
+        eligibility = publish_eligibility(run_dir)
+        if eligibility["eligible"]:
+            publish_result = publish_latest(run_dir, args.latest_dir, args.handoff_out)
+            publish_result["eligibility"] = eligibility
+        else:
+            publish_result = {
+                "published": False,
+                "reason": "reconciled_run_not_eligible_for_latest_publish",
+                "eligibility": eligibility,
+                "source_run_dir": str(run_dir),
+                "latest_dir": str(args.latest_dir),
+                "handoff_out": str(args.handoff_out),
+            }
     return {
         "schema_version": "autoloop_lightweight_reconciliation.v1",
         "generated_at": utc_now(),
@@ -387,7 +445,37 @@ def self_test():
         for hours in (24, 48, 72):
             write_json(run_dir / f"capture_discovery_{hours}h.json", capture)
         write_json(run_dir / "candidate_downstream_readiness_24h.json", {"all_candidates": []})
-        write_json(run_dir / "a_class_fastlane_mode_audit_24h.json", {"capture_stage_rates": {}})
+        write_json(run_dir / "capture_cross_validity_24h.json", {"promotion_allowed": False, "slices": []})
+        write_json(run_dir / "markov_effectiveness_24h.json", {"promotion_allowed": False, "profiles": []})
+        write_json(run_dir / "a_class_fastlane_mode_audit_24h.json", {
+            "capture_stage_rates": {
+                "denominator_raw_signal_ids": 3,
+                "denominator_raw_gold_silver_events": 3,
+                "detector_capture_rate": 1.0,
+                "decision_record_capture_rate": 0.667,
+                "pass_allow_capture_rate": 0.333,
+                "pending_capture_rate": 0.333,
+                "final_entry_contract_reach_rate": 0.0,
+                "paper_trade_intent_rate": 0.0,
+                "paper_capture_rate": 0.0,
+                "realized_capture_rate": 0.0,
+                "events": {
+                    "candidate_matched_any": 3,
+                    "decision_records": 2,
+                    "pass_or_allow": 1,
+                    "pending_entry": 1,
+                    "final_entry_contract": 0,
+                    "paper_trade_intent": 0,
+                    "paper_committed": 0,
+                    "realized": 0,
+                    "entered": 0,
+                },
+                "mode_disabled_adjusted_final_eligibility": {
+                    "mode_disabled_only_unique_signal_ids": 0,
+                    "status": "not_ready",
+                },
+            },
+        })
         write_json(run_dir / "pnl_cross_secondary_24h.json", {"baseline": []})
         write_json(run_dir / "raw_gold_silver_funnel_audit_24h.json", {
             "raw_gold_silver_events": 3,

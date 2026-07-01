@@ -2678,6 +2678,18 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         for row in selected_decision_no_pass_rows
         if isinstance(row, dict) and row.get("cluster")
     ]
+    previous_decision_no_pass_quality_timing_watch = [
+        row
+        for row in (registry.get("shadow_only_decision_no_pass_quality_timing_watch") or [])
+        if isinstance(row, dict) and row.get("hypothesis_id")
+    ]
+    decision_review_empty_or_missing = not selected_decision_no_pass_rows and (
+        not decision_no_pass_review
+        or decision_no_pass_review.get("classification") == "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_EMPTY"
+        or verdict.get("autoloop_execution_status") == "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC"
+    )
+    if not decision_no_pass_quality_timing_watch and previous_decision_no_pass_quality_timing_watch and decision_review_empty_or_missing:
+        decision_no_pass_quality_timing_watch = previous_decision_no_pass_quality_timing_watch
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
@@ -3758,6 +3770,22 @@ def self_test():
         assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["promotion_allowed"] is False
         assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["definition"]["stage"] == (
             "decision_no_pass_or_allow"
+        )
+        preserved_registry = update_hypothesis_registry(
+            manual_registry_path,
+            {
+                "classification": "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC",
+                "autoloop_execution_status": "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC",
+                "decision_no_pass_quality_timing_review": {
+                    "classification": "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_EMPTY",
+                    "selected_clusters_to_cover_current_pass_allow_gap_upper_bound": [],
+                },
+            },
+            {"watchlist_hypotheses": []},
+        )
+        assert len(preserved_registry["shadow_only_decision_no_pass_quality_timing_watch"]) == 1
+        assert preserved_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["hypothesis_id"] == (
+            "decision_no_pass_quality_timing:matrix_alignment_wait"
         )
         required_artifacts = [
             "capture_60_gap_report.json",
