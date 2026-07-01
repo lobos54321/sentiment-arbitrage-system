@@ -2952,7 +2952,11 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
     )
     if not decision_no_pass_quality_timing_watch and previous_decision_no_pass_quality_timing_watch and decision_review_empty_or_missing:
         decision_no_pass_quality_timing_watch = previous_decision_no_pass_quality_timing_watch
-    pending_audit = verdict.get("pending_to_final_entry_audit") or {}
+    pending_audit = (
+        verdict.get("pending_to_final_entry_audit_v3")
+        or verdict.get("pending_to_final_entry_audit")
+        or {}
+    )
     momentum_decay_review = (
         (pending_audit.get("stale_before_final_review") or {}).get("momentum_decay_review")
         or {}
