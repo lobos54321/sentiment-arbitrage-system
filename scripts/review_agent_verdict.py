@@ -1496,6 +1496,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pending_no_final_entry_classification": (
                 pending_to_final_entry_audit_v3.get("pending_no_final_entry_classification") or {}
             ),
+            "largest_transition_dropoff_review": (
+                pending_to_final_entry_audit_v3.get("largest_transition_dropoff_review") or {}
+            ),
             "promotion_allowed": False,
         },
         "final_entry_readiness_audit_v3": {

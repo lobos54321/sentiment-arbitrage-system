@@ -415,6 +415,7 @@ def build_pending_to_final_entry_audit(a_class):
         "unknown": 0,
     }
     top_reason_rows = []
+    bucket_source_rows = {category: [] for category in required_categories}
     for row in category_rows:
         count = safe_int(row.get("count"), 0)
         category = str(row.get("category") or "")
@@ -449,10 +450,37 @@ def build_pending_to_final_entry_audit(a_class):
         else:
             bucket = "missing_final_contract_record"
         required_categories[bucket] += count
+        bucket_source_rows.setdefault(bucket, []).append({
+            "source_category": category,
+            "count": count,
+            "description": row.get("description"),
+            "share_of_pending_without_final": row.get("share_of_pending_without_final"),
+            "top_reasons": reasons[:8],
+            "automatic_allowed_scope": row.get("automatic_allowed_scope"),
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+        })
         top_reason_rows.extend(reasons[:5])
     if pending_without_final and not any(required_categories.values()):
         required_categories["unknown"] = pending_without_final
+        bucket_source_rows.setdefault("unknown", []).append({
+            "source_category": "UNKNOWN_PENDING_TO_FINAL_GAP",
+            "count": pending_without_final,
+            "description": "Pending entries did not reach final_entry_contract and no more specific attribution was available.",
+            "top_reasons": [],
+        })
     dominant = max(required_categories.items(), key=lambda item: item[1])[0] if required_categories else "unknown"
+    pending_count = safe_int(events.get("pending_entry"), 0)
+    adjacent_drop_count = max(0, pending_count - final_count)
+    largest_transition_review = build_pending_to_final_transition_review(
+        category_counts=required_categories,
+        bucket_source_rows=bucket_source_rows,
+        pending_count=pending_count,
+        final_count=final_count,
+        adjacent_drop_count=adjacent_drop_count,
+        pending_without_final=pending_without_final,
+    )
     return {
         "schema_version": "pending_to_final_entry_audit.v1",
         "report_type": "pending_to_final_entry_audit",
@@ -474,8 +502,171 @@ def build_pending_to_final_entry_audit(a_class):
             "source_category_counts": category_rows,
             "top_reasons": top_reason_rows[:20],
         },
+        "largest_transition_dropoff_review": largest_transition_review,
         "upstream_funnel_gap": upstream,
         "pending_to_final_entry_gap": pending_gap,
+    }
+
+
+def pending_to_final_category_action(category):
+    actions = {
+        "stale_before_final": {
+            "next_action": "audit_quality_timing_staleness_before_final_shadow_only",
+            "allowed_scope": "shadow-only timing attribution and evaluator reporting",
+            "human_approval_required_if_fix_requires": "changing signal freshness, timing thresholds, entry policy, or final_entry_contract",
+        },
+        "quote_missing": {
+            "next_action": "audit_quote_context_before_final_data_path_only",
+            "allowed_scope": "quote data/evaluator attribution only",
+            "human_approval_required_if_fix_requires": "relaxing quote, route, spread, or execution requirements",
+        },
+        "route_missing": {
+            "next_action": "audit_route_context_before_final_data_path_only",
+            "allowed_scope": "route data/evaluator attribution only",
+            "human_approval_required_if_fix_requires": "relaxing route availability or executor requirements",
+        },
+        "spread_above_route_limit": {
+            "next_action": "audit_spread_distribution_before_final_shadow_only",
+            "allowed_scope": "spread distribution reporting only",
+            "human_approval_required_if_fix_requires": "changing spread limits or route policy",
+        },
+        "expected_rr_below_policy": {
+            "next_action": "audit_expected_rr_before_final_shadow_only",
+            "allowed_scope": "expected-RR distribution reporting only",
+            "human_approval_required_if_fix_requires": "changing expected-RR policy",
+        },
+        "hourly_cap_block": {
+            "next_action": "audit_capacity_and_hourly_cap_shadow_only",
+            "allowed_scope": "capacity/cap attribution only",
+            "human_approval_required_if_fix_requires": "changing hourly cap, risk, canary, or executor settings",
+        },
+        "lifecycle_cancelled": {
+            "next_action": "audit_lifecycle_cancellation_before_final_shadow_only",
+            "allowed_scope": "lifecycle attribution and candidate context reporting only",
+            "human_approval_required_if_fix_requires": "changing lifecycle state machine or entry eligibility",
+        },
+        "duplicate_or_existing_position": {
+            "next_action": "audit_duplicate_existing_position_attribution_shadow_only",
+            "allowed_scope": "duplicate/existing-position attribution only",
+            "human_approval_required_if_fix_requires": "changing position limits or duplicate suppression",
+        },
+        "pending_expired": {
+            "next_action": "audit_pending_ttl_and_expiry_shadow_only",
+            "allowed_scope": "pending TTL/timing attribution only",
+            "human_approval_required_if_fix_requires": "changing pending TTL or retry policy",
+        },
+        "missing_final_contract_record": {
+            "next_action": "audit_final_entry_contract_recording_bridge",
+            "allowed_scope": "instrumentation/join/reporting audit only",
+            "human_approval_required_if_fix_requires": "changing final_entry_contract behavior",
+        },
+        "mode_shadow_preblocked": {
+            "next_action": "audit_a_class_shadow_preblock_readiness_only",
+            "allowed_scope": "A_CLASS readiness attribution only",
+            "human_approval_required_if_fix_requires": "resetting SHADOW, enabling A_CLASS, or changing runtime mode",
+        },
+        "unknown": {
+            "next_action": "improve_pending_to_final_attribution_instrumentation",
+            "allowed_scope": "read-only attribution instrumentation",
+            "human_approval_required_if_fix_requires": "changing strategy, gates, final_entry_contract, A_CLASS, executor, or risk",
+        },
+    }
+    return actions.get(category, actions["unknown"])
+
+
+def build_pending_to_final_transition_review(
+    *,
+    category_counts,
+    bucket_source_rows,
+    pending_count,
+    final_count,
+    adjacent_drop_count,
+    pending_without_final,
+):
+    target_to_explain = adjacent_drop_count or pending_without_final
+    rows = []
+    for category, count in sorted(
+        (category_counts or {}).items(),
+        key=lambda item: (safe_int(item[1], 0), str(item[0])),
+        reverse=True,
+    ):
+        count = safe_int(count, 0)
+        if count <= 0:
+            continue
+        action = pending_to_final_category_action(category)
+        rows.append({
+            "category": category,
+            "event_count": count,
+            "share_of_pending_without_final": rate(count, pending_without_final),
+            "share_of_adjacent_transition_dropoff_upper_bound": rate(
+                min(count, target_to_explain),
+                target_to_explain,
+            ),
+            "source_categories": (bucket_source_rows or {}).get(category) or [],
+            "next_action": action["next_action"],
+            "allowed_scope": action["allowed_scope"],
+            "human_approval_required_if_fix_requires": action[
+                "human_approval_required_if_fix_requires"
+            ],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    selected = []
+    cumulative = 0
+    for row in rows:
+        if target_to_explain and cumulative >= target_to_explain:
+            break
+        contribution = min(
+            safe_int(row.get("event_count"), 0),
+            max(0, target_to_explain - cumulative),
+        )
+        cumulative += contribution
+        selected.append({
+            "category": row.get("category"),
+            "event_count": row.get("event_count"),
+            "events_contributing_to_largest_transition_dropoff_upper_bound": contribution,
+            "cumulative_events_contributing_to_largest_transition_dropoff_upper_bound": cumulative,
+            "next_action": row.get("next_action"),
+            "allowed_scope": row.get("allowed_scope"),
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return {
+        "schema_version": "pending_to_final_transition_dropoff_review.v1",
+        "report_type": "pending_to_final_transition_dropoff_review",
+        "evidence_level": "discovery_same_window_transition_attribution",
+        "pending_capture_count": pending_count,
+        "final_eligibility_count": final_count,
+        "adjacent_count_loss_pending_to_final": adjacent_drop_count,
+        "pending_without_final_entry_contract": pending_without_final,
+        "target_to_explain_count": target_to_explain,
+        "category_count": len(rows),
+        "categories": rows,
+        "selected_categories_to_cover_largest_transition_dropoff_upper_bound": selected,
+        "selected_upper_bound_event_count": cumulative,
+        "covers_largest_transition_dropoff_upper_bound": (
+            cumulative >= target_to_explain if target_to_explain else True
+        ),
+        "next_action": (
+            selected[0]["next_action"]
+            if selected
+            else "continue_pending_to_final_transition_monitoring"
+        ),
+        "interpretation": (
+            "Upper-bound attribution only. It explains where pending entries disappeared before final_entry_contract; "
+            "it does not prove any pending signal should bypass timing, quote, lifecycle, mode, or final-entry controls."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
     }
 
 
@@ -1189,11 +1380,12 @@ def improvement_queue_priority(item):
     source_priority = {
         "quality_timing_reject_cluster": 0,
         "quality_timing_candidate_probe": 1,
-        "filtered_winner_dossier": 2,
-        "strategy_memory_missing_shadow_candidate": 3,
-        "clean_2d_capture_cross_slice": 4,
-        "derive_context_filtered_shadow_candidate": 5,
-        "refine_potential_entry_hypothesis_with_context": 6,
+        "pending_to_final_transition_dropoff_category": 2,
+        "filtered_winner_dossier": 3,
+        "strategy_memory_missing_shadow_candidate": 4,
+        "clean_2d_capture_cross_slice": 5,
+        "derive_context_filtered_shadow_candidate": 6,
+        "refine_potential_entry_hypothesis_with_context": 7,
     }
     stage_priority = {
         "pass_allow_capture": 0,
@@ -1290,6 +1482,49 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "promotion_allowed": False,
             "evidence": {"final_blocker_counts": blocker_counts},
             "next_action": "bridge_filtered_winners_to_current_funnel_blockers",
+        })
+    transition_review = pending_audit.get("largest_transition_dropoff_review") or {}
+    for row in transition_review.get("selected_categories_to_cover_largest_transition_dropoff_upper_bound") or []:
+        if not isinstance(row, dict):
+            continue
+        category = row.get("category")
+        items.append({
+            "candidate_id": f"pending_to_final:{category}",
+            "hypothesis_source": "pending_to_final_transition_dropoff_category",
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_to_final_category",
+                "pending_entry_ts",
+                "final_entry_contract_record",
+                "decision_reason",
+            ],
+            "time_legal_status": "read_only_transition_attribution_not_entry_rule",
+            "context_blockers": [],
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "evidence": {
+                "category": category,
+                "event_count": row.get("event_count"),
+                "events_contributing_to_largest_transition_dropoff_upper_bound": row.get(
+                    "events_contributing_to_largest_transition_dropoff_upper_bound"
+                ),
+                "cumulative_events_contributing_to_largest_transition_dropoff_upper_bound": row.get(
+                    "cumulative_events_contributing_to_largest_transition_dropoff_upper_bound"
+                ),
+                "adjacent_count_loss_pending_to_final": transition_review.get(
+                    "adjacent_count_loss_pending_to_final"
+                ),
+                "pending_without_final_entry_contract": transition_review.get(
+                    "pending_without_final_entry_contract"
+                ),
+            },
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "next_action": row.get("next_action"),
         })
     qt_review = (quality_timing.get("shadow_only_review") or {})
     for row in (qt_review.get("top_research_opportunities") or [])[:10]:
@@ -1753,17 +1988,29 @@ def self_test():
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
         assert pending["pending_no_final_entry_classification"]["categories"]["quote_missing"] == 1
+        transition_review = pending["largest_transition_dropoff_review"]
+        assert transition_review["promotion_allowed"] is False
+        assert transition_review["adjacent_count_loss_pending_to_final"] == 1
+        assert transition_review["selected_categories_to_cover_largest_transition_dropoff_upper_bound"][0]["category"] == "quote_missing"
+        assert transition_review["selected_categories_to_cover_largest_transition_dropoff_upper_bound"][0]["promotion_allowed"] is False
         strategy = load_json(run_dir / "strategy_memory_capture_validation.json")
         assert strategy["promotion_allowed"] is False
         assert strategy["hypotheses_count"] == 1
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
-        assert queue["queue_count"] >= 2
+        assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 1
+        assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
         assert queue["top_opportunities"] == queue["top_items"]
         assert any(
             item.get("candidate_id") == "quality_timing:matrix_alignment_wait"
             and item.get("expected_capture_stage_improved") == "pass_allow_capture"
+            for item in queue["top_items"]
+        )
+        assert any(
+            item.get("candidate_id") == "pending_to_final:quote_missing"
+            and item.get("expected_capture_stage_improved") == "final_eligibility"
+            and item.get("promotion_allowed") is False
             for item in queue["top_items"]
         )
         oos = load_json(run_dir / "oos_readiness_summary.json")
