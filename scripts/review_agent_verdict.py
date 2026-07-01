@@ -121,6 +121,7 @@ DERIVED_READINESS_SIBLINGS = {
     "context_dimension_eligibility": "context_dimension_eligibility.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
+    "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1283,6 +1284,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     shadow_bridge_reason_counts = (shadow_decision_bridge.get("reason_counts") or [])[:10]
     pass_allow_gap_audit = readiness_reports.get("pass_allow_capture_gap_audit") or {}
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
+    pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
+    pass_allow_60_closure_tracks = pass_allow_60_closure_plan.get("closure_tracks") or {}
+    pass_allow_60_dnp_clusters = (
+        pass_allow_60_closure_tracks.get("decision_no_pass_quality_timing_clusters") or {}
+    )
+    pass_allow_60_clean_cross = (
+        pass_allow_60_closure_tracks.get("clean_2d_pass_allow_lift_slices") or {}
+    )
+    pass_allow_60_shadow_queue = (
+        pass_allow_60_closure_tracks.get("shadow_queue_pass_allow_items") or {}
+    )
     shadow_bridge_review_queue_items = []
     for row in shadow_bridge_candidate_counts[:10]:
         if not isinstance(row, dict):
@@ -1755,6 +1767,26 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "top_clusters": (decision_no_pass_review.get("clusters") or [])[:8],
             "context_constraints": decision_no_pass_review.get("context_constraints") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "pass_allow_60_closure_plan": {
+            "available": bool(pass_allow_60_closure_plan),
+            "classification": pass_allow_60_closure_plan.get("classification"),
+            "next_action": pass_allow_60_closure_plan.get("next_action"),
+            "target_gap": pass_allow_60_closure_plan.get("target_gap") or {},
+            "decision_no_pass_quality_timing_clusters": pass_allow_60_dnp_clusters,
+            "clean_2d_pass_allow_lift_slices": {
+                "count": pass_allow_60_clean_cross.get("count"),
+                "items": (pass_allow_60_clean_cross.get("items") or [])[:12],
+            },
+            "shadow_queue_pass_allow_items": {
+                "count": pass_allow_60_shadow_queue.get("count"),
+                "items": (pass_allow_60_shadow_queue.get("items") or [])[:12],
+            },
+            "context_constraints": pass_allow_60_closure_plan.get("context_constraints") or {},
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,

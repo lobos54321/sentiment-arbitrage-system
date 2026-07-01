@@ -56,6 +56,7 @@ REQUIRED_FINAL_ARTIFACTS = (
     "context_dimension_eligibility.json",
     "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review.json",
+    "pass_allow_60_closure_plan.json",
     "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation.json",
