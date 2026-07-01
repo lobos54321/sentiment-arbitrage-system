@@ -34,7 +34,7 @@ from quality_timing_reject_research_audit import (
 )
 
 
-SCHEMA_VERSION = "pass_allow_60_post_freeze_oos_validation.v1"
+SCHEMA_VERSION = "pass_allow_60_post_freeze_oos_validation.v2"
 DEFAULT_EXPECTED_CANDIDATES = 84
 DEFAULT_MIN_RAW_EVENTS = 10
 DEFAULT_MIN_SELECTED_EVENTS = 3
@@ -625,6 +625,17 @@ def build_report(args):
         "post_freeze_usable_hours": post_freeze_usable_hours,
         "post_freeze_safety_sec": int(args.safety_sec),
         "raw_gold_silver_event_rows": raw_count,
+        "raw_gold_silver_rows_since_eval_start_unfiltered": (
+            post_freeze_source_activity.get("raw_gold_silver_rows_since_eval_start_unfiltered")
+        ),
+        "all_raw_rows_since_eval_start": post_freeze_source_activity.get("all_raw_rows_since_eval_start"),
+        "latest_raw_signal_age_sec": post_freeze_source_activity.get("latest_raw_signal_age_sec"),
+        "latest_raw_gold_silver_age_sec": (
+            post_freeze_source_activity.get("latest_raw_gold_silver_age_sec")
+        ),
+        "latest_raw_gold_silver_lag_sec_before_eval_start": (
+            post_freeze_source_activity.get("latest_raw_gold_silver_lag_sec_before_eval_start")
+        ),
         "min_raw_events_for_oos_judgment": int(args.min_raw_events),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,
@@ -809,8 +820,11 @@ def run_self_test():
         )
         payload = build_report(args)
         write_json(out, payload)
+        assert payload["schema_version"] == SCHEMA_VERSION
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
+        assert payload["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
+        assert payload["all_raw_rows_since_eval_start"] == 2
         assert payload["oos_data_availability"]["classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
         assert payload["post_freeze_source_activity"]["available"] is True
         assert payload["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
@@ -834,6 +848,7 @@ def run_self_test():
             "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         )
         assert zero_availability["post_freeze_source_activity"]["all_raw_rows_since_eval_start"] == 49
+        assert zero_availability["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 0
         assert zero_availability["candidate_observation_effective_status"] == (
             "not_applicable_no_raw_signal_ids"
         )
