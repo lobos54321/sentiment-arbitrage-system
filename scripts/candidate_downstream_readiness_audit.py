@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-SCHEMA_VERSION = "candidate_downstream_readiness_audit.v1"
+SCHEMA_VERSION = "candidate_downstream_readiness_audit.v2"
 GS_TIERS = {"gold", "silver"}
 
 
@@ -367,6 +367,7 @@ def build_report(args):
         "candidate_count_observed": len(by_candidate),
         "candidate_count_expected": args.expected_candidates,
         "stage_counts": {key: len(value) for key, value in stage_sets.items()},
+        "stage_signal_ids": {key: sorted(value) for key, value in stage_sets.items()},
         "classification_counts": dict(counts),
         "top_candidates": rows[: args.limit],
         "all_candidates": rows,

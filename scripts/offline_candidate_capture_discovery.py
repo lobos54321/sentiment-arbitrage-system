@@ -1348,6 +1348,16 @@ def build_context_slices(observations, dog_idx, raw_all_dog_idx, baseline_by_can
         if len({row["signal_id"] for row in rows}) < min_slice_signals:
             continue
         summary = summarize_group(rows, dog_idx, raw_all_dog_idx)
+        matched_gold_silver_signal_ids = sorted({
+            row["signal_id"]
+            for row in rows
+            if row.get("signal_id") and row.get("matched") and obs_is_raw_dog(row, dog_idx)
+        })
+        gold_silver_signal_ids = sorted({
+            row["signal_id"]
+            for row in rows
+            if row.get("signal_id") and obs_is_raw_dog(row, dog_idx)
+        })
         base = baseline_by_candidate.get(candidate_id, {})
         recall = summary.get("match_recall_event")
         precision = summary.get("match_precision_event")
@@ -1359,6 +1369,8 @@ def build_context_slices(observations, dog_idx, raw_all_dog_idx, baseline_by_can
             "dimension": dimension,
             "slice_value": slice_value,
             **summary,
+            "gold_silver_signal_ids": gold_silver_signal_ids,
+            "matched_gold_silver_signal_ids": matched_gold_silver_signal_ids,
             "baseline_match_recall_event": base_recall,
             "baseline_match_precision_event": base_precision,
             "recall_lift_vs_candidate_baseline": (

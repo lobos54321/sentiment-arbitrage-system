@@ -1391,6 +1391,73 @@ def downstream_proxy_for_candidate(candidate_id, downstream_by_candidate, global
     }
 
 
+def downstream_stage_signal_id_sets(candidate_downstream):
+    stage_signal_ids = (candidate_downstream or {}).get("stage_signal_ids") or {}
+    return {
+        key: {str(value) for value in values or [] if value is not None}
+        for key, values in stage_signal_ids.items()
+    }
+
+
+def downstream_slice_for_signal_ids(signal_ids, stage_sets, global_rates):
+    signal_set = {str(value) for value in signal_ids or [] if value is not None}
+    denominator = len(signal_set)
+    if not denominator:
+        return {
+            "downstream_lift_available": False,
+            "downstream_lift_scope": "slice_level_unavailable",
+            "downstream_lift_unavailable_reason": "slice_matched_gold_silver_signal_ids_missing",
+            "downstream_slice_join_available": False,
+            "downstream_slice_join_required_for_promotion_evidence": True,
+            "decision_lift": None,
+            "pass_allow_lift": None,
+            "pending_lift": None,
+            "final_entry_lift": None,
+            "mode_adjusted_final_eligibility_lift": None,
+            "paper_capture_lift": None,
+        }
+    decision_count = len(signal_set & stage_sets.get("decision", set()))
+    pass_allow_count = len(signal_set & stage_sets.get("pass_allow", set()))
+    pending_count = len(signal_set & stage_sets.get("pending", set()))
+    final_count = len(signal_set & stage_sets.get("final_entry", set()))
+    mode_adjusted_count = len(signal_set & stage_sets.get("final_mode_disabled_only", set()))
+    paper_count = len(signal_set & stage_sets.get("paper_committed", set()))
+    decision_rate = safe_rate(decision_count, denominator)
+    pass_allow_rate = safe_rate(pass_allow_count, denominator)
+    pending_rate = safe_rate(pending_count, denominator)
+    final_rate = safe_rate(final_count, denominator)
+    mode_adjusted_rate = safe_rate(mode_adjusted_count, denominator)
+    paper_rate = safe_rate(paper_count, denominator)
+    return {
+        "downstream_lift_available": True,
+        "downstream_lift_scope": "slice_level_matched_gold_silver_signal_id",
+        "downstream_slice_join_available": True,
+        "downstream_slice_join_required_for_promotion_evidence": False,
+        "slice_downstream_signal_count": denominator,
+        "decision_count_after_match": decision_count,
+        "pass_allow_count_after_match": pass_allow_count,
+        "pending_count_after_match": pending_count,
+        "final_entry_count_after_match": final_count,
+        "mode_adjusted_final_eligibility_count_after_match": mode_adjusted_count,
+        "paper_capture_count_after_match": paper_count,
+        "decision_capture_rate_after_match": decision_rate,
+        "pass_allow_capture_rate_after_match": pass_allow_rate,
+        "pending_capture_rate_after_match": pending_rate,
+        "final_entry_rate_after_match": final_rate,
+        "mode_adjusted_final_eligibility_rate_after_match": mode_adjusted_rate,
+        "paper_capture_rate_after_match": paper_rate,
+        "decision_lift": round_lift(decision_rate, global_rates.get("decision_rate")),
+        "pass_allow_lift": round_lift(pass_allow_rate, global_rates.get("pass_allow_rate")),
+        "pending_lift": round_lift(pending_rate, global_rates.get("pending_rate")),
+        "final_entry_lift": round_lift(final_rate, global_rates.get("final_entry_rate")),
+        "mode_adjusted_final_eligibility_lift": round_lift(
+            mode_adjusted_rate,
+            global_rates.get("mode_disabled_adjusted_final_eligibility_rate"),
+        ),
+        "paper_capture_lift": round_lift(paper_rate, global_rates.get("paper_committed_rate")),
+    }
+
+
 QUOTE_SENSITIVE_CROSS_DIMS = {
     "source_quote_clean",
     "source_quote_executable",
@@ -1513,6 +1580,8 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
     }
     downstream_by_candidate = candidate_downstream_index(candidate_downstream)
     global_rates = downstream_global_rates(candidate_downstream)
+    downstream_stage_sets = downstream_stage_signal_id_sets(candidate_downstream)
+    slice_downstream_available = bool(downstream_stage_sets)
     valid = []
     invalid = []
     for row in capture.get("context_slices") or []:
@@ -1536,8 +1605,34 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
             "invalid_reasons": reasons,
             "data_blockers": reasons,
             "pnl_secondary_status": "secondary_pnl_report_required_not_used_for_capture_cross",
-            **downstream_proxy_for_candidate(row.get("candidate_id"), downstream_by_candidate, global_rates),
         }
+        slice_downstream = (
+            downstream_slice_for_signal_ids(
+                row.get("matched_gold_silver_signal_ids"),
+                downstream_stage_sets,
+                global_rates,
+            )
+            if slice_downstream_available
+            else downstream_proxy_for_candidate(row.get("candidate_id"), downstream_by_candidate, global_rates)
+        )
+        if (
+            slice_downstream_available
+            and not slice_downstream.get("downstream_lift_available")
+        ):
+            fallback = downstream_proxy_for_candidate(row.get("candidate_id"), downstream_by_candidate, global_rates)
+            slice_downstream.update(
+                {
+                    "candidate_proxy_downstream_lift_scope": fallback.get("downstream_lift_scope"),
+                    "candidate_proxy_decision_lift": fallback.get("decision_lift"),
+                    "candidate_proxy_pass_allow_lift": fallback.get("pass_allow_lift"),
+                    "candidate_proxy_pending_lift": fallback.get("pending_lift"),
+                    "candidate_proxy_final_entry_lift": fallback.get("final_entry_lift"),
+                    "candidate_proxy_mode_adjusted_final_eligibility_lift": fallback.get(
+                        "mode_adjusted_final_eligibility_lift"
+                    ),
+                }
+            )
+        item.update(slice_downstream)
         (valid if not reasons else invalid).append(item)
     return {
         "schema_version": "capture_cross_validity_report.v1",
@@ -1561,8 +1656,12 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
             "unregistered_dimensions_are_invalid": True,
             "core_metadata_dimensions_allowed_without_context_coverage": sorted(CORE_METADATA_CROSS_DIMS),
             "pnl_is_secondary": True,
-            "downstream_lift_scope": "candidate_level_after_match_proxy_not_slice_specific",
-            "slice_level_downstream_join_required_for_promotion_evidence": True,
+            "downstream_lift_scope": (
+                "slice_level_matched_gold_silver_signal_id"
+                if slice_downstream_available
+                else "candidate_level_after_match_proxy_not_slice_specific"
+            ),
+            "slice_level_downstream_join_required_for_promotion_evidence": not slice_downstream_available,
         },
         "dimension_registry": {
             "quote-sensitive": sorted(QUOTE_SENSITIVE_CROSS_DIMS),
@@ -1580,8 +1679,16 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
         "dimension_status_counts": dict(Counter(row["dimension_eligibility_status"] for row in valid + invalid)),
         "downstream_global_rates": global_rates,
         "notes": [
-            "Downstream lifts in this report are candidate-level after-match proxies attached to each slice.",
-            "They are useful for discovery ranking but are not slice-specific promotion evidence until a raw observation to decision join is added.",
+            (
+                "Downstream lifts are slice-specific matched gold/silver signal_id overlays."
+                if slice_downstream_available
+                else "Downstream lifts in this report are candidate-level after-match proxies attached to each slice."
+            ),
+            (
+                "Slice-level downstream joins are available for discovery ranking; promotion still requires clean OOS validation."
+                if slice_downstream_available
+                else "They are useful for discovery ranking but are not slice-specific promotion evidence until a raw observation to decision join is added."
+            ),
             "valid_top_crosses only includes registered dimensions with clean coverage or explicitly allowed core metadata dimensions.",
             "promotion_allowed remains false.",
         ],
@@ -4640,10 +4747,14 @@ def self_test():
             latest_dir / "latest_codex_handoff.md"
         ).read_text()
         capture_cross_validity = load_json(latest_dir / "capture_cross_validity_24h.json")
-        assert capture_cross_validity["criteria"]["downstream_lift_scope"] == (
-            "candidate_level_after_match_proxy_not_slice_specific"
-        )
-        assert capture_cross_validity["criteria"]["slice_level_downstream_join_required_for_promotion_evidence"] is True
+        assert capture_cross_validity["criteria"]["downstream_lift_scope"] in {
+            "slice_level_matched_gold_silver_signal_id",
+            "candidate_level_after_match_proxy_not_slice_specific",
+        }
+        if capture_cross_validity["criteria"]["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id":
+            assert capture_cross_validity["criteria"]["slice_level_downstream_join_required_for_promotion_evidence"] is False
+        else:
+            assert capture_cross_validity["criteria"]["slice_level_downstream_join_required_for_promotion_evidence"] is True
         if capture_cross_validity.get("valid_top_crosses"):
             first_cross = capture_cross_validity["valid_top_crosses"][0]
             assert "decision_lift" in first_cross
@@ -4652,9 +4763,14 @@ def self_test():
             assert "final_entry_lift" in first_cross
             assert "mode_adjusted_final_eligibility_lift" in first_cross
             assert first_cross["downstream_lift_scope"] in {
+                "slice_level_matched_gold_silver_signal_id",
                 "candidate_level_after_match_proxy_not_slice_specific",
-                "unavailable",
+                "slice_level_unavailable",
             }
+            if first_cross["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id":
+                assert first_cross["downstream_slice_join_available"] is True
+                assert first_cross["downstream_slice_join_required_for_promotion_evidence"] is False
+                assert "slice_downstream_signal_count" in first_cross
             assert first_cross["pnl_secondary_status"] == "secondary_pnl_report_required_not_used_for_capture_cross"
         shadow_bridge = load_json(latest_dir / "shadow_decision_bridge_audit_24h.json")
         assert shadow_bridge["status"] in {
