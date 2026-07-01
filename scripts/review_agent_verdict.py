@@ -1566,6 +1566,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pass_allow_60_oos_freeze_registry": (
                 oos_readiness_summary_v3.get("pass_allow_60_oos_freeze_registry") or {}
             ),
+            "pass_allow_60_oos_readiness_monitor": (
+                oos_readiness_summary_v3.get("pass_allow_60_oos_readiness_monitor") or {}
+            ),
             "promotion_allowed": False,
         },
         "blocked_subtype": blocked_subtype,
