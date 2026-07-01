@@ -322,6 +322,56 @@ def classify_report(raw_count, items):
     return "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
 
 
+def build_oos_data_availability(raw_count, args, observation_meta, post_freeze_usable_hours):
+    min_raw_events = int(args.min_raw_events)
+    root_causes = []
+    if raw_count == 0:
+        root_causes.append("no_post_freeze_raw_gold_silver_events")
+    elif raw_count < min_raw_events:
+        root_causes.append("post_freeze_raw_gold_silver_event_rows_below_min")
+    if raw_count > 0 and not (observation_meta or {}).get("available"):
+        root_causes.append("candidate_observations_unavailable_for_post_freeze_signal_ids")
+    candidate_observation_effective_status = (
+        "not_applicable_no_raw_signal_ids"
+        if raw_count == 0
+        else "available"
+        if (observation_meta or {}).get("available")
+        else "unavailable"
+    )
+    classification = (
+        "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        if raw_count == 0
+        else "OOS_DATA_BELOW_MIN_RAW_EVENTS"
+        if raw_count < min_raw_events
+        else "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
+        if candidate_observation_effective_status == "unavailable"
+        else "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
+    )
+    next_action = (
+        "continue_collecting_post_freeze_raw_gold_silver_events"
+        if classification == "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        else "continue_collecting_until_min_oos_raw_events"
+        if classification == "OOS_DATA_BELOW_MIN_RAW_EVENTS"
+        else "inspect_post_freeze_candidate_observation_join"
+        if classification == "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
+        else "judge_post_freeze_oos_repeat_evidence"
+    )
+    return {
+        "classification": classification,
+        "root_causes": root_causes,
+        "raw_gold_silver_event_rows": raw_count,
+        "min_raw_events_for_oos_judgment": min_raw_events,
+        "post_freeze_usable_hours": post_freeze_usable_hours,
+        "candidate_observation_meta": observation_meta or {},
+        "candidate_observation_effective_status": candidate_observation_effective_status,
+        "next_action": next_action,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_report(args):
     registry = load_json(args.freeze_registry, {})
     frozen_at = registry.get("definition_set_frozen_at") or registry.get("generated_at")
@@ -391,6 +441,13 @@ def build_report(args):
     ]
     repeated = [row for row in items if row.get("verdict") == "PASS_ALLOW_60_POST_FREEZE_REPEAT_WATCH"]
     classification = classify_report(raw_count, items)
+    post_freeze_usable_hours = round(max(0, now_ts - eval_start_ts) / 3600.0, 4)
+    oos_data_availability = build_oos_data_availability(
+        raw_count,
+        args,
+        observation_meta,
+        post_freeze_usable_hours,
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "pass_allow_60_post_freeze_oos_validation",
@@ -412,10 +469,11 @@ def build_report(args):
         "eval_start_ts": eval_start_ts,
         "eval_start_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(eval_start_ts)),
         "now_ts": now_ts,
-        "post_freeze_usable_hours": round(max(0, now_ts - eval_start_ts) / 3600.0, 4),
+        "post_freeze_usable_hours": post_freeze_usable_hours,
         "post_freeze_safety_sec": int(args.safety_sec),
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": int(args.min_raw_events),
+        "oos_data_availability": oos_data_availability,
         "global_pass_allow_count": global_pass_allow_count,
         "global_pass_allow_rate": global_pass_allow_rate,
         "candidate_observation_meta": observation_meta,
@@ -599,9 +657,23 @@ def run_self_test():
         write_json(out, payload)
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
+        assert payload["oos_data_availability"]["classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
         assert payload["validated_definition_count"] == 2
         assert payload["repeat_watch_count"] >= 1
         assert out.exists()
+        zero_availability = build_oos_data_availability(
+            0,
+            args,
+            {"available": False, "reason": "missing_signal_ids_or_table"},
+            1.25,
+        )
+        assert zero_availability["classification"] == (
+            "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        )
+        assert zero_availability["candidate_observation_effective_status"] == (
+            "not_applicable_no_raw_signal_ids"
+        )
+        assert zero_availability["root_causes"] == ["no_post_freeze_raw_gold_silver_events"]
     print("self-test passed")
 
 

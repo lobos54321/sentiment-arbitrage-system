@@ -2921,6 +2921,7 @@ def build_oos_summary(run_dir, reports=None):
             "too_small_definition_count": pass_allow_post_freeze_validation.get("too_small_definition_count"),
             "post_freeze_usable_hours": pass_allow_post_freeze_validation.get("post_freeze_usable_hours"),
             "definition_set_frozen_at": pass_allow_post_freeze_validation.get("definition_set_frozen_at"),
+            "oos_data_availability": pass_allow_post_freeze_validation.get("oos_data_availability") or {},
             "status_counts": pass_allow_post_freeze_validation.get("status_counts") or {},
             "top_repeat_watch_items": (
                 pass_allow_post_freeze_validation.get("top_repeat_watch_items") or []

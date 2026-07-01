@@ -587,6 +587,9 @@ def build_handoff(verdict):
         ])
     oos_readiness = verdict.get("oos_readiness_summary") or {}
     if oos_readiness:
+        pass_allow_post_freeze = (
+            oos_readiness.get("pass_allow_60_post_freeze_oos_validation") or {}
+        )
         compact_oos = {
             "classification": oos_readiness.get("classification"),
             "available_probe_count": oos_readiness.get("available_probe_count"),
@@ -594,6 +597,20 @@ def build_handoff(verdict):
             "oos_repeated_watch_probe_count": oos_readiness.get("oos_repeated_watch_probe_count"),
             "next_action": oos_readiness.get("next_action"),
             "readiness_delta": oos_readiness.get("readiness_delta") or {},
+            "pass_allow_60_post_freeze": {
+                "classification": pass_allow_post_freeze.get("classification"),
+                "raw_gold_silver_event_rows": pass_allow_post_freeze.get(
+                    "raw_gold_silver_event_rows"
+                ),
+                "post_freeze_usable_hours": pass_allow_post_freeze.get(
+                    "post_freeze_usable_hours"
+                ),
+                "repeat_watch_count": pass_allow_post_freeze.get("repeat_watch_count"),
+                "oos_data_availability": pass_allow_post_freeze.get(
+                    "oos_data_availability"
+                ) or {},
+                "promotion_allowed": False,
+            },
             "promotion_allowed": False,
             "probes": (oos_readiness.get("probes") or [])[:4],
         }
@@ -958,6 +975,26 @@ def self_test():
             "additional_count_needed_to_60": 1,
             "next_best_allowed_action": "audit_decision_bridge_and_quality_timing_shadow_only",
             "promotion_allowed": False,
+        },
+        "oos_readiness_summary": {
+            "classification": "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED",
+            "available_probe_count": 1,
+            "sufficient_probe_count": 0,
+            "oos_repeated_watch_probe_count": 0,
+            "next_action": "continue_collecting_post_freeze_window_before_judging_oos",
+            "pass_allow_60_post_freeze_oos_validation": {
+                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
+                "raw_gold_silver_event_rows": 0,
+                "post_freeze_usable_hours": 1.25,
+                "repeat_watch_count": 0,
+                "oos_data_availability": {
+                    "classification": "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER",
+                    "root_causes": ["no_post_freeze_raw_gold_silver_events"],
+                    "candidate_observation_effective_status": "not_applicable_no_raw_signal_ids",
+                    "next_action": "continue_collecting_post_freeze_raw_gold_silver_events",
+                    "promotion_allowed": False,
+                },
+            },
         },
         "non_quote_sensitive_capture_discovery_allowed": True,
         "quote_sensitive_slices_blocked": True,
@@ -1361,6 +1398,7 @@ def self_test():
     assert "Kline Coverage Resolution" in text
     assert "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE" in text
     assert "low_confidence_time_legal_research" in text
+    assert "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER" in text
     quote_pending_verdict = {
         **verdict,
         "classification": "BLOCKED_CONTEXT_COVERAGE",
