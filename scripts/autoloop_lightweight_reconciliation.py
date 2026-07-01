@@ -106,22 +106,39 @@ def publish_latest(run_dir, latest_dir, handoff_out):
     source = Path(run_dir)
     target = Path(latest_dir)
     target.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    skipped_same_file = 0
+
+    def copy_if_different(src, dst):
+        nonlocal copied, skipped_same_file
+        try:
+            same_file = src.resolve() == dst.resolve()
+        except FileNotFoundError:
+            same_file = False
+        if same_file:
+            skipped_same_file += 1
+            return
+        shutil.copy2(src, dst)
+        copied += 1
+
     for report in source.glob("*.json"):
-        shutil.copy2(report, target / report.name)
+        copy_if_different(report, target / report.name)
     for name in ("run_summary.md", "codex_handoff.md"):
         path = source / name
         if path.exists():
-            shutil.copy2(path, target / name)
+            copy_if_different(path, target / name)
     handoff_path = Path(handoff_out)
     run_handoff = source / "codex_handoff.md"
     if run_handoff.exists():
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(run_handoff, handoff_path)
+        copy_if_different(run_handoff, handoff_path)
     return {
         "published": True,
         "source_run_dir": str(source),
         "latest_dir": str(target),
         "handoff_out": str(handoff_path),
+        "copied_count": copied,
+        "skipped_same_file_count": skipped_same_file,
     }
 
 
@@ -512,6 +529,13 @@ def self_test():
         assert (latest_dir / "run_summary.md").read_text(encoding="utf-8").startswith(
             "# Gold/Silver Capture AutoLoop Reconciliation Status"
         )
+        same_dir_publish = publish_latest(
+            run_dir,
+            run_dir,
+            run_dir / "codex_handoff.md",
+        )
+        assert same_dir_publish["published"] is True
+        assert same_dir_publish["skipped_same_file_count"] > 0
         validation = load_json(run_dir / "strategy_memory_validation_24h.json")
         assert validation["hypotheses"][0]["window_validation_count"] == 3
         assert load_json(registry)["strategy_memory"]["hypotheses"][0]["route"] == "delay_replay_only"
