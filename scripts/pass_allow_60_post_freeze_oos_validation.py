@@ -84,6 +84,146 @@ def write_json(path, payload):
     tmp.replace(target)
 
 
+def table_exists(db, table):
+    try:
+        return bool(
+            db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+        )
+    except sqlite3.Error:
+        return False
+
+
+def table_columns(db, table):
+    try:
+        return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def iso_from_ts(value):
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(parsed))
+
+
+def build_post_freeze_source_activity(raw_db, eval_start_ts, now_ts):
+    """Summarize raw outcome activity after freeze independent of GS filters."""
+    if not table_exists(raw_db, "raw_signal_outcomes"):
+        return {
+            "available": False,
+            "reason": "raw_signal_outcomes_table_missing",
+        }
+    cols = table_columns(raw_db, "raw_signal_outcomes")
+    if "signal_ts" not in cols:
+        return {
+            "available": False,
+            "reason": "signal_ts_column_missing",
+        }
+    post = raw_db.execute(
+        """
+        SELECT COUNT(*) AS count, MAX(signal_ts) AS latest_signal_ts
+        FROM raw_signal_outcomes
+        WHERE COALESCE(signal_ts, 0) >= ? AND COALESCE(signal_ts, 0) <= ?
+        """,
+        (eval_start_ts, now_ts),
+    ).fetchone()
+    all_latest = raw_db.execute(
+        """
+        SELECT MAX(signal_ts) AS latest_signal_ts
+        FROM raw_signal_outcomes
+        WHERE COALESCE(signal_ts, 0) <= ?
+        """,
+        (now_ts,),
+    ).fetchone()
+    tier_parts = []
+    tier_params = []
+    if "raw_sustained_tier" in cols:
+        tier_parts.append("raw_sustained_tier IN (?, ?)")
+        tier_params.extend(["gold", "silver"])
+    if "raw_primary_tier" in cols:
+        tier_parts.append("raw_primary_tier IN (?, ?)")
+        tier_params.extend(["gold", "silver"])
+    if tier_parts:
+        tier_where = " OR ".join(tier_parts)
+        post_gs = raw_db.execute(
+            f"""
+            SELECT COUNT(*) AS count, MAX(signal_ts) AS latest_signal_ts
+            FROM raw_signal_outcomes
+            WHERE COALESCE(signal_ts, 0) >= ?
+              AND COALESCE(signal_ts, 0) <= ?
+              AND ({tier_where})
+            """,
+            (eval_start_ts, now_ts, *tier_params),
+        ).fetchone()
+        latest_gs = raw_db.execute(
+            f"""
+            SELECT MAX(signal_ts) AS latest_signal_ts
+            FROM raw_signal_outcomes
+            WHERE COALESCE(signal_ts, 0) <= ?
+              AND ({tier_where})
+            """,
+            (now_ts, *tier_params),
+        ).fetchone()
+        latest_gs_before = raw_db.execute(
+            f"""
+            SELECT MAX(signal_ts) AS latest_signal_ts
+            FROM raw_signal_outcomes
+            WHERE COALESCE(signal_ts, 0) < ?
+              AND ({tier_where})
+            """,
+            (eval_start_ts, *tier_params),
+        ).fetchone()
+    else:
+        post_gs = {"count": None, "latest_signal_ts": None}
+        latest_gs = {"latest_signal_ts": None}
+        latest_gs_before = {"latest_signal_ts": None}
+
+    def row_value(row, key):
+        if row is None:
+            return None
+        try:
+            return row[key]
+        except Exception:
+            return row.get(key) if isinstance(row, dict) else None
+
+    latest_raw_ts = row_value(all_latest, "latest_signal_ts")
+    latest_post_raw_ts = row_value(post, "latest_signal_ts")
+    latest_gs_ts = row_value(latest_gs, "latest_signal_ts")
+    latest_post_gs_ts = row_value(post_gs, "latest_signal_ts")
+    latest_gs_before_ts = row_value(latest_gs_before, "latest_signal_ts")
+    return {
+        "available": True,
+        "all_raw_rows_since_eval_start": int(row_value(post, "count") or 0),
+        "latest_raw_signal_ts": latest_raw_ts,
+        "latest_raw_signal_iso": iso_from_ts(latest_raw_ts),
+        "latest_post_freeze_raw_signal_ts": latest_post_raw_ts,
+        "latest_post_freeze_raw_signal_iso": iso_from_ts(latest_post_raw_ts),
+        "raw_gold_silver_rows_since_eval_start_unfiltered": (
+            None if row_value(post_gs, "count") is None else int(row_value(post_gs, "count") or 0)
+        ),
+        "latest_raw_gold_silver_signal_ts": latest_gs_ts,
+        "latest_raw_gold_silver_signal_iso": iso_from_ts(latest_gs_ts),
+        "latest_post_freeze_raw_gold_silver_signal_ts": latest_post_gs_ts,
+        "latest_post_freeze_raw_gold_silver_signal_iso": iso_from_ts(latest_post_gs_ts),
+        "latest_raw_gold_silver_before_eval_start_ts": latest_gs_before_ts,
+        "latest_raw_gold_silver_before_eval_start_iso": iso_from_ts(latest_gs_before_ts),
+        "latest_raw_gold_silver_lag_sec_before_eval_start": (
+            None if latest_gs_before_ts is None else max(0, int(eval_start_ts) - int(latest_gs_before_ts))
+        ),
+        "latest_raw_signal_age_sec": (
+            None if latest_raw_ts is None else max(0, int(now_ts) - int(latest_raw_ts))
+        ),
+        "latest_raw_gold_silver_age_sec": (
+            None if latest_gs_ts is None else max(0, int(now_ts) - int(latest_gs_ts))
+        ),
+    }
+
+
 def truthy(value):
     if isinstance(value, bool):
         return value
@@ -322,7 +462,13 @@ def classify_report(raw_count, items):
     return "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
 
 
-def build_oos_data_availability(raw_count, args, observation_meta, post_freeze_usable_hours):
+def build_oos_data_availability(
+    raw_count,
+    args,
+    observation_meta,
+    post_freeze_usable_hours,
+    post_freeze_source_activity=None,
+):
     min_raw_events = int(args.min_raw_events)
     root_causes = []
     if raw_count == 0:
@@ -362,6 +508,7 @@ def build_oos_data_availability(raw_count, args, observation_meta, post_freeze_u
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": min_raw_events,
         "post_freeze_usable_hours": post_freeze_usable_hours,
+        "post_freeze_source_activity": post_freeze_source_activity or {},
         "candidate_observation_meta": observation_meta or {},
         "candidate_observation_effective_status": candidate_observation_effective_status,
         "next_action": next_action,
@@ -395,6 +542,11 @@ def build_report(args):
     paper_db = sqlite3.connect(args.db)
     paper_db.row_factory = sqlite3.Row
     try:
+        post_freeze_source_activity = build_post_freeze_source_activity(
+            raw_db,
+            eval_start_ts,
+            now_ts,
+        )
         raw_rows = load_raw_dogs(raw_db, eval_start_ts)
         raw_rows = [
             row for row in raw_rows
@@ -447,6 +599,7 @@ def build_report(args):
         args,
         observation_meta,
         post_freeze_usable_hours,
+        post_freeze_source_activity,
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -474,6 +627,7 @@ def build_report(args):
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": int(args.min_raw_events),
         "oos_data_availability": oos_data_availability,
+        "post_freeze_source_activity": post_freeze_source_activity,
         "global_pass_allow_count": global_pass_allow_count,
         "global_pass_allow_rate": global_pass_allow_rate,
         "candidate_observation_meta": observation_meta,
@@ -658,18 +812,28 @@ def run_self_test():
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
         assert payload["oos_data_availability"]["classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
+        assert payload["post_freeze_source_activity"]["available"] is True
+        assert payload["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
         assert payload["validated_definition_count"] == 2
         assert payload["repeat_watch_count"] >= 1
         assert out.exists()
+        source_activity = {
+            "available": True,
+            "all_raw_rows_since_eval_start": 49,
+            "raw_gold_silver_rows_since_eval_start_unfiltered": 0,
+            "latest_raw_signal_age_sec": 60,
+        }
         zero_availability = build_oos_data_availability(
             0,
             args,
             {"available": False, "reason": "missing_signal_ids_or_table"},
             1.25,
+            source_activity,
         )
         assert zero_availability["classification"] == (
             "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         )
+        assert zero_availability["post_freeze_source_activity"]["all_raw_rows_since_eval_start"] == 49
         assert zero_availability["candidate_observation_effective_status"] == (
             "not_applicable_no_raw_signal_ids"
         )
