@@ -2432,6 +2432,7 @@ def stable_hypothesis_signature(
     matured_volume_watch,
     quality_timing_watch=None,
     quality_timing_candidate_probes=None,
+    decision_no_pass_quality_timing_watch=None,
 ):
     watchlist_keys = []
     for row in watchlist_hypotheses or []:
@@ -2473,11 +2474,64 @@ def stable_hypothesis_signature(
         quality_timing_probe_keys,
         key=lambda item: item.get("hypothesis_id") or "",
     )
+    decision_no_pass_keys = []
+    for row in decision_no_pass_quality_timing_watch or []:
+        if not isinstance(row, dict):
+            continue
+        decision_no_pass_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    decision_no_pass_keys = sorted(
+        decision_no_pass_keys,
+        key=lambda item: item.get("hypothesis_id") or "",
+    )
     return {
         "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
         "shadow_only_matured_volume_watch": matured_keys,
         "shadow_only_quality_timing_watch": quality_timing_keys,
         "shadow_only_quality_timing_candidate_probes": quality_timing_probe_keys,
+        "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_keys,
+    }
+
+
+def compact_decision_no_pass_quality_timing_hypothesis(row):
+    cluster = row.get("cluster")
+    return {
+        "hypothesis_id": f"decision_no_pass_quality_timing:{hypothesis_id_part(cluster)}",
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_decision_no_pass_quality_timing_cluster",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "definition": {
+            "cluster": cluster,
+            "stage": "decision_no_pass_or_allow",
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+        },
+        "latest_metrics": {
+            key: row.get(key)
+            for key in (
+                "decision_no_pass_event_count",
+                "events_contributing_to_gap_upper_bound",
+                "cumulative_events_contributing_to_gap_upper_bound",
+                "share_of_raw_gold_silver",
+                "share_of_current_pass_allow_gap_upper_bound",
+                "unique_tokens",
+                "candidate_matched_any_rate",
+                "max_sustained_peak_pct_max",
+                "time_to_sustained_peak_sec_median",
+            )
+        },
+        "reason_counts": (row.get("reason_counts") or [])[:10],
+        "top_candidates": (row.get("top_candidates") or [])[:10],
+        "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:10],
+        "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+        "context_blockers": row.get("context_blockers") or [],
+        "next_validation": (
+            "track_same_decision_no_pass_cluster_in_next_clean_window_then_oos_if_repeated"
+        ),
     }
 
 
@@ -2591,12 +2645,46 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
     quality_timing_candidate_probes = build_quality_timing_candidate_probes(
         quality_timing_opportunities,
     )
+    decision_no_pass_review = verdict.get("decision_no_pass_quality_timing_review") or {}
+    selected_decision_no_pass_clusters = {
+        row.get("cluster")
+        for row in (
+            decision_no_pass_review.get("selected_clusters_to_cover_current_pass_allow_gap_upper_bound")
+            or []
+        )
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    selected_decision_no_pass_rows = []
+    if selected_decision_no_pass_clusters:
+        top_by_cluster = {
+            row.get("cluster"): row
+            for row in (decision_no_pass_review.get("top_clusters") or [])
+            if isinstance(row, dict) and row.get("cluster")
+        }
+        selected_by_cluster = {
+            row.get("cluster"): row
+            for row in (
+                decision_no_pass_review.get("selected_clusters_to_cover_current_pass_allow_gap_upper_bound")
+                or []
+            )
+            if isinstance(row, dict) and row.get("cluster")
+        }
+        for cluster in sorted(selected_decision_no_pass_clusters):
+            merged = dict(top_by_cluster.get(cluster) or {})
+            merged.update(selected_by_cluster.get(cluster) or {})
+            selected_decision_no_pass_rows.append(merged)
+    decision_no_pass_quality_timing_watch = [
+        compact_decision_no_pass_quality_timing_hypothesis(row)
+        for row in selected_decision_no_pass_rows
+        if isinstance(row, dict) and row.get("cluster")
+    ]
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
         matured_volume_watch=matured_volume_watch,
         quality_timing_watch=quality_timing_watch,
         quality_timing_candidate_probes=quality_timing_candidate_probes,
+        decision_no_pass_quality_timing_watch=decision_no_pass_quality_timing_watch,
     )
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
@@ -2616,6 +2704,7 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         "shadow_only_matured_volume_watch": matured_volume_watch,
         "shadow_only_quality_timing_watch": quality_timing_watch,
         "shadow_only_quality_timing_candidate_probes": quality_timing_candidate_probes,
+        "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_quality_timing_watch,
         "strategy_memory": compact_strategy_memory_registry(strategy_memory_summary),
         "recent_runs": recent[-20:],
     }
@@ -3531,6 +3620,7 @@ def self_test():
         assert "shadow_only_matured_volume_watch" in registry
         assert "shadow_only_quality_timing_watch" in registry
         assert "shadow_only_quality_timing_candidate_probes" in registry
+        assert "shadow_only_decision_no_pass_quality_timing_watch" in registry
         assert "strategy_memory" in registry
         assert registry["strategy_memory"]["promotion_allowed"] is False
         assert registry["strategy_memory"]["allowed_use"] == "shadow_only"
@@ -3611,6 +3701,45 @@ def self_test():
                         ]
                     }
                 },
+                "decision_no_pass_quality_timing_review": {
+                    "selected_clusters_to_cover_current_pass_allow_gap_upper_bound": [
+                        {
+                            "cluster": "matrix_alignment_wait",
+                            "decision_no_pass_event_count": 7,
+                            "events_contributing_to_gap_upper_bound": 7,
+                            "cumulative_events_contributing_to_gap_upper_bound": 7,
+                            "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                            "human_approval_required_if_fix_requires": "changing matrix alignment thresholds",
+                        }
+                    ],
+                    "top_clusters": [
+                        {
+                            "cluster": "matrix_alignment_wait",
+                            "decision_no_pass_event_count": 7,
+                            "share_of_raw_gold_silver": 0.06,
+                            "share_of_current_pass_allow_gap_upper_bound": 0.31,
+                            "unique_tokens": 6,
+                            "candidate_matched_any_rate": 1.0,
+                            "reason_counts": [
+                                {
+                                    "component": "matrix_evaluator",
+                                    "event_type": "matrix_decision",
+                                    "decision": "wait",
+                                    "reason": "matrices not yet aligned",
+                                    "count": 7,
+                                }
+                            ],
+                            "top_candidates": [
+                                {"candidate_id": "entry_mode_registry:smart_entry_pullback_bounce", "family": "entry_mode_registry", "count": 7},
+                            ],
+                            "top_lifecycle_source_contexts": [
+                                {"lifecycle_profile": "ATH_SHALLOW_PULLBACK:PROBE", "source_component": "matrix_evaluator", "count": 1}
+                            ],
+                            "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                            "human_approval_required_if_fix_requires": "changing matrix alignment thresholds",
+                        }
+                    ],
+                },
             },
             {"watchlist_hypotheses": []},
         )
@@ -3623,6 +3752,13 @@ def self_test():
         )
         assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["promotion_allowed"] is False
         assert manual_registry["shadow_only_quality_timing_candidate_probes"][0]["strategy_change_allowed"] is False
+        assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["hypothesis_id"] == (
+            "decision_no_pass_quality_timing:matrix_alignment_wait"
+        )
+        assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["promotion_allowed"] is False
+        assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["definition"]["stage"] == (
+            "decision_no_pass_or_allow"
+        )
         required_artifacts = [
             "capture_60_gap_report.json",
             "capture_stage_metrics.json",
