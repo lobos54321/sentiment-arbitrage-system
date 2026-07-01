@@ -1470,6 +1470,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "next_action": next_action,
         "parallel_next_action": parallel_next_action,
         "parallel_next_action_reason": parallel_next_action_reason,
+        "capture_60_biggest_gap_stage": capture_60_gap_report.get("biggest_gap_stage"),
+        "capture_60_target_shortfall_stage": (
+            capture_60_gap_report.get("target_shortfall_stage")
+            or capture_60_gap_report.get("biggest_gap_stage")
+        ),
+        "capture_60_additional_count_needed": (
+            capture_60_gap_report.get("additional_count_needed_to_60")
+        ),
+        "capture_60_next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
         "capture_60_target_loop": {
             "available": bool(capture_60_gap_report),
             "target_capture_rate": capture_60_gap_report.get("target_capture_rate"),
@@ -2644,6 +2653,18 @@ def self_test():
                 "paper_enablement_allowed": False,
             },
         },
+        "capture_60_gap_report": {
+            "target_capture_rate": 0.6,
+            "raw_gold_silver_denominator": 10,
+            "target_60_count": 6,
+            "biggest_gap_stage": "pass_allow_capture",
+            "target_shortfall_stage": "pass_allow_capture",
+            "additional_count_needed_to_60": 1,
+            "next_best_allowed_action": (
+                "audit_decision_bridge_and_quality_timing_shadow_only_with_blocked_context_dimensions_excluded"
+            ),
+            "mode_disabled_adjusted_final_eligibility_rate": 0.1,
+        },
         "shadow_decision_bridge_audit": {
             "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
             "denominator": {
@@ -2689,6 +2710,12 @@ def self_test():
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
     assert stage_verdict["paper_trade_intent_rate"] == 0.0
     assert stage_verdict["paper_capture_rate"] == 0.0
+    assert stage_verdict["capture_60_biggest_gap_stage"] == "pass_allow_capture"
+    assert stage_verdict["capture_60_target_shortfall_stage"] == "pass_allow_capture"
+    assert stage_verdict["capture_60_additional_count_needed"] == 1
+    assert stage_verdict["capture_60_next_best_allowed_action"] == (
+        "audit_decision_bridge_and_quality_timing_shadow_only_with_blocked_context_dimensions_excluded"
+    )
     assert stage_verdict["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 5
     assert stage_verdict["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
     assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
