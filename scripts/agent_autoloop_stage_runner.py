@@ -633,9 +633,15 @@ def stage_finalize(args, run_dir):
     )
     eligibility = final_publish_eligibility(run_dir)
     published = False
+    sync_skipped_same_latest = False
+    latest_dir = Path(args.out_root) / "latest"
     if eligibility["eligible"]:
-        sync_latest(run_dir, Path(args.out_root) / "latest", Path(args.handoff_dir), verdict_path, summary_path, handoff_path)
-        published = True
+        if run_dir.resolve() == latest_dir.resolve():
+            sync_skipped_same_latest = True
+            published = True
+        else:
+            sync_latest(run_dir, latest_dir, Path(args.handoff_dir), verdict_path, summary_path, handoff_path)
+            published = True
     update_stage_state(
         run_dir,
         "finalize",
@@ -643,6 +649,7 @@ def stage_finalize(args, run_dir):
         promotion_allowed=verdict.get("promotion_allowed"),
         publish_latest=published,
         publish_eligibility=eligibility,
+        sync_skipped_same_latest=sync_skipped_same_latest,
     )
     return {
         "stage": "finalize",
