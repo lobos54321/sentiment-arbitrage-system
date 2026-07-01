@@ -434,7 +434,7 @@ def rounded_probe_hours(value):
     return round(number + 0.5, 0)
 
 
-def build_oos_readiness_delta(probes):
+def build_oos_readiness_delta(probes, refresh_report=None):
     """Summarize why the current OOS probes are not yet judgeable.
 
     The loop already records detailed blockers per probe. This compact delta is
@@ -448,6 +448,8 @@ def build_oos_readiness_delta(probes):
             "reason": "no_oos_probes_available",
             "promotion_allowed": False,
         }
+    post_freeze_probe = (refresh_report or {}).get("post_freeze_probe") or {}
+    post_freeze_hours = as_float(post_freeze_probe.get("hours"))
 
     def score(row):
         signals = as_int(row.get("signals_scanned"), 0) or 0
@@ -490,9 +492,29 @@ def build_oos_readiness_delta(probes):
             candidates.append(hours * 2.0)
         recommended_hours = rounded_probe_hours(max(candidates))
 
+    non_overlapping = [
+        row for row in available
+        if row.get("registry_frozen_before_eval_window") is True
+    ]
+    best_non_overlapping = max(non_overlapping, key=score) if non_overlapping else None
+    non_overlap_hours_remaining = None
+    if recommended_hours is not None and post_freeze_hours is not None:
+        non_overlap_hours_remaining = max(0.0, round(float(recommended_hours) - float(post_freeze_hours), 4))
+    next_action = (
+        "review_repeated_oos_watch_without_promotion"
+        if best.get("sufficient_for_oos_judgment") and best.get("registry_frozen_before_eval_window") is True
+        else "wait_for_non_overlapping_window_before_oos_judgment"
+        if not non_overlapping
+        else "rerun_oos_with_recommended_probe_hours_when_new_data_arrives"
+    )
+
     return {
         "available": True,
         "best_probe": best.get("probe"),
+        "best_probe_role": "sample_volume_reference_not_true_oos"
+        if best.get("registry_frozen_before_eval_window") is not True
+        else "true_oos_probe",
+        "best_true_oos_probe": best_non_overlapping.get("probe") if best_non_overlapping else None,
         "best_probe_sufficient": bool(best.get("sufficient_for_oos_judgment")),
         "best_probe_blockers": best.get("blockers") or [],
         "signals_scanned": signals,
@@ -505,12 +527,13 @@ def build_oos_readiness_delta(probes):
         "min_oos_matured_volume_known_rate": min_known_rate,
         "matured_volume_known_rate_needed": known_rate_deficit,
         "registry_frozen_before_eval_window": best.get("registry_frozen_before_eval_window"),
+        "non_overlapping_probe_count": len(non_overlapping),
+        "post_freeze_window_hours_available": post_freeze_hours,
+        "sample_volume_recommended_probe_hours": recommended_hours,
+        "non_overlapping_window_hours_needed": recommended_hours,
+        "non_overlapping_window_hours_remaining": non_overlap_hours_remaining,
         "next_recommended_probe_hours": recommended_hours,
-        "next_recommended_action": (
-            "rerun_oos_with_recommended_probe_hours_when_new_data_arrives"
-            if not best.get("sufficient_for_oos_judgment")
-            else "review_repeated_oos_watch_without_promotion"
-        ),
+        "next_recommended_action": next_action,
         "promotion_allowed": False,
     }
 
@@ -568,7 +591,7 @@ def build_oos_readiness_summary(readiness_reports):
     else:
         classification = "OOS_NO_REPEAT_CONTINUE_WATCH"
         next_action = "continue_watchlist_validation"
-    readiness_delta = build_oos_readiness_delta(probes)
+    readiness_delta = build_oos_readiness_delta(probes, refresh_report)
     return {
         "available_probe_count": len(available),
         "sufficient_probe_count": len(sufficient),
