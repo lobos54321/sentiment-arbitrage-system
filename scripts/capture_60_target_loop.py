@@ -1141,8 +1141,17 @@ def build_context_dimension_eligibility(reports):
         else coverage_rate(context_report.get("kline_coverage") or {})
     )
     markov_diag = markov.get("profile_diagnostics") or {}
-    markov_informative = any((row or {}).get("informative_bucket_count", 0) for row in markov_diag.values())
-    markov_blocked = bool(markov.get("context_blockers") or markov.get("non_informative_reasons"))
+    markov_informative_profiles = {
+        name: row for name, row in markov_diag.items()
+        if (row or {}).get("informative_bucket_count", 0)
+    }
+    markov_blocked_profiles = {
+        name: reason for name, reason in (markov.get("non_informative_reasons") or {}).items()
+        if reason
+    }
+    markov_context_blockers = list(markov.get("context_blockers") or [])
+    markov_informative = bool(markov_informative_profiles)
+    markov_blocked = bool(markov_context_blockers) or (bool(markov_blocked_profiles) and not markov_informative)
     quote_status = dimension_status_from_rate(quote_rate, pending=quote_pending, writer_bug=quote_writer_bug)
     quote_blockers = sorted(blocker for blocker in blockers if "quote" in blocker or "schema" in blocker)
     quote_evidence = dict(quote_cov)
@@ -1226,12 +1235,19 @@ def build_context_dimension_eligibility(reports):
             "status": STATUS_CLEAN if markov_informative and not markov_blocked else (STATUS_NA if not markov else STATUS_BLOCKED),
             "eligible_for_capture_cross": bool(markov_informative and not markov_blocked),
             "coverage_rate": None,
-            "blockers": sorted(set(markov.get("context_blockers") or [])),
+            "blockers": sorted(set(markov_context_blockers if markov_blocked else [])),
             "evidence": {
                 "classification": markov.get("classification"),
                 "profile_count": len(markov_diag),
-                "informative_profile_count": sum(1 for row in markov_diag.values() if (row or {}).get("informative_bucket_count", 0)),
-                "non_informative_reasons": markov.get("non_informative_reasons") or {},
+                "informative_profile_count": len(markov_informative_profiles),
+                "informative_profiles": sorted(markov_informative_profiles),
+                "non_informative_reasons": markov_blocked_profiles,
+                "partial_profile_blockers": markov_blocked_profiles if markov_informative else {},
+                "status_note": (
+                    "informative_profiles_available_discovery_only"
+                    if markov_informative and markov_blocked_profiles and not markov_context_blockers
+                    else None
+                ),
             },
         },
         "Strategy Memory": {
@@ -3414,6 +3430,29 @@ def self_test():
         assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
         assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
+        partial_markov = build_context_dimension_eligibility({
+            "markov_effectiveness": {
+                "profile_diagnostics": {
+                    "candidate_lifecycle": {
+                        "informative_bucket_count": 4,
+                        "status": "informative_discovery_only",
+                    },
+                    "kline": {
+                        "informative_bucket_count": 0,
+                        "status": "profile_over_fragmented_or_min_closed_not_met",
+                    },
+                },
+                "non_informative_reasons": {
+                    "kline": "closed_rows_exist_but_no_bucket_reached_min_closed",
+                },
+                "context_blockers": [],
+            }
+        })
+        assert partial_markov["dimensions"]["Markov"]["status"] == STATUS_CLEAN
+        assert partial_markov["dimensions"]["Markov"]["eligible_for_capture_cross"] is True
+        assert "Markov" in partial_markov["clean_dimensions"]
+        assert "Markov" not in partial_markov["blocked_dimensions"]
+        assert partial_markov["dimensions"]["Markov"]["evidence"]["partial_profile_blockers"]["kline"]
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
         assert pending["pending_no_final_entry_classification"]["categories"]["stale_before_final"] == 1
