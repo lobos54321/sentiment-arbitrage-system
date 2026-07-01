@@ -530,6 +530,11 @@ def stage_oos(args, run_dir):
     as the frozen hypothesis source. It does not promote candidates or change
     runtime behavior.
     """
+    freeze_registry = run_dir / "pass_allow_60_oos_freeze_registry.json"
+    if not freeze_registry.exists():
+        latest_registry = Path(args.out_root) / "latest" / "pass_allow_60_oos_freeze_registry.json"
+        if latest_registry.exists():
+            freeze_registry = latest_registry
     rows = [
         run_report(
             "oos_readiness_probe_refresh",
@@ -548,7 +553,20 @@ def stage_oos(args, run_dir):
             ],
             run_dir / "oos_readiness_probe_refresh.json",
             timeout=max(60, int(args.report_timeout_sec) * 3),
-        )
+        ),
+        run_report(
+            "pass_allow_60_post_freeze_oos_validation",
+            [
+                "scripts/pass_allow_60_post_freeze_oos_validation.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--freeze-registry", str(freeze_registry),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(run_dir / "pass_allow_60_post_freeze_oos_validation.json"),
+            ],
+            run_dir / "pass_allow_60_post_freeze_oos_validation.json",
+            timeout=max(60, int(args.report_timeout_sec) * 2),
+        ),
     ]
     append_diagnostics(run_dir, rows)
     update_stage_state(run_dir, "oos")
@@ -589,6 +607,7 @@ def collect_paths(args, run_dir):
         "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
+        "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
         "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
         "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     }

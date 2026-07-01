@@ -116,6 +116,7 @@ DERIVED_READINESS_SIBLINGS = {
     "matured_volume_cross_oos_probe_0p5h": "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
     "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
+    "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
@@ -1568,6 +1569,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "pass_allow_60_oos_readiness_monitor": (
                 oos_readiness_summary_v3.get("pass_allow_60_oos_readiness_monitor") or {}
+            ),
+            "pass_allow_60_post_freeze_oos_validation": (
+                oos_readiness_summary_v3.get("pass_allow_60_post_freeze_oos_validation") or {}
             ),
             "promotion_allowed": False,
         },

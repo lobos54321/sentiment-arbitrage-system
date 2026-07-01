@@ -2691,6 +2691,7 @@ def load_oos_reports(run_dir):
         "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
         "matured_volume_capture_cross_audit_oos_probe_1h.json",
         "oos_readiness_probe_refresh.json",
+        "pass_allow_60_post_freeze_oos_validation.json",
     ):
         path = run_dir / name
         if path.exists():
@@ -2728,6 +2729,11 @@ def build_oos_summary(run_dir, reports=None):
     )
     pass_allow_freeze_registry = (
         (input_reports or {}).get("pass_allow_60_oos_freeze_registry") or {}
+    )
+    pass_allow_post_freeze_validation = (
+        (input_reports or {}).get("pass_allow_60_post_freeze_oos_validation")
+        or oos_reports.get("pass_allow_60_post_freeze_oos_validation")
+        or {}
     )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
     qt_queue_count = safe_int(
@@ -2858,6 +2864,37 @@ def build_oos_summary(run_dir, reports=None):
             0,
         )
         summary["pass_allow_60_oos_readiness_monitor"] = pass_allow_oos_monitor
+    if pass_allow_post_freeze_validation:
+        summary["pass_allow_60_post_freeze_oos_validation"] = {
+            "available": True,
+            "classification": pass_allow_post_freeze_validation.get("classification"),
+            "next_action": pass_allow_post_freeze_validation.get("next_action"),
+            "raw_gold_silver_event_rows": pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows"),
+            "global_pass_allow_count": pass_allow_post_freeze_validation.get("global_pass_allow_count"),
+            "global_pass_allow_rate": pass_allow_post_freeze_validation.get("global_pass_allow_rate"),
+            "frozen_definition_count": pass_allow_post_freeze_validation.get("frozen_definition_count"),
+            "validated_definition_count": pass_allow_post_freeze_validation.get("validated_definition_count"),
+            "supported_definition_count": pass_allow_post_freeze_validation.get("supported_definition_count"),
+            "repeat_watch_count": pass_allow_post_freeze_validation.get("repeat_watch_count"),
+            "positive_lift_count": pass_allow_post_freeze_validation.get("positive_lift_count"),
+            "too_small_definition_count": pass_allow_post_freeze_validation.get("too_small_definition_count"),
+            "post_freeze_usable_hours": pass_allow_post_freeze_validation.get("post_freeze_usable_hours"),
+            "definition_set_frozen_at": pass_allow_post_freeze_validation.get("definition_set_frozen_at"),
+            "status_counts": pass_allow_post_freeze_validation.get("status_counts") or {},
+            "top_repeat_watch_items": (
+                pass_allow_post_freeze_validation.get("top_repeat_watch_items") or []
+            )[:12],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["pass_allow_60_post_freeze_oos_classification"] = (
+            pass_allow_post_freeze_validation.get("classification")
+        )
+        summary["pass_allow_60_post_freeze_oos_repeat_watch_count"] = (
+            pass_allow_post_freeze_validation.get("repeat_watch_count")
+        )
     return summary
 
 
