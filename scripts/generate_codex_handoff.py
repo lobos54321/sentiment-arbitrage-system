@@ -698,6 +698,7 @@ def build_handoff(verdict):
                 "quality_timing_shadow_review_queue": verdict.get("quality_timing_shadow_review_queue") or {},
                 "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
                 "pass_allow_capture_gap_audit": verdict.get("pass_allow_capture_gap_audit") or {},
+                "decision_no_pass_quality_timing_review": verdict.get("decision_no_pass_quality_timing_review") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},

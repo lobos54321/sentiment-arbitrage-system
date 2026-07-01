@@ -60,6 +60,7 @@ V3_OUTPUT_FILES = {
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
+    "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -576,6 +577,48 @@ def top_stage_reasons(rows, stage_name, limit=12):
     ][:limit]
 
 
+def classify_quality_timing_reason_cluster(row):
+    component = str((row or {}).get("component") or "").lower()
+    reason = str((row or {}).get("reason") or "").lower()
+    decision = str((row or {}).get("decision") or "").lower()
+    event_type = str((row or {}).get("event_type") or "").lower()
+    stage = str((row or {}).get("stage") or "").lower()
+    text = " ".join([stage, component, event_type, decision, reason])
+    if "matrix" in component or "matrices not yet aligned" in reason:
+        return "matrix_alignment_wait"
+    if "lotto_observe_low_mc_vol" in reason or "low_volume" in reason or "low_vol" in reason:
+        return "low_volume_observe"
+    if "risky_newborn_pullback" in reason:
+        return "newborn_pullback_timing_reject"
+    if "not_ath" in reason:
+        return "notath_upstream_skip"
+    if "buy_pressure" in reason or "weak_buying_pressure" in reason:
+        return "buy_pressure_weak"
+    if "chasing_top" in reason:
+        return "chasing_top_timing_reject"
+    if "score_too_low" in reason or "quality_score" in reason:
+        return "score_or_quality_too_low"
+    if "negative_trend" in reason or "momentum_fading" in reason:
+        return "momentum_fading_or_negative_trend"
+    if "entry_node_timeout" in reason or "retry_watch_scheduled" in reason:
+        return "entry_timing_timeout_or_retry"
+    if "final_entry" in component or "final_entry" in reason:
+        return "final_entry_contract_research_block"
+    if "top10_pct" in reason or "concentration" in reason:
+        return "holder_concentration_quality_reject"
+    if text.strip():
+        return "other_quality_timing_reject"
+    return "unknown_quality_timing_reject"
+
+
+def stage_count(row, stage_name):
+    return sum(
+        safe_int(item.get("count"), 0)
+        for item in (row or {}).get("stage_counts") or []
+        if item.get("stage") == stage_name
+    )
+
+
 def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, context_eligibility):
     """Explain the current gap from raw gold/silver events to pass/allow.
 
@@ -784,6 +827,166 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
         "notes": [
             "This audit targets the first below-60% stage: pass_allow_capture.",
             "All counts are discovery/readiness evidence. No row authorizes a runtime policy change.",
+        ],
+    }
+
+
+def build_decision_no_pass_quality_timing_review(stage_metrics, pass_allow_gap_audit, reports, context_eligibility):
+    """Prioritize decision-no-pass quality/timing clusters against the 60% target.
+
+    This narrows the previous quality/timing audit to the first below-target
+    stage, pass_allow_capture. It provides a shadow-only review plan for the
+    exact clusters that could close the current pass/allow gap if future clean
+    windows and OOS validation prove they are false negatives.
+    """
+    quality_timing = reports.get("quality_timing_reject_research") or {}
+    stage_attribution = quality_timing.get("stage_attribution") or {}
+    reason_rows = [
+        row for row in stage_attribution.get("reason_counts") or []
+        if row.get("stage") == "decision_no_pass_or_allow"
+    ]
+    cluster_reason_rows = {}
+    for row in reason_rows:
+        cluster = classify_quality_timing_reason_cluster(row)
+        cluster_reason_rows.setdefault(cluster, []).append(row)
+
+    opportunities = {
+        row.get("cluster"): row
+        for row in ((quality_timing.get("shadow_only_review") or {}).get("top_research_opportunities") or [])
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    target_gap = pass_allow_gap_audit.get("target_gap") or {}
+    additional_needed = safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0)
+    raw_den = safe_int(target_gap.get("raw_gold_silver_denominator"), 0)
+    rows = []
+    for cluster in sorted(set(cluster_reason_rows) | set(opportunities)):
+        opportunity = opportunities.get(cluster) or {}
+        dnp_count = stage_count(opportunity, "decision_no_pass_or_allow")
+        reason_count = sum(safe_int(row.get("count"), 0) for row in cluster_reason_rows.get(cluster) or [])
+        event_count = dnp_count or reason_count
+        if event_count <= 0:
+            continue
+        review_blockers = quality_timing_context_blockers(opportunity, context_eligibility) if opportunity else []
+        rows.append({
+            "cluster": cluster,
+            "decision_no_pass_event_count": event_count,
+            "share_of_raw_gold_silver": rate(event_count, raw_den),
+            "share_of_current_pass_allow_gap_upper_bound": rate(
+                min(event_count, additional_needed),
+                additional_needed,
+            ),
+            "unique_tokens": opportunity.get("unique_tokens"),
+            "candidate_matched_any_rate": opportunity.get("candidate_matched_any_rate"),
+            "max_sustained_peak_pct_max": opportunity.get("max_sustained_peak_pct_max"),
+            "time_to_sustained_peak_sec_median": opportunity.get("time_to_sustained_peak_sec_median"),
+            "reason_counts": cluster_reason_rows.get(cluster) or [],
+            "top_candidates": (opportunity.get("top_candidates") or [])[:8],
+            "top_lifecycle_source_contexts": (opportunity.get("top_lifecycle_source_contexts") or [])[:8],
+            "suggested_shadow_only_action": (
+                opportunity.get("suggested_shadow_only_action")
+                or "continue_reason_level_shadow_review"
+            ),
+            "human_approval_required_if_fix_requires": (
+                opportunity.get("human_approval_required_if_fix_requires")
+                or "changing strategy, entry policy, gate, final_entry, or runtime behavior"
+            ),
+            "context_blockers": review_blockers,
+            "review_status": "SHADOW_REVIEW_READY" if not review_blockers else "BLOCKED_CONTEXT_COVERAGE",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            safe_int(row.get("decision_no_pass_event_count"), 0),
+            safe_float(row.get("candidate_matched_any_rate"), 0) or 0,
+            str(row.get("cluster") or ""),
+        ),
+        reverse=True,
+    )
+    cumulative = 0
+    selected = []
+    for row in rows:
+        if additional_needed and cumulative >= additional_needed:
+            break
+        contribution = min(
+            safe_int(row.get("decision_no_pass_event_count"), 0),
+            max(0, additional_needed - cumulative),
+        )
+        cumulative += contribution
+        selected.append({
+            "cluster": row.get("cluster"),
+            "decision_no_pass_event_count": row.get("decision_no_pass_event_count"),
+            "events_contributing_to_gap_upper_bound": contribution,
+            "cumulative_events_contributing_to_gap_upper_bound": cumulative,
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+            "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    classification = (
+        "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_READY"
+        if rows
+        else "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_EMPTY"
+    )
+    if rows and any(row.get("review_status") == "BLOCKED_CONTEXT_COVERAGE" for row in rows):
+        classification = "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_CONTEXT_BLOCKED"
+    return {
+        "schema_version": "decision_no_pass_quality_timing_review.v1",
+        "report_type": "decision_no_pass_quality_timing_review",
+        "generated_at": utc_now(),
+        "phase": "discovery_readiness",
+        "evidence_level": "discovery_same_window",
+        "usage": "read_only_shadow_review_decision_no_pass_quality_timing",
+        "classification": classification,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "runtime_effect": "none",
+        "target_gap": target_gap,
+        "decision_no_pass_quality_timing_event_count": sum(
+            safe_int(row.get("decision_no_pass_event_count"), 0)
+            for row in rows
+        ),
+        "cluster_count": len(rows),
+        "clusters": rows,
+        "selected_clusters_to_cover_current_pass_allow_gap_upper_bound": selected,
+        "selected_cluster_count": len(selected),
+        "selected_upper_bound_event_count": cumulative,
+        "covers_current_pass_allow_gap_upper_bound": cumulative >= additional_needed if additional_needed else True,
+        "context_constraints": {
+            "clean_dimensions": context_eligibility.get("clean_dimensions") or [],
+            "blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
+            "rule": "Blocked quote/kline/Markov dimensions are excluded from this review.",
+        },
+        "next_action": (
+            "track_selected_decision_no_pass_quality_timing_clusters_shadow_only_then_clean_window_oos"
+            if rows
+            else "continue_pass_allow_gap_monitoring"
+        ),
+        "allowed_scope": [
+            "read-only evaluator/report improvements",
+            "shadow-only candidate/context instrumentation",
+            "hypothesis registry entries for clean-window/OOS validation",
+        ],
+        "forbidden_scope": [
+            "strategy change",
+            "entry policy change",
+            "hard gate relaxation",
+            "exit gate change",
+            "final_entry_contract change",
+            "A_CLASS mode reset or enablement",
+            "paper/live executor enablement",
+            "canary or risk increase",
+        ],
+        "notes": [
+            "Upper-bound review only: selected clusters may explain the current pass_allow shortfall, but do not prove any runtime threshold should change.",
+            "Any fix requiring strategy, gate, final_entry_contract, A_CLASS, executor, paper/live, or risk changes requires human approval.",
         ],
     }
 
@@ -1169,6 +1372,12 @@ def assemble_reports(run_dir, out_dir=None):
         reports,
         context_eligibility,
     )
+    decision_no_pass_review = build_decision_no_pass_quality_timing_review(
+        stage_metrics,
+        pass_allow_gap_audit,
+        reports,
+        context_eligibility,
+    )
     final_entry_readiness = build_final_entry_readiness_audit(reports.get("a_class") or {}, stage_metrics, pending_audit)
     strategy_memory_capture = build_strategy_memory_capture_validation(reports)
     shadow_queue = build_shadow_candidate_improvement_queue(reports, context_eligibility)
@@ -1178,6 +1387,7 @@ def assemble_reports(run_dir, out_dir=None):
         "capture_stage_metrics": stage_metrics,
         "context_dimension_eligibility": context_eligibility,
         "pass_allow_capture_gap_audit": pass_allow_gap_audit,
+        "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
@@ -1201,6 +1411,7 @@ def assemble_reports(run_dir, out_dir=None):
             "additional_count_needed_to_60": gap_report.get("additional_count_needed_to_60"),
             "next_best_allowed_action": gap_report.get("next_best_allowed_action"),
             "pass_allow_gap_next_action": pass_allow_gap_audit.get("next_action"),
+            "decision_no_pass_review_next_action": decision_no_pass_review.get("next_action"),
             "context_blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
             "strategy_memory_hypotheses_count": strategy_memory_capture.get("hypotheses_count"),
             "shadow_candidate_queue_count": shadow_queue.get("queue_count"),

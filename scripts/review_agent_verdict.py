@@ -118,6 +118,7 @@ DERIVED_READINESS_SIBLINGS = {
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
+    "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1114,6 +1115,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     shadow_bridge_family_counts = (shadow_decision_bridge.get("family_counts") or [])[:10]
     shadow_bridge_reason_counts = (shadow_decision_bridge.get("reason_counts") or [])[:10]
     pass_allow_gap_audit = readiness_reports.get("pass_allow_capture_gap_audit") or {}
+    decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     shadow_bridge_review_queue_items = []
     for row in shadow_bridge_candidate_counts[:10]:
         if not isinstance(row, dict):
@@ -1519,6 +1521,31 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "shadow_decision_bridge": pass_allow_gap_audit.get("shadow_decision_bridge") or {},
             "decision_no_pass_quality_timing": pass_allow_gap_audit.get("decision_no_pass_quality_timing") or {},
             "context_constraints": pass_allow_gap_audit.get("context_constraints") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "decision_no_pass_quality_timing_review": {
+            "available": bool(decision_no_pass_review),
+            "classification": decision_no_pass_review.get("classification"),
+            "next_action": decision_no_pass_review.get("next_action"),
+            "target_gap": decision_no_pass_review.get("target_gap") or {},
+            "decision_no_pass_quality_timing_event_count": (
+                decision_no_pass_review.get("decision_no_pass_quality_timing_event_count")
+            ),
+            "cluster_count": decision_no_pass_review.get("cluster_count"),
+            "selected_cluster_count": decision_no_pass_review.get("selected_cluster_count"),
+            "selected_upper_bound_event_count": decision_no_pass_review.get("selected_upper_bound_event_count"),
+            "covers_current_pass_allow_gap_upper_bound": (
+                decision_no_pass_review.get("covers_current_pass_allow_gap_upper_bound")
+            ),
+            "selected_clusters_to_cover_current_pass_allow_gap_upper_bound": (
+                decision_no_pass_review.get("selected_clusters_to_cover_current_pass_allow_gap_upper_bound")
+                or []
+            ),
+            "top_clusters": (decision_no_pass_review.get("clusters") or [])[:8],
+            "context_constraints": decision_no_pass_review.get("context_constraints") or {},
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
