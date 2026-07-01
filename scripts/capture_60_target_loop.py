@@ -1935,6 +1935,91 @@ def build_pass_allow_60_closure_plan(
         })
     shadow_pass_allow_items = shadow_pass_allow_items[:20]
 
+    residual_gap_after_clusters = max(0, additional_needed - cumulative)
+    clean_2d_non_dedup_upper_bound = sum(
+        safe_int(row.get("matched_gold_silver_events"), 0)
+        for row in clean_cross_items
+    )
+    clean_2d_max_single_slice = max(
+        [safe_int(row.get("matched_gold_silver_events"), 0) for row in clean_cross_items] or [0]
+    )
+    shadow_queue_non_dedup_upper_bound = sum(
+        safe_int(
+            row.get("events_contributing_to_60pct_gap_upper_bound")
+            or row.get("event_count"),
+            0,
+        )
+        for row in shadow_pass_allow_items
+    )
+    supplemental_non_dedup_upper_bound = (
+        clean_2d_non_dedup_upper_bound + shadow_queue_non_dedup_upper_bound
+    )
+    residual_gap_supplemental_tracks = {
+        "residual_gap_after_selected_clusters": residual_gap_after_clusters,
+        "clean_2d_pass_allow_lift_slice_count": len(clean_cross_items),
+        "clean_2d_positive_pass_allow_lift_count": len(clean_cross_items),
+        "clean_2d_non_dedup_upper_bound_event_count": clean_2d_non_dedup_upper_bound,
+        "clean_2d_max_single_slice_matched_gold_silver_events": clean_2d_max_single_slice,
+        "clean_2d_top_items": [
+            {
+                "plan_item_id": row.get("plan_item_id"),
+                "candidate_id": row.get("candidate_id"),
+                "dimension": row.get("dimension"),
+                "slice_value": row.get("slice_value"),
+                "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+                "pass_allow_lift": row.get("pass_allow_lift"),
+                "downstream_lift_scope": row.get("downstream_lift_scope"),
+            }
+            for row in clean_cross_items[:5]
+        ],
+        "shadow_queue_pass_allow_item_count": len(shadow_pass_allow_items),
+        "shadow_queue_non_dedup_upper_bound_event_count": shadow_queue_non_dedup_upper_bound,
+        "shadow_queue_top_items": [
+            {
+                "plan_item_id": row.get("plan_item_id"),
+                "candidate_id": row.get("candidate_id"),
+                "hypothesis_source": row.get("hypothesis_source"),
+                "event_count": row.get("event_count"),
+                "events_contributing_to_60pct_gap_upper_bound": (
+                    row.get("events_contributing_to_60pct_gap_upper_bound")
+                ),
+                "next_action": row.get("next_action"),
+            }
+            for row in shadow_pass_allow_items[:5]
+        ],
+        "supplemental_non_dedup_upper_bound_event_count": supplemental_non_dedup_upper_bound,
+        "supplemental_tracks_can_cover_residual_upper_bound": (
+            residual_gap_after_clusters == 0
+            or supplemental_non_dedup_upper_bound >= residual_gap_after_clusters
+        ),
+        "combined_selected_plus_supplemental_upper_bound_event_count": (
+            cumulative + supplemental_non_dedup_upper_bound
+        ),
+        "combined_tracks_can_cover_current_gap_upper_bound": (
+            cumulative + supplemental_non_dedup_upper_bound >= additional_needed
+            if additional_needed
+            else True
+        ),
+        "evidence_level": "non_deduped_same_window_upper_bound_not_promotion_evidence",
+        "next_action": (
+            "track_residual_pass_allow_gap_clean_2d_and_shadow_queue_until_oos"
+            if residual_gap_after_clusters > 0 and supplemental_non_dedup_upper_bound
+            else "continue_pass_allow_reason_decomposition"
+            if residual_gap_after_clusters > 0
+            else "selected_clusters_cover_current_gap_upper_bound"
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "caveat": (
+            "Supplemental tracks are intentionally non-deduped upper bounds. They show where to "
+            "continue shadow-only/OOS collection for the residual pass_allow gap; they do not prove "
+            "runtime capture improvement and cannot justify strategy, gate, final_entry_contract, "
+            "A_CLASS, executor, paper/live, canary, or risk changes."
+        ),
+    }
+
     if additional_needed <= 0:
         classification = "PASS_ALLOW_60_CLOSURE_NOT_NEEDED"
         next_action = "pass_allow_capture_target_reached_continue_downstream_gap_audit"
@@ -1949,7 +2034,7 @@ def build_pass_allow_60_closure_plan(
         next_action = "continue_pass_allow_reason_decomposition"
 
     return {
-        "schema_version": "pass_allow_60_closure_plan.v2",
+        "schema_version": "pass_allow_60_closure_plan.v3",
         "report_type": "pass_allow_60_closure_plan",
         "generated_at": utc_now(),
         "phase": "discovery_readiness",
@@ -1973,8 +2058,9 @@ def build_pass_allow_60_closure_plan(
             "selected_clusters_cover_current_gap_upper_bound": (
                 cumulative >= additional_needed if additional_needed else True
             ),
-            "residual_gap_after_selected_cluster_upper_bound": max(0, additional_needed - cumulative),
+            "residual_gap_after_selected_cluster_upper_bound": residual_gap_after_clusters,
         },
+        "residual_gap_supplemental_tracks": residual_gap_supplemental_tracks,
         "closure_tracks": {
             "decision_no_pass_quality_timing_clusters": {
                 "count": len(selected_cluster_items),
@@ -2927,6 +3013,9 @@ def build_oos_summary(run_dir, reports=None):
         clean_cross_count = safe_int(clean_cross_track.get("count"), 0)
         shadow_pass_allow_count = safe_int(shadow_track.get("count"), 0)
         target_gap = pass_allow_closure_plan.get("target_gap") or {}
+        residual_supplemental_tracks = (
+            pass_allow_closure_plan.get("residual_gap_supplemental_tracks") or {}
+        )
         queue_count = selected_cluster_count + clean_cross_count + shadow_pass_allow_count
         if safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0) <= 0:
             closure_oos_classification = "PASS_ALLOW_60_CLOSURE_OOS_NOT_NEEDED"
@@ -2942,6 +3031,7 @@ def build_oos_summary(run_dir, reports=None):
             "classification": pass_allow_closure_plan.get("classification"),
             "next_action": pass_allow_closure_plan.get("next_action"),
             "target_gap": target_gap,
+            "residual_gap_supplemental_tracks": residual_supplemental_tracks,
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -2960,6 +3050,7 @@ def build_oos_summary(run_dir, reports=None):
             "residual_gap_after_selected_cluster_upper_bound": (
                 target_gap.get("residual_gap_after_selected_cluster_upper_bound")
             ),
+            "residual_gap_supplemental_tracks": residual_supplemental_tracks,
             "blocked_until": "context_clean_window_and_non_overlapping_eval",
             "next_action": next_action,
             "promotion_allowed": False,
@@ -3497,9 +3588,15 @@ def self_test():
         assert pass_allow_gap["promotion_allowed"] is False
         closure_plan = load_json(run_dir / "pass_allow_60_closure_plan.json")
         assert closure_plan["promotion_allowed"] is False
-        assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v2"
+        assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v3"
         assert closure_plan["classification"] == "PASS_ALLOW_60_CLOSURE_NOT_NEEDED"
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
+        residual_tracks = closure_plan["residual_gap_supplemental_tracks"]
+        assert residual_tracks["residual_gap_after_selected_clusters"] == 0
+        assert residual_tracks["clean_2d_pass_allow_lift_slice_count"] == 1
+        assert residual_tracks["clean_2d_positive_pass_allow_lift_count"] == 1
+        assert residual_tracks["supplemental_tracks_can_cover_residual_upper_bound"] is True
+        assert residual_tracks["promotion_allowed"] is False
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
         clean_2d_item = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]
         assert clean_2d_item["pass_allow_lift"] == 0.25

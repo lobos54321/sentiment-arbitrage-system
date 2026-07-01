@@ -1839,6 +1839,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "classification": pass_allow_60_closure_plan.get("classification"),
             "next_action": pass_allow_60_closure_plan.get("next_action"),
             "target_gap": pass_allow_60_closure_plan.get("target_gap") or {},
+            "residual_gap_supplemental_tracks": (
+                pass_allow_60_closure_plan.get("residual_gap_supplemental_tracks") or {}
+            ),
             "decision_no_pass_quality_timing_clusters": pass_allow_60_dnp_clusters,
             "clean_2d_pass_allow_lift_slices": {
                 "count": pass_allow_60_clean_cross.get("count"),
