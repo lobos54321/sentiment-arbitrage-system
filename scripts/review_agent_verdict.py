@@ -1426,6 +1426,16 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "raw_gold_silver_denominator": capture_60_gap_report.get("raw_gold_silver_denominator"),
             "target_60_count": capture_60_gap_report.get("target_60_count"),
             "biggest_gap_stage": capture_60_gap_report.get("biggest_gap_stage"),
+            "target_shortfall_stage": capture_60_gap_report.get(
+                "target_shortfall_stage"
+            ) or capture_60_gap_report.get("biggest_gap_stage"),
+            "largest_transition_dropoff": capture_60_gap_report.get(
+                "largest_transition_dropoff"
+            ) or capture_60_gap_report.get("largest_stage_dropoff") or {},
+            "recommended_parallel_tracks": capture_60_gap_report.get(
+                "recommended_parallel_tracks"
+            ) or [],
+            "gap_interpretation": capture_60_gap_report.get("gap_interpretation") or {},
             "additional_count_needed_to_60": capture_60_gap_report.get("additional_count_needed_to_60"),
             "next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
             "detector_capture_rate": capture_60_gap_report.get("detector_capture_rate"),

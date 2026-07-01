@@ -265,6 +265,55 @@ def stage_specific_allowed_action(biggest_gap_stage, pending_audit):
     return "continue_shadow_oos_collection"
 
 
+def transition_dropoff_allowed_action(dropoff, pending_audit):
+    to_stage = (dropoff or {}).get("to_stage")
+    if not to_stage:
+        return "continue_shadow_oos_collection"
+    return stage_specific_allowed_action(to_stage, pending_audit)
+
+
+def gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pending_audit):
+    largest_dropoff = stage_metrics.get("largest_stage_dropoff") or {}
+    target_track = {
+        "track": "target_shortfall_to_60",
+        "stage": biggest_gap_stage,
+        "additional_count_needed_to_60": additional_needed,
+        "meaning": (
+            "First capture stage below the 60% target. This determines the next "
+            "target-driven shadow/evaluator action."
+        ),
+        "next_action": stage_specific_allowed_action(biggest_gap_stage, pending_audit),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+    transition_track = {
+        "track": "largest_transition_dropoff",
+        "from_stage": largest_dropoff.get("from_stage"),
+        "to_stage": largest_dropoff.get("to_stage"),
+        "drop_count": largest_dropoff.get("drop_count"),
+        "drop_rate_of_previous": largest_dropoff.get("drop_rate_of_previous"),
+        "meaning": (
+            "Largest count loss between adjacent funnel stages. This is diagnostic "
+            "dropoff evidence and may require a parallel audit even when it is not "
+            "the first stage below 60%."
+        ),
+        "next_action": transition_dropoff_allowed_action(largest_dropoff, pending_audit),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+    return {
+        "target_shortfall_stage": biggest_gap_stage,
+        "largest_transition_dropoff_stage": largest_dropoff.get("to_stage"),
+        "largest_transition_dropoff": largest_dropoff,
+        "tracks": [target_track, transition_track],
+        "promotion_allowed": False,
+    }
+
+
 def next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_audit):
     blocked_dimensions = [
         name for name, row in (context_eligibility.get("dimensions") or {}).items()
@@ -557,6 +606,7 @@ def build_context_dimension_eligibility(reports):
 def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit):
     stage_counts = stage_metrics["stage_counts"]
     biggest_gap_stage, additional_needed = first_stage_below_target(stage_counts)
+    interpretation = gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pending_audit)
     return {
         "schema_version": "capture_60_gap_report.v1",
         "report_type": "capture_60_gap_report",
@@ -583,12 +633,17 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         "realized_capture_count": stage_counts["realized_capture"]["count"],
         "realized_capture_rate": stage_counts["realized_capture"]["rate"],
         "biggest_gap_stage": biggest_gap_stage,
+        "target_shortfall_stage": biggest_gap_stage,
         "largest_stage_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
+        "largest_transition_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
         "additional_count_needed_to_60": additional_needed,
         "next_best_allowed_action": next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_audit),
+        "gap_interpretation": interpretation,
+        "recommended_parallel_tracks": interpretation.get("tracks") or [],
         "human_approval_required_before_runtime_change": True,
         "notes": [
             "This is a target-gap report, not a promotion report.",
+            "target_shortfall_stage is the first stage below 60%; largest_transition_dropoff is the biggest adjacent funnel loss. They can differ and should be audited separately.",
             "All suggested actions are constrained to evaluator, data, shadow-only, or human-approval handoff paths.",
         ],
     }
@@ -1658,6 +1713,19 @@ def self_test():
         assert gap["raw_gold_silver_denominator"] == 5
         assert gap["target_60_count"] == 3
         assert gap["biggest_gap_stage"] == "pending_capture"
+        assert gap["target_shortfall_stage"] == "pending_capture"
+        assert gap["largest_transition_dropoff"]["to_stage"] in {
+            "detector_capture",
+            "decision_capture",
+            "pass_allow_capture",
+            "pending_capture",
+            "final_eligibility",
+            "mode_disabled_adjusted_final_eligibility",
+            "paper_capture",
+            "realized_capture",
+        }
+        assert len(gap["recommended_parallel_tracks"]) == 2
+        assert all(item["promotion_allowed"] is False for item in gap["recommended_parallel_tracks"])
         assert gap["additional_count_needed_to_60"] == 1
         assert gap["next_best_allowed_action"] == (
             "audit_pass_allow_to_pending_bridge_shadow_only_with_blocked_context_dimensions_excluded"

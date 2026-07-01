@@ -173,6 +173,8 @@ def build_handoff(verdict):
         f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
         f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
         f"- capture_60_biggest_gap_stage: `{(verdict.get('capture_60_target_loop') or {}).get('biggest_gap_stage')}`",
+        f"- capture_60_target_shortfall_stage: `{(verdict.get('capture_60_target_loop') or {}).get('target_shortfall_stage')}`",
+        f"- capture_60_largest_transition_dropoff: `{json.dumps((verdict.get('capture_60_target_loop') or {}).get('largest_transition_dropoff') or {}, sort_keys=True)}`",
         f"- capture_60_additional_count_needed: `{(verdict.get('capture_60_target_loop') or {}).get('additional_count_needed_to_60')}`",
         f"- capture_60_next_best_allowed_action: `{(verdict.get('capture_60_target_loop') or {}).get('next_best_allowed_action')}`",
         f"- handoff_needed: `{str(needed).lower()}`",
@@ -203,6 +205,8 @@ def build_handoff(verdict):
         )
         lines.extend([
             "## Capture 60 Target Loop",
+            "",
+            "The `target_shortfall_stage` is the first stage below 60%; `largest_transition_dropoff` is the largest adjacent funnel loss. Treat them as separate shadow-only audit tracks when they differ.",
             "",
             "```json",
             json.dumps(
