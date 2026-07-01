@@ -30,3 +30,4 @@ def test_strategy_memory_self_tests():
     run_script("offline_strategy_memory_audit.py", "--self-test")
     run_script("strategy_memory_validation.py", "--self-test")
     run_script("autoloop_lightweight_reconciliation.py", "--self-test")
+    run_script("agent_autoloop_stage_runner.py", "--self-test")
