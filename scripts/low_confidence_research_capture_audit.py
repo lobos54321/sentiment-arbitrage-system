@@ -101,6 +101,21 @@ def baseline_lag_bucket(value):
     return "not_evaluable_gt_300s"
 
 
+def first_bar_lag_bucket(value):
+    parsed = safe_float(value)
+    if parsed is None:
+        return "missing"
+    if parsed < 0:
+        return "invalid_negative"
+    if parsed <= 60:
+        return "le_60s"
+    if parsed <= 120:
+        return "le_120s"
+    if parsed <= 300:
+        return "le_300s"
+    return "gt_300s"
+
+
 def raw_tier(row):
     return str(row.get("raw_sustained_tier") or row.get("raw_primary_tier") or "").lower()
 
@@ -341,6 +356,57 @@ def build_denominator_summary(raw_rows, low_rows):
     }
 
 
+def build_time_legality_summary(raw_rows, low_rows, denominator):
+    formal = (denominator.get("formal_evaluable_gold_silver") or {}).get("event_rows") or 0
+    raw_all = (denominator.get("raw_all_gold_silver") or {}).get("event_rows") or len(raw_rows)
+    before_peak = 0
+    after_or_unknown = 0
+    lag_deltas = []
+    for row in low_rows:
+        baseline_lag = safe_float(row.get("baseline_lag_sec"))
+        peak_lag = safe_float(row.get("time_to_sustained_peak_sec"))
+        if baseline_lag is not None and peak_lag is not None and baseline_lag <= peak_lag:
+            before_peak += 1
+            lag_deltas.append(peak_lag - baseline_lag)
+        else:
+            after_or_unknown += 1
+    formal_plus_time_legal = formal + before_peak
+    return {
+        "classification": (
+            "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_RECOVERABLE"
+            if raw_all and formal_plus_time_legal / raw_all >= 0.8
+            else "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_INSUFFICIENT"
+        ),
+        "promotion_allowed": False,
+        "formal_denominator_changed": False,
+        "allowed_use": "research_only",
+        "raw_all_gold_silver_event_rows": raw_all,
+        "formal_evaluable_event_rows": formal,
+        "low_confidence_research_event_rows": len(low_rows),
+        "baseline_before_sustained_peak_rows": before_peak,
+        "baseline_after_or_unknown_peak_rows": after_or_unknown,
+        "baseline_before_sustained_peak_rate": rate(before_peak, len(low_rows)),
+        "baseline_lag_bucket_counts": dict(
+            Counter(row.get("baseline_lag_bucket") or "UNKNOWN" for row in low_rows).most_common()
+        ),
+        "first_bar_lag_bucket_counts": dict(
+            Counter(first_bar_lag_bucket(row.get("first_bar_lag_sec")) for row in low_rows).most_common()
+        ),
+        "median_peak_after_baseline_sec": (
+            sorted(lag_deltas)[len(lag_deltas) // 2] if lag_deltas else None
+        ),
+        "formal_plus_time_legal_recoverable_rows": formal_plus_time_legal,
+        "formal_plus_time_legal_recoverable_rate": rate(formal_plus_time_legal, raw_all),
+        "reaches_80pct_if_research_rows_accepted": bool(
+            raw_all and formal_plus_time_legal / raw_all >= 0.8
+        ),
+        "note": (
+            "This is a research-only time-legality audit. It does not add low-confidence rows "
+            "to the formal denominator and cannot be used for promotion without clean OOS validation."
+        ),
+    }
+
+
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
@@ -359,6 +425,7 @@ def build_report(args):
         candidate_layer = summarize_candidate_layer(audits, obs, args.expected_candidates)
         decision_layer = summarize_decision_layer(audits, decisions, trades)
         denominator = build_denominator_summary(raw_rows, low_rows)
+        time_legality = build_time_legality_summary(raw_rows, low_rows, denominator)
         blockers = []
         if not raw_rows:
             blockers.append("raw_gold_silver_denominator_empty")
@@ -388,6 +455,7 @@ def build_report(args):
             "blockers": blockers,
             "observation_load": obs_meta,
             "denominator": denominator,
+            "time_legality": time_legality,
             "candidate_layer": candidate_layer,
             "decision_layer": decision_layer,
             "low_confidence_examples": sorted(
@@ -426,6 +494,7 @@ def compact_summary(report):
     low_den = denominator.get("low_confidence_research_gold_silver") or {}
     candidate = report.get("candidate_layer") or {}
     decision = report.get("decision_layer") or {}
+    time_legality = report.get("time_legality") or {}
     return {
         "verdict": report.get("verdict"),
         "promotion_allowed": False,
@@ -441,6 +510,15 @@ def compact_summary(report):
         "would_enter_rate": decision.get("would_enter_rate"),
         "entered_rate": decision.get("entered_rate"),
         "terminal_bucket_counts": decision.get("terminal_bucket_counts"),
+        "time_legality": {
+            "classification": time_legality.get("classification"),
+            "formal_plus_time_legal_recoverable_rate": time_legality.get("formal_plus_time_legal_recoverable_rate"),
+            "reaches_80pct_if_research_rows_accepted": time_legality.get("reaches_80pct_if_research_rows_accepted"),
+            "baseline_before_sustained_peak_rows": time_legality.get("baseline_before_sustained_peak_rows"),
+            "baseline_after_or_unknown_peak_rows": time_legality.get("baseline_after_or_unknown_peak_rows"),
+            "promotion_allowed": False,
+            "formal_denominator_changed": False,
+        },
         "top_candidates": candidate.get("top_candidates_by_low_confidence_raw_gs_match"),
         "blockers": report.get("blockers") or [],
     }
@@ -544,11 +622,17 @@ def self_test():
         assert report["denominator"]["formal_evaluable_gold_silver"]["event_rows"] == 1
         assert report["denominator"]["low_confidence_research_gold_silver"]["event_rows"] == 2
         assert report["denominator"]["low_confidence_31_60_gold_silver"]["event_rows"] == 1
+        assert report["time_legality"]["baseline_before_sustained_peak_rows"] == 2
+        assert report["time_legality"]["baseline_after_or_unknown_peak_rows"] == 0
+        assert report["time_legality"]["formal_plus_time_legal_recoverable_rows"] == 3
+        assert report["time_legality"]["formal_denominator_changed"] is False
+        assert report["time_legality"]["promotion_allowed"] is False
         assert report["candidate_layer"]["candidate_matched_any_events"] == 2
         assert report["candidate_layer"]["full_candidate_coverage_rate"] == 1.0
         assert report["decision_layer"]["events_with_decision_record"] == 1
         compact = compact_summary(report)
         assert compact["low_confidence_research_event_rows"] == 2
+        assert compact["time_legality"]["baseline_before_sustained_peak_rows"] == 2
         assert compact["promotion_allowed"] is False
     print("SELF_TEST_PASS low_confidence_research_capture_audit")
 
