@@ -585,6 +585,53 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    runtime_health = verdict.get("runtime_health_snapshot") or {}
+    if runtime_health:
+        signal_source = runtime_health.get("signal_source_freshness") or {}
+        paper_review = runtime_health.get("paper_review_snapshot") or {}
+        paper_fast_lane = runtime_health.get("paper_fast_lane_health") or {}
+        observer_logs = runtime_health.get("observer_logs") or {}
+        compact_runtime_health = {
+            "available": runtime_health.get("available"),
+            "status": runtime_health.get("status"),
+            "warnings": runtime_health.get("warnings") or [],
+            "blockers": runtime_health.get("blockers") or [],
+            "signal_source_freshness": {
+                "status": signal_source.get("status"),
+                "age_minutes": signal_source.get("age_minutes"),
+                "fail_closed": signal_source.get("fail_closed"),
+                "latest_iso": signal_source.get("latest_iso"),
+            },
+            "paper_review_snapshot": {
+                "status": paper_review.get("status"),
+                "age_minutes": paper_review.get("age_minutes"),
+                "max_age_minutes": paper_review.get("max_age_minutes"),
+                "warnings": paper_review.get("warnings") or [],
+            },
+            "paper_fast_lane_health": {
+                "status": paper_fast_lane.get("status"),
+                "age_minutes": paper_fast_lane.get("age_minutes"),
+                "max_age_minutes": paper_fast_lane.get("max_age_minutes"),
+                "warnings": paper_fast_lane.get("warnings") or [],
+            },
+            "paper_db_status": (runtime_health.get("paper_db") or {}).get("status"),
+            "observer_logs_status": observer_logs.get("status"),
+            "runtime_final_evidence_status": (
+                runtime_health.get("runtime_final_evidence") or {}
+            ).get("status"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        lines.extend([
+            "## Runtime Health Snapshot",
+            "",
+            "```json",
+            json.dumps(compact_runtime_health, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     oos_readiness = verdict.get("oos_readiness_summary") or {}
     if oos_readiness:
         pass_allow_post_freeze = (
@@ -996,6 +1043,36 @@ def self_test():
                 },
             },
         },
+        "runtime_health_snapshot": {
+            "available": True,
+            "status": "degraded",
+            "warnings": [
+                "runtime_paper_fast_lane_health_stale",
+                "runtime_paper_review_snapshot_stale",
+            ],
+            "blockers": [],
+            "signal_source_freshness": {
+                "status": "ok",
+                "age_minutes": 4.0,
+                "fail_closed": False,
+                "latest_iso": "2026-07-01T20:29:04Z",
+            },
+            "paper_review_snapshot": {
+                "status": "stale_or_missing",
+                "age_minutes": 550.0,
+                "max_age_minutes": 30.0,
+                "warnings": ["runtime_paper_review_snapshot_stale"],
+            },
+            "paper_fast_lane_health": {
+                "status": "stale_or_missing",
+                "age_minutes": 34296.0,
+                "max_age_minutes": 30.0,
+                "warnings": ["runtime_paper_fast_lane_health_stale"],
+            },
+            "paper_db": {"status": "ok"},
+            "observer_logs": {"status": "ok"},
+            "runtime_final_evidence": {"status": "ok"},
+        },
         "non_quote_sensitive_capture_discovery_allowed": True,
         "quote_sensitive_slices_blocked": True,
         "volume_profile_coverage": {"coverage_rate": 1.0},
@@ -1399,6 +1476,8 @@ def self_test():
     assert "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE" in text
     assert "low_confidence_time_legal_research" in text
     assert "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER" in text
+    assert "Runtime Health Snapshot" in text
+    assert "runtime_paper_review_snapshot_stale" in text
     quote_pending_verdict = {
         **verdict,
         "classification": "BLOCKED_CONTEXT_COVERAGE",
