@@ -16,6 +16,7 @@ import math
 import tempfile
 import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -120,6 +121,26 @@ def boolish(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def parse_utc_ts(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except Exception:
+        pass
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return int(datetime.fromisoformat(text).timestamp())
+    except Exception:
+        return None
 
 
 def rate(num, den):
@@ -2078,6 +2099,145 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan):
     }
 
 
+def freeze_item_required_dimension_groups(item):
+    definition = (item or {}).get("freeze_definition") or {}
+    groups = set()
+    dimension_group = definition.get("dimension_group")
+    if dimension_group:
+        groups.add(dimension_group)
+    dimension = definition.get("dimension")
+    if dimension:
+        if "quote" in str(dimension):
+            groups.add("quote-sensitive")
+        elif "source" in str(dimension):
+            groups.add("source_component")
+        elif "lifecycle" in str(dimension):
+            groups.add("lifecycle")
+        elif "volume" in str(dimension):
+            groups.add("volume")
+        elif "kline" in str(dimension) or "candle" in str(dimension):
+            groups.add("kline")
+        elif "markov" in str(dimension):
+            groups.add("Markov")
+    for blocker in definition.get("context_blockers") or item.get("context_blockers") or []:
+        blocker_text = str(blocker)
+        if "quote" in blocker_text or "schema" in blocker_text:
+            groups.add("quote-sensitive")
+        elif "source_component" in blocker_text:
+            groups.add("source_component")
+        elif "lifecycle" in blocker_text:
+            groups.add("lifecycle")
+        elif "volume" in blocker_text:
+            groups.add("volume")
+        elif "kline" in blocker_text or "candle" in blocker_text:
+            groups.add("kline")
+        elif "markov" in blocker_text:
+            groups.add("Markov")
+    return sorted(groups)
+
+
+def build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, context_eligibility):
+    items = pass_allow_freeze_registry.get("items") or []
+    blocked_dimensions = set(context_eligibility.get("blocked_dimensions") or [])
+    clean_dimensions = set(context_eligibility.get("clean_dimensions") or [])
+    now_ts = int(time.time())
+    freeze_ts = parse_utc_ts(pass_allow_freeze_registry.get("generated_at"))
+    post_freeze_age_sec = None if freeze_ts is None else max(0, now_ts - freeze_ts)
+    safety_sec = 120
+    min_post_freeze_hours = 0.05
+    usable_post_freeze_sec = None
+    usable_post_freeze_hours = None
+    if post_freeze_age_sec is not None:
+        usable_post_freeze_sec = max(0, post_freeze_age_sec - safety_sec)
+        usable_post_freeze_hours = round(usable_post_freeze_sec / 3600.0, 4)
+    scoped_rows = []
+    clean_count = 0
+    blocked_count = 0
+    source_counts = Counter()
+    blocked_source_counts = Counter()
+    clean_source_counts = Counter()
+    blocker_counts = Counter()
+    for item in items:
+        source = item.get("source") or "unknown"
+        source_counts[source] += 1
+        required = freeze_item_required_dimension_groups(item)
+        blockers = sorted(group for group in required if group in blocked_dimensions)
+        clean = not blockers
+        if clean:
+            clean_count += 1
+            clean_source_counts[source] += 1
+        else:
+            blocked_count += 1
+            blocked_source_counts[source] += 1
+            blocker_counts.update(blockers)
+        scoped_rows.append({
+            "freeze_id": item.get("freeze_id"),
+            "source": source,
+            "definition_fingerprint": item.get("definition_fingerprint"),
+            "required_dimension_groups": required,
+            "blocked_required_dimension_groups": blockers,
+            "definition_context_clean": clean,
+            "promotion_allowed": False,
+        })
+    global_blocked_not_required = sorted(
+        group for group in blocked_dimensions
+        if not any(group in row["required_dimension_groups"] for row in scoped_rows)
+    )
+    if not items:
+        classification = "PASS_ALLOW_60_OOS_MONITOR_EMPTY"
+        next_action = "continue_pass_allow_gap_reason_decomposition"
+    elif clean_count <= 0:
+        classification = "PASS_ALLOW_60_OOS_ALL_DEFINITIONS_CONTEXT_BLOCKED"
+        next_action = "fix_or_exclude_blocked_context_dimensions_before_oos"
+    elif usable_post_freeze_hours is None:
+        classification = "PASS_ALLOW_60_OOS_FREEZE_TS_MISSING"
+        next_action = "regenerate_freeze_registry_with_generated_at"
+    elif usable_post_freeze_hours < min_post_freeze_hours:
+        classification = "PASS_ALLOW_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG"
+        next_action = "continue_collecting_post_freeze_window_before_judging_oos"
+    else:
+        classification = "PASS_ALLOW_60_OOS_READY_FOR_POST_FREEZE_PROBE"
+        next_action = "run_pass_allow_60_post_freeze_oos_validation"
+    return {
+        "schema_version": "pass_allow_60_oos_readiness_monitor.v1",
+        "report_type": "pass_allow_60_oos_readiness_monitor",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "freeze_generated_at": pass_allow_freeze_registry.get("generated_at"),
+        "freeze_generated_ts": freeze_ts,
+        "now_ts": now_ts,
+        "post_freeze_age_sec": post_freeze_age_sec,
+        "post_freeze_safety_sec": safety_sec,
+        "usable_post_freeze_sec": usable_post_freeze_sec,
+        "usable_post_freeze_hours": usable_post_freeze_hours,
+        "min_post_freeze_hours_for_probe": min_post_freeze_hours,
+        "post_freeze_hours_needed": (
+            None if usable_post_freeze_hours is None
+            else max(0.0, round(min_post_freeze_hours - usable_post_freeze_hours, 4))
+        ),
+        "frozen_definition_count": len(items),
+        "definition_context_clean_count": clean_count,
+        "definition_context_blocked_count": blocked_count,
+        "source_counts": dict(source_counts),
+        "clean_source_counts": dict(clean_source_counts),
+        "blocked_source_counts": dict(blocked_source_counts),
+        "blocked_required_dimension_counts": dict(blocker_counts),
+        "global_blocked_dimensions": sorted(blocked_dimensions),
+        "clean_dimensions": sorted(clean_dimensions),
+        "global_blocked_dimensions_not_required_by_frozen_definitions": global_blocked_not_required,
+        "items": scoped_rows[:75],
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Definition-scoped context readiness only. Global dirty dimensions do not block a frozen definition unless that definition requires them.",
+            "A post-freeze probe is still discovery/readiness evidence; promotion requires non-overlapping validation and human approval.",
+        ],
+    }
+
+
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     return {
         "schema_version": "final_entry_readiness_audit.v1",
@@ -2650,6 +2810,10 @@ def build_oos_summary(run_dir, reports=None):
         if queue_count:
             summary["next_pass_allow_60_closure_oos_action"] = next_action
     if pass_allow_freeze_registry:
+        pass_allow_oos_monitor = build_pass_allow_60_oos_readiness_monitor(
+            pass_allow_freeze_registry,
+            (input_reports or {}).get("context_dimension_eligibility") or {},
+        )
         summary["pass_allow_60_oos_freeze_registry"] = {
             "available": True,
             "classification": pass_allow_freeze_registry.get("classification"),
@@ -2665,6 +2829,7 @@ def build_oos_summary(run_dir, reports=None):
             pass_allow_freeze_registry.get("frozen_definition_count"),
             0,
         )
+        summary["pass_allow_60_oos_readiness_monitor"] = pass_allow_oos_monitor
     return summary
 
 
@@ -2674,6 +2839,7 @@ def assemble_reports(run_dir, out_dir=None):
     reports = collect_reports(run_dir)
     stage_metrics = build_capture_stage_metrics(reports.get("a_class") or {})
     context_eligibility = build_context_dimension_eligibility(reports)
+    reports["context_dimension_eligibility"] = context_eligibility
     pending_audit = build_pending_to_final_entry_audit(reports.get("a_class") or {})
     pending_audit["stale_before_final_review"] = build_stale_before_final_review(
         pending_audit,
@@ -3167,6 +3333,13 @@ def self_test():
         assert oos["pass_allow_60_closure_oos_queue_count"] >= 1
         assert oos["pass_allow_60_oos_freeze_registry"]["available"] is True
         assert oos["pass_allow_60_oos_frozen_definition_count"] >= 1
+        monitor = oos["pass_allow_60_oos_readiness_monitor"]
+        assert monitor["promotion_allowed"] is False
+        assert monitor["frozen_definition_count"] >= 1
+        assert monitor["definition_context_clean_count"] >= 1
+        assert monitor["definition_context_blocked_count"] == 0
+        assert "quote-sensitive" not in monitor["global_blocked_dimensions"]
+        assert "volume" in monitor["global_blocked_dimensions_not_required_by_frozen_definitions"]
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
 
