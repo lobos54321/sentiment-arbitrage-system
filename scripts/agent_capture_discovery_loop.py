@@ -3047,6 +3047,8 @@ def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, ha
     for report in run_dir.glob("*.json"):
         if report.name != "reviewer_verdict.json":
             shutil.copy2(report, latest_dir / report.name)
+    shutil.copy2(handoff_path, latest_dir / "codex_handoff.md")
+    shutil.copy2(handoff_path, latest_dir / "latest_codex_handoff.md")
     handoff_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(handoff_path, handoff_dir / "latest_codex_handoff.md")
 
@@ -3845,9 +3847,15 @@ def self_test():
             "strategy_memory_filtered_winner_bridge.json",
             "strategy_memory_exit_shadow_summary.json",
             "strategy_memory_delay_replay_summary.json",
+            "codex_handoff.md",
+            "latest_codex_handoff.md",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
+        assert "current_commit:" in (latest_dir / "codex_handoff.md").read_text()
+        assert (latest_dir / "codex_handoff.md").read_text() == (
+            latest_dir / "latest_codex_handoff.md"
+        ).read_text()
         capture_cross_validity = load_json(latest_dir / "capture_cross_validity_24h.json")
         assert capture_cross_validity["criteria"]["downstream_lift_scope"] == (
             "candidate_level_after_match_proxy_not_slice_specific"
