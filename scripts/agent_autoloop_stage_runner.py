@@ -515,6 +515,38 @@ def stage_strategy(args, run_dir):
     return {"stage": "strategy", "diagnostics": rows}
 
 
+def stage_oos(args, run_dir):
+    """Refresh read-only OOS probes from the frozen hypothesis registry.
+
+    This stage intentionally runs before finalize and uses the current registry
+    as the frozen hypothesis source. It does not promote candidates or change
+    runtime behavior.
+    """
+    rows = [
+        run_report(
+            "oos_readiness_probe_refresh",
+            [
+                "scripts/refresh_oos_readiness_probes.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
+                "--registry", args.registry,
+                "--run-dir", str(run_dir),
+                "--probe-hours", str(args.oos_probe_hours or ""),
+                "--expected-candidates", str(args.expected_candidates),
+                "--max-scan-rows", str(args.max_scan_rows),
+                "--timeout-sec", str(args.report_timeout_sec),
+                "--out", str(run_dir / "oos_readiness_probe_refresh.json"),
+            ],
+            run_dir / "oos_readiness_probe_refresh.json",
+            timeout=max(60, int(args.report_timeout_sec) * 3),
+        )
+    ]
+    append_diagnostics(run_dir, rows)
+    update_stage_state(run_dir, "oos")
+    return {"stage": "oos", "diagnostics": rows}
+
+
 def collect_paths(args, run_dir):
     hours = int(args.hours)
     markov_paths = {}
@@ -546,6 +578,7 @@ def collect_paths(args, run_dir):
         "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
         "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
+        "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
     }
     readiness = {}
     for key, filename in readiness_names.items():
@@ -622,10 +655,23 @@ STAGES = {
     "context": stage_context,
     "decision": stage_decision,
     "strategy": stage_strategy,
+    "oos": stage_oos,
     "finalize": stage_finalize,
 }
 
-DEFAULT_SEQUENCE = ("init", "selftests", "capture", "core", "markov", "derived", "context", "decision", "strategy", "finalize")
+DEFAULT_SEQUENCE = (
+    "init",
+    "selftests",
+    "capture",
+    "core",
+    "markov",
+    "derived",
+    "context",
+    "decision",
+    "strategy",
+    "oos",
+    "finalize",
+)
 
 
 def parse_stages(value):
@@ -665,7 +711,7 @@ def self_test():
             run_dir=str(run_dir),
             reset=True,
         )
-        for stage in ("init", "selftests", "capture", "core", "markov", "derived", "context", "decision", "strategy", "finalize"):
+        for stage in DEFAULT_SEQUENCE:
             STAGES[stage](args, run_dir)
         latest = root / "agent_runs" / "latest"
         assert (latest / "reviewer_verdict.json").exists()
