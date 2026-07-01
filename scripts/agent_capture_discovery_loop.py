@@ -3847,6 +3847,7 @@ def write_materialized_artifacts(
             build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
         )
         readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
+        run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
 

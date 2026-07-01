@@ -49,6 +49,7 @@ REQUIRED_FILES = {
     "candidate_improvement": "candidate_improvement_opportunities_24h.json",
     "quality_timing_reject_research": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
+    "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
@@ -2129,6 +2130,9 @@ def build_oos_summary(run_dir, reports=None):
     quality_timing_probe_validation = (
         (input_reports or {}).get("quality_timing_candidate_probe_validation") or {}
     )
+    decision_no_pass_watch_validation = (
+        (input_reports or {}).get("decision_no_pass_quality_timing_watch_validation") or {}
+    )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
     qt_queue_count = safe_int(
         quality_timing_probe_validation.get("oos_readiness_queue_count")
@@ -2156,6 +2160,34 @@ def build_oos_summary(run_dir, reports=None):
         if qt_queue_count:
             summary["next_quality_timing_oos_action"] = (
                 "hold_repeated_quality_timing_probes_until_clean_window_then_non_overlapping_oos"
+            )
+    dnp_oos_queue = decision_no_pass_watch_validation.get("oos_readiness_queue") or {}
+    dnp_queue_count = safe_int(dnp_oos_queue.get("queue_count"), 0)
+    if decision_no_pass_watch_validation:
+        summary["decision_no_pass_quality_timing_watch_validation"] = {
+            "available": True,
+            "classification": decision_no_pass_watch_validation.get("classification"),
+            "next_action": decision_no_pass_watch_validation.get("next_action"),
+            "registered_watch_count": decision_no_pass_watch_validation.get("registered_watch_count"),
+            "validated_watch_count": decision_no_pass_watch_validation.get("validated_watch_count"),
+            "repeated_selected_cluster_count": (
+                decision_no_pass_watch_validation.get("repeated_selected_cluster_count")
+            ),
+            "repeated_selected_cluster_rate": (
+                decision_no_pass_watch_validation.get("repeated_selected_cluster_rate")
+            ),
+            "oos_readiness_queue_count": dnp_queue_count,
+            "oos_queue_classification": dnp_oos_queue.get("classification"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "blocked_until": "context_clean_window_and_non_overlapping_eval",
+        }
+        summary["decision_no_pass_quality_timing_oos_queue_count"] = dnp_queue_count
+        if dnp_queue_count:
+            summary["next_decision_no_pass_quality_timing_oos_action"] = (
+                "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
             )
     return summary
 
@@ -2437,6 +2469,20 @@ def create_self_test_run(root):
         },
         "promotion_allowed": False,
     }
+    decision_no_pass_watch_validation = {
+        "classification": "DECISION_NO_PASS_QUALITY_TIMING_WATCH_REPEATED_SAME_WINDOW",
+        "next_action": "continue_cluster_tracking_until_clean_window_then_oos",
+        "registered_watch_count": 1,
+        "validated_watch_count": 1,
+        "repeated_selected_cluster_count": 1,
+        "repeated_selected_cluster_rate": 1.0,
+        "oos_readiness_queue": {
+            "classification": "DECISION_NO_PASS_QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+            "queue_count": 1,
+            "promotion_allowed": False,
+        },
+        "promotion_allowed": False,
+    }
     capture_cross = {
         "valid_top_crosses": [
             {
@@ -2463,6 +2509,7 @@ def create_self_test_run(root):
         "candidate_improvement": candidate_improvement,
         "quality_timing_reject_research": quality_timing,
         "quality_timing_candidate_probe_validation": quality_timing_probe_validation,
+        "decision_no_pass_quality_timing_watch_validation": decision_no_pass_watch_validation,
         "capture_cross": capture_cross,
         "markov_effectiveness": markov,
     }
@@ -2580,6 +2627,10 @@ def self_test():
         assert oos["quality_timing_probe_validation"]["oos_readiness_queue_count"] == 1
         assert oos["next_quality_timing_oos_action"] == (
             "hold_repeated_quality_timing_probes_until_clean_window_then_non_overlapping_oos"
+        )
+        assert oos["decision_no_pass_quality_timing_watch_validation"]["oos_readiness_queue_count"] == 1
+        assert oos["next_decision_no_pass_quality_timing_oos_action"] == (
+            "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
         )
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
