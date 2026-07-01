@@ -1956,8 +1956,20 @@ def stable_fingerprint(payload):
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
-def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan):
+def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_registry=None):
     """Freeze current pass/allow closure hypotheses for future OOS checks."""
+    previous_registry = previous_registry or {}
+    previous_items_by_id = {
+        row.get("freeze_id"): row
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("freeze_id")
+    }
+    previous_fingerprints = {
+        row.get("definition_fingerprint")
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("definition_fingerprint")
+    }
+    now = utc_now()
     tracks = pass_allow_closure_plan.get("closure_tracks") or {}
     target_gap = pass_allow_closure_plan.get("target_gap") or {}
     items = []
@@ -1966,12 +1978,16 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan):
         if not source_item:
             return
         fingerprint = stable_fingerprint(freeze_definition)
+        freeze_id = f"pass_allow_60:{source}:{fingerprint}"
+        previous = previous_items_by_id.get(freeze_id) or {}
+        frozen_at = previous.get("frozen_at") or previous_registry.get("definition_set_frozen_at") or previous_registry.get("generated_at") or now
         items.append({
-            "freeze_id": f"pass_allow_60:{source}:{fingerprint}",
+            "freeze_id": freeze_id,
             "source": source,
             "source_plan_item_id": source_item.get("plan_item_id"),
             "expected_capture_stage_improved": expected_stage,
             "definition_fingerprint": fingerprint,
+            "frozen_at": frozen_at,
             "freeze_definition": freeze_definition,
             "current_window_evidence": {
                 key: source_item.get(key)
@@ -2067,10 +2083,16 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan):
         classification = "PASS_ALLOW_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
     else:
         classification = "PASS_ALLOW_60_OOS_FREEZE_EMPTY"
+    fingerprints = {row.get("definition_fingerprint") for row in items if row.get("definition_fingerprint")}
+    previous_set_frozen_at = previous_registry.get("definition_set_frozen_at") or previous_registry.get("generated_at")
+    definition_set_unchanged = bool(fingerprints and fingerprints == previous_fingerprints)
+    definition_set_frozen_at = previous_set_frozen_at if definition_set_unchanged else now
     return {
         "schema_version": "pass_allow_60_oos_freeze_registry.v1",
         "report_type": "pass_allow_60_oos_freeze_registry",
-        "generated_at": utc_now(),
+        "generated_at": now,
+        "definition_set_frozen_at": definition_set_frozen_at,
+        "definition_set_unchanged_from_previous_registry": definition_set_unchanged,
         "phase": "discovery_readiness",
         "evidence_level": "same_window_definitions_frozen_for_future_oos",
         "usage": "read_only_oos_definition_registry",
@@ -2141,7 +2163,11 @@ def build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, contex
     blocked_dimensions = set(context_eligibility.get("blocked_dimensions") or [])
     clean_dimensions = set(context_eligibility.get("clean_dimensions") or [])
     now_ts = int(time.time())
-    freeze_ts = parse_utc_ts(pass_allow_freeze_registry.get("generated_at"))
+    freeze_at = (
+        pass_allow_freeze_registry.get("definition_set_frozen_at")
+        or pass_allow_freeze_registry.get("generated_at")
+    )
+    freeze_ts = parse_utc_ts(freeze_at)
     post_freeze_age_sec = None if freeze_ts is None else max(0, now_ts - freeze_ts)
     safety_sec = 120
     min_post_freeze_hours = 0.05
@@ -2205,6 +2231,8 @@ def build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, contex
         "classification": classification,
         "next_action": next_action,
         "freeze_generated_at": pass_allow_freeze_registry.get("generated_at"),
+        "definition_set_frozen_at": pass_allow_freeze_registry.get("definition_set_frozen_at"),
+        "freeze_age_reference_at": freeze_at,
         "freeze_generated_ts": freeze_ts,
         "now_ts": now_ts,
         "post_freeze_age_sec": post_freeze_age_sec,
@@ -2872,7 +2900,14 @@ def assemble_reports(run_dir, out_dir=None):
         context_eligibility,
     )
     reports["pass_allow_60_closure_plan"] = pass_allow_closure_plan
-    pass_allow_freeze_registry = build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan)
+    previous_pass_allow_freeze_registry = load_json(
+        run_dir / V3_OUTPUT_FILES["pass_allow_60_oos_freeze_registry"],
+        {},
+    )
+    pass_allow_freeze_registry = build_pass_allow_60_oos_freeze_registry(
+        pass_allow_closure_plan,
+        previous_pass_allow_freeze_registry,
+    )
     reports["pass_allow_60_oos_freeze_registry"] = pass_allow_freeze_registry
     oos_summary = build_oos_summary(run_dir, reports)
     payloads = {
@@ -3253,6 +3288,8 @@ def self_test():
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
         assert freeze_registry["frozen_definition_count"] >= 1
+        assert freeze_registry["definition_set_frozen_at"]
+        assert freeze_registry["items"][0]["frozen_at"]
         assert freeze_registry["items"][0]["definition_fingerprint"]
         assert freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
         context = load_json(run_dir / "context_dimension_eligibility.json")
@@ -3341,6 +3378,12 @@ def self_test():
         assert "quote-sensitive" not in monitor["global_blocked_dimensions"]
         assert "volume" in monitor["global_blocked_dimensions_not_required_by_frozen_definitions"]
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
+        first_frozen_at = freeze_registry["definition_set_frozen_at"]
+        second_result = assemble_reports(run_dir)
+        second_freeze = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
+        assert second_result["summary"]["biggest_gap_stage"] == "pending_capture"
+        assert second_freeze["definition_set_frozen_at"] == first_frozen_at
+        assert second_freeze["definition_set_unchanged_from_previous_registry"] is True
     print("SELF_TEST_PASS capture_60_target_loop")
 
 
