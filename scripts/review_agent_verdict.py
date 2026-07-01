@@ -120,6 +120,7 @@ DERIVED_READINESS_SIBLINGS = {
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "kline_coverage_resolution_audit": "kline_coverage_resolution_audit_24h.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
@@ -1240,6 +1241,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
     shadow_candidate_improvement_queue = readiness_reports.get("shadow_candidate_improvement_queue") or {}
+    kline_coverage_resolution = readiness_reports.get("kline_coverage_resolution_audit") or {}
     oos_readiness_summary_v3 = (
         readiness_reports.get("oos_readiness_summary_v3")
         or readiness_reports.get("oos_readiness_summary")
@@ -2104,6 +2106,20 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             },
             "blockers": low_confidence_audit.get("blockers") or [],
         },
+        "kline_coverage_resolution_audit": {
+            "available": bool(kline_coverage_resolution),
+            "overall": kline_coverage_resolution.get("overall") or {},
+            "promotion_allowed": False,
+            "formal_denominator_changed": bool(kline_coverage_resolution.get("formal_denominator_changed")),
+            "formal_kline_coverage": kline_coverage_resolution.get("formal_kline_coverage") or {},
+            "research_recoverability": kline_coverage_resolution.get("research_recoverability") or {},
+            "low_confidence_capture_summary": (
+                kline_coverage_resolution.get("low_confidence_capture_summary") or {}
+            ),
+            "allowed_resolution_tracks": (
+                kline_coverage_resolution.get("allowed_resolution_tracks") or []
+            ),
+        },
         "quality_timing_reject_research_audit": {
             "available": bool(quality_timing_audit),
             "verdict": quality_timing_audit.get("verdict"),
@@ -2735,6 +2751,28 @@ def self_test():
     assert volume_blocked_by_context_eligibility["formal_volume_sensitive_slices_blocked"] is True
     assert "volume_profile_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
     assert "kline_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
+    kline_resolution_verdict = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True}, readiness_reports={
+        "kline_coverage_resolution_audit": {
+            "overall": {
+                "classification": "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE",
+                "promotion_allowed": False,
+            },
+            "formal_kline_coverage": {"formal_coverage_rate": 0.46},
+            "research_recoverability": {
+                "confidence_adjusted_research_kline_coverage_rate": 0.83,
+            },
+            "allowed_resolution_tracks": [{"track": "low_confidence_time_legal_research"}],
+        },
+    })
+    assert kline_resolution_verdict["kline_coverage_resolution_audit"]["available"] is True
+    assert kline_resolution_verdict["kline_coverage_resolution_audit"]["promotion_allowed"] is False
+    assert (
+        kline_resolution_verdict["kline_coverage_resolution_audit"]["overall"]["classification"]
+        == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+    )
     legacy_quote_blocked = build_verdict({
         **capture,
         "quote_context_coverage": {

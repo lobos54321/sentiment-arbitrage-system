@@ -43,6 +43,7 @@ REPORT_TEST_COMMANDS = (
     ("matured_volume_capture_cross_self_test", ["scripts/matured_volume_capture_cross_audit.py", "--self-test"]),
     ("hypothesis_validation_self_test", ["scripts/hypothesis_validation_audit.py", "--self-test"]),
     ("low_confidence_research_capture_self_test", ["scripts/low_confidence_research_capture_audit.py", "--self-test"]),
+    ("kline_coverage_resolution_self_test", ["scripts/kline_coverage_resolution_audit.py", "--self-test"]),
     ("quality_timing_reject_research_self_test", ["scripts/quality_timing_reject_research_audit.py", "--self-test"]),
     ("candidate_downstream_readiness_self_test", ["scripts/candidate_downstream_readiness_audit.py", "--self-test"]),
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
@@ -1764,6 +1765,7 @@ def run_reports(run_dir, args):
     matured_volume_capture_cross_path = run_dir / f"matured_volume_capture_cross_audit_{primary_hours}h.json"
     hypothesis_validation_path = run_dir / f"hypothesis_validation_audit_{primary_hours}h.json"
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
+    kline_coverage_resolution_path = run_dir / f"kline_coverage_resolution_audit_{primary_hours}h.json"
     quality_timing_research_path = run_dir / f"quality_timing_reject_research_audit_{primary_hours}h.json"
     strategy_memory_ingestion_path = run_dir / "strategy_memory_ingestion_summary.json"
     strategy_memory_validation_path = run_dir / "strategy_memory_validation_24h.json"
@@ -2062,6 +2064,21 @@ def run_reports(run_dir, args):
     ))
     if low_confidence_research_path.exists():
         readiness_paths["low_confidence_research_capture_audit"] = low_confidence_research_path
+    diagnostics.append(run_report(
+        "kline_coverage_resolution_audit",
+        [
+            "scripts/kline_coverage_resolution_audit.py",
+            "--volume-kline-audit", str(volume_kline_audit_path),
+            "--low-confidence-audit", str(low_confidence_research_path),
+            "--matured-kline-recheck", str(matured_kline_recheck_path),
+            "--matured-volume-cross", str(matured_volume_capture_cross_path),
+            "--out", str(kline_coverage_resolution_path),
+        ],
+        kline_coverage_resolution_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if kline_coverage_resolution_path.exists():
+        readiness_paths["kline_coverage_resolution_audit"] = kline_coverage_resolution_path
     diagnostics.append(run_report(
         "quality_timing_reject_research_audit",
         [

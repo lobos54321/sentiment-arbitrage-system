@@ -813,6 +813,7 @@ def build_handoff(verdict):
                 "matured_volume_watch_queue": verdict.get("matured_volume_watch_queue") or {},
                 "hypothesis_validation_audit": verdict.get("hypothesis_validation_audit") or {},
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
+                "kline_coverage_resolution_audit": verdict.get("kline_coverage_resolution_audit") or {},
                 "quality_timing_reject_research_audit": verdict.get("quality_timing_reject_research_audit") or {},
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
                 "decision_no_pass_quality_timing_watch_validation": verdict.get("decision_no_pass_quality_timing_watch_validation") or {},

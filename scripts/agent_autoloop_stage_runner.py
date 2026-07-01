@@ -409,6 +409,18 @@ def stage_context(args, run_dir):
             ],
             run_dir / f"low_confidence_research_capture_audit_{hours}h.json",
         ),
+        (
+            "kline_coverage_resolution_audit",
+            [
+                "scripts/kline_coverage_resolution_audit.py",
+                "--volume-kline-audit", str(run_dir / f"volume_kline_coverage_audit_{hours}h.json"),
+                "--low-confidence-audit", str(run_dir / f"low_confidence_research_capture_audit_{hours}h.json"),
+                "--matured-kline-recheck", str(run_dir / f"matured_kline_volume_recheck_audit_{hours}h.json"),
+                "--matured-volume-cross", str(run_dir / f"matured_volume_capture_cross_audit_{hours}h.json"),
+                "--out", str(run_dir / f"kline_coverage_resolution_audit_{hours}h.json"),
+            ],
+            run_dir / f"kline_coverage_resolution_audit_{hours}h.json",
+        ),
     ]
     rows.extend(run_report(name, cmd, out, timeout=int(args.report_timeout_sec)) for name, cmd, out in commands)
     hypothesis_path = run_dir / f"hypothesis_validation_audit_{hours}h.json"
@@ -597,6 +609,7 @@ def collect_paths(args, run_dir):
         "matured_volume_capture_cross_audit": f"matured_volume_capture_cross_audit_{hours}h.json",
         "hypothesis_validation_audit": f"hypothesis_validation_audit_{hours}h.json",
         "low_confidence_research_capture_audit": f"low_confidence_research_capture_audit_{hours}h.json",
+        "kline_coverage_resolution_audit": f"kline_coverage_resolution_audit_{hours}h.json",
         "quality_timing_reject_research_audit": f"quality_timing_reject_research_audit_{hours}h.json",
         "context_blocker_monitor": f"context_blocker_monitor_{hours}h.json",
         "decision_no_pass_quality_timing_watch_validation": f"decision_no_pass_quality_timing_watch_validation_{hours}h.json",
