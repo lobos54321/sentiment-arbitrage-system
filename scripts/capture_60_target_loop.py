@@ -54,6 +54,7 @@ REQUIRED_FILES = {
     "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
+    "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
     "oos_refresh": "oos_readiness_probe_refresh.json",
 }
@@ -1097,6 +1098,7 @@ def build_context_dimension_eligibility(reports):
     capture = reports.get("capture") or {}
     context_report = reports.get("context_coverage") or {}
     context_monitor = reports.get("context_blocker_monitor") or {}
+    volume_kline = reports.get("volume_kline_coverage_audit") or {}
     markov = reports.get("markov_effectiveness") or {}
     strategy_memory = reports.get("strategy_memory_validation") or {}
     report_health = capture.get("report_health") or {}
@@ -1130,8 +1132,14 @@ def build_context_dimension_eligibility(reports):
 
     source_rate = coverage_rate(context_report.get("source_component_coverage") or {})
     lifecycle_rate = coverage_rate(context_report.get("lifecycle_profile_coverage") or {})
-    volume_rate = coverage_rate(context_report.get("volume_profile_coverage") or {})
-    kline_rate = coverage_rate(context_report.get("kline_coverage") or {})
+    volume_context = volume_kline.get("volume_context") or {}
+    raw_gs_kline = volume_kline.get("raw_gold_silver_kline") or {}
+    volume_rate = coverage_rate(volume_context) if volume_context else coverage_rate(context_report.get("volume_profile_coverage") or {})
+    kline_rate = (
+        safe_float(raw_gs_kline.get("kline_coverage_rate"))
+        if raw_gs_kline
+        else coverage_rate(context_report.get("kline_coverage") or {})
+    )
     markov_diag = markov.get("profile_diagnostics") or {}
     markov_informative = any((row or {}).get("informative_bucket_count", 0) for row in markov_diag.values())
     markov_blocked = bool(markov.get("context_blockers") or markov.get("non_informative_reasons"))
@@ -1145,6 +1153,39 @@ def build_context_dimension_eligibility(reports):
         "active_quote_context_blockers": quote_blockers if quote_status != STATUS_CLEAN else [],
         "stale_or_reconciled_quote_context_blockers": quote_blockers if quote_status == STATUS_CLEAN else [],
     })
+    volume_blockers = set(blocker for blocker in blockers if "volume" in blocker)
+    if volume_context.get("blocker"):
+        volume_blockers.add(volume_context.get("blocker"))
+    volume_evidence = dict(context_report.get("volume_profile_coverage") or {})
+    if volume_context:
+        volume_evidence.update({
+            "context_field_present_rate": (context_report.get("volume_profile_coverage") or {}).get("coverage_rate"),
+            "field_present_rate": volume_context.get("field_present_rate"),
+            "known_rate": volume_context.get("known_rate"),
+            "unknown_rate": volume_context.get("unknown_rate"),
+            "missing_rate": volume_context.get("missing_rate"),
+            "not_applicable_rate": volume_context.get("not_applicable_rate"),
+            "root_causes": volume_context.get("root_causes") or [],
+            "unknown_diagnostics": volume_context.get("unknown_diagnostics") or {},
+            "coverage_denominator_type": volume_context.get("coverage_denominator_type"),
+            "blocker": volume_context.get("blocker"),
+        })
+    kline_blockers = set(blocker for blocker in blockers if "kline" in blocker)
+    if raw_gs_kline.get("blocker"):
+        kline_blockers.add(raw_gs_kline.get("blocker"))
+    kline_evidence = dict(context_report.get("kline_coverage") or {})
+    if raw_gs_kline:
+        kline_evidence.update({
+            "coverage_denominator_type": raw_gs_kline.get("coverage_denominator_type") or "raw_all_gold_silver",
+            "raw_all_gold_silver_event_rows": raw_gs_kline.get("raw_all_gold_silver_event_rows"),
+            "kline_covered_rows": raw_gs_kline.get("kline_covered_rows"),
+            "kline_uncovered_rows": raw_gs_kline.get("kline_uncovered_rows"),
+            "coverage_rate": raw_gs_kline.get("kline_coverage_rate"),
+            "kline_coverage_pct": raw_gs_kline.get("kline_coverage_pct"),
+            "blocker": raw_gs_kline.get("blocker"),
+            "kline_uncovered_root_cause_counts": raw_gs_kline.get("kline_uncovered_root_cause_counts") or {},
+            "low_confidence_research_audit": raw_gs_kline.get("low_confidence_research_audit") or {},
+        })
     dimensions = {
         "quote-sensitive": {
             "status": quote_status,
@@ -1171,15 +1212,15 @@ def build_context_dimension_eligibility(reports):
             "status": dimension_status_from_rate(volume_rate),
             "eligible_for_capture_cross": volume_rate is not None and volume_rate >= 0.8,
             "coverage_rate": volume_rate,
-            "blockers": sorted(blocker for blocker in blockers if "volume" in blocker),
-            "evidence": context_report.get("volume_profile_coverage") or {},
+            "blockers": sorted(volume_blockers),
+            "evidence": volume_evidence,
         },
         "kline": {
             "status": dimension_status_from_rate(kline_rate),
             "eligible_for_capture_cross": kline_rate is not None and kline_rate >= 0.8,
             "coverage_rate": kline_rate,
-            "blockers": sorted(blocker for blocker in blockers if "kline" in blocker),
-            "evidence": context_report.get("kline_coverage") or {},
+            "blockers": sorted(kline_blockers),
+            "evidence": kline_evidence,
         },
         "Markov": {
             "status": STATUS_CLEAN if markov_informative and not markov_blocked else (STATUS_NA if not markov else STATUS_BLOCKED),
@@ -2997,7 +3038,7 @@ def create_self_test_run(root):
     run_dir = root / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     capture = {
-        "report_health": {"promotion_blockers": ["volume_profile_coverage_below_80pct"]},
+        "report_health": {"promotion_blockers": []},
         "quote_context_coverage": {
             "source_quote_clean_present_rate": 1.0,
             "source_quote_executable_present_rate": 1.0,
@@ -3008,9 +3049,33 @@ def create_self_test_run(root):
         "quote_context_coverage": capture["quote_context_coverage"],
         "source_component_coverage": {"coverage_rate": 1.0},
         "lifecycle_profile_coverage": {"coverage_rate": 1.0},
-        "volume_profile_coverage": {"coverage_rate": 0.5, "blocker": "volume_profile_coverage_below_80pct"},
+        "volume_profile_coverage": {"coverage_rate": 1.0, "blocker": None},
         "kline_coverage": {"coverage_rate": 0.47, "blocker": "kline_coverage_below_80pct"},
-        "blockers": ["volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"],
+        "blockers": ["kline_coverage_below_80pct"],
+    }
+    volume_kline = {
+        "volume_context": {
+            "coverage_denominator_type": "signal_context_carrier_rows",
+            "field_present_rate": 1.0,
+            "known_rate": 0.5,
+            "unknown_rate": 0.5,
+            "missing_rate": 0.0,
+            "blocker": "volume_profile_coverage_below_80pct",
+            "root_causes": ["volume_profile_unknown_from_insufficient_or_unclassified_kline"],
+            "unknown_diagnostics": {
+                "volume_profile_reason_counts": {"insufficient_kline_bars_lt_3": 2},
+            },
+        },
+        "raw_gold_silver_kline": {
+            "coverage_denominator_type": "raw_all_gold_silver",
+            "raw_all_gold_silver_event_rows": 5,
+            "kline_covered_rows": 2,
+            "kline_uncovered_rows": 3,
+            "kline_coverage_rate": 0.4,
+            "kline_coverage_pct": 40.0,
+            "blocker": "kline_coverage_below_80pct",
+            "kline_uncovered_root_cause_counts": {"baseline_confidence_low_low_30_60s": 3},
+        },
     }
     context_blocker_monitor = {
         "overall_verdict": {
@@ -3247,6 +3312,7 @@ def create_self_test_run(root):
     fixtures = {
         "capture": capture,
         "context_coverage": context,
+        "volume_kline_coverage_audit": volume_kline,
         "context_blocker_monitor": context_blocker_monitor,
         "a_class": a_class,
         "strategy_memory_validation": strategy_validation,
@@ -3341,6 +3407,12 @@ def self_test():
         )
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
+        assert context["dimensions"]["volume"]["coverage_rate"] == 0.5
+        assert context["dimensions"]["volume"]["evidence"]["field_present_rate"] == 1.0
+        assert context["dimensions"]["volume"]["evidence"]["known_rate"] == 0.5
+        assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
+        assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
+        assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
         assert pending["pending_no_final_entry_classification"]["categories"]["stale_before_final"] == 1
