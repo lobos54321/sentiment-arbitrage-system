@@ -660,6 +660,9 @@ def stage_finalize(args, run_dir):
     if eligibility["eligible"]:
         if run_dir.resolve() == latest_dir.resolve():
             sync_skipped_same_latest = True
+            shutil.copy2(handoff_path, latest_dir / "latest_codex_handoff.md")
+            Path(args.handoff_dir).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(handoff_path, Path(args.handoff_dir) / "latest_codex_handoff.md")
             published = True
         else:
             sync_latest(run_dir, latest_dir, Path(args.handoff_dir), verdict_path, summary_path, handoff_path)
@@ -679,6 +682,7 @@ def stage_finalize(args, run_dir):
         "promotion_allowed": verdict.get("promotion_allowed"),
         "publish_latest": published,
         "publish_eligibility": eligibility,
+        "sync_skipped_same_latest": sync_skipped_same_latest,
         "decision_no_pass_watch_count": len(registry.get("shadow_only_decision_no_pass_quality_timing_watch") or []),
     }
 
@@ -763,8 +767,19 @@ def self_test():
         latest = root / "agent_runs" / "latest"
         assert (latest / "reviewer_verdict.json").exists()
         assert (latest / "capture_60_gap_report.json").exists()
+        assert (latest / "latest_codex_handoff.md").exists()
+        assert (root / "agent_handoffs" / "latest_codex_handoff.md").exists()
         assert load_json(latest / "reviewer_verdict.json")["promotion_allowed"] is False
         assert load_json(root / "hypothesis_registry.json")["promotion_allowed"] is False
+        (latest / "latest_codex_handoff.md").write_text("STALE_LATEST_ALIAS", encoding="utf-8")
+        (root / "agent_handoffs" / "latest_codex_handoff.md").write_text("STALE_GLOBAL_ALIAS", encoding="utf-8")
+        same_latest_finalize = stage_finalize(args, latest)
+        assert same_latest_finalize["publish_latest"] is True
+        assert same_latest_finalize["sync_skipped_same_latest"] is True
+        assert "STALE_LATEST_ALIAS" not in (latest / "latest_codex_handoff.md").read_text(encoding="utf-8")
+        assert "STALE_GLOBAL_ALIAS" not in (
+            root / "agent_handoffs" / "latest_codex_handoff.md"
+        ).read_text(encoding="utf-8")
     print("SELF_TEST_PASS agent_autoloop_stage_runner")
 
 
