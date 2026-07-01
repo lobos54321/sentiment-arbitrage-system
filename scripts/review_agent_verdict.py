@@ -755,6 +755,26 @@ def volume_profile_blocker_state(blockers, matured_kline_recheck, matured_volume
     }
 
 
+def context_dimension_formal_blockers(context_dimension_eligibility):
+    dimensions = (context_dimension_eligibility or {}).get("dimensions") or {}
+    fallback_blockers = {
+        "quote-sensitive": "source_quote_clean_coverage_below_80pct",
+        "volume": "volume_profile_coverage_below_80pct",
+        "kline": "kline_coverage_below_80pct",
+        "Markov": "markov_bucket_coverage_below_80pct",
+    }
+    blockers = []
+    for name, row in dimensions.items():
+        status = row.get("status")
+        if status in {"CLEAN", "NOT_APPLICABLE"}:
+            continue
+        row_blockers = [blocker for blocker in (row.get("blockers") or []) if blocker]
+        blockers.extend(row_blockers)
+        if not row_blockers and name in fallback_blockers:
+            blockers.append(fallback_blockers[name])
+    return sorted(set(blockers))
+
+
 def top_slice_key(row):
     return (
         JUDGMENT_ORDER.get(row.get("judgment"), -1),
@@ -939,6 +959,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     runtime_health_snapshot = readiness_reports.get("runtime_health_snapshot") or {}
     runtime_health_blockers = list(runtime_health_snapshot.get("blockers") or [])
     runtime_health_warnings = list(runtime_health_snapshot.get("warnings") or [])
+    context_dimension_eligibility = readiness_reports.get("context_dimension_eligibility") or {}
+    context_dimension_blockers = context_dimension_formal_blockers(context_dimension_eligibility)
     quote_writer_fix_status = (
         context_monitor_overall.get("quote_writer_fix")
         or context_monitor_quote_smoke.get("classification")
@@ -953,6 +975,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     blockers = list(report_health.get("promotion_blockers") or [])
     blockers.extend(runtime_health_blockers)
+    blockers.extend(context_dimension_blockers)
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
     candidate_observed = coverage.get("candidate_count_observed")
@@ -1213,7 +1236,6 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     strategy_memory_delay_summary = readiness_reports.get("strategy_memory_delay_replay_summary") or {}
     capture_60_gap_report = readiness_reports.get("capture_60_gap_report") or {}
     capture_stage_metrics_v3 = readiness_reports.get("capture_stage_metrics") or {}
-    context_dimension_eligibility = readiness_reports.get("context_dimension_eligibility") or {}
     pending_to_final_entry_audit_v3 = readiness_reports.get("pending_to_final_entry_audit") or {}
     final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
@@ -2686,6 +2708,33 @@ def self_test():
     assert quote_blocked["non_quote_sensitive_capture_discovery_allowed"] is True
     assert quote_blocked["quote_sensitive_slices_blocked"] is True
     assert quote_blocked["quote_missing_root_cause"]["missing_due_to_writer_path_count"] == 3
+    volume_blocked_by_context_eligibility = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True}, readiness_reports={
+        "context_dimension_eligibility": {
+            "dimensions": {
+                "volume": {
+                    "status": "BLOCKED_UNKNOWN",
+                    "coverage_rate": 0.3,
+                    "blockers": ["volume_profile_coverage_below_80pct"],
+                    "eligible_for_capture_cross": False,
+                },
+                "kline": {
+                    "status": "BLOCKED_UNKNOWN",
+                    "coverage_rate": 0.46,
+                    "blockers": ["kline_coverage_below_80pct"],
+                    "eligible_for_capture_cross": False,
+                },
+            },
+            "blocked_dimensions": ["volume", "kline"],
+            "clean_dimensions": ["quote-sensitive", "source_component", "lifecycle"],
+        },
+    })
+    assert volume_blocked_by_context_eligibility["classification"] == "BLOCKED_CONTEXT_COVERAGE"
+    assert volume_blocked_by_context_eligibility["formal_volume_sensitive_slices_blocked"] is True
+    assert "volume_profile_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
+    assert "kline_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
     legacy_quote_blocked = build_verdict({
         **capture,
         "quote_context_coverage": {
