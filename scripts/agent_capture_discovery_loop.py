@@ -3247,6 +3247,20 @@ def write_materialized_artifacts(
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
 
+    if state == "final":
+        # The v3 target artifacts are materialized near the end of the run.
+        # Refresh the registry after they exist so target-scoped watchlists
+        # such as decision_no_pass_quality_timing are not computed from the
+        # pre-v3 verdict and accidentally cleared.
+        registry = update_hypothesis_registry(args.registry, verdict, capture, strategy_memory_summary)
+        write_json(
+            quality_timing_probe_validation_path,
+            build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
+        )
+        readiness_paths["quality_timing_candidate_probe_validation"] = quality_timing_probe_validation_path
+        verdict = build_loop_verdict()
+        write_json(verdict_path, verdict)
+
     handoff_text = build_handoff(verdict)
     handoff_path = run_dir / "codex_handoff.md"
     write_handoff_text(handoff_path, handoff_text)
