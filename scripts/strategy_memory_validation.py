@@ -173,6 +173,20 @@ def compact_candidate_validation(candidate_id, capture_by_candidate, downstream_
     }
 
 
+def compact_candidate_capture_window(candidate_id, capture_by_candidate):
+    capture = capture_by_candidate.get(candidate_id) or {}
+    return {
+        "candidate_id": candidate_id,
+        "family": capture.get("family"),
+        "raw_gold_silver_recall": capture.get("match_recall_event"),
+        "precision": capture.get("match_precision_event"),
+        "matched_gold_silver_events": capture.get("matched_gold_silver_events"),
+        "matched_raw_all_gold_silver_events": capture.get("matched_raw_all_gold_silver_events"),
+        "candidate_match_total": capture.get("match_count"),
+        "judgment": capture.get("judgment"),
+    }
+
+
 def choose_primary_candidate(candidate_rows):
     if not candidate_rows:
         return None
@@ -225,6 +239,58 @@ def summarize_windows(capture_reports):
     return rows
 
 
+def build_hypothesis_window_validations(candidate_ids, capture_reports, *, downstream_by_candidate, pnl_by_candidate):
+    rows = []
+    for label, report in sorted(capture_reports.items(), key=lambda item: safe_float(item[0], 0)):
+        if not report:
+            continue
+        capture_by_candidate = candidate_baseline_map(report)
+        if str(label) == "24":
+            candidate_rows = [
+                compact_candidate_validation(candidate_id, capture_by_candidate, downstream_by_candidate, pnl_by_candidate)
+                for candidate_id in candidate_ids
+                if candidate_id in capture_by_candidate or candidate_id in downstream_by_candidate or candidate_id in pnl_by_candidate
+            ]
+            downstream_scope = "current_24h_downstream_readiness_joined"
+        else:
+            candidate_rows = [
+                compact_candidate_capture_window(candidate_id, capture_by_candidate)
+                for candidate_id in candidate_ids
+                if candidate_id in capture_by_candidate
+            ]
+            downstream_scope = "capture_only_downstream_not_loaded_for_this_window"
+        primary = choose_primary_candidate(candidate_rows)
+        denom = report.get("raw_gold_silver_denominator") or {}
+        coverage = report.get("coverage") or {}
+        rows.append({
+            "hours": int(float(label)),
+            "downstream_scope": downstream_scope,
+            "raw_gold_silver_event_rows": denom.get("event_rows"),
+            "raw_gold_silver_unique_tokens": denom.get("unique_tokens"),
+            "rows_complete_against_summary": denom.get("rows_complete_against_summary"),
+            "candidate_count_observed": coverage.get("candidate_count_observed"),
+            "observation_coverage_pct": coverage.get("coverage_pct"),
+            "mapped_candidate_count": len(candidate_ids),
+            "observed_mapped_candidate_count": len(candidate_rows),
+            "raw_gold_silver_recall": (primary or {}).get("raw_gold_silver_recall"),
+            "precision": (primary or {}).get("precision"),
+            "decision_capture": (primary or {}).get("decision_capture"),
+            "pass_allow_capture": (primary or {}).get("pass_allow_capture"),
+            "pending_capture": (primary or {}).get("pending_capture"),
+            "final_eligibility_capture": (primary or {}).get("final_eligibility_capture"),
+            "mode_disabled_adjusted_final_eligibility": (
+                (primary or {}).get("mode_disabled_adjusted_final_eligibility")
+            ),
+            "paper_capture": (primary or {}).get("paper_capture"),
+            "realized_capture": (primary or {}).get("realized_capture"),
+            "pnl_secondary_status": ((primary or {}).get("pnl_secondary") or {}).get("judgment"),
+            "primary_current_candidate": primary,
+            "candidate_validations": candidate_rows[:24],
+            "promotion_allowed": False,
+        })
+    return rows
+
+
 def build_validation(args):
     registry = load_json(args.registry, {})
     ingestion = load_json(args.ingestion_summary, {})
@@ -247,11 +313,14 @@ def build_validation(args):
         if not isinstance(row, dict):
             continue
         candidate_ids = as_list(row.get("mapped_existing_candidate_ids"))
-        candidate_rows = [
-            compact_candidate_validation(candidate_id, capture_by_candidate, downstream_by_candidate, pnl_by_candidate)
-            for candidate_id in candidate_ids
-            if candidate_id in capture_by_candidate or candidate_id in downstream_by_candidate or candidate_id in pnl_by_candidate
-        ]
+        window_validations = build_hypothesis_window_validations(
+            candidate_ids,
+            capture_reports,
+            downstream_by_candidate=downstream_by_candidate,
+            pnl_by_candidate=pnl_by_candidate,
+        )
+        current_24h = next((item for item in window_validations if item.get("hours") == 24), {})
+        candidate_rows = as_list(current_24h.get("candidate_validations"))
         primary = choose_primary_candidate(candidate_rows)
         verdict = verdict_for_hypothesis(row, candidate_rows)
         data_blockers = []
@@ -297,6 +366,9 @@ def build_validation(args):
             "pnl_secondary_status": ((primary or {}).get("pnl_secondary") or {}).get("judgment"),
             "primary_current_candidate": primary,
             "candidate_validations": candidate_rows[:24],
+            "window_validations": window_validations,
+            "window_validation_count": len(window_validations),
+            "multi_window_validation_scope": "24h_primary_verdict_with_48h_72h_capture_context",
             "verdict": verdict,
         })
     status_counts = {}
@@ -544,6 +616,10 @@ def self_test():
         assert validation["status_counts"][VERDICTS["DISCOVERY_WATCH"]] == 1
         assert validation["status_counts"][VERDICTS["EXIT_ONLY"]] == 1
         assert validation["hypotheses"][0]["pnl_secondary_status"] == "WATCH"
+        assert validation["hypotheses"][0]["window_validation_count"] == 3
+        assert [row["hours"] for row in validation["hypotheses"][0]["window_validations"]] == [24, 48, 72]
+        assert validation["hypotheses"][0]["window_validations"][0]["decision_capture"] == 0.6
+        assert validation["hypotheses"][0]["window_validations"][1]["downstream_scope"] == "capture_only_downstream_not_loaded_for_this_window"
         bridge = build_filtered_winner_bridge(args, validation)
         assert bridge["filtered_winner_count"] == 1
         exit_summary = build_exit_shadow_summary(args, validation)
