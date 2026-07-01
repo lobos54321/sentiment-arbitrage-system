@@ -1549,6 +1549,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "classification": oos_readiness_summary_v3.get("classification"),
             "available_probe_count": oos_readiness_summary_v3.get("available_probe_count"),
             "sufficient_probe_count": oos_readiness_summary_v3.get("sufficient_probe_count"),
+            "pass_allow_60_closure_oos_queue_count": (
+                oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue_count")
+            ),
+            "next_pass_allow_60_closure_oos_action": (
+                oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
+            ),
+            "pass_allow_60_closure_oos_queue": (
+                oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue") or {}
+            ),
             "promotion_allowed": False,
         },
         "blocked_subtype": blocked_subtype,

@@ -2371,6 +2371,9 @@ def build_oos_summary(run_dir, reports=None):
     decision_no_pass_watch_validation = (
         (input_reports or {}).get("decision_no_pass_quality_timing_watch_validation") or {}
     )
+    pass_allow_closure_plan = (
+        (input_reports or {}).get("pass_allow_60_closure_plan") or {}
+    )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
     qt_queue_count = safe_int(
         quality_timing_probe_validation.get("oos_readiness_queue_count")
@@ -2427,6 +2430,58 @@ def build_oos_summary(run_dir, reports=None):
             summary["next_decision_no_pass_quality_timing_oos_action"] = (
                 "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
             )
+    if pass_allow_closure_plan:
+        closure_tracks = pass_allow_closure_plan.get("closure_tracks") or {}
+        dnp_track = closure_tracks.get("decision_no_pass_quality_timing_clusters") or {}
+        clean_cross_track = closure_tracks.get("clean_2d_pass_allow_lift_slices") or {}
+        shadow_track = closure_tracks.get("shadow_queue_pass_allow_items") or {}
+        selected_cluster_count = safe_int(dnp_track.get("count"), 0)
+        clean_cross_count = safe_int(clean_cross_track.get("count"), 0)
+        shadow_pass_allow_count = safe_int(shadow_track.get("count"), 0)
+        target_gap = pass_allow_closure_plan.get("target_gap") or {}
+        queue_count = selected_cluster_count + clean_cross_count + shadow_pass_allow_count
+        if safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0) <= 0:
+            closure_oos_classification = "PASS_ALLOW_60_CLOSURE_OOS_NOT_NEEDED"
+            next_action = "continue_downstream_gap_oos_monitoring"
+        elif queue_count:
+            closure_oos_classification = "PASS_ALLOW_60_CLOSURE_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+            next_action = "hold_pass_allow_60_closure_plan_until_clean_non_overlapping_oos"
+        else:
+            closure_oos_classification = "PASS_ALLOW_60_CLOSURE_OOS_QUEUE_EMPTY"
+            next_action = "continue_pass_allow_gap_reason_decomposition"
+        summary["pass_allow_60_closure_plan"] = {
+            "available": True,
+            "classification": pass_allow_closure_plan.get("classification"),
+            "next_action": pass_allow_closure_plan.get("next_action"),
+            "target_gap": target_gap,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["pass_allow_60_closure_oos_queue"] = {
+            "classification": closure_oos_classification,
+            "queue_count": queue_count,
+            "decision_no_pass_cluster_count": selected_cluster_count,
+            "clean_2d_pass_allow_lift_slice_count": clean_cross_count,
+            "shadow_queue_pass_allow_item_count": shadow_pass_allow_count,
+            "selected_cluster_upper_bound_event_count": target_gap.get("selected_cluster_upper_bound_event_count"),
+            "selected_clusters_cover_current_gap_upper_bound": (
+                target_gap.get("selected_clusters_cover_current_gap_upper_bound")
+            ),
+            "residual_gap_after_selected_cluster_upper_bound": (
+                target_gap.get("residual_gap_after_selected_cluster_upper_bound")
+            ),
+            "blocked_until": "context_clean_window_and_non_overlapping_eval",
+            "next_action": next_action,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["pass_allow_60_closure_oos_queue_count"] = queue_count
+        if queue_count:
+            summary["next_pass_allow_60_closure_oos_action"] = next_action
     return summary
 
 
@@ -2467,6 +2522,7 @@ def assemble_reports(run_dir, out_dir=None):
         reports,
         context_eligibility,
     )
+    reports["pass_allow_60_closure_plan"] = pass_allow_closure_plan
     oos_summary = build_oos_summary(run_dir, reports)
     payloads = {
         "capture_60_gap_report": gap_report,
@@ -2890,6 +2946,11 @@ def self_test():
         assert oos["next_decision_no_pass_quality_timing_oos_action"] == (
             "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
         )
+        assert oos["pass_allow_60_closure_plan"]["available"] is True
+        assert oos["pass_allow_60_closure_oos_queue"]["classification"] == (
+            "PASS_ALLOW_60_CLOSURE_OOS_NOT_NEEDED"
+        )
+        assert oos["pass_allow_60_closure_oos_queue_count"] >= 1
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
 
