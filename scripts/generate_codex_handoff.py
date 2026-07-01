@@ -588,16 +588,18 @@ def build_handoff(verdict):
             "```",
             "",
         ])
-    strategy_memory = verdict.get("strategy_memory_ingestion_summary") or {}
-    if strategy_memory:
+    strategy_memory = verdict.get("strategy_memory") or {}
+    strategy_memory_ingestion = verdict.get("strategy_memory_ingestion_summary") or {}
+    strategy_memory_validation = verdict.get("strategy_memory_validation") or {}
+    if strategy_memory or strategy_memory_ingestion or strategy_memory_validation:
         lines.extend([
             "## Strategy Memory",
             "",
             "```json",
             json.dumps(
                 {
-                    "available": strategy_memory.get("available"),
-                    "strategy_memory_hypotheses_count": strategy_memory.get("strategy_memory_hypotheses_count"),
+                    "enabled": strategy_memory.get("enabled", strategy_memory_ingestion.get("available")),
+                    "hypotheses_count": strategy_memory.get("hypotheses_count"),
                     "mapped_to_existing_candidates": strategy_memory.get("mapped_to_existing_candidates"),
                     "missing_shadow_candidates": strategy_memory.get("missing_shadow_candidates"),
                     "rejected_future_data_hypotheses": strategy_memory.get("rejected_future_data_hypotheses"),
@@ -606,6 +608,10 @@ def build_handoff(verdict):
                     "exit_policy_variants_tested": strategy_memory.get("exit_policy_variants_tested"),
                     "delay_replay_done": strategy_memory.get("delay_replay_done"),
                     "paper_trades_db_available": strategy_memory.get("paper_trades_db_available"),
+                    "validation_status_counts": strategy_memory.get("validation_status_counts") or (
+                        strategy_memory_validation.get("status_counts") or {}
+                    ),
+                    "validation_window_count": strategy_memory.get("validation_window_count"),
                     "evidence_level": "historical_memory",
                     "allowed_use": "shadow_only",
                     "promotion_allowed": False,
@@ -614,10 +620,14 @@ def build_handoff(verdict):
                     "automatic_runtime_change_allowed": False,
                     "paper_enablement_allowed": False,
                     "missing_shadow_candidate_handoffs": (
-                        strategy_memory.get("missing_shadow_candidate_handoffs") or []
+                        strategy_memory.get("missing_shadow_candidate_handoffs")
+                        or strategy_memory_ingestion.get("missing_shadow_candidate_handoffs")
+                        or []
                     )[:8],
                     "exit_only_hypotheses": (
-                        strategy_memory.get("exit_only_hypotheses") or []
+                        strategy_memory.get("exit_only_hypotheses")
+                        or strategy_memory_ingestion.get("exit_only_hypotheses")
+                        or []
                     )[:8],
                 },
                 indent=2,

@@ -48,6 +48,7 @@ REPORT_TEST_COMMANDS = (
     ("a_class_mode_readiness_self_test", ["scripts/a_class_fastlane_mode_readiness_audit.py", "--self-test"]),
     ("runtime_health_snapshot_self_test", ["scripts/runtime_health_snapshot_audit.py", "--self-test"]),
     ("strategy_memory_audit_self_test", ["scripts/offline_strategy_memory_audit.py", "--self-test"]),
+    ("strategy_memory_validation_self_test", ["scripts/strategy_memory_validation.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
@@ -363,6 +364,17 @@ def is_strategy_memory_exit_only(hypothesis, mapping_row):
     return bool(hid.startswith("SM-EXIT") or "exit" in family or mapping_status == "missing_exit_shadow_sim_only")
 
 
+def is_strategy_memory_delay_replay_only(hypothesis, mapping_row):
+    hid = str(hypothesis.get("id") or hypothesis.get("hypothesis_id") or "").upper()
+    family = str(hypothesis.get("strategy_family") or "").lower()
+    mapping_status = str((mapping_row or {}).get("mapping_status") or "")
+    return bool(
+        "EXECUTION-DELAY" in hid
+        or "delay" in family
+        or mapping_status == "missing_delay_replay_only"
+    )
+
+
 def compact_strategy_memory_hypothesis(hypothesis, mapping_row, *, paper_db_available):
     hid = hypothesis.get("id") or hypothesis.get("hypothesis_id")
     future_features = list(hypothesis.get("future_or_posthoc_features") or [])
@@ -373,8 +385,14 @@ def compact_strategy_memory_hypothesis(hypothesis, mapping_row, *, paper_db_avai
         or "future_data_features_must_be_labels_only" in blocked_contexts
     )
     exit_only = is_strategy_memory_exit_only(hypothesis, mapping_row)
+    delay_replay_only = is_strategy_memory_delay_replay_only(hypothesis, mapping_row)
     requires_paper = strategy_memory_requires_paper_db(hypothesis)
     evidence_incomplete = bool(requires_paper and not paper_db_available)
+    route = "strategy_memory_shadow_context_only"
+    if exit_only:
+        route = "exit_policy_shadow_simulator_only"
+    elif delay_replay_only:
+        route = "delay_replay_only"
     return {
         "hypothesis_id": hid,
         "name": hypothesis.get("name"),
@@ -398,8 +416,9 @@ def compact_strategy_memory_hypothesis(hypothesis, mapping_row, *, paper_db_avai
         "requires_paper_trades_db": requires_paper,
         "evidence_incomplete": evidence_incomplete,
         "evidence_incomplete_reason": "paper_trades_db_unavailable" if evidence_incomplete else None,
-        "route": "exit_policy_shadow_simulator_only" if exit_only else "strategy_memory_shadow_context_only",
+        "route": route,
         "exit_only": exit_only,
+        "delay_replay_only": delay_replay_only,
         "next_validation_required": hypothesis.get("next_validation_required"),
         "entry_definition": hypothesis.get("entry_definition"),
         "exit_definition": hypothesis.get("exit_definition"),
@@ -1401,6 +1420,7 @@ def first_blocker_priority(blockers):
         "observation_coverage_below_99pct",
         "raw_dog_rows_incomplete",
         "signal_id_join_rate_below_99pct",
+        "autoloop_execution_timeout_partial_sync",
         "source_quote_clean_coverage_below_80pct",
         "source_quote_executable_coverage_below_80pct",
         "volume_profile_coverage_below_80pct",
@@ -1451,6 +1471,52 @@ def parse_capture_hours(value, primary_hours):
     return sorted(hours)
 
 
+def diagnostic_is_timeout_like(row):
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("error", "stdout_tail", "stderr_tail", "name")
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "timeout_after_",
+            "timed out",
+            "timeout",
+            "524",
+            "gateway timeout",
+        )
+    )
+
+
+def autoloop_timeout_status(diagnostics):
+    failed = [row for row in diagnostics or [] if not row.get("ok")]
+    timeout_like = [row for row in failed if diagnostic_is_timeout_like(row)]
+    if not timeout_like:
+        return None
+    return {
+        "classification": "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC",
+        "status": "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC",
+        "timeout_command_count": len(timeout_like),
+        "failed_command_count": len(failed),
+        "all_failed_commands_timeout_like": len(timeout_like) == len(failed),
+        "timeout_commands": [
+            {
+                "name": row.get("name"),
+                "duration_sec": row.get("duration_sec"),
+                "error": row.get("error"),
+                "returncode": row.get("returncode"),
+            }
+            for row in timeout_like[:20]
+        ],
+        "strategy_failure_inferred": False,
+        "lightweight_artifact_reconciliation_required": True,
+        "preserve_previous_valid_reviewer_verdict": True,
+        "handoff_only_if_timeout_repeats": True,
+        "next_action": "run_lightweight_artifact_reconciliation_and_preserve_previous_valid_verdict",
+        "promotion_allowed": False,
+    }
+
+
 def run_reports(run_dir, args):
     primary_hours = int(args.hours)
     capture_path = run_dir / f"capture_discovery_{primary_hours}h.json"
@@ -1478,6 +1544,10 @@ def run_reports(run_dir, args):
     low_confidence_research_path = run_dir / f"low_confidence_research_capture_audit_{primary_hours}h.json"
     quality_timing_research_path = run_dir / f"quality_timing_reject_research_audit_{primary_hours}h.json"
     strategy_memory_ingestion_path = run_dir / "strategy_memory_ingestion_summary.json"
+    strategy_memory_validation_path = run_dir / "strategy_memory_validation_24h.json"
+    strategy_memory_filtered_winner_bridge_path = run_dir / "strategy_memory_filtered_winner_bridge.json"
+    strategy_memory_exit_shadow_summary_path = run_dir / "strategy_memory_exit_shadow_summary.json"
+    strategy_memory_delay_replay_summary_path = run_dir / "strategy_memory_delay_replay_summary.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -1833,6 +1903,37 @@ def run_reports(run_dir, args):
     ))
     if runtime_health_snapshot_path.exists():
         readiness_paths["runtime_health_snapshot"] = runtime_health_snapshot_path
+    diagnostics.append(run_report(
+        "strategy_memory_validation",
+        [
+            "scripts/strategy_memory_validation.py",
+            "--registry", str(args.registry),
+            "--ingestion-summary", str(strategy_memory_ingestion_path),
+            "--capture-24h", str(capture_paths.get(24, capture_path)),
+            "--capture-48h", str(capture_paths.get(48, capture_paths.get(primary_hours, capture_path))),
+            "--capture-72h", str(capture_paths.get(72, capture_paths.get(primary_hours, capture_path))),
+            "--downstream", str(candidate_downstream_path),
+            "--a-class", str(a_class_fastlane_path),
+            "--pnl", str(pnl_path),
+            "--filtered-winner", str(Path(args.data_dir) / "filtered_winner_dossier_24h.json"),
+            "--exit-report", str(Path(args.data_dir) / "exit_policy_shadow_simulator_24h.json"),
+            "--delay-report", str(Path(args.data_dir) / "execution_delay_adjusted_replay_24h.json"),
+            "--out", str(strategy_memory_validation_path),
+            "--filtered-bridge-out", str(strategy_memory_filtered_winner_bridge_path),
+            "--exit-summary-out", str(strategy_memory_exit_shadow_summary_path),
+            "--delay-summary-out", str(strategy_memory_delay_replay_summary_path),
+        ],
+        strategy_memory_validation_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if strategy_memory_validation_path.exists():
+        readiness_paths["strategy_memory_validation"] = strategy_memory_validation_path
+    if strategy_memory_filtered_winner_bridge_path.exists():
+        readiness_paths["strategy_memory_filtered_winner_bridge"] = strategy_memory_filtered_winner_bridge_path
+    if strategy_memory_exit_shadow_summary_path.exists():
+        readiness_paths["strategy_memory_exit_shadow_summary"] = strategy_memory_exit_shadow_summary_path
+    if strategy_memory_delay_replay_summary_path.exists():
+        readiness_paths["strategy_memory_delay_replay_summary"] = strategy_memory_delay_replay_summary_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,
@@ -2315,6 +2416,7 @@ def compact_strategy_memory_registry(summary):
             "evidence_incomplete_reason": row.get("evidence_incomplete_reason"),
             "route": row.get("route"),
             "exit_only": bool(row.get("exit_only")),
+            "delay_replay_only": bool(row.get("delay_replay_only")),
             "missing_shadow_candidate_handoff_required": bool(row.get("missing_shadow_candidate_handoff_required")),
             "next_validation_required": row.get("next_validation_required"),
         })
@@ -2621,7 +2723,43 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         "",
         "```json",
         json.dumps(
-            verdict.get("strategy_memory_ingestion_summary") or {},
+            {
+                "strategy_memory": verdict.get("strategy_memory") or {},
+                "strategy_memory_ingestion_summary": verdict.get("strategy_memory_ingestion_summary") or {},
+                "strategy_memory_validation": {
+                    key: (verdict.get("strategy_memory_validation") or {}).get(key)
+                    for key in (
+                        "available",
+                        "hypotheses_count",
+                        "status_counts",
+                        "window_validations",
+                        "promotion_allowed",
+                        "evidence_role",
+                    )
+                },
+                "strategy_memory_filtered_winner_bridge": verdict.get("strategy_memory_filtered_winner_bridge") or {},
+                "strategy_memory_exit_shadow_summary": {
+                    key: (verdict.get("strategy_memory_exit_shadow_summary") or {}).get(key)
+                    for key in (
+                        "available",
+                        "exit_policy_variants_tested",
+                        "sample_count",
+                        "gold_silver_sample_count",
+                        "promotion_allowed",
+                        "evidence_role",
+                    )
+                },
+                "strategy_memory_delay_replay_summary": {
+                    key: (verdict.get("strategy_memory_delay_replay_summary") or {}).get(key)
+                    for key in (
+                        "available",
+                        "delay_replay_done",
+                        "entry_delays_sec",
+                        "promotion_allowed",
+                        "evidence_role",
+                    )
+                },
+            },
             indent=2,
             sort_keys=True,
         )[:12000],
@@ -2754,13 +2892,30 @@ def write_materialized_artifacts(
             tests=tests if tests.get("status") != "pending" else {},
             readiness_reports=collect_readiness_reports(),
         )
+        timeout_status = autoloop_timeout_status(diagnostics)
         if any(not row.get("ok") for row in diagnostics):
-            verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + ["report_generation_failed"]))
-            verdict_payload["classification"] = "BLOCKED_DATA"
+            if timeout_status:
+                verdict_payload["blockers"] = sorted(
+                    set((verdict_payload.get("blockers") or []) + ["autoloop_execution_timeout_partial_sync"])
+                )
+                verdict_payload["classification"] = "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC"
+                verdict_payload["autoloop_execution_status"] = timeout_status["status"]
+                verdict_payload["timeout_reconciliation"] = timeout_status
+                verdict_payload["strategy_failure_inferred"] = False
+                verdict_payload["next_action"] = timeout_status["next_action"]
+            else:
+                verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + ["report_generation_failed"]))
+                verdict_payload["classification"] = "BLOCKED_DATA"
+                verdict_payload["autoloop_execution_status"] = "FULL_RUN_REPORT_GENERATION_FAILED"
             verdict_payload["promotion_allowed"] = False
-        if state != "final":
+        else:
+            verdict_payload["autoloop_execution_status"] = "FULL_RUN_COMPLETED"
+        if state != "final" and not timeout_status:
             verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + [state]))
             verdict_payload["classification"] = "BLOCKED_DATA"
+            verdict_payload["promotion_allowed"] = False
+        elif state != "final" and timeout_status:
+            verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + [state]))
             verdict_payload["promotion_allowed"] = False
         verdict_payload["loop"] = {
             "schema_version": SCHEMA_VERSION,
@@ -3332,6 +3487,10 @@ def self_test():
             "quality_timing_reject_research_audit_24h.json",
             "quality_timing_candidate_probe_validation_24h.json",
             "strategy_memory_ingestion_summary.json",
+            "strategy_memory_validation_24h.json",
+            "strategy_memory_filtered_winner_bridge.json",
+            "strategy_memory_exit_shadow_summary.json",
+            "strategy_memory_delay_replay_summary.json",
         ]
         missing_artifacts = [name for name in required_artifacts if not (latest_dir / name).exists()]
         assert not missing_artifacts, missing_artifacts
@@ -3378,6 +3537,15 @@ def self_test():
         assert strategy_memory["paper_trades_db_available"] is True
         assert strategy_memory["missing_shadow_candidate_handoffs"][0]["allowed_action"] == "generate_codex_handoff_only"
         assert any(row["route"] == "exit_policy_shadow_simulator_only" for row in strategy_memory["hypotheses"])
+        strategy_validation = load_json(latest_dir / "strategy_memory_validation_24h.json")
+        assert strategy_validation["promotion_allowed"] is False
+        assert strategy_validation["strategy_memory_enabled"] is True
+        assert strategy_validation["hypotheses_count"] == 2
+        assert "STRATEGY_MEMORY_EXIT_ONLY" in strategy_validation["status_counts"]
+        assert "window_validations" in strategy_validation
+        assert load_json(latest_dir / "strategy_memory_filtered_winner_bridge.json")["promotion_allowed"] is False
+        assert load_json(latest_dir / "strategy_memory_exit_shadow_summary.json")["promotion_allowed"] is False
+        assert load_json(latest_dir / "strategy_memory_delay_replay_summary.json")["promotion_allowed"] is False
     print("SELF_TEST_PASS agent_capture_discovery_loop")
 
 

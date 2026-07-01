@@ -28,3 +28,4 @@ def test_strategy_memory_self_tests():
     run_script("exit_policy_shadow_simulator.py", "--self-test")
     run_script("execution_delay_adjusted_replay.py", "--self-test")
     run_script("offline_strategy_memory_audit.py", "--self-test")
+    run_script("strategy_memory_validation.py", "--self-test")

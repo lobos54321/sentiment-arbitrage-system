@@ -97,6 +97,10 @@ DERIVED_READINESS_SIBLINGS = {
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
+    "strategy_memory_validation": "strategy_memory_validation_24h.json",
+    "strategy_memory_filtered_winner_bridge": "strategy_memory_filtered_winner_bridge.json",
+    "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
+    "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
     "shadow_decision_bridge_audit": "shadow_decision_bridge_audit_24h.json",
     "a_class_fastlane_mode_audit": "a_class_fastlane_mode_audit_24h.json",
     "runtime_health_snapshot": "runtime_health_snapshot_24h.json",
@@ -1028,6 +1032,10 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     quality_timing_audit = readiness_reports.get("quality_timing_reject_research_audit") or {}
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
     strategy_memory_ingestion = readiness_reports.get("strategy_memory_ingestion_summary") or {}
+    strategy_memory_validation = readiness_reports.get("strategy_memory_validation") or {}
+    strategy_memory_filtered_bridge = readiness_reports.get("strategy_memory_filtered_winner_bridge") or {}
+    strategy_memory_exit_summary = readiness_reports.get("strategy_memory_exit_shadow_summary") or {}
+    strategy_memory_delay_summary = readiness_reports.get("strategy_memory_delay_replay_summary") or {}
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     if any(blocker in data_blockers for blocker in blockers):
@@ -1771,6 +1779,98 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "paper_enablement_allowed": False,
             "candidate_catalog_change_allowed": False,
             "notes": strategy_memory_ingestion.get("notes") or [],
+        },
+        "strategy_memory": {
+            "enabled": bool(strategy_memory_ingestion.get("available") or strategy_memory_validation.get("strategy_memory_enabled")),
+            "hypotheses_count": (
+                strategy_memory_validation.get("hypotheses_count")
+                or strategy_memory_ingestion.get("strategy_memory_hypotheses_count", 0)
+            ),
+            "mapped_to_existing_candidates": strategy_memory_ingestion.get("mapped_to_existing_candidates", 0),
+            "missing_shadow_candidates": strategy_memory_ingestion.get("missing_shadow_candidates", 0),
+            "rejected_future_data_hypotheses": strategy_memory_ingestion.get("rejected_future_data_hypotheses", 0),
+            "filtered_winner_count": (
+                strategy_memory_filtered_bridge.get("filtered_winner_count")
+                or strategy_memory_ingestion.get("filtered_winner_count", 0)
+            ),
+            "exit_policy_variants_tested": (
+                strategy_memory_exit_summary.get("exit_policy_variants_tested")
+                or strategy_memory_ingestion.get("exit_policy_variants_tested", 0)
+            ),
+            "delay_replay_done": boolish(
+                strategy_memory_delay_summary.get("delay_replay_done")
+                if strategy_memory_delay_summary
+                else strategy_memory_ingestion.get("delay_replay_done")
+            ),
+            "paper_trades_db_available": boolish(strategy_memory_ingestion.get("paper_trades_db_available")),
+            "evidence_role": "discovery_only",
+            "allowed_use": "shadow_only",
+            "evidence_level": "historical_memory",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "candidate_catalog_change_allowed": False,
+            "validation_status_counts": strategy_memory_validation.get("status_counts") or {},
+            "validation_window_count": len(strategy_memory_validation.get("window_validations") or []),
+            "filtered_winner_bridge_available": bool(strategy_memory_filtered_bridge),
+            "exit_shadow_summary_available": bool(strategy_memory_exit_summary),
+            "delay_replay_summary_available": bool(strategy_memory_delay_summary),
+            "top_10_shadow_hypotheses": strategy_memory_ingestion.get("top_10_shadow_hypotheses") or [],
+            "missing_shadow_candidate_handoffs": (
+                strategy_memory_ingestion.get("missing_shadow_candidate_handoffs") or []
+            )[:12],
+            "exit_only_hypotheses": (
+                strategy_memory_exit_summary.get("exit_only_hypotheses")
+                or strategy_memory_ingestion.get("exit_only_hypotheses")
+                or []
+            )[:12],
+            "notes": [
+                "Strategy Memory is discovery-only historical prior evidence.",
+                "Historical memory cannot set promotion_allowed=true.",
+                "Missing shadow candidates are handoff-only.",
+            ],
+        },
+        "strategy_memory_validation": {
+            "available": bool(strategy_memory_validation),
+            "schema_version": strategy_memory_validation.get("schema_version"),
+            "hypotheses_count": strategy_memory_validation.get("hypotheses_count", 0),
+            "status_counts": strategy_memory_validation.get("status_counts") or {},
+            "window_validations": strategy_memory_validation.get("window_validations") or [],
+            "top_hypotheses": (strategy_memory_validation.get("hypotheses") or [])[:12],
+            "promotion_allowed": False,
+            "evidence_role": "discovery_only",
+        },
+        "strategy_memory_filtered_winner_bridge": {
+            "available": bool(strategy_memory_filtered_bridge),
+            "filtered_winner_count": strategy_memory_filtered_bridge.get("filtered_winner_count", 0),
+            "final_blocker_counts": strategy_memory_filtered_bridge.get("final_blocker_counts") or {},
+            "current_strategy_memory_hypothesis": (
+                strategy_memory_filtered_bridge.get("current_strategy_memory_hypothesis") or {}
+            ),
+            "promotion_allowed": False,
+            "evidence_role": "discovery_only",
+        },
+        "strategy_memory_exit_shadow_summary": {
+            "available": bool(strategy_memory_exit_summary),
+            "exit_policy_variants_tested": strategy_memory_exit_summary.get("exit_policy_variants_tested", 0),
+            "sample_count": strategy_memory_exit_summary.get("sample_count"),
+            "gold_silver_sample_count": strategy_memory_exit_summary.get("gold_silver_sample_count"),
+            "top_variants": (strategy_memory_exit_summary.get("top_variants") or [])[:8],
+            "exit_only_hypotheses": (strategy_memory_exit_summary.get("exit_only_hypotheses") or [])[:8],
+            "promotion_allowed": False,
+            "evidence_role": "exit_shadow_simulator_only",
+        },
+        "strategy_memory_delay_replay_summary": {
+            "available": bool(strategy_memory_delay_summary),
+            "delay_replay_done": boolish(strategy_memory_delay_summary.get("delay_replay_done")),
+            "entry_delays_sec": strategy_memory_delay_summary.get("entry_delays_sec") or [],
+            "execution_delay_hypotheses": (
+                strategy_memory_delay_summary.get("execution_delay_hypotheses") or []
+            )[:8],
+            "hypotheses": (strategy_memory_delay_summary.get("hypotheses") or [])[:12],
+            "promotion_allowed": False,
+            "evidence_role": "delay_replay_only",
         },
         "A_CLASS_mode_status": readiness_reports.get("a_class_fastlane_mode_audit") or {},
         "final_entry_contract_blocker_breakdown": (
