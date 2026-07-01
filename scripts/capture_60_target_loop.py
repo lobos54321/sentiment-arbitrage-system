@@ -47,6 +47,7 @@ REQUIRED_FILES = {
     "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
     "candidate_improvement": "candidate_improvement_opportunities_24h.json",
     "quality_timing_reject_research": "quality_timing_reject_research_audit_24h.json",
+    "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
@@ -874,14 +875,15 @@ def load_oos_reports(run_dir):
     return reports
 
 
-def build_oos_summary(run_dir):
-    reports = load_oos_reports(run_dir)
+def build_oos_summary(run_dir, reports=None):
+    oos_reports = load_oos_reports(run_dir)
+    input_reports = reports if reports is not None else {}
     if build_oos_readiness_summary:
-        summary = build_oos_readiness_summary(reports)
+        summary = build_oos_readiness_summary(oos_reports)
     else:
         summary = {
-            "classification": "OOS_PROBES_MISSING" if not reports else "OOS_REPORTS_AVAILABLE",
-            "available_probe_count": len(reports),
+            "classification": "OOS_PROBES_MISSING" if not oos_reports else "OOS_REPORTS_AVAILABLE",
+            "available_probe_count": len(oos_reports),
             "promotion_allowed": False,
             "probes": [],
         }
@@ -889,6 +891,37 @@ def build_oos_summary(run_dir):
     summary["report_type"] = "oos_readiness_summary"
     summary["generated_at"] = utc_now()
     summary["promotion_allowed"] = False
+    quality_timing_probe_validation = (
+        (input_reports or {}).get("quality_timing_candidate_probe_validation") or {}
+    )
+    qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
+    qt_queue_count = safe_int(
+        quality_timing_probe_validation.get("oos_readiness_queue_count")
+        or qt_oos_queue.get("queue_count"),
+        0,
+    )
+    if quality_timing_probe_validation:
+        summary["quality_timing_probe_validation"] = {
+            "available": True,
+            "classification": quality_timing_probe_validation.get("classification"),
+            "next_action": quality_timing_probe_validation.get("next_action"),
+            "registered_probe_count": quality_timing_probe_validation.get("registered_probe_count"),
+            "validated_probe_count": quality_timing_probe_validation.get("validated_probe_count"),
+            "repeated_probe_count": quality_timing_probe_validation.get("repeated_probe_count"),
+            "repeated_probe_rate": quality_timing_probe_validation.get("repeated_probe_rate"),
+            "oos_readiness_queue_count": qt_queue_count,
+            "oos_queue_classification": qt_oos_queue.get("classification"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "blocked_until": "context_clean_window_and_non_overlapping_eval",
+        }
+        summary["quality_timing_oos_queue_count"] = qt_queue_count
+        if qt_queue_count:
+            summary["next_quality_timing_oos_action"] = (
+                "hold_repeated_quality_timing_probes_until_clean_window_then_non_overlapping_oos"
+            )
     return summary
 
 
@@ -904,7 +937,7 @@ def assemble_reports(run_dir, out_dir=None):
     final_entry_readiness = build_final_entry_readiness_audit(reports.get("a_class") or {}, stage_metrics, pending_audit)
     strategy_memory_capture = build_strategy_memory_capture_validation(reports)
     shadow_queue = build_shadow_candidate_improvement_queue(reports, context_eligibility)
-    oos_summary = build_oos_summary(run_dir)
+    oos_summary = build_oos_summary(run_dir, reports)
     payloads = {
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
@@ -1082,6 +1115,21 @@ def create_self_test_run(root):
             ]
         }
     }
+    quality_timing_probe_validation = {
+        "classification": "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW",
+        "next_action": "continue_shadow_probe_tracking_until_clean_window_then_oos",
+        "registered_probe_count": 1,
+        "validated_probe_count": 1,
+        "repeated_probe_count": 1,
+        "repeated_probe_rate": 1.0,
+        "oos_readiness_queue_count": 1,
+        "oos_readiness_queue": {
+            "classification": "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+            "queue_count": 1,
+            "promotion_allowed": False,
+        },
+        "promotion_allowed": False,
+    }
     capture_cross = {
         "valid_top_crosses": [
             {
@@ -1107,6 +1155,7 @@ def create_self_test_run(root):
         "strategy_memory_ingestion": ingestion,
         "candidate_improvement": candidate_improvement,
         "quality_timing_reject_research": quality_timing,
+        "quality_timing_candidate_probe_validation": quality_timing_probe_validation,
         "capture_cross": capture_cross,
         "markov_effectiveness": markov,
     }
@@ -1148,6 +1197,11 @@ def self_test():
             item.get("candidate_id") == "quality_timing:matrix_alignment_wait"
             and item.get("expected_capture_stage_improved") == "pass_allow_capture"
             for item in queue["top_items"]
+        )
+        oos = load_json(run_dir / "oos_readiness_summary.json")
+        assert oos["quality_timing_probe_validation"]["oos_readiness_queue_count"] == 1
+        assert oos["next_quality_timing_oos_action"] == (
+            "hold_repeated_quality_timing_probes_until_clean_window_then_non_overlapping_oos"
         )
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
