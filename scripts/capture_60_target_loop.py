@@ -46,6 +46,7 @@ REQUIRED_FILES = {
     "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
     "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
     "candidate_improvement": "candidate_improvement_opportunities_24h.json",
+    "quality_timing_reject_research": "quality_timing_reject_research_audit_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
@@ -632,12 +633,45 @@ def build_strategy_memory_capture_validation(reports):
     }
 
 
+def expected_stage_from_quality_timing_stage(stage):
+    stage = str(stage or "")
+    if stage == "decision_no_pass_or_allow":
+        return "pass_allow_capture"
+    if stage == "pass_or_allow_without_pending_entry":
+        return "pending_capture"
+    if stage == "pending_without_final_entry_contract":
+        return "final_eligibility"
+    return "mode_disabled_adjusted_final_eligibility"
+
+
+def quality_timing_required_features(row):
+    required = ["quality_timing_cluster", "decision_reason"]
+    contexts = row.get("top_lifecycle_source_contexts") or []
+    if contexts:
+        required.extend(["lifecycle_profile", "source_component"])
+    if row.get("top_candidates"):
+        required.append("candidate_id")
+    return required
+
+
+def quality_timing_context_blockers(row, context_eligibility):
+    blockers = []
+    dimensions = context_eligibility.get("dimensions") or {}
+    for dim in ("lifecycle", "source_component"):
+        if dim in quality_timing_required_features(row):
+            status = (dimensions.get(dim) or {}).get("status")
+            if status not in {STATUS_CLEAN, STATUS_NA}:
+                blockers.append(dim)
+    return blockers
+
+
 def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     candidate_improvement = reports.get("candidate_improvement") or {}
     strategy_memory_validation = reports.get("strategy_memory_validation") or {}
     strategy_memory_ingestion = reports.get("strategy_memory_ingestion") or {}
     filtered_bridge = reports.get("strategy_memory_filtered_winner_bridge") or {}
     pending_audit = reports.get("pending_to_final_entry_audit") or {}
+    quality_timing = reports.get("quality_timing_reject_research") or {}
     capture_cross = reports.get("capture_cross") or {}
     clean_dimensions = set(context_eligibility.get("clean_dimensions") or [])
     items = []
@@ -702,6 +736,66 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "evidence": {"final_blocker_counts": blocker_counts},
             "next_action": "bridge_filtered_winners_to_current_funnel_blockers",
         })
+    qt_review = (quality_timing.get("shadow_only_review") or {})
+    for row in (qt_review.get("top_research_opportunities") or [])[:10]:
+        if not isinstance(row, dict):
+            continue
+        cluster = row.get("cluster")
+        stage_counts = row.get("stage_counts") or []
+        dominant_stage = (stage_counts[0] or {}).get("stage") if stage_counts else None
+        items.append({
+            "candidate_id": f"quality_timing:{cluster}",
+            "hypothesis_source": "quality_timing_reject_cluster",
+            "expected_capture_stage_improved": expected_stage_from_quality_timing_stage(dominant_stage),
+            "required_features": quality_timing_required_features(row),
+            "time_legal_status": "research_only_runtime_reject_cluster_not_entry_rule",
+            "context_blockers": quality_timing_context_blockers(row, context_eligibility),
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "evidence": {
+                "cluster": cluster,
+                "event_count": row.get("event_count"),
+                "share_of_quality_timing_rejects": row.get("share_of_quality_timing_rejects"),
+                "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
+                "unique_tokens": row.get("unique_tokens"),
+                "candidate_matched_any_rate": row.get("candidate_matched_any_rate"),
+                "readiness_impact_upper_bound": row.get("readiness_impact_upper_bound") or {},
+                "top_candidates": (row.get("top_candidates") or [])[:5],
+                "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:5],
+            },
+            "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+            "next_action": row.get("suggested_shadow_only_action")
+            or "track_quality_timing_false_negative_shadow_probe",
+        })
+        for candidate in (row.get("top_candidates") or [])[:2]:
+            candidate_id = candidate.get("candidate_id")
+            if not candidate_id or candidate_id in {"current_all", "current_would_enter_all"}:
+                continue
+            items.append({
+                "candidate_id": candidate_id,
+                "hypothesis_source": "quality_timing_candidate_probe",
+                "expected_capture_stage_improved": expected_stage_from_quality_timing_stage(dominant_stage),
+                "required_features": ["quality_timing_cluster", "candidate_id", "decision_reason"],
+                "time_legal_status": "research_only_runtime_reject_cluster_not_entry_rule",
+                "context_blockers": quality_timing_context_blockers(row, context_eligibility),
+                "allowed_use": "shadow_only",
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+                "evidence": {
+                    "cluster": cluster,
+                    "candidate_cluster_match_count": candidate.get("count"),
+                    "candidate_family": candidate.get("family"),
+                    "cluster_event_count": row.get("event_count"),
+                    "share_of_quality_timing_rejects": row.get("share_of_quality_timing_rejects"),
+                },
+                "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
+                "next_action": "track_candidate_within_quality_timing_cluster_shadow_only",
+            })
     status_counts = Counter(row.get("hypothesis_source") for row in items)
     return {
         "schema_version": "shadow_candidate_improvement_queue.v1",
@@ -925,6 +1019,33 @@ def create_self_test_run(root):
             }
         ]
     }
+    quality_timing = {
+        "shadow_only_review": {
+            "top_research_opportunities": [
+                {
+                    "cluster": "matrix_alignment_wait",
+                    "event_count": 2,
+                    "share_of_quality_timing_rejects": 1.0,
+                    "share_of_raw_all_gold_silver": 0.4,
+                    "unique_tokens": 2,
+                    "candidate_matched_any_rate": 1.0,
+                    "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 2}],
+                    "top_candidates": [
+                        {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2}
+                    ],
+                    "top_lifecycle_source_contexts": [
+                        {
+                            "lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE",
+                            "source_component": "matrix_evaluator",
+                            "count": 2,
+                        }
+                    ],
+                    "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
+                    "human_approval_required_if_fix_requires": "changing matrix alignment thresholds",
+                }
+            ]
+        }
+    }
     capture_cross = {
         "valid_top_crosses": [
             {
@@ -949,6 +1070,7 @@ def create_self_test_run(root):
         "strategy_memory_validation": strategy_validation,
         "strategy_memory_ingestion": ingestion,
         "candidate_improvement": candidate_improvement,
+        "quality_timing_reject_research": quality_timing,
         "capture_cross": capture_cross,
         "markov_effectiveness": markov,
     }
@@ -985,6 +1107,12 @@ def self_test():
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
         assert queue["queue_count"] >= 2
+        assert queue["source_counts"]["quality_timing_reject_cluster"] == 1
+        assert any(
+            item.get("candidate_id") == "quality_timing:matrix_alignment_wait"
+            and item.get("expected_capture_stage_improved") == "pass_allow_capture"
+            for item in queue["top_items"]
+        )
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
     print("SELF_TEST_PASS capture_60_target_loop")
 
