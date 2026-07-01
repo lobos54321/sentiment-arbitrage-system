@@ -1390,33 +1390,140 @@ def downstream_proxy_for_candidate(candidate_id, downstream_by_candidate, global
     }
 
 
+QUOTE_SENSITIVE_CROSS_DIMS = {
+    "source_quote_clean",
+    "source_quote_executable",
+    "source_quote_executable_proxy",
+}
+KLINE_CROSS_DIMS = {
+    "candle_pattern",
+    "fbr_time_legal",
+    "fbr_lookahead_warning",
+}
+CORE_METADATA_CROSS_DIMS = {
+    "signal_type": "core_signal_metadata",
+    "market_cap_bucket": "core_market_metadata",
+    "mode_route": "core_route_metadata",
+}
+
+
+def context_field_rate(context_report, field):
+    field_cov = (context_report.get("context_field_coverage") or {}).get(field) or {}
+    for key in ("effective_present_rate", "coverage_rate"):
+        if field_cov.get(key) is not None:
+            return field_cov.get(key)
+    if field_cov.get("coverage_pct") is not None:
+        return pct_to_rate(field_cov.get("coverage_pct"))
+    return None
+
+
+def capture_cross_dimension_eligibility(dim, rates):
+    """Return a stable eligibility decision for a capture-cross dimension."""
+    if dim in QUOTE_SENSITIVE_CROSS_DIMS:
+        ok = rates["quote_clean"] >= 0.8 and rates["quote_executable"] >= 0.8
+        return {
+            "dimension_group": "quote-sensitive",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["quote_context_coverage_below_80pct"],
+        }
+    if dim == "source_component":
+        ok = rates["source_component"] is not None and rates["source_component"] >= 0.8
+        return {
+            "dimension_group": "source_component",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["source_component_coverage_below_80pct"],
+        }
+    if dim == "source_resonance_state":
+        rate = rates["source_resonance_state"]
+        ok = rate is not None and rate >= 0.8
+        return {
+            "dimension_group": "source_resonance_state",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["source_resonance_state_coverage_below_80pct"],
+        }
+    if dim in {"lifecycle_profile", "lifecycle_state"}:
+        ok = rates["lifecycle"] is not None and rates["lifecycle"] >= 0.8
+        return {
+            "dimension_group": "lifecycle",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["lifecycle_profile_coverage_below_80pct"],
+        }
+    if dim == "volume_profile":
+        ok = rates["volume"] is not None and rates["volume"] >= 0.8
+        return {
+            "dimension_group": "volume",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["volume_profile_coverage_below_80pct"],
+        }
+    if dim in KLINE_CROSS_DIMS:
+        ok = rates["kline"] is not None and rates["kline"] >= 0.8
+        return {
+            "dimension_group": "kline",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["kline_coverage_below_80pct"],
+        }
+    if dim == "hard_gate_status":
+        rate = rates["hard_gate_status"]
+        ok = rate is not None and rate >= 0.8
+        return {
+            "dimension_group": "hard_gate",
+            "dimension_eligibility_status": "CLEAN" if ok else "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": [] if ok else ["hard_gate_status_coverage_below_80pct"],
+        }
+    if dim == "markov_bucket":
+        return {
+            "dimension_group": "Markov",
+            "dimension_eligibility_status": "BLOCKED_CONTEXT_COVERAGE",
+            "invalid_reasons": ["markov_effectiveness_not_loaded_for_capture_cross_validity"],
+        }
+    if dim in CORE_METADATA_CROSS_DIMS:
+        return {
+            "dimension_group": CORE_METADATA_CROSS_DIMS[dim],
+            "dimension_eligibility_status": "CORE_METADATA_ALLOWED",
+            "invalid_reasons": [],
+        }
+    return {
+        "dimension_group": "unregistered",
+        "dimension_eligibility_status": "UNREGISTERED_DIMENSION",
+        "invalid_reasons": ["unregistered_context_dimension"],
+    }
+
+
 def build_capture_cross_validity_report(capture, context_report, candidate_downstream=None):
     quote_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_clean_present_rate") or 0)
     quote_exec_rate = ((context_report.get("quote_context_coverage") or {}).get("source_quote_executable_present_rate") or 0)
     source_component_rate = ((context_report.get("source_component_coverage") or {}).get("effective_present_rate"))
     if source_component_rate is None:
         source_component_rate = ((context_report.get("source_component_coverage") or {}).get("coverage_rate") or 0)
+    lifecycle_rate = ((context_report.get("lifecycle_profile_coverage") or {}).get("effective_present_rate"))
+    if lifecycle_rate is None:
+        lifecycle_rate = ((context_report.get("lifecycle_profile_coverage") or {}).get("coverage_rate") or 0)
     volume_rate = ((context_report.get("volume_profile_coverage") or {}).get("coverage_rate") or 0)
     kline_rate = ((context_report.get("kline_coverage") or {}).get("coverage_rate") or 0)
+    rates = {
+        "quote_clean": quote_rate,
+        "quote_executable": quote_exec_rate,
+        "source_component": source_component_rate,
+        "source_resonance_state": context_field_rate(context_report, "source_resonance_state"),
+        "lifecycle": lifecycle_rate,
+        "volume": volume_rate,
+        "kline": kline_rate,
+        "hard_gate_status": context_field_rate(context_report, "hard_gate_status"),
+    }
     downstream_by_candidate = candidate_downstream_index(candidate_downstream)
     global_rates = downstream_global_rates(candidate_downstream)
     valid = []
     invalid = []
     for row in capture.get("context_slices") or []:
         dim = row.get("dimension")
-        reasons = []
-        if dim in {"source_quote_clean", "source_quote_executable", "source_quote_executable_proxy"} and (quote_rate < 0.8 or quote_exec_rate < 0.8):
-            reasons.append("quote_context_coverage_below_80pct")
-        if dim == "source_component" and source_component_rate < 0.8:
-            reasons.append("source_component_coverage_below_80pct")
-        if dim == "volume_profile" and volume_rate < 0.8:
-            reasons.append("volume_profile_coverage_below_80pct")
-        if dim in {"candle_pattern", "fbr_time_legal", "fbr_lookahead_warning"} and kline_rate < 0.8:
-            reasons.append("kline_coverage_below_80pct")
+        dimension_eligibility = capture_cross_dimension_eligibility(dim, rates)
+        reasons = list(dimension_eligibility["invalid_reasons"])
         item = {
             "candidate_id": row.get("candidate_id"),
             "family": row.get("family"),
             "dimension": dim,
+            "dimension_group": dimension_eligibility["dimension_group"],
+            "dimension_eligibility_status": dimension_eligibility["dimension_eligibility_status"],
             "slice_value": row.get("slice_value"),
             "judgment": row.get("judgment"),
             "matched_gold_silver_events": row.get("matched_gold_silver_events"),
@@ -1445,16 +1552,36 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
         "criteria": {
             "quote_sensitive_requires_present_rate_gte": 0.8,
             "source_component_requires_present_rate_gte": 0.8,
+            "source_resonance_state_requires_present_rate_gte": 0.8,
+            "lifecycle_requires_present_rate_gte": 0.8,
             "volume_sensitive_requires_present_rate_gte": 0.8,
             "kline_sensitive_requires_coverage_rate_gte": 0.8,
+            "hard_gate_status_requires_present_rate_gte": 0.8,
+            "unregistered_dimensions_are_invalid": True,
+            "core_metadata_dimensions_allowed_without_context_coverage": sorted(CORE_METADATA_CROSS_DIMS),
             "pnl_is_secondary": True,
             "downstream_lift_scope": "candidate_level_after_match_proxy_not_slice_specific",
             "slice_level_downstream_join_required_for_promotion_evidence": True,
         },
+        "dimension_registry": {
+            "quote-sensitive": sorted(QUOTE_SENSITIVE_CROSS_DIMS),
+            "source_component": ["source_component"],
+            "source_resonance_state": ["source_resonance_state"],
+            "lifecycle": ["lifecycle_profile", "lifecycle_state"],
+            "volume": ["volume_profile"],
+            "kline": sorted(KLINE_CROSS_DIMS),
+            "hard_gate": ["hard_gate_status"],
+            "Markov": ["markov_bucket"],
+            "core_metadata": sorted(CORE_METADATA_CROSS_DIMS),
+        },
+        "dimension_group_counts": dict(Counter(row["dimension_group"] for row in valid)),
+        "invalid_dimension_group_counts": dict(Counter(row["dimension_group"] for row in invalid)),
+        "dimension_status_counts": dict(Counter(row["dimension_eligibility_status"] for row in valid + invalid)),
         "downstream_global_rates": global_rates,
         "notes": [
             "Downstream lifts in this report are candidate-level after-match proxies attached to each slice.",
             "They are useful for discovery ranking but are not slice-specific promotion evidence until a raw observation to decision join is added.",
+            "valid_top_crosses only includes registered dimensions with clean coverage or explicitly allowed core metadata dimensions.",
             "promotion_allowed remains false.",
         ],
     }

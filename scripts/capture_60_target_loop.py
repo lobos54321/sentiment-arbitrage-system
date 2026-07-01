@@ -1865,7 +1865,10 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
         if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
             continue
         dimension = row.get("dimension")
-        if dimension and dimension not in clean_dimensions and dimension not in {"signal_type", "mode_route"}:
+        dimension_group = row.get("dimension_group") or dimension
+        dimension_status = row.get("dimension_eligibility_status")
+        core_allowed = dimension_status == "CORE_METADATA_ALLOWED"
+        if dimension_group and dimension_group not in clean_dimensions and not core_allowed:
             continue
         items.append({
             "candidate_id": row.get("candidate_id"),
@@ -1873,6 +1876,8 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "expected_capture_stage_improved": "detector_capture",
             "required_features": [dimension] if dimension else [],
             "time_legal_status": "context_slice_time_legal_not_proven",
+            "dimension_group": dimension_group,
+            "dimension_eligibility_status": dimension_status,
             "context_blockers": row.get("invalid_reasons") or [],
             "allowed_use": "shadow_only",
             "promotion_allowed": False,
