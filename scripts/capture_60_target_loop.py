@@ -1400,12 +1400,38 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
     else:
         next_action = "continue_pass_allow_capture_monitoring"
 
+    if additional_needed <= 0:
+        classification = "PASS_ALLOW_CAPTURE_60_REACHED_DISCOVERY_ONLY"
+        dominant_gap_stage = None
+        dominant_blocker = None
+        next_action = "pass_allow_capture_target_reached_continue_downstream_gap_audit"
+    elif shadow_bridge_count and shadow_bridge.get("status") != "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE":
+        classification = "PASS_ALLOW_CAPTURE_GAP_SHADOW_DECISION_BRIDGE_INCOMPLETE"
+        dominant_gap_stage = "decision_capture_to_pass_allow_capture"
+        dominant_blocker = "shadow_matched_no_decision_bridge"
+    elif qt_decision_no_pass:
+        classification = "PASS_ALLOW_CAPTURE_GAP_DECISION_NO_PASS_QUALITY_TIMING"
+        dominant_gap_stage = "decision_capture_to_pass_allow_capture"
+        dominant_blocker = "quality_timing_decision_no_pass_or_allow"
+    elif potential_sources["decision_no_pass_or_allow_upper_bound"]:
+        classification = "PASS_ALLOW_CAPTURE_GAP_DECISION_NO_PASS_REASON_DECOMPOSITION_NEEDED"
+        dominant_gap_stage = "decision_capture_to_pass_allow_capture"
+        dominant_blocker = "decision_no_pass_or_allow"
+    else:
+        classification = "PASS_ALLOW_CAPTURE_GAP_UNATTRIBUTED_MONITOR"
+        dominant_gap_stage = "decision_capture_to_pass_allow_capture"
+        dominant_blocker = "unattributed_pass_allow_shortfall"
+
     blocked_dimensions = context_eligibility.get("blocked_dimensions") or []
     clean_dimensions = context_eligibility.get("clean_dimensions") or []
     return {
         "schema_version": "pass_allow_capture_gap_audit.v1",
         "report_type": "pass_allow_capture_gap_audit",
         "generated_at": utc_now(),
+        "classification": classification,
+        "dominant_gap_stage": dominant_gap_stage,
+        "dominant_blocker": dominant_blocker,
+        "next_action": next_action,
         "phase": "discovery_readiness",
         "evidence_level": "discovery_same_window",
         "usage": "read_only_pass_allow_gap_targeting",
@@ -1472,7 +1498,6 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
             "blocked_dimensions_excluded_from_this_audit": blocked_dimensions,
             "rule": "Do not use blocked quote/kline/Markov dimensions for promotion or OOS evidence.",
         },
-        "next_action": next_action,
         "allowed_scope": [
             "read-only evaluator/report improvements",
             "shadow-only candidate or context instrumentation",
@@ -2492,6 +2517,12 @@ def self_test():
         assert stage_metrics["mode_disabled_adjusted_final_eligibility_rate"] == 0.2
         assert stage_metrics["paper_capture_count"] == 0
         assert stage_metrics["paper_capture_rate"] == 0.0
+        pass_allow_gap = load_json(run_dir / "pass_allow_capture_gap_audit.json")
+        assert pass_allow_gap["classification"] == "PASS_ALLOW_CAPTURE_60_REACHED_DISCOVERY_ONLY"
+        assert pass_allow_gap["dominant_gap_stage"] is None
+        assert pass_allow_gap["dominant_blocker"] is None
+        assert pass_allow_gap["next_action"] == "pass_allow_capture_target_reached_continue_downstream_gap_audit"
+        assert pass_allow_gap["promotion_allowed"] is False
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
