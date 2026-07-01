@@ -520,6 +520,7 @@ def build_handoff(verdict):
             "sufficient_probe_count": oos_readiness.get("sufficient_probe_count"),
             "oos_repeated_watch_probe_count": oos_readiness.get("oos_repeated_watch_probe_count"),
             "next_action": oos_readiness.get("next_action"),
+            "readiness_delta": oos_readiness.get("readiness_delta") or {},
             "promotion_allowed": False,
             "probes": (oos_readiness.get("probes") or [])[:4],
         }

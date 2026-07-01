@@ -362,6 +362,9 @@ def compact_oos_probe(name, report, cross_report=None):
         "signals_scanned": quality.get("signals_scanned"),
         "evaluable_raw_gs_event_rows": quality.get("evaluable_raw_gs_event_rows"),
         "matured_volume_known_rate": quality.get("matured_volume_known_rate"),
+        "min_oos_signals": quality.get("min_oos_signals"),
+        "min_oos_raw_gs_events": quality.get("min_oos_raw_gs_events"),
+        "min_oos_matured_volume_known_rate": quality.get("min_oos_matured_volume_known_rate"),
         "cross_classification": quality.get("cross_classification") or cross_overall.get("classification"),
         "cross_known_rate": cross_context.get("known_rate"),
         "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
@@ -393,12 +396,122 @@ def compact_oos_refresh_probe(row):
             if validation.get("matured_volume_known_rate") is not None
             else cross.get("matured_volume_known_rate")
         ),
+        "min_oos_signals": validation.get("min_oos_signals"),
+        "min_oos_raw_gs_events": validation.get("min_oos_raw_gs_events"),
+        "min_oos_matured_volume_known_rate": validation.get("min_oos_matured_volume_known_rate"),
         "cross_classification": cross.get("classification"),
         "cross_known_rate": cross.get("matured_volume_known_rate"),
         "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
         "repeated_watch_count": validation.get("repeated_watch_count"),
         "registry_frozen_before_eval_window": validation.get("registry_frozen_before_eval_window"),
         "source": "oos_readiness_probe_refresh",
+    }
+
+
+def probe_hours_value(label):
+    text = str(label or "").strip()
+    if not text:
+        return None
+    if text.endswith("h"):
+        text = text[:-1]
+    text = text.replace("p", ".")
+    return as_float(text)
+
+
+def rounded_probe_hours(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    if number < 1:
+        return round(number, 3)
+    if number < 24:
+        return round(number + 0.05, 1)
+    return round(number + 0.5, 0)
+
+
+def build_oos_readiness_delta(probes):
+    """Summarize why the current OOS probes are not yet judgeable.
+
+    The loop already records detailed blockers per probe. This compact delta is
+    deliberately read-only: it estimates the missing sample/context quantities
+    and a next probe window without changing strategy or promotion state.
+    """
+    available = [row for row in probes if row.get("available")]
+    if not available:
+        return {
+            "available": False,
+            "reason": "no_oos_probes_available",
+            "promotion_allowed": False,
+        }
+
+    def score(row):
+        signals = as_int(row.get("signals_scanned"), 0) or 0
+        raw_gs = as_int(row.get("evaluable_raw_gs_event_rows"), 0) or 0
+        known = as_float(row.get("matured_volume_known_rate"))
+        return (
+            bool(row.get("sufficient_for_oos_judgment")),
+            raw_gs,
+            signals,
+            known if known is not None else -1,
+            probe_hours_value(row.get("probe")) or 0,
+        )
+
+    best = max(available, key=score)
+    min_signals = as_int(best.get("min_oos_signals"), 50) or 50
+    min_raw_gs = as_int(best.get("min_oos_raw_gs_events"), 10) or 10
+    min_known_rate = as_float(best.get("min_oos_matured_volume_known_rate"))
+    if min_known_rate is None:
+        min_known_rate = 0.8
+
+    signals = as_int(best.get("signals_scanned"), 0) or 0
+    raw_gs = as_int(best.get("evaluable_raw_gs_event_rows"), 0) or 0
+    known_rate = as_float(best.get("matured_volume_known_rate"))
+    hours = probe_hours_value(best.get("probe"))
+
+    signal_deficit = max(0, min_signals - signals)
+    raw_gs_deficit = max(0, min_raw_gs - raw_gs)
+    known_rate_deficit = None
+    if known_rate is not None:
+        known_rate_deficit = max(0.0, round(min_known_rate - known_rate, 6))
+
+    recommended_hours = None
+    if hours:
+        candidates = [hours]
+        if signals > 0 and signal_deficit:
+            candidates.append(hours * float(min_signals) / float(signals))
+        if raw_gs > 0 and raw_gs_deficit:
+            candidates.append(hours * float(min_raw_gs) / float(raw_gs))
+        elif raw_gs_deficit:
+            candidates.append(hours * 2.0)
+        recommended_hours = rounded_probe_hours(max(candidates))
+
+    return {
+        "available": True,
+        "best_probe": best.get("probe"),
+        "best_probe_sufficient": bool(best.get("sufficient_for_oos_judgment")),
+        "best_probe_blockers": best.get("blockers") or [],
+        "signals_scanned": signals,
+        "min_oos_signals": min_signals,
+        "signals_needed": signal_deficit,
+        "evaluable_raw_gs_event_rows": raw_gs,
+        "min_oos_raw_gs_events": min_raw_gs,
+        "raw_gs_events_needed": raw_gs_deficit,
+        "matured_volume_known_rate": known_rate,
+        "min_oos_matured_volume_known_rate": min_known_rate,
+        "matured_volume_known_rate_needed": known_rate_deficit,
+        "registry_frozen_before_eval_window": best.get("registry_frozen_before_eval_window"),
+        "next_recommended_probe_hours": recommended_hours,
+        "next_recommended_action": (
+            "rerun_oos_with_recommended_probe_hours_when_new_data_arrives"
+            if not best.get("sufficient_for_oos_judgment")
+            else "review_repeated_oos_watch_without_promotion"
+        ),
+        "promotion_allowed": False,
     }
 
 
@@ -455,12 +568,14 @@ def build_oos_readiness_summary(readiness_reports):
     else:
         classification = "OOS_NO_REPEAT_CONTINUE_WATCH"
         next_action = "continue_watchlist_validation"
+    readiness_delta = build_oos_readiness_delta(probes)
     return {
         "available_probe_count": len(available),
         "sufficient_probe_count": len(sufficient),
         "oos_repeated_watch_probe_count": len(repeated),
         "classification": classification,
         "next_action": next_action,
+        "readiness_delta": readiness_delta,
         "promotion_allowed": False,
         "human_action_required": False,
         "probes": probes,

@@ -135,6 +135,9 @@ def compact_validation(path: Path) -> dict:
         "signals_scanned": quality.get("signals_scanned"),
         "evaluable_raw_gs_event_rows": quality.get("evaluable_raw_gs_event_rows"),
         "matured_volume_known_rate": quality.get("matured_volume_known_rate"),
+        "min_oos_signals": quality.get("min_oos_signals"),
+        "min_oos_raw_gs_events": quality.get("min_oos_raw_gs_events"),
+        "min_oos_matured_volume_known_rate": quality.get("min_oos_matured_volume_known_rate"),
     }
 
 
