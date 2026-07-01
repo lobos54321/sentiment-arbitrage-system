@@ -121,6 +121,59 @@ def compact_shadow_queue_items(items, limit=5):
     return compact
 
 
+def compact_kline_coverage_resolution(audit):
+    if not isinstance(audit, dict) or not audit:
+        return {}
+    formal = audit.get("formal_kline_coverage") or {}
+    research = audit.get("research_recoverability") or {}
+    low_confidence = audit.get("low_confidence_capture_summary") or {}
+    tracks = []
+    for row in audit.get("allowed_resolution_tracks") or []:
+        if not isinstance(row, dict):
+            continue
+        tracks.append({
+            "track": row.get("track"),
+            "allowed_use": row.get("allowed_use"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "recoverable_rows": row.get("recoverable_rows"),
+            "row_count": row.get("row_count"),
+            "recoverable_known_rate": row.get("recoverable_known_rate"),
+        })
+    return {
+        "available": audit.get("available", True),
+        "classification": (audit.get("overall") or {}).get("classification"),
+        "next_action": (audit.get("overall") or {}).get("next_action"),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "formal_denominator_changed": bool(audit.get("formal_denominator_changed")),
+        "formal_coverage_rate": formal.get("coverage_rate"),
+        "formal_covered_rows": formal.get("covered_rows"),
+        "formal_target_80pct_count": formal.get("target_80pct_count"),
+        "formal_additional_rows_needed_to_80pct": formal.get(
+            "additional_rows_needed_to_80pct"
+        ),
+        "confidence_adjusted_research_coverage_rate": research.get(
+            "confidence_adjusted_research_coverage_rate"
+        ),
+        "confidence_adjusted_research_covered_rows": research.get(
+            "confidence_adjusted_research_covered_rows"
+        ),
+        "time_legal_recoverable_reaches_80pct": research.get(
+            "time_legal_recoverable_reaches_80pct"
+        ),
+        "low_confidence_event_rows": low_confidence.get("event_rows"),
+        "low_confidence_candidate_matched_any_rate": low_confidence.get(
+            "candidate_matched_any_rate"
+        ),
+        "allowed_resolution_tracks": tracks,
+    }
+
+
 def build_handoff(verdict):
     blockers = verdict.get("blockers") or []
     actionable = actionable_blockers(verdict)
@@ -247,6 +300,20 @@ def build_handoff(verdict):
                 indent=2,
                 sort_keys=True,
             ),
+            "```",
+            "",
+        ])
+    kline_resolution_summary = compact_kline_coverage_resolution(
+        verdict.get("kline_coverage_resolution_audit") or {}
+    )
+    if kline_resolution_summary:
+        lines.extend([
+            "## Kline Coverage Resolution",
+            "",
+            "Formal kline-sensitive evidence remains blocked unless coverage reaches the required threshold. Research recovery tracks are shadow-only and do not change the formal denominator.",
+            "",
+            "```json",
+            json.dumps(kline_resolution_summary, indent=2, sort_keys=True),
             "```",
             "",
         ])
@@ -1193,6 +1260,37 @@ def self_test():
                 }
             ],
         },
+        "kline_coverage_resolution_audit": {
+            "available": True,
+            "overall": {
+                "classification": "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE",
+                "next_action": "continue_research_only_recovery_without_formal_kline_promotion",
+            },
+            "formal_denominator_changed": False,
+            "formal_kline_coverage": {
+                "coverage_rate": 0.46,
+                "covered_rows": 42,
+                "target_80pct_count": 73,
+                "additional_rows_needed_to_80pct": 31,
+            },
+            "research_recoverability": {
+                "confidence_adjusted_research_coverage_rate": 0.83,
+                "confidence_adjusted_research_covered_rows": 76,
+                "time_legal_recoverable_reaches_80pct": True,
+            },
+            "low_confidence_capture_summary": {
+                "event_rows": 34,
+                "candidate_matched_any_rate": 1.0,
+            },
+            "allowed_resolution_tracks": [
+                {
+                    "track": "low_confidence_time_legal_research",
+                    "allowed_use": "research_only",
+                    "recoverable_rows": 34,
+                }
+            ],
+            "promotion_allowed": False,
+        },
         "strategy_memory_ingestion_summary": {
             "available": True,
             "strategy_memory_hypotheses_count": 2,
@@ -1260,6 +1358,9 @@ def self_test():
     assert "candidate_improvement_opportunities_summary" in text
     assert "shadow_candidate_improvement_top_items" in text
     assert "quality_timing:notath_upstream_skip" in text
+    assert "Kline Coverage Resolution" in text
+    assert "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE" in text
+    assert "low_confidence_time_legal_research" in text
     quote_pending_verdict = {
         **verdict,
         "classification": "BLOCKED_CONTEXT_COVERAGE",
