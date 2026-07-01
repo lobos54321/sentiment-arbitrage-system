@@ -1666,6 +1666,32 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "top_families",
                 )
             },
+            "readiness_impact_upper_bound": {
+                key: (quality_timing_audit.get("readiness_impact_upper_bound") or {}).get(key)
+                for key in (
+                    "target_final_eligibility_rate",
+                    "raw_all_gold_silver_event_rows",
+                    "target_final_eligibility_event_count",
+                    "current_final_entry_contract_signal_count",
+                    "current_final_entry_contract_rate",
+                    "quality_timing_reject_event_rows",
+                    "current_gap_to_60pct_event_count",
+                    "quality_timing_rejects_share_of_current_60pct_gap_upper_bound",
+                    "upper_bound_final_eligibility_count_if_all_quality_timing_resolved",
+                    "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved",
+                    "residual_gap_to_60pct_after_all_quality_timing_upper_bound",
+                    "would_all_quality_timing_resolution_reach_60pct_upper_bound",
+                    "interpretation",
+                )
+            } | {
+                "top_cluster_upper_bounds": (
+                    ((quality_timing_audit.get("readiness_impact_upper_bound") or {}).get("cluster_upper_bounds") or [])[:8]
+                ),
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            },
             "stage_attribution": {
                 "stage_counts": ((quality_timing_audit.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
                 "reason_counts": ((quality_timing_audit.get("stage_attribution") or {}).get("reason_counts") or [])[:8],

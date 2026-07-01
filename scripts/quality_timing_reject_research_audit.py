@@ -42,6 +42,7 @@ from offline_raw_gold_silver_funnel_audit import (
 SCHEMA_VERSION = "quality_timing_reject_research_audit.v1"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
+READINESS_TARGET_RATE = 0.6
 
 
 def utc_now():
@@ -231,6 +232,65 @@ def compact_counter(counter, names, limit=30):
     return rows
 
 
+def count_raw_signals_reaching_final_entry_contract(raw_rows, decisions):
+    raw_ids = {row.get("signal_id_key") for row in raw_rows if row.get("signal_id_key")}
+    reached = set()
+    for row in decisions:
+        key = signal_id_key(decision_value(row, "signal_id"))
+        if key in raw_ids and is_final_entry_contract(row):
+            reached.add(key)
+    return reached
+
+
+def build_readiness_impact_upper_bound(raw_rows, qt_count, reached_final_signal_ids, cluster_counts):
+    raw_count = len(raw_rows)
+    current_final_count = len(reached_final_signal_ids or set())
+    target_count = int((READINESS_TARGET_RATE * raw_count) + 0.999999) if raw_count else 0
+    current_gap = max(0, target_count - current_final_count)
+    potential_final_count = min(raw_count, current_final_count + int(qt_count or 0))
+    residual_gap_after_all_qt = max(0, target_count - potential_final_count)
+    cluster_rows = []
+    for cluster, count in (cluster_counts or Counter()).most_common():
+        potential_count = min(raw_count, current_final_count + int(count or 0))
+        cluster_rows.append({
+            "cluster": cluster,
+            "event_count": count,
+            "current_final_eligibility_count": current_final_count,
+            "upper_bound_final_eligibility_count_if_cluster_resolved": potential_count,
+            "upper_bound_final_eligibility_rate_if_cluster_resolved": rate(potential_count, raw_count),
+            "events_contributing_to_60pct_gap_upper_bound": min(int(count or 0), current_gap),
+            "share_of_current_60pct_gap_upper_bound": rate(min(int(count or 0), current_gap), current_gap),
+            "residual_gap_to_60pct_after_cluster_upper_bound": max(0, target_count - potential_count),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return {
+        "target_final_eligibility_rate": READINESS_TARGET_RATE,
+        "raw_all_gold_silver_event_rows": raw_count,
+        "target_final_eligibility_event_count": target_count,
+        "current_final_entry_contract_signal_count": current_final_count,
+        "current_final_entry_contract_rate": rate(current_final_count, raw_count),
+        "quality_timing_reject_event_rows": qt_count,
+        "current_gap_to_60pct_event_count": current_gap,
+        "quality_timing_rejects_share_of_current_60pct_gap_upper_bound": rate(min(int(qt_count or 0), current_gap), current_gap),
+        "upper_bound_final_eligibility_count_if_all_quality_timing_resolved": potential_final_count,
+        "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": rate(potential_final_count, raw_count),
+        "residual_gap_to_60pct_after_all_quality_timing_upper_bound": residual_gap_after_all_qt,
+        "would_all_quality_timing_resolution_reach_60pct_upper_bound": potential_final_count >= target_count if raw_count else False,
+        "cluster_upper_bounds": cluster_rows,
+        "interpretation": (
+            "Upper bound only: assumes every quality/timing reject could safely reach final_entry_contract. "
+            "It does not prove the rejects were wrong, safe, or eligible for runtime changes."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def top_examples(rows, limit):
     rows = sorted(
         rows,
@@ -368,8 +428,13 @@ def build_shadow_only_review(
     cluster_matched_any,
     cluster_peak_pct,
     cluster_time_to_peak,
+    readiness_impact_upper_bound,
     limit,
 ):
+    cluster_impact = {
+        row.get("cluster"): row
+        for row in (readiness_impact_upper_bound or {}).get("cluster_upper_bounds") or []
+    }
     opportunities = []
     for cluster, count in cluster_counts.most_common(limit):
         details = SHADOW_REVIEW_CLUSTER_DETAILS.get(
@@ -386,6 +451,7 @@ def build_shadow_only_review(
             "candidate_matched_any_rate": rate(cluster_matched_any.get(cluster, 0), count),
             "max_sustained_peak_pct_max": max_or_none(cluster_peak_pct.get(cluster) or []),
             "time_to_sustained_peak_sec_median": median_or_none(cluster_time_to_peak.get(cluster) or []),
+            "readiness_impact_upper_bound": cluster_impact.get(cluster) or {},
             "stage_counts": compact_counter(
                 cluster_stage_counts.get(cluster) or Counter(),
                 ["stage"],
@@ -431,6 +497,7 @@ def build_shadow_only_review(
                 "but this does not prove the reject was wrong or safe to trade."
             ),
         },
+        "readiness_impact_upper_bound": readiness_impact_upper_bound,
         "dominant_cluster": opportunities[0]["cluster"] if opportunities else None,
         "dominant_stage": dominant_stage,
         "research_opportunity_count": len(opportunities),
@@ -485,6 +552,7 @@ def build_report(args):
                 observations_by_signal[obs["signal_id_key"]].append(obs)
 
         qt_events = stage_quality_timing_events(raw_rows, decisions)
+        reached_final_signal_ids = count_raw_signals_reaching_final_entry_contract(raw_rows, decisions)
         qt_rows = []
         stage_counts = Counter()
         reason_counts = Counter()
@@ -590,6 +658,12 @@ def build_report(args):
             verdict = "QUALITY_TIMING_REJECT_RESEARCH_EMPTY"
         elif blockers:
             verdict = "QUALITY_TIMING_REJECT_RESEARCH_BLOCKED_DATA"
+        readiness_impact_upper_bound = build_readiness_impact_upper_bound(
+            raw_rows,
+            qt_count,
+            reached_final_signal_ids,
+            cluster_counts,
+        )
         shadow_only_review = build_shadow_only_review(
             raw_rows=raw_rows,
             qt_count=qt_count,
@@ -603,6 +677,7 @@ def build_report(args):
             cluster_matched_any=cluster_matched_any,
             cluster_peak_pct=cluster_peak_pct,
             cluster_time_to_peak=cluster_time_to_peak,
+            readiness_impact_upper_bound=readiness_impact_upper_bound,
             limit=args.limit,
         )
 
@@ -647,6 +722,7 @@ def build_report(args):
                 "top_candidates": compact_counter(candidate_counts, ["candidate_id", "family"], args.limit),
                 "top_families": compact_counter(family_counts, ["family"], args.limit),
             },
+            "readiness_impact_upper_bound": readiness_impact_upper_bound,
             "stage_attribution": {
                 "stage_counts": compact_counter(stage_counts, ["stage"], args.limit),
                 "reason_counts": compact_counter(
@@ -697,6 +773,7 @@ def compact_summary(report):
         "automatic_runtime_change_allowed": False,
         "denominator": report.get("denominator") or {},
         "candidate_match_attribution": report.get("candidate_match_attribution") or {},
+        "readiness_impact_upper_bound": report.get("readiness_impact_upper_bound") or {},
         "top_stage_counts": ((report.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
         "top_reason_counts": ((report.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
         "top_candidates": ((report.get("candidate_match_attribution") or {}).get("top_candidates") or [])[:10],
@@ -810,6 +887,11 @@ def self_test():
         assert report["denominator"]["quality_timing_reject_event_rows"] == 2
         assert report["candidate_match_attribution"]["candidate_matched_any_events"] == 2
         assert report["candidate_match_attribution"]["full_candidate_coverage_rate"] == 1.0
+        impact = report["readiness_impact_upper_bound"]
+        assert impact["current_final_entry_contract_signal_count"] == 1
+        assert impact["quality_timing_reject_event_rows"] == 2
+        assert impact["upper_bound_final_eligibility_count_if_all_quality_timing_resolved"] == 3
+        assert impact["would_all_quality_timing_resolution_reach_60pct_upper_bound"] is True
         review = report["shadow_only_review"]
         assert review["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
         assert review["promotion_allowed"] is False
@@ -818,6 +900,7 @@ def self_test():
         assert review["paper_enablement_allowed"] is False
         assert review["research_opportunity_count"] >= 1
         assert review["top_research_opportunities"][0]["promotion_allowed"] is False
+        assert review["top_research_opportunities"][0]["readiness_impact_upper_bound"]["promotion_allowed"] is False
         stages = {row["stage"]: row["count"] for row in report["stage_attribution"]["stage_counts"]}
         assert stages["decision_no_pass_or_allow"] == 1
         assert stages["pass_or_allow_without_pending_entry"] == 1
