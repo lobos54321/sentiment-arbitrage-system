@@ -88,6 +88,39 @@ def handoff_needed(verdict):
     return any(blocker in FIXABLE_BLOCKER_HINTS for blocker in actionable_blockers(verdict))
 
 
+def compact_shadow_queue_items(items, limit=5):
+    compact = []
+    for item in (items or [])[:limit]:
+        evidence = item.get("evidence") or {}
+        readiness = evidence.get("readiness_impact_upper_bound") or {}
+        compact.append({
+            "candidate_id": item.get("candidate_id"),
+            "hypothesis_source": item.get("hypothesis_source"),
+            "expected_capture_stage_improved": item.get("expected_capture_stage_improved"),
+            "next_action": item.get("next_action"),
+            "context_blockers": item.get("context_blockers") or [],
+            "human_approval_required_if_fix_requires": (
+                item.get("human_approval_required_if_fix_requires")
+            ),
+            "evidence": {
+                "cluster": evidence.get("cluster"),
+                "event_count": evidence.get("event_count"),
+                "unique_tokens": evidence.get("unique_tokens"),
+                "candidate_cluster_match_count": evidence.get("candidate_cluster_match_count"),
+                "candidate_family": evidence.get("candidate_family"),
+                "share_of_raw_all_gold_silver": evidence.get("share_of_raw_all_gold_silver"),
+                "events_contributing_to_60pct_gap_upper_bound": readiness.get(
+                    "events_contributing_to_60pct_gap_upper_bound"
+                ),
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return compact
+
+
 def build_handoff(verdict):
     blockers = verdict.get("blockers") or []
     actionable = actionable_blockers(verdict)
@@ -162,6 +195,12 @@ def build_handoff(verdict):
         "",
     ]
     if verdict.get("capture_60_target_loop"):
+        shadow_queue = verdict.get("shadow_candidate_improvement_queue") or {}
+        shadow_top_items = (
+            shadow_queue.get("top_items")
+            or shadow_queue.get("top_opportunities")
+            or []
+        )
         lines.extend([
             "## Capture 60 Target Loop",
             "",
@@ -177,25 +216,31 @@ def build_handoff(verdict):
                             "blocked_dimensions",
                         )
                     },
-                    "pending_to_final_entry_audit_v3": verdict.get("pending_to_final_entry_audit_v3") or {},
+                    "pending_to_final_entry_audit_v3": {
+                        key: (verdict.get("pending_to_final_entry_audit_v3") or {}).get(key)
+                        for key in (
+                            "dropoff_counts",
+                            "pending_no_final_entry_classification",
+                            "promotion_allowed",
+                        )
+                    },
                     "shadow_candidate_improvement_queue": {
-                        key: (verdict.get("shadow_candidate_improvement_queue") or {}).get(key)
+                        key: shadow_queue.get(key)
                         for key in (
                             "queue_count",
                             "source_counts",
                             "promotion_allowed",
                         )
                     },
-                    "shadow_candidate_improvement_top_items": (
-                        (verdict.get("shadow_candidate_improvement_queue") or {}).get("top_items")
-                        or (verdict.get("shadow_candidate_improvement_queue") or {}).get("top_opportunities")
-                        or []
-                    )[:5],
+                    "shadow_candidate_improvement_top_items": compact_shadow_queue_items(
+                        shadow_top_items,
+                        limit=5,
+                    ),
                     "oos_readiness_summary_v3": verdict.get("oos_readiness_summary_v3") or {},
                 },
                 indent=2,
                 sort_keys=True,
-            )[:12000],
+            ),
             "```",
             "",
         ])
