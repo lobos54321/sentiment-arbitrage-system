@@ -145,13 +145,20 @@ def build_report(args: argparse.Namespace) -> dict:
     run_dir = Path(args.run_dir)
     registry = load_json(Path(args.registry))
     probes = [part.strip() for part in str(args.probe_hours).split(",") if part.strip()]
-    registry_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
+    registry_frozen_at = (
+        registry.get("oos_hypothesis_frozen_at")
+        or registry.get("hypothesis_frozen_at")
+        or registry.get("updated_at")
+    )
     registry_updated_ts = parse_time(registry_frozen_at)
     now_ts = int(time.time())
     post_freeze_probe = {
         "enabled": bool(args.post_freeze_probe),
         "registry_frozen_at": registry_frozen_at,
         "registry_updated_at": registry.get("updated_at"),
+        "global_hypothesis_frozen_at": registry.get("hypothesis_frozen_at"),
+        "oos_hypothesis_frozen_at": registry.get("oos_hypothesis_frozen_at"),
+        "oos_hypothesis_set_signature_present": bool(registry.get("oos_hypothesis_set_signature")),
         "registry_updated_ts": registry_updated_ts,
         "now_ts": now_ts,
         "safety_sec": args.post_freeze_safety_sec,

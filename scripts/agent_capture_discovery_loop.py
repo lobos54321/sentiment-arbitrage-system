@@ -2495,6 +2495,29 @@ def stable_hypothesis_signature(
     }
 
 
+def stable_oos_hypothesis_signature(*, matured_volume_watch):
+    """Signature for hypotheses currently eligible for matured-volume OOS.
+
+    The full hypothesis registry can change for unrelated reasons such as
+    Strategy Memory metadata, quality/timing review queues, or recent run
+    bookkeeping. Those updates must not reset the non-overlapping OOS clock for
+    the frozen matured-volume hypotheses that ``hypothesis_validation_audit``
+    evaluates.
+    """
+    matured_keys = []
+    for row in matured_volume_watch or []:
+        if not isinstance(row, dict):
+            continue
+        matured_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    matured_keys = sorted(matured_keys, key=lambda item: item.get("hypothesis_id") or "")
+    return {
+        "shadow_only_matured_volume_watch": matured_keys,
+    }
+
+
 def compact_decision_no_pass_quality_timing_hypothesis(row):
     cluster = row.get("cluster")
     return {
@@ -2701,11 +2724,27 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
     hypothesis_frozen_at = previous_frozen_at if previous_signature == new_signature and previous_frozen_at else utc_now()
+    new_oos_signature = stable_oos_hypothesis_signature(
+        matured_volume_watch=matured_volume_watch,
+    )
+    previous_oos_signature = registry.get("oos_hypothesis_set_signature")
+    previous_oos_frozen_at = (
+        registry.get("oos_hypothesis_frozen_at")
+        or registry.get("hypothesis_frozen_at")
+        or registry.get("updated_at")
+    )
+    oos_hypothesis_frozen_at = (
+        previous_oos_frozen_at
+        if previous_oos_signature in (None, new_oos_signature) and previous_oos_frozen_at
+        else utc_now()
+    )
     registry = {
         "schema_version": "hypothesis_registry.v2",
         "updated_at": utc_now(),
         "hypothesis_frozen_at": hypothesis_frozen_at,
         "hypothesis_set_signature": new_signature,
+        "oos_hypothesis_frozen_at": oos_hypothesis_frozen_at,
+        "oos_hypothesis_set_signature": new_oos_signature,
         "phase": "discovery_mesh",
         "promotion_allowed": False,
         "hypotheses": {
@@ -3787,6 +3826,40 @@ def self_test():
         assert manual_registry["shadow_only_decision_no_pass_quality_timing_watch"][0]["definition"]["stage"] == (
             "decision_no_pass_or_allow"
         )
+        original_oos_frozen_at = manual_registry["oos_hypothesis_frozen_at"]
+        changed_non_oos_registry = update_hypothesis_registry(
+            manual_registry_path,
+            {
+                "generated_at": utc_now(),
+                "classification": "BLOCKED_CONTEXT_COVERAGE",
+                "blockers": ["volume_profile_coverage_below_80pct"],
+                "capture_judgment_counts": {},
+                "H1_capture_metrics": {},
+                "H2_capture_metrics": {},
+                "matured_volume_capture_cross_audit": {
+                    "top_slices": [
+                        {
+                            "candidate_id": "entry_mode_registry:ath_flat_structure_tiny_scout",
+                            "dimension": "matured_volume_profile",
+                            "slice_value": "building",
+                            "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                        }
+                    ]
+                },
+                "quality_timing_reject_research_audit": {
+                    "shadow_only_review": {
+                        "top_research_opportunities": [
+                            {
+                                "cluster": "low_volume_observe",
+                                "suggested_shadow_only_action": "track_low_volume_gold_silver_shadow_probe",
+                            }
+                        ]
+                    }
+                },
+            },
+            {"watchlist_hypotheses": []},
+        )
+        assert changed_non_oos_registry["oos_hypothesis_frozen_at"] == original_oos_frozen_at
         preserved_registry = update_hypothesis_registry(
             manual_registry_path,
             {

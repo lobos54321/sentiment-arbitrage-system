@@ -183,7 +183,11 @@ def validate_matured_volume_hypotheses(registry, cross):
     indexed = index_matured_volume_slices(cross)
     window = cross.get("window") or {}
     window_quality = eval_window_quality(cross)
-    registry_updated_ts = parse_time(registry.get("hypothesis_frozen_at") or registry.get("updated_at"))
+    registry_updated_ts = parse_time(
+        registry.get("oos_hypothesis_frozen_at")
+        or registry.get("hypothesis_frozen_at")
+        or registry.get("updated_at")
+    )
     eval_since_ts = parse_time(window.get("since_ts"))
     eval_until_ts = parse_time(window.get("until_ts"))
     frozen_before_eval = (
@@ -240,6 +244,8 @@ def validate_matured_volume_hypotheses(registry, cross):
     oos_repeated_count = sum(1 for row in rows if row["status"] == "OOS_REPEATED_WATCH_PENDING_REVIEW")
     return {
         "registry_updated_at": registry.get("updated_at"),
+        "global_hypothesis_frozen_at": registry.get("hypothesis_frozen_at"),
+        "oos_hypothesis_frozen_at": registry.get("oos_hypothesis_frozen_at"),
         "registry_updated_ts": registry_updated_ts,
         "eval_window": {
             "since_ts": eval_since_ts,
