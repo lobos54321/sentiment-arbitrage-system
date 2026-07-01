@@ -95,6 +95,15 @@ def build_report(args):
     formal_plus_time_legal = formal_covered + time_legal_recoverable_rows
     formal_plus_time_legal_rate = rate(formal_plus_time_legal, total)
     time_legal_recoverable_reaches_80 = bool(total and formal_plus_time_legal >= target_80)
+    low_time_legality = low_confidence_capture.get("time_legality") or {}
+    low_time_legality_complete = (
+        low_time_legality.get("classification") == "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_RECOVERABLE"
+        and low_time_legality.get("formal_denominator_changed") is False
+    )
+    low_time_legality_reaches_80 = bool(
+        low_time_legality.get("reaches_80pct_if_research_rows_accepted")
+        or low_time_legality.get("formal_plus_time_legal_recoverable_rate", 0) >= TARGET_RATE
+    )
 
     confidence_adjusted_reaches_80 = bool(
         confidence_adjusted_rate is not None and confidence_adjusted_rate >= TARGET_RATE
@@ -116,6 +125,9 @@ def build_report(args):
     elif formal_covered >= target_80:
         classification = "KLINE_FORMAL_COVERAGE_CLEAN"
         next_action = "allow_formal_kline_discovery_only"
+    elif confidence_adjusted_reaches_80 and low_time_legality_complete and low_time_legality_reaches_80:
+        classification = "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+        next_action = "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
     elif confidence_adjusted_reaches_80:
         classification = "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
         next_action = "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator"
@@ -176,6 +188,8 @@ def build_report(args):
             "promotion_allowed": False,
             "formal_kline_slices_blocked": formal_covered < target_80,
             "research_kline_recoverable": confidence_adjusted_reaches_80,
+            "low_confidence_time_legality_audit_complete": low_time_legality_complete,
+            "low_confidence_time_legality_reaches_80pct": low_time_legality_reaches_80,
         },
         "formal_kline_coverage": {
             "raw_all_gold_silver_event_rows": total,
@@ -201,6 +215,25 @@ def build_report(args):
             "formal_plus_time_legal_recoverable_rows": formal_plus_time_legal,
             "formal_plus_time_legal_recoverable_rate": formal_plus_time_legal_rate,
             "time_legal_recoverable_reaches_80pct": time_legal_recoverable_reaches_80,
+            "low_confidence_time_legality_audit": {
+                "available": bool(low_time_legality),
+                "classification": low_time_legality.get("classification"),
+                "allowed_use": low_time_legality.get("allowed_use"),
+                "formal_denominator_changed": low_time_legality.get("formal_denominator_changed"),
+                "baseline_before_sustained_peak_rows": low_time_legality.get(
+                    "baseline_before_sustained_peak_rows"
+                ),
+                "baseline_after_or_unknown_peak_rows": low_time_legality.get(
+                    "baseline_after_or_unknown_peak_rows"
+                ),
+                "formal_plus_time_legal_recoverable_rate": low_time_legality.get(
+                    "formal_plus_time_legal_recoverable_rate"
+                ),
+                "reaches_80pct_if_research_rows_accepted": low_time_legality.get(
+                    "reaches_80pct_if_research_rows_accepted"
+                ),
+                "promotion_allowed": False,
+            },
         },
         "low_confidence_capture_summary": {
             "available": bool(low_confidence_capture),
@@ -259,6 +292,16 @@ def self_test():
                 "candidate_match_any_rate": 1.0,
                 "top_candidates_by_low_confidence_raw_gs_match": [{"candidate_id": "current_all"}],
             },
+            "time_legality": {
+                "classification": "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_RECOVERABLE",
+                "allowed_use": "research_only",
+                "formal_denominator_changed": False,
+                "baseline_before_sustained_peak_rows": 4,
+                "baseline_after_or_unknown_peak_rows": 0,
+                "formal_plus_time_legal_recoverable_rate": 0.8,
+                "reaches_80pct_if_research_rows_accepted": True,
+                "promotion_allowed": False,
+            },
         })
         write_json(matured_path, {"recheck": {"recoverable_known_rate": 0.95}})
         write_json(cross_path, {"matured_volume_context": {"known_rate": 0.94}})
@@ -271,8 +314,13 @@ def self_test():
         ))
         assert report["promotion_allowed"] is False
         assert report["overall"]["classification"] == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+        assert report["overall"]["next_action"] == (
+            "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
+        )
+        assert report["overall"]["low_confidence_time_legality_audit_complete"] is True
         assert report["formal_kline_coverage"]["additional_formal_rows_needed_to_80pct"] == 4
         assert report["research_recoverability"]["time_legal_recoverable_reaches_80pct"] is True
+        assert report["research_recoverability"]["low_confidence_time_legality_audit"]["promotion_allowed"] is False
         assert report["low_confidence_capture_summary"]["candidate_match_any_rate"] == 1.0
         assert compact_summary(report)["promotion_allowed"] is False
     print("SELF_TEST_PASS kline_coverage_resolution_audit")
