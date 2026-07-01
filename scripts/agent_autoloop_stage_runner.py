@@ -148,20 +148,25 @@ def final_publish_eligibility(run_dir):
     path = Path(run_dir)
     capture = load_json_default(path / "capture_discovery_24h.json", {})
     gap = load_json_default(path / "capture_60_gap_report.json", {})
+    a_class = load_json_default(path / "a_class_fastlane_mode_audit_24h.json", {})
     capture_den = capture_denominator(capture)
     gap_den = int(gap.get("raw_gold_silver_denominator") or 0)
+    stage2_raw = int(((a_class.get("stage2_flat_summary") or {}).get("raw_gs_events")) or 0)
     missing = [name for name in REQUIRED_FINAL_ARTIFACTS if not (path / name).exists()]
     blockers = []
     if missing:
         blockers.append("missing_required_final_artifacts")
     if capture_den > 0 and gap_den <= 0:
         blockers.append("capture_60_denominator_zero_while_capture_denominator_positive")
+    if capture_den > 0 and stage2_raw <= 0:
+        blockers.append("a_class_stage2_summary_missing_while_capture_denominator_positive")
     return {
         "eligible": not blockers,
         "blockers": blockers,
         "missing_required_final_artifacts": missing,
         "capture_denominator": capture_den,
         "capture_60_denominator": gap_den,
+        "a_class_stage2_raw_gs_events": stage2_raw,
     }
 
 
@@ -338,14 +343,14 @@ def stage_derived(args, run_dir):
     )
     shadow_bridge_path = run_dir / f"shadow_decision_bridge_audit_{hours}h.json"
     write_derived_report(shadow_bridge_path, build_shadow_decision_bridge_audit(raw_funnel))
-    a_class_path = run_dir / f"a_class_fastlane_mode_audit_{hours}h.json"
-    write_derived_report(a_class_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
+    a_class_light_path = run_dir / f"a_class_fastlane_mode_audit_{hours}h_derived.json"
+    write_derived_report(a_class_light_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
     update_stage_state(run_dir, "derived")
     return {
         "stage": "derived",
         "artifacts": [
             str(context_path), str(candidate_effectiveness_path), str(markov_effectiveness_path),
-            str(capture_cross_path), str(improvement_path), str(shadow_bridge_path), str(a_class_path),
+            str(capture_cross_path), str(improvement_path), str(shadow_bridge_path), str(a_class_light_path),
         ],
     }
 
@@ -714,7 +719,16 @@ def self_test():
             run_dir=str(run_dir),
             reset=True,
         )
-        for stage in DEFAULT_SEQUENCE:
+        for stage in ("init", "selftests", "capture", "core", "markov", "derived"):
+            STAGES[stage](args, run_dir)
+        assert not (run_dir / "a_class_fastlane_mode_audit_24h.json").exists()
+        assert (run_dir / "a_class_fastlane_mode_audit_24h_derived.json").exists()
+        derived_only_finalize = stage_finalize(args, run_dir)
+        assert derived_only_finalize["publish_latest"] is False
+        assert "a_class_stage2_summary_missing_while_capture_denominator_positive" in (
+            derived_only_finalize["publish_eligibility"]["blockers"]
+        )
+        for stage in ("context", "decision", "strategy", "oos", "finalize"):
             STAGES[stage](args, run_dir)
         latest = root / "agent_runs" / "latest"
         assert (latest / "reviewer_verdict.json").exists()
