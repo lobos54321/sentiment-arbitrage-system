@@ -450,6 +450,8 @@ def build_oos_readiness_delta(probes, refresh_report=None):
         }
     post_freeze_probe = (refresh_report or {}).get("post_freeze_probe") or {}
     post_freeze_hours = as_float(post_freeze_probe.get("hours"))
+    registry_updated_ts = as_int(post_freeze_probe.get("registry_updated_ts"))
+    safety_sec = as_int(post_freeze_probe.get("safety_sec"), 0) or 0
 
     def score(row):
         signals = as_int(row.get("signals_scanned"), 0) or 0
@@ -498,8 +500,13 @@ def build_oos_readiness_delta(probes, refresh_report=None):
     ]
     best_non_overlapping = max(non_overlapping, key=score) if non_overlapping else None
     non_overlap_hours_remaining = None
+    next_true_oos_eligible_ts = None
+    next_true_oos_eligible_at_utc = None
     if recommended_hours is not None and post_freeze_hours is not None:
         non_overlap_hours_remaining = max(0.0, round(float(recommended_hours) - float(post_freeze_hours), 4))
+    if recommended_hours is not None and registry_updated_ts is not None:
+        next_true_oos_eligible_ts = int(registry_updated_ts + safety_sec + float(recommended_hours) * 3600)
+        next_true_oos_eligible_at_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(next_true_oos_eligible_ts))
     next_action = (
         "review_repeated_oos_watch_without_promotion"
         if best.get("sufficient_for_oos_judgment") and best.get("registry_frozen_before_eval_window") is True
@@ -532,6 +539,13 @@ def build_oos_readiness_delta(probes, refresh_report=None):
         "sample_volume_recommended_probe_hours": recommended_hours,
         "non_overlapping_window_hours_needed": recommended_hours,
         "non_overlapping_window_hours_remaining": non_overlap_hours_remaining,
+        "next_true_oos_eligible_ts": next_true_oos_eligible_ts,
+        "next_true_oos_eligible_at_utc": next_true_oos_eligible_at_utc,
+        "non_overlap_warning": (
+            "best_probe_is_not_true_oos_do_not_judge_promotion"
+            if best.get("registry_frozen_before_eval_window") is not True
+            else None
+        ),
         "next_recommended_probe_hours": recommended_hours,
         "next_recommended_action": next_action,
         "promotion_allowed": False,
