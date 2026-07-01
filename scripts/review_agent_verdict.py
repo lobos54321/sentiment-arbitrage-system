@@ -1426,6 +1426,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     top_actionable_blocker = next_highest_priority_blocker
     top_blocker = top_actionable_blocker or top_formal_blocker
+    kline_resolution_next_action = (
+        (kline_coverage_resolution.get("overall") or {}).get("next_action")
+    )
     if context_clean_window_pending and not actionable_blockers:
         top_blocker = "context_clean_window_pending"
     if classification == "BLOCKED_DATA":
@@ -1433,6 +1436,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     elif classification == "BLOCKED_CONTEXT_COVERAGE":
         if context_clean_window_pending and not actionable_blockers:
             next_action = "wait_for_context_clean_window_and_continue_shadow_oos_collection"
+        elif top_actionable_blocker == "kline_coverage_below_80pct" and kline_resolution_next_action:
+            next_action = kline_resolution_next_action
         elif (
             volume_blocker_non_actionable
             and not actionable_blockers
@@ -2753,11 +2758,12 @@ def self_test():
     assert "kline_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
     kline_resolution_verdict = build_verdict({
         **capture,
-        "report_health": {"promotion_blockers": []},
+        "report_health": {"promotion_blockers": ["kline_coverage_below_80pct"]},
     }, tests={"passed": True}, readiness_reports={
         "kline_coverage_resolution_audit": {
             "overall": {
                 "classification": "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE",
+                "next_action": "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator",
                 "promotion_allowed": False,
             },
             "formal_kline_coverage": {"formal_coverage_rate": 0.46},
@@ -2772,6 +2778,10 @@ def self_test():
     assert (
         kline_resolution_verdict["kline_coverage_resolution_audit"]["overall"]["classification"]
         == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+    )
+    assert kline_resolution_verdict["classification"] == "BLOCKED_CONTEXT_COVERAGE"
+    assert kline_resolution_verdict["next_action"] == (
+        "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator"
     )
     legacy_quote_blocked = build_verdict({
         **capture,
