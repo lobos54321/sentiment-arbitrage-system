@@ -243,17 +243,7 @@ def largest_stage_dropoff(stage_counts):
     return rows[0] if rows else {}
 
 
-def next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_audit):
-    blocked_dimensions = [
-        name for name, row in (context_eligibility.get("dimensions") or {}).items()
-        if row.get("status") not in {STATUS_CLEAN, STATUS_NA}
-    ]
-    if blocked_dimensions:
-        if any((context_eligibility.get("dimensions") or {}).get(name, {}).get("status") == STATUS_PENDING for name in blocked_dimensions):
-            return "wait_for_context_clean_window_and_continue_shadow_oos_collection"
-        if any((context_eligibility.get("dimensions") or {}).get(name, {}).get("status") == STATUS_WRITER_BUG for name in blocked_dimensions):
-            return "fix_context_writer_path_before_using_blocked_dimensions"
-        return "run_context_coverage_audit_and_block_dirty_dimensions"
+def stage_specific_allowed_action(biggest_gap_stage, pending_audit):
     if biggest_gap_stage in {"detector_capture"}:
         return "generate_shadow_candidate_improvement_queue"
     if biggest_gap_stage in {"decision_capture", "pass_allow_capture"}:
@@ -268,6 +258,31 @@ def next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_aud
     if biggest_gap_stage in {"paper_capture", "realized_capture"}:
         return "human_approval_required_before_paper_or_exit_runtime_changes"
     return "continue_shadow_oos_collection"
+
+
+def next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_audit):
+    blocked_dimensions = [
+        name for name, row in (context_eligibility.get("dimensions") or {}).items()
+        if row.get("status") not in {STATUS_CLEAN, STATUS_NA}
+    ]
+    stage_action = stage_specific_allowed_action(biggest_gap_stage, pending_audit)
+    if blocked_dimensions:
+        if any((context_eligibility.get("dimensions") or {}).get(name, {}).get("status") == STATUS_WRITER_BUG for name in blocked_dimensions):
+            return "fix_context_writer_path_before_using_blocked_dimensions"
+        if biggest_gap_stage in {
+            "decision_capture",
+            "pass_allow_capture",
+            "pending_capture",
+            "final_eligibility",
+            "mode_disabled_adjusted_final_eligibility",
+        }:
+            return f"{stage_action}_with_blocked_context_dimensions_excluded"
+        if biggest_gap_stage == "detector_capture":
+            return "generate_shadow_candidate_improvement_queue_using_clean_dimensions_only"
+        if any((context_eligibility.get("dimensions") or {}).get(name, {}).get("status") == STATUS_PENDING for name in blocked_dimensions):
+            return "wait_for_context_clean_window_and_continue_shadow_oos_collection"
+        return "run_context_coverage_audit_and_block_dirty_dimensions"
+    return stage_action
 
 
 def build_capture_stage_metrics(a_class):
@@ -955,6 +970,9 @@ def self_test():
         assert gap["target_60_count"] == 3
         assert gap["biggest_gap_stage"] == "pending_capture"
         assert gap["additional_count_needed_to_60"] == 1
+        assert gap["next_best_allowed_action"] == (
+            "audit_pass_allow_to_pending_bridge_shadow_only_with_blocked_context_dimensions_excluded"
+        )
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["source_component"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
