@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -25,6 +27,7 @@ from agent_capture_discovery_loop import (
     build_strategy_memory_ingestion_summary,
     compact_strategy_memory_registry,
     load_json,
+    update_hypothesis_registry,
     write_json,
 )
 from generate_codex_handoff import build_handoff, write_text
@@ -46,6 +49,80 @@ def safe_load(path, default=None):
         return load_json(path)
     except Exception:
         return default
+
+
+def run_capture_60_target_loop(run_dir, timeout_sec=180):
+    """Rebuild target-loop artifacts from already materialized reports."""
+    run_path = Path(run_dir)
+    result = {
+        "name": "capture_60_target_loop_reconciliation",
+        "ok": False,
+        "returncode": None,
+        "duration_sec": None,
+        "skipped": False,
+    }
+    if not (run_path / "capture_discovery_24h.json").exists():
+        result["skipped"] = True
+        result["reason"] = "capture_discovery_24h_missing"
+        return result
+    started = time.time()
+    cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "capture_60_target_loop.py"),
+        "--run-dir",
+        str(run_path),
+        "--out-dir",
+        str(run_path),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(SCRIPT_DIR.parent),
+            text=True,
+            capture_output=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        result.update({
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout_tail": (proc.stdout or "")[-4000:],
+            "stderr_tail": (proc.stderr or "")[-4000:],
+        })
+    except subprocess.TimeoutExpired as exc:
+        result.update({
+            "ok": False,
+            "returncode": "timeout",
+            "stdout_tail": (exc.stdout or "")[-4000:] if isinstance(exc.stdout, str) else "",
+            "stderr_tail": (exc.stderr or "")[-4000:] if isinstance(exc.stderr, str) else "",
+            "error": "timeout_expired",
+        })
+    result["duration_sec"] = round(time.time() - started, 3)
+    return result
+
+
+def publish_latest(run_dir, latest_dir, handoff_out):
+    """Publish a reconciled partial run as the latest read-only artifact set."""
+    source = Path(run_dir)
+    target = Path(latest_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    for report in source.glob("*.json"):
+        shutil.copy2(report, target / report.name)
+    for name in ("run_summary.md", "codex_handoff.md"):
+        path = source / name
+        if path.exists():
+            shutil.copy2(path, target / name)
+    handoff_path = Path(handoff_out)
+    run_handoff = source / "codex_handoff.md"
+    if run_handoff.exists():
+        handoff_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(run_handoff, handoff_path)
+    return {
+        "published": True,
+        "source_run_dir": str(source),
+        "latest_dir": str(target),
+        "handoff_out": str(handoff_path),
+    }
 
 
 def update_run_summary(path, verdict):
@@ -174,6 +251,7 @@ def reconcile(args):
     delay_summary = build_delay_replay_summary(validation_args, validation)
     delay_summary_path = run_dir / "strategy_memory_delay_replay_summary.json"
     write_json(delay_summary_path, delay_summary)
+    capture_60_reconciliation = run_capture_60_target_loop(run_dir)
 
     capture_path = run_dir / "capture_discovery_24h.json"
     pnl_path = run_dir / "pnl_cross_secondary_24h.json"
@@ -218,13 +296,22 @@ def reconcile(args):
         verdict["next_action"] = "full_autoloop_timeout_reconciled_continue_previous_valid_plan"
     else:
         verdict["autoloop_execution_status"] = "LIGHTWEIGHT_RECONCILIATION_COMPLETED"
+    verdict.setdefault("loop", {})
+    verdict["loop"]["capture_60_target_reconciliation"] = capture_60_reconciliation
     verdict_path = run_dir / "reviewer_verdict.json"
     write_json(verdict_path, verdict)
+    capture = load_json(capture_path) if capture_path.exists() else {}
+    registry = update_hypothesis_registry(args.registry, verdict, capture, ingestion)
 
     handoff_path = Path(args.handoff_out)
-    write_text(handoff_path, build_handoff(verdict))
+    handoff_text = build_handoff(verdict)
+    write_text(handoff_path, handoff_text)
+    write_text(run_dir / "codex_handoff.md", handoff_text)
     summary_path = run_dir / "run_summary.md"
     update_run_summary(summary_path, verdict)
+    publish_result = None
+    if args.publish_latest:
+        publish_result = publish_latest(run_dir, args.latest_dir, args.handoff_out)
     return {
         "schema_version": "autoloop_lightweight_reconciliation.v1",
         "generated_at": utc_now(),
@@ -236,10 +323,13 @@ def reconcile(args):
         "reviewer_verdict_out": str(verdict_path),
         "handoff_out": str(handoff_path),
         "run_summary_out": str(summary_path),
+        "capture_60_target_reconciliation": capture_60_reconciliation,
+        "publish_latest": publish_result,
         "classification": verdict.get("classification"),
         "autoloop_execution_status": verdict.get("autoloop_execution_status"),
         "strategy_failure_inferred": verdict.get("strategy_failure_inferred", False),
         "strategy_memory_status_counts": validation.get("status_counts") or {},
+        "decision_no_pass_watch_count": len(registry.get("shadow_only_decision_no_pass_quality_timing_watch") or []),
         "promotion_allowed": False,
     }
 
@@ -299,7 +389,18 @@ def self_test():
         write_json(run_dir / "candidate_downstream_readiness_24h.json", {"all_candidates": []})
         write_json(run_dir / "a_class_fastlane_mode_audit_24h.json", {"capture_stage_rates": {}})
         write_json(run_dir / "pnl_cross_secondary_24h.json", {"baseline": []})
+        write_json(run_dir / "raw_gold_silver_funnel_audit_24h.json", {
+            "raw_gold_silver_events": 3,
+            "candidate_matched_any": 3,
+            "has_decision_record": 2,
+            "pass_allow": 1,
+            "pending_entry": 1,
+            "reached_final_entry_contract": 0,
+            "paper_trade_intent": 0,
+            "paper_trade_committed": 0,
+        })
         write_json(run_dir / "reviewer_verdict.json", {"classification": "BLOCKED_CONTEXT_COVERAGE", "promotion_allowed": False})
+        latest_dir = data_dir / "agent_runs" / "latest_published"
         args = argparse.Namespace(
             data_dir=str(data_dir),
             run_dir=str(run_dir),
@@ -307,14 +408,22 @@ def self_test():
             strategy_memory_dir=str(strategy_dir),
             paper_db=str(root / "paper.db"),
             handoff_out=str(data_dir / "agent_handoffs" / "latest_codex_handoff.md"),
+            latest_dir=str(latest_dir),
+            publish_latest=True,
             timeout_partial_sync=True,
             timeout_source="self_test_524",
         )
         result = reconcile(args)
         assert result["classification"] == "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC"
         assert result["strategy_failure_inferred"] is False
+        assert result["capture_60_target_reconciliation"]["ok"] is True
+        assert result["publish_latest"]["published"] is True
         verdict = load_json(run_dir / "reviewer_verdict.json")
         assert verdict["timeout_reconciliation"]["lightweight_artifact_reconciliation_done"] is True
+        assert (latest_dir / "reviewer_verdict.json").exists()
+        assert (latest_dir / "run_summary.md").read_text(encoding="utf-8").startswith(
+            "# Gold/Silver Capture AutoLoop Reconciliation Status"
+        )
         validation = load_json(run_dir / "strategy_memory_validation_24h.json")
         assert validation["hypotheses"][0]["window_validation_count"] == 3
         assert load_json(registry)["strategy_memory"]["hypotheses"][0]["route"] == "delay_replay_only"
@@ -329,6 +438,8 @@ def parse_args(argv=None):
     parser.add_argument("--strategy-memory-dir", default=None)
     parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
     parser.add_argument("--handoff-out", default="/app/data/agent_handoffs/latest_codex_handoff.md")
+    parser.add_argument("--latest-dir", default="/app/data/agent_runs/latest")
+    parser.add_argument("--publish-latest", action="store_true")
     parser.add_argument("--timeout-partial-sync", action="store_true")
     parser.add_argument("--timeout-source", default="remote_full_autoloop_timeout_or_524")
     parser.add_argument("--self-test", action="store_true")
