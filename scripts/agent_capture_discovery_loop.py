@@ -3837,6 +3837,8 @@ def write_materialized_artifacts(
             "context_dimension_eligibility": "context_dimension_eligibility.json",
             "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
             "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
+            "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+            "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
             "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
             "final_entry_readiness_audit": "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",

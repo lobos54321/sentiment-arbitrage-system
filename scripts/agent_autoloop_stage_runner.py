@@ -589,6 +589,8 @@ def collect_paths(args, run_dir):
         "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
+        "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+        "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     }
     readiness = {}
     for key, filename in readiness_names.items():
