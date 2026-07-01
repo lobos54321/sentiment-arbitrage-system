@@ -51,6 +51,18 @@ def safe_load(path, default=None):
 def update_run_summary(path, verdict):
     target = Path(path)
     old = target.read_text(encoding="utf-8") if target.exists() else "# Gold/Silver Capture AutoLoop Summary\n"
+    status_section = (
+        "# Gold/Silver Capture AutoLoop Reconciliation Status\n\n"
+        f"- generated_at: `{utc_now()}`\n"
+        f"- classification: `{verdict.get('classification')}`\n"
+        f"- autoloop_execution_status: `{verdict.get('autoloop_execution_status')}`\n"
+        f"- current_commit: `{verdict.get('current_commit')}`\n"
+        f"- deployment_commit: `{verdict.get('deployment_commit')}`\n"
+        f"- next_action: `{verdict.get('next_action')}`\n"
+        f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`\n"
+        f"- strategy_failure_inferred: `{str(bool(verdict.get('strategy_failure_inferred'))).lower()}`\n"
+        "\n"
+    )
     strategy_memory_section = {
         "strategy_memory": verdict.get("strategy_memory") or {},
         "strategy_memory_validation": {
@@ -99,6 +111,16 @@ def update_run_summary(path, verdict):
         new_text = old.split(marker, 1)[0].rstrip() + section
     else:
         new_text = old.rstrip() + section
+    status_marker = "# Gold/Silver Capture AutoLoop Reconciliation Status\n"
+    if status_marker in new_text:
+        remainder = new_text.split(status_marker, 1)[1]
+        if "\n# Gold/Silver Capture" in remainder:
+            remainder = "# Gold/Silver Capture" + remainder.split("\n# Gold/Silver Capture", 1)[1]
+        else:
+            remainder = ""
+        new_text = status_section.rstrip() + "\n\n" + remainder.lstrip()
+    else:
+        new_text = status_section.rstrip() + "\n\n" + new_text.lstrip()
     write_text(target, new_text + "\n")
 
 
