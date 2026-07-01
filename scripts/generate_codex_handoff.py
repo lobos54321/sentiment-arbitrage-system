@@ -226,6 +226,7 @@ def build_handoff(verdict):
                             "dropoff_counts",
                             "pending_no_final_entry_classification",
                             "largest_transition_dropoff_review",
+                            "stale_before_final_review",
                             "promotion_allowed",
                         )
                     },

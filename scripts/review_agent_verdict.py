@@ -1499,6 +1499,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "largest_transition_dropoff_review": (
                 pending_to_final_entry_audit_v3.get("largest_transition_dropoff_review") or {}
             ),
+            "stale_before_final_review": (
+                pending_to_final_entry_audit_v3.get("stale_before_final_review") or {}
+            ),
             "promotion_allowed": False,
         },
         "final_entry_readiness_audit_v3": {

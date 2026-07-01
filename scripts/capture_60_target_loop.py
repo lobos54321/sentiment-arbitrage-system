@@ -421,7 +421,7 @@ def build_pending_to_final_entry_audit(a_class):
         category = str(row.get("category") or "")
         reasons = row.get("top_reasons") or []
         text = " ".join(str(reason.get("reason") or "") for reason in reasons).lower()
-        if "stale" in text:
+        if "stale" in text or category == "QUALITY_OR_TIMING_REJECT":
             bucket = "stale_before_final"
         elif "quote" in text:
             bucket = "quote_missing"
@@ -662,6 +662,199 @@ def build_pending_to_final_transition_review(
         "interpretation": (
             "Upper-bound attribution only. It explains where pending entries disappeared before final_entry_contract; "
             "it does not prove any pending signal should bypass timing, quote, lifecycle, mode, or final-entry controls."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
+def quality_timing_cluster_action(cluster):
+    actions = {
+        "momentum_fading_or_negative_trend": {
+            "next_action": "audit_pending_quality_timing_momentum_decay_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing momentum, trend, timing, entry policy, or final_entry_contract"
+            ),
+        },
+        "chasing_top_timing_reject": {
+            "next_action": "audit_pending_chasing_top_timing_window_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing top-chasing rejection policy, timing thresholds, or final_entry_contract"
+            ),
+        },
+        "buy_pressure_weak": {
+            "next_action": "audit_pending_buy_pressure_decay_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing buy-pressure thresholds, quality gates, or final_entry_contract"
+            ),
+        },
+        "score_or_quality_too_low": {
+            "next_action": "audit_pending_quality_score_decay_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing quality-score thresholds, entry policy, or final_entry_contract"
+            ),
+        },
+        "entry_timing_timeout_or_retry": {
+            "next_action": "audit_pending_entry_timing_timeout_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing pending TTL, retry policy, timing thresholds, or final_entry_contract"
+            ),
+        },
+        "newborn_pullback_timing_reject": {
+            "next_action": "audit_pending_newborn_pullback_timing_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing newborn pullback timing policy or final_entry_contract"
+            ),
+        },
+        "other_quality_timing_reject": {
+            "next_action": "decompose_pending_quality_timing_other_rejects_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing strategy, thresholds, gates, final_entry_contract, A_CLASS, executor, or risk"
+            ),
+        },
+        "unknown_quality_timing_reject": {
+            "next_action": "improve_pending_quality_timing_attribution_instrumentation",
+            "human_approval_required_if_fix_requires": (
+                "changing strategy, thresholds, gates, final_entry_contract, A_CLASS, executor, or risk"
+            ),
+        },
+    }
+    return actions.get(cluster, actions["other_quality_timing_reject"])
+
+
+def build_stale_before_final_review(pending_audit, reports, context_eligibility):
+    """Decompose the stale/timing pending->final bucket using read-only QT evidence."""
+
+    category_counts = (
+        (pending_audit.get("pending_no_final_entry_classification") or {}).get("categories")
+        or {}
+    )
+    stale_count = safe_int(category_counts.get("stale_before_final"), 0)
+    pending_without_final = safe_int(
+        ((pending_audit.get("dropoff_counts") or {}).get("pending_no_final_entry")),
+        0,
+    )
+    transition_review = pending_audit.get("largest_transition_dropoff_review") or {}
+    adjacent_drop = safe_int(transition_review.get("adjacent_count_loss_pending_to_final"), 0)
+
+    quality_timing = reports.get("quality_timing_reject_research") or {}
+    reason_rows = (quality_timing.get("stage_attribution") or {}).get("reason_counts") or []
+    opportunity_by_cluster = {
+        row.get("cluster"): row
+        for row in ((quality_timing.get("shadow_only_review") or {}).get("top_research_opportunities") or [])
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    cluster_counts = {}
+    cluster_reasons = {}
+    for row in reason_rows:
+        if row.get("stage") != "pending_without_final_entry_contract":
+            continue
+        cluster = classify_quality_timing_reason_cluster(row)
+        count = safe_int(row.get("count"), 0)
+        cluster_counts[cluster] = cluster_counts.get(cluster, 0) + count
+        cluster_reasons.setdefault(cluster, []).append(row)
+
+    clusters = []
+    for cluster, count in sorted(
+        cluster_counts.items(),
+        key=lambda item: (safe_int(item[1], 0), str(item[0])),
+        reverse=True,
+    ):
+        if count <= 0:
+            continue
+        action = quality_timing_cluster_action(cluster)
+        opportunity = opportunity_by_cluster.get(cluster) or {}
+        clusters.append({
+            "cluster": cluster,
+            "event_count": count,
+            "share_of_stale_before_final": rate(count, stale_count),
+            "share_of_pending_without_final": rate(count, pending_without_final),
+            "share_of_adjacent_transition_dropoff_upper_bound": rate(
+                min(count, adjacent_drop or stale_count),
+                adjacent_drop or stale_count,
+            ),
+            "reason_counts": (cluster_reasons.get(cluster) or [])[:10],
+            "top_candidates": (opportunity.get("top_candidates") or [])[:8],
+            "top_lifecycle_source_contexts": (
+                opportunity.get("top_lifecycle_source_contexts") or []
+            )[:8],
+            "context_blockers": quality_timing_context_blockers(opportunity, context_eligibility)
+            if opportunity
+            else [],
+            "next_action": action["next_action"],
+            "human_approval_required_if_fix_requires": action[
+                "human_approval_required_if_fix_requires"
+            ],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    selected = []
+    cumulative = 0
+    for row in clusters:
+        if stale_count and cumulative >= stale_count:
+            break
+        contribution = min(
+            safe_int(row.get("event_count"), 0),
+            max(0, stale_count - cumulative),
+        )
+        cumulative += contribution
+        selected.append({
+            "cluster": row.get("cluster"),
+            "event_count": row.get("event_count"),
+            "events_contributing_to_stale_before_final_upper_bound": contribution,
+            "cumulative_events_contributing_to_stale_before_final_upper_bound": cumulative,
+            "next_action": row.get("next_action"),
+            "context_blockers": row.get("context_blockers") or [],
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    examples = []
+    selected_clusters = {row.get("cluster") for row in selected}
+    for example in quality_timing.get("top_examples") or []:
+        if not isinstance(example, dict):
+            continue
+        if example.get("stage") != "pending_without_final_entry_contract":
+            continue
+        if selected_clusters and example.get("shadow_review_cluster") not in selected_clusters:
+            continue
+        examples.append(example)
+        if len(examples) >= 8:
+            break
+
+    return {
+        "schema_version": "pending_to_final_stale_before_final_review.v1",
+        "report_type": "pending_to_final_stale_before_final_review",
+        "evidence_level": "discovery_same_window_quality_timing_attribution",
+        "usage": "read_only_shadow_timing_attribution",
+        "stale_before_final_event_count": stale_count,
+        "pending_without_final_entry_contract": pending_without_final,
+        "adjacent_count_loss_pending_to_final": adjacent_drop,
+        "quality_timing_pending_without_final_event_count": sum(cluster_counts.values()),
+        "cluster_count": len(clusters),
+        "clusters": clusters,
+        "selected_clusters_to_cover_stale_before_final_upper_bound": selected,
+        "selected_upper_bound_event_count": cumulative,
+        "covers_stale_before_final_upper_bound": cumulative >= stale_count if stale_count else True,
+        "top_examples": examples,
+        "next_action": (
+            selected[0]["next_action"]
+            if selected
+            else "continue_pending_stale_before_final_monitoring"
+        ),
+        "interpretation": (
+            "Upper-bound attribution only. These are pending gold/silver events whose quality/timing state "
+            "worsened before final_entry_contract. This does not prove the rejects were wrong or safe to trade."
         ),
         "promotion_allowed": False,
         "strategy_change_allowed": False,
@@ -1380,12 +1573,13 @@ def improvement_queue_priority(item):
     source_priority = {
         "quality_timing_reject_cluster": 0,
         "quality_timing_candidate_probe": 1,
-        "pending_to_final_transition_dropoff_category": 2,
-        "filtered_winner_dossier": 3,
-        "strategy_memory_missing_shadow_candidate": 4,
-        "clean_2d_capture_cross_slice": 5,
-        "derive_context_filtered_shadow_candidate": 6,
-        "refine_potential_entry_hypothesis_with_context": 7,
+        "pending_to_final_stale_before_final_cluster": 2,
+        "pending_to_final_transition_dropoff_category": 3,
+        "filtered_winner_dossier": 4,
+        "strategy_memory_missing_shadow_candidate": 5,
+        "clean_2d_capture_cross_slice": 6,
+        "derive_context_filtered_shadow_candidate": 7,
+        "refine_potential_entry_hypothesis_with_context": 8,
     }
     stage_priority = {
         "pass_allow_capture": 0,
@@ -1519,6 +1713,49 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
                 ),
                 "pending_without_final_entry_contract": transition_review.get(
                     "pending_without_final_entry_contract"
+                ),
+            },
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "next_action": row.get("next_action"),
+        })
+    stale_review = pending_audit.get("stale_before_final_review") or {}
+    for row in stale_review.get("selected_clusters_to_cover_stale_before_final_upper_bound") or []:
+        if not isinstance(row, dict):
+            continue
+        cluster = row.get("cluster")
+        items.append({
+            "candidate_id": f"pending_to_final_stale:{cluster}",
+            "hypothesis_source": "pending_to_final_stale_before_final_cluster",
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_entry_ts",
+                "quality_timing_cluster",
+                "decision_reason",
+                "final_entry_contract_record",
+            ],
+            "time_legal_status": "read_only_pending_timing_attribution_not_entry_rule",
+            "context_blockers": row.get("context_blockers") or [],
+            "allowed_use": "shadow_only",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "evidence": {
+                "cluster": cluster,
+                "event_count": row.get("event_count"),
+                "events_contributing_to_stale_before_final_upper_bound": row.get(
+                    "events_contributing_to_stale_before_final_upper_bound"
+                ),
+                "cumulative_events_contributing_to_stale_before_final_upper_bound": row.get(
+                    "cumulative_events_contributing_to_stale_before_final_upper_bound"
+                ),
+                "stale_before_final_event_count": stale_review.get(
+                    "stale_before_final_event_count"
+                ),
+                "adjacent_count_loss_pending_to_final": stale_review.get(
+                    "adjacent_count_loss_pending_to_final"
                 ),
             },
             "human_approval_required_if_fix_requires": row.get(
@@ -1688,6 +1925,11 @@ def assemble_reports(run_dir, out_dir=None):
     stage_metrics = build_capture_stage_metrics(reports.get("a_class") or {})
     context_eligibility = build_context_dimension_eligibility(reports)
     pending_audit = build_pending_to_final_entry_audit(reports.get("a_class") or {})
+    pending_audit["stale_before_final_review"] = build_stale_before_final_review(
+        pending_audit,
+        reports,
+        context_eligibility,
+    )
     reports["pending_to_final_entry_audit"] = pending_audit
     gap_report = build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit)
     pass_allow_gap_audit = build_pass_allow_capture_gap_audit(
@@ -1805,7 +2047,19 @@ def create_self_test_run(root):
                 "pending_without_final_entry_contract": 1,
                 "pending_without_final_entry_category_counts": {
                     "categories": [
-                        {"category": "DATA_OR_MARKET_CONTEXT_BLOCK", "count": 1, "top_reasons": [{"reason": "quote_missing"}]}
+                        {
+                            "category": "QUALITY_OR_TIMING_REJECT",
+                            "count": 1,
+                            "top_reasons": [
+                                {
+                                    "component": "smart_entry",
+                                    "count": 1,
+                                    "decision": "reject",
+                                    "event_type": "timing_decision",
+                                    "reason": "momentum_fading",
+                                }
+                            ],
+                        }
                     ]
                 },
             },
@@ -1861,6 +2115,18 @@ def create_self_test_run(root):
         ]
     }
     quality_timing = {
+        "stage_attribution": {
+            "reason_counts": [
+                {
+                    "stage": "pending_without_final_entry_contract",
+                    "component": "smart_entry",
+                    "count": 1,
+                    "decision": "reject",
+                    "event_type": "timing_decision",
+                    "reason": "momentum_fading",
+                }
+            ]
+        },
         "shadow_only_review": {
             "top_research_opportunities": [
                 {
@@ -1883,7 +2149,25 @@ def create_self_test_run(root):
                     ],
                     "suggested_shadow_only_action": "track_matrix_alignment_false_negative_shadow_probe",
                     "human_approval_required_if_fix_requires": "changing matrix alignment thresholds",
-                }
+                },
+                {
+                    "cluster": "momentum_fading_or_negative_trend",
+                    "event_count": 1,
+                    "share_of_quality_timing_rejects": 0.5,
+                    "share_of_raw_all_gold_silver": 0.2,
+                    "unique_tokens": 1,
+                    "candidate_matched_any_rate": 1.0,
+                    "stage_counts": [{"stage": "pending_without_final_entry_contract", "count": 1}],
+                    "top_lifecycle_source_contexts": [
+                        {
+                            "lifecycle_profile": "FIRST_PUMP:PROBE",
+                            "source_component": "smart_entry",
+                            "count": 1,
+                        }
+                    ],
+                    "suggested_shadow_only_action": "track_pending_momentum_decay_shadow_probe",
+                    "human_approval_required_if_fix_requires": "changing momentum thresholds",
+                },
             ]
         }
     }
@@ -1987,19 +2271,24 @@ def self_test():
         assert context["dimensions"]["volume"]["status"] == STATUS_BLOCKED
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
-        assert pending["pending_no_final_entry_classification"]["categories"]["quote_missing"] == 1
+        assert pending["pending_no_final_entry_classification"]["categories"]["stale_before_final"] == 1
         transition_review = pending["largest_transition_dropoff_review"]
         assert transition_review["promotion_allowed"] is False
         assert transition_review["adjacent_count_loss_pending_to_final"] == 1
-        assert transition_review["selected_categories_to_cover_largest_transition_dropoff_upper_bound"][0]["category"] == "quote_missing"
+        assert transition_review["selected_categories_to_cover_largest_transition_dropoff_upper_bound"][0]["category"] == "stale_before_final"
         assert transition_review["selected_categories_to_cover_largest_transition_dropoff_upper_bound"][0]["promotion_allowed"] is False
+        stale_review = pending["stale_before_final_review"]
+        assert stale_review["promotion_allowed"] is False
+        assert stale_review["stale_before_final_event_count"] == 1
+        assert stale_review["selected_clusters_to_cover_stale_before_final_upper_bound"][0]["cluster"] == "momentum_fading_or_negative_trend"
         strategy = load_json(run_dir / "strategy_memory_capture_validation.json")
         assert strategy["promotion_allowed"] is False
         assert strategy["hypotheses_count"] == 1
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
         assert queue["queue_count"] >= 3
-        assert queue["source_counts"]["quality_timing_reject_cluster"] == 1
+        assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
+        assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
         assert queue["top_opportunities"] == queue["top_items"]
         assert any(
@@ -2008,7 +2297,13 @@ def self_test():
             for item in queue["top_items"]
         )
         assert any(
-            item.get("candidate_id") == "pending_to_final:quote_missing"
+            item.get("candidate_id") == "pending_to_final:stale_before_final"
+            and item.get("expected_capture_stage_improved") == "final_eligibility"
+            and item.get("promotion_allowed") is False
+            for item in queue["top_items"]
+        )
+        assert any(
+            item.get("candidate_id") == "pending_to_final_stale:momentum_fading_or_negative_trend"
             and item.get("expected_capture_stage_improved") == "final_eligibility"
             and item.get("promotion_allowed") is False
             for item in queue["top_items"]
