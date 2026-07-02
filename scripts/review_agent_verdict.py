@@ -3964,7 +3964,11 @@ def self_test():
         })
         write_json(root / "capture_cross_validity_24h.json", {
             "schema_version": "capture_cross_validity_report.v1",
+            "classification": "CAPTURE_CROSS_DISCOVERY_WATCH",
+            "next_action": "track_valid_capture_crosses_in_clean_non_overlapping_oos",
+            "evidence_level": "discovery_same_window",
             "valid_cross_count": 3,
+            "promotion_allowed": False,
         })
         write_json(root / "shadow_candidate_improvement_queue.json", {
             "schema_version": "shadow_candidate_improvement_queue.v3",
@@ -4134,6 +4138,11 @@ def self_test():
         assert sibling_verdict["candidate_improvement_opportunities_summary"]["opportunity_count"] == 2
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
+        assert sibling_verdict["two_d_cross_validity_summary"]["classification"] == "CAPTURE_CROSS_DISCOVERY_WATCH"
+        assert sibling_verdict["two_d_cross_validity_summary"]["next_action"] == (
+            "track_valid_capture_crosses_in_clean_non_overlapping_oos"
+        )
+        assert sibling_verdict["two_d_cross_validity_summary"]["promotion_allowed"] is False
         shadow_queue = sibling_verdict["shadow_candidate_improvement_queue"]
         assert shadow_queue["classification"] == "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
         assert shadow_queue["evidence_level"] == "discovery_shadow_only"

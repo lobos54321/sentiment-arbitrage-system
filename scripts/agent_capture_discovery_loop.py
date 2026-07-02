@@ -1642,7 +1642,7 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
             )
         item.update(slice_downstream)
         (valid if not reasons else invalid).append(item)
-    return {
+    report = {
         "schema_version": "capture_cross_validity_report.v1",
         "report_type": "capture_cross_validity_24h",
         "valid_cross_count": len(valid),
@@ -1701,6 +1701,51 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
             "promotion_allowed remains false.",
         ],
     }
+    apply_capture_cross_verdict(report)
+    return report
+
+
+def apply_capture_cross_verdict(report):
+    valid = [row for row in report.get("valid_top_crosses") or [] if isinstance(row, dict)]
+    invalid_count = int(report.get("invalid_cross_count") or 0)
+    valid_count = int(report.get("valid_cross_count") or len(valid))
+    judgment_counts = Counter(str(row.get("judgment") or "UNKNOWN") for row in valid)
+    hit_count = sum(
+        1
+        for row in valid
+        if str(row.get("judgment") or "").upper() in {"DISCOVERY_HIT", "HIT", "CAPTURE_DISCOVERY_HIT"}
+    )
+    watch_count = sum(
+        1
+        for row in valid
+        if str(row.get("judgment") or "").upper() in {"WATCH", "DISCOVERY_WATCH"}
+    )
+    if hit_count:
+        classification = "CAPTURE_CROSS_DISCOVERY_HIT_PENDING_OOS"
+        next_action = "freeze_clean_capture_cross_definitions_for_next_window_oos"
+    elif valid_count:
+        classification = "CAPTURE_CROSS_DISCOVERY_WATCH"
+        next_action = "track_valid_capture_crosses_in_clean_non_overlapping_oos"
+    elif invalid_count:
+        classification = "CAPTURE_CROSS_BLOCKED_CONTEXT_COVERAGE"
+        next_action = "wait_for_context_clean_window_before_capture_cross_oos"
+    else:
+        classification = "CAPTURE_CROSS_NO_VALID_SIGNAL"
+        next_action = "continue_capture_discovery_until_clean_cross_signal"
+    report["classification"] = classification
+    report["next_action"] = next_action
+    report["evidence_level"] = report.get("evidence_level") or "discovery_same_window"
+    report["valid_cross_judgment_counts"] = dict(judgment_counts)
+    report["discovery_hit_count"] = hit_count
+    report["watch_count"] = watch_count
+    report["same_window_discovery_only"] = True
+    report["oos_required_before_promotion"] = True
+    report["can_promote_live"] = False
+    report["promotion_allowed"] = False
+    report["strategy_change_allowed"] = False
+    report["automatic_runtime_change_allowed"] = False
+    report["paper_enablement_allowed"] = False
+    return report
 
 
 def build_a_class_fastlane_mode_audit(raw_funnel, context_report):
@@ -5238,6 +5283,16 @@ def self_test():
             latest_dir / "latest_codex_handoff.md"
         ).read_text()
         capture_cross_validity = load_json(latest_dir / "capture_cross_validity_24h.json")
+        assert capture_cross_validity["classification"] in {
+            "CAPTURE_CROSS_DISCOVERY_HIT_PENDING_OOS",
+            "CAPTURE_CROSS_DISCOVERY_WATCH",
+            "CAPTURE_CROSS_BLOCKED_CONTEXT_COVERAGE",
+            "CAPTURE_CROSS_NO_VALID_SIGNAL",
+        }
+        assert capture_cross_validity["next_action"]
+        assert capture_cross_validity["promotion_allowed"] is False
+        assert capture_cross_validity["same_window_discovery_only"] is True
+        assert capture_cross_validity["oos_required_before_promotion"] is True
         assert capture_cross_validity["criteria"]["downstream_lift_scope"] in {
             "slice_level_matched_gold_silver_signal_id",
             "candidate_level_after_match_proxy_not_slice_specific",

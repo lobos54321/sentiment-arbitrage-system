@@ -3670,6 +3670,53 @@ def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility
     capture_cross["notes"] = notes
     capture_cross["can_promote_live"] = False
     capture_cross["promotion_allowed"] = False
+    return apply_capture_cross_verdict(capture_cross)
+
+
+def apply_capture_cross_verdict(capture_cross):
+    valid = [
+        row for row in capture_cross.get("valid_top_crosses") or []
+        if isinstance(row, dict)
+    ]
+    invalid_count = int(capture_cross.get("invalid_cross_count") or 0)
+    valid_count = int(capture_cross.get("valid_cross_count") or len(valid))
+    judgment_counts = Counter(str(row.get("judgment") or "UNKNOWN") for row in valid)
+    hit_count = sum(
+        1
+        for row in valid
+        if str(row.get("judgment") or "").upper()
+        in {"DISCOVERY_HIT", "HIT", "CAPTURE_DISCOVERY_HIT"}
+    )
+    watch_count = sum(
+        1
+        for row in valid
+        if str(row.get("judgment") or "").upper() in {"WATCH", "DISCOVERY_WATCH"}
+    )
+    if hit_count:
+        classification = "CAPTURE_CROSS_DISCOVERY_HIT_PENDING_OOS"
+        next_action = "freeze_clean_capture_cross_definitions_for_next_window_oos"
+    elif valid_count:
+        classification = "CAPTURE_CROSS_DISCOVERY_WATCH"
+        next_action = "track_valid_capture_crosses_in_clean_non_overlapping_oos"
+    elif invalid_count:
+        classification = "CAPTURE_CROSS_BLOCKED_CONTEXT_COVERAGE"
+        next_action = "wait_for_context_clean_window_before_capture_cross_oos"
+    else:
+        classification = "CAPTURE_CROSS_NO_VALID_SIGNAL"
+        next_action = "continue_capture_discovery_until_clean_cross_signal"
+    capture_cross["classification"] = classification
+    capture_cross["next_action"] = next_action
+    capture_cross["evidence_level"] = capture_cross.get("evidence_level") or "discovery_same_window"
+    capture_cross["valid_cross_judgment_counts"] = dict(judgment_counts)
+    capture_cross["discovery_hit_count"] = hit_count
+    capture_cross["watch_count"] = watch_count
+    capture_cross["same_window_discovery_only"] = True
+    capture_cross["oos_required_before_promotion"] = True
+    capture_cross["can_promote_live"] = False
+    capture_cross["promotion_allowed"] = False
+    capture_cross["strategy_change_allowed"] = False
+    capture_cross["automatic_runtime_change_allowed"] = False
+    capture_cross["paper_enablement_allowed"] = False
     return capture_cross
 
 
@@ -5085,6 +5132,16 @@ def self_test():
         assert "matured_volume" not in context["blocked_dimensions"]
         assert context["dimension_eligibility"]["matured_volume"]["allowed_use"] == "shadow_only_matured_volume_context"
         capture_cross = load_json(run_dir / "capture_cross_validity_24h.json")
+        assert capture_cross["classification"] in {
+            "CAPTURE_CROSS_DISCOVERY_HIT_PENDING_OOS",
+            "CAPTURE_CROSS_DISCOVERY_WATCH",
+            "CAPTURE_CROSS_BLOCKED_CONTEXT_COVERAGE",
+            "CAPTURE_CROSS_NO_VALID_SIGNAL",
+        }
+        assert capture_cross["next_action"]
+        assert capture_cross["promotion_allowed"] is False
+        assert capture_cross["same_window_discovery_only"] is True
+        assert capture_cross["oos_required_before_promotion"] is True
         matured_cross_rows = capture_cross["shadow_matured_volume_top_crosses"]
         assert matured_cross_rows
         assert matured_cross_rows[0]["dimension_group"] == "matured_volume"
