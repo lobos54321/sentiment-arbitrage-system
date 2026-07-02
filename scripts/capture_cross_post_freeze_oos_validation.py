@@ -203,11 +203,14 @@ def build_stage_sets(paper_db, raw_rows, audits, trades, eval_start_ts, now_ts):
 
 def build_oos_data_availability(raw_count, min_raw_events, observation_meta, source_activity):
     all_raw_since_freeze = (source_activity or {}).get("all_raw_rows_since_eval_start")
+    wait_reason = (source_activity or {}).get("post_freeze_wait_reason")
     root_causes = []
     if all_raw_since_freeze == 0:
         root_causes.append("no_post_freeze_raw_signal_rows")
     if raw_count == 0:
         root_causes.append("no_post_freeze_raw_gold_silver_events")
+        if wait_reason:
+            root_causes.append(wait_reason)
     elif raw_count < min_raw_events:
         root_causes.append("post_freeze_raw_gold_silver_event_rows_below_min")
     if raw_count > 0 and not (observation_meta or {}).get("available"):
@@ -251,6 +254,7 @@ def build_oos_data_availability(raw_count, min_raw_events, observation_meta, sou
         "raw_gold_silver_event_rows_needed_for_min": max(0, int(min_raw_events) - int(raw_count or 0)),
         "raw_gold_silver_event_rows_needed_to_minimum": max(0, int(min_raw_events) - int(raw_count or 0)),
         "all_raw_rows_since_eval_start": all_raw_since_freeze,
+        "post_freeze_wait_reason": wait_reason,
         "raw_signal_rows_seen_after_freeze": (
             None if all_raw_since_freeze is None else int(all_raw_since_freeze or 0)
         ),
@@ -655,6 +659,7 @@ def build_report(args):
             oos_data_availability.get("classification") == "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
         ),
         "post_freeze_oos_wait_reason": oos_data_availability.get("classification"),
+        "post_freeze_wait_reason": oos_data_availability.get("post_freeze_wait_reason"),
         "oos_data_next_action": oos_data_availability.get("next_action"),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,

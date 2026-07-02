@@ -817,6 +817,7 @@ def build_report(args):
             oos_data_availability.get("classification") == "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
         ),
         "post_freeze_oos_wait_reason": oos_data_availability.get("classification"),
+        "post_freeze_wait_reason": oos_data_availability.get("post_freeze_wait_reason"),
         "oos_data_next_action": oos_data_availability.get("next_action"),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,
