@@ -214,7 +214,7 @@ def stage_selftests(args, run_dir):
 
 def stage_capture(args, run_dir):
     rows = []
-    for hours in parse_capture_hours(args.capture_hours, int(args.hours)):
+    for hours in parse_stage_capture_hours(args.capture_hours, int(args.hours), bool(args.capture_exact)):
         path = run_dir / f"capture_discovery_{hours}h.json"
         rows.append(run_report(
             f"capture_discovery_{hours}h",
@@ -235,8 +235,14 @@ def stage_capture(args, run_dir):
     if primary.exists() and legacy != primary:
         shutil.copy2(primary, legacy)
     append_diagnostics(run_dir, rows)
-    update_stage_state(run_dir, "capture", primary_capture=str(primary))
-    return {"stage": "capture", "diagnostics": rows}
+    update_stage_state(
+        run_dir,
+        "capture",
+        primary_capture=str(primary),
+        capture_exact=bool(args.capture_exact),
+        capture_hours=[row.get("name") for row in rows],
+    )
+    return {"stage": "capture", "capture_exact": bool(args.capture_exact), "diagnostics": rows}
 
 
 def stage_core(args, run_dir):
@@ -758,6 +764,29 @@ def parse_stages(value):
     return stages
 
 
+def parse_capture_hours_exact(value, primary_hours):
+    hours = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            parsed = int(float(item))
+        except ValueError:
+            continue
+        if parsed > 0:
+            hours.append(parsed)
+    if not hours:
+        hours.append(int(primary_hours))
+    return sorted(set(hours))
+
+
+def parse_stage_capture_hours(value, primary_hours, capture_exact=False):
+    if capture_exact:
+        return parse_capture_hours_exact(value, primary_hours)
+    return parse_capture_hours(value, primary_hours)
+
+
 def parse_context_reports(value):
     selected = [item.strip() for item in str(value or "").split(",") if item.strip()]
     if not selected or "all" in selected:
@@ -782,6 +811,9 @@ def parse_context_reports(value):
 
 
 def self_test():
+    assert parse_stage_capture_hours("48", 24, False) == [24, 48]
+    assert parse_stage_capture_hours("48", 24, True) == [48]
+    assert parse_stage_capture_hours("", 24, True) == [24]
     assert parse_context_reports("") == set(DEFAULT_CONTEXT_REPORTS)
     assert parse_context_reports("all") == set(DEFAULT_CONTEXT_REPORTS)
     assert parse_context_reports("volume_kline,matured_volume,hypothesis_validation") == {
@@ -801,6 +833,7 @@ def self_test():
             strategy_memory_dir=str(root / "strategy_memory_local"),
             hours=24,
             capture_hours="24",
+            capture_exact=False,
             expected_candidates=2,
             out_root=str(root / "agent_runs"),
             handoff_dir=str(root / "agent_handoffs"),
@@ -855,6 +888,14 @@ def main(argv=None):
     parser.add_argument("--strategy-memory-dir", default=None)
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--capture-hours", default="24")
+    parser.add_argument(
+        "--capture-exact",
+        action="store_true",
+        help=(
+            "For --stage capture, run exactly --capture-hours instead of always "
+            "including the primary --hours window. Read-only helper for avoiding 524s."
+        ),
+    )
     parser.add_argument("--expected-candidates", type=int, default=84)
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
     parser.add_argument("--handoff-dir", default=DEFAULT_HANDOFF_DIR)
