@@ -792,7 +792,8 @@ def build_handoff(verdict):
         ])
     matured_cross = verdict.get("matured_volume_capture_cross_audit") or {}
     matured_queue = verdict.get("matured_volume_watch_queue") or {}
-    if matured_cross or matured_queue:
+    matured_repeated_review = verdict.get("matured_volume_repeated_watch_review") or {}
+    if matured_cross or matured_queue or matured_repeated_review:
         matured_context = matured_cross.get("matured_volume_context") or {}
         h1 = matured_cross.get("h1_matured_building_volume") or {}
         matured_payload = {
@@ -814,6 +815,18 @@ def build_handoff(verdict):
             "matured_volume_profile_counts": matured_context.get("profile_counts") or {},
             "h1_matured_building_volume": h1,
             "watch_queue_items": (matured_queue.get("items") or [])[:8],
+            "repeated_watch_review": {
+                "classification": matured_repeated_review.get("classification"),
+                "next_action": matured_repeated_review.get("next_action"),
+                "repeated_probe_count": matured_repeated_review.get("repeated_probe_count"),
+                "repeated_watch_total": matured_repeated_review.get("repeated_watch_total"),
+                "review_item_count": matured_repeated_review.get("review_item_count"),
+                "candidate_family_counts": matured_repeated_review.get("candidate_family_counts") or {},
+                "slice_value_counts": matured_repeated_review.get("slice_value_counts") or {},
+                "top_items": (matured_repeated_review.get("top_items") or [])[:8],
+                "allowed_use": matured_repeated_review.get("allowed_use") or "shadow_only_review",
+                "promotion_allowed": False,
+            },
             "interpretation": (
                 "Matured-volume rows are delayed-context discovery evidence while formal volume/kline coverage is blocked. "
                 "They can guide shadow-only watch/OOS collection but cannot promote runtime strategy."

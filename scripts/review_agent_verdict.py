@@ -886,6 +886,106 @@ def build_oos_readiness_summary(readiness_reports):
     }
 
 
+def build_matured_volume_repeated_watch_review(oos_readiness_summary):
+    """Compact OOS repeated-watch details into an explicit shadow review queue."""
+    repeated_review = (oos_readiness_summary or {}).get("oos_repeated_watch_review") or {}
+    probes = repeated_review.get("probes") or []
+    items = []
+    candidate_family_counts = {}
+    slice_value_counts = {}
+    for probe in probes:
+        for row in probe.get("top_repeated_hypotheses") or []:
+            definition = row.get("definition") or {}
+            current = row.get("current_slice") or {}
+            registry = row.get("registry_latest_metrics") or {}
+            candidate_id = row.get("candidate_id") or definition.get("candidate_id")
+            slice_value = row.get("slice_value") or definition.get("slice_value")
+            family = str(candidate_id or "").split(":", 1)[0] if candidate_id else "unknown"
+            candidate_family_counts[family] = candidate_family_counts.get(family, 0) + 1
+            slice_value_counts[str(slice_value or "UNKNOWN")] = (
+                slice_value_counts.get(str(slice_value or "UNKNOWN"), 0) + 1
+            )
+            items.append({
+                "hypothesis_id": row.get("hypothesis_id"),
+                "candidate_id": candidate_id,
+                "candidate_family": family,
+                "dimension": row.get("dimension") or definition.get("dimension"),
+                "slice_value": slice_value,
+                "probe": probe.get("probe"),
+                "scope": row.get("scope") or "shadow_only_matured_volume_context",
+                "status": row.get("status"),
+                "review_verdict": row.get("review_verdict") or "REPEATED_WATCH_SHADOW_REVIEW_ONLY",
+                "current_slice": {
+                    "slice_signal_count": current.get("slice_signal_count"),
+                    "slice_raw_gs_count": current.get("slice_raw_gs_count"),
+                    "matched_gs_count": current.get("matched_gs_count"),
+                    "candidate_match_count": current.get("candidate_match_count"),
+                    "match_recall_event": current.get("match_recall_event"),
+                    "match_precision_event": current.get("match_precision_event"),
+                    "recall_lift_vs_candidate_baseline": current.get("recall_lift_vs_candidate_baseline"),
+                    "precision_lift_vs_candidate_baseline": current.get("precision_lift_vs_candidate_baseline"),
+                },
+                "registry_latest_metrics": {
+                    "slice_signal_count": registry.get("slice_signal_count"),
+                    "slice_raw_gs_count": registry.get("slice_raw_gs_count"),
+                    "matched_gs_count": registry.get("matched_gs_count"),
+                    "candidate_match_count": registry.get("candidate_match_count"),
+                    "match_recall_event": registry.get("match_recall_event"),
+                    "match_precision_event": registry.get("match_precision_event"),
+                    "recall_lift_vs_candidate_baseline": registry.get("recall_lift_vs_candidate_baseline"),
+                    "precision_lift_vs_candidate_baseline": registry.get("precision_lift_vs_candidate_baseline"),
+                },
+                "not_promotion_reasons": row.get("not_promotion_reasons") or [
+                    "repeated_watch_is_not_promotion_evidence",
+                    "requires_additional_non_overlapping_window_or_human_review",
+                    "runtime_strategy_gate_risk_changes_forbidden",
+                ],
+                "allowed_use": "shadow_only_review",
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            })
+    items.sort(
+        key=lambda row: (
+            as_int((row.get("current_slice") or {}).get("matched_gs_count"), 0) or 0,
+            as_float((row.get("current_slice") or {}).get("match_precision_event")) or 0.0,
+            as_float((row.get("current_slice") or {}).get("recall_lift_vs_candidate_baseline")) or 0.0,
+        ),
+        reverse=True,
+    )
+    repeated_watch_total = as_int(repeated_review.get("repeated_watch_total"), len(items)) or 0
+    if repeated_watch_total > 0:
+        classification = "MATURED_VOLUME_REPEATED_WATCH_REVIEW_READY"
+        next_action = "continue_shadow_oos_review_and_collect_additional_non_overlapping_window"
+    else:
+        classification = "MATURED_VOLUME_REPEATED_WATCH_REVIEW_EMPTY"
+        next_action = "continue_shadow_matured_volume_oos_collection"
+    return {
+        "schema_version": "matured_volume_repeated_watch_review.v1",
+        "classification": classification,
+        "next_action": next_action,
+        "source_report": "oos_readiness_summary.oos_repeated_watch_review",
+        "repeated_probe_count": repeated_review.get("repeated_probe_count", 0),
+        "repeated_watch_total": repeated_watch_total,
+        "review_item_count": len(items),
+        "candidate_family_counts": dict(sorted(candidate_family_counts.items())),
+        "slice_value_counts": dict(sorted(slice_value_counts.items())),
+        "top_items": items[:12],
+        "allowed_use": "shadow_only_review",
+        "evidence_level": "post_freeze_oos_repeated_watch",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Repeated matured-volume WATCH is not promotion evidence.",
+            "Matured volume is delayed-context evidence and cannot be used as immediate runtime entry evidence.",
+            "Any runtime, gate, final_entry_contract, A_CLASS, executor, paper, or risk change requires human approval.",
+        ],
+    }
+
+
 def compact_oos_probe_refresh(report):
     if not report:
         return {"available": False}
@@ -1589,6 +1689,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         or readiness_reports.get("oos_readiness_summary")
         or oos_readiness_summary
         or {}
+    )
+    matured_volume_repeated_watch_review = build_matured_volume_repeated_watch_review(
+        oos_readiness_summary_v3
     )
     capture_cross_post_freeze_oos_validation = (
         readiness_reports.get("capture_cross_post_freeze_oos_validation")
@@ -3120,6 +3223,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
         },
         "matured_volume_watch_queue": matured_volume_watch_queue,
+        "matured_volume_repeated_watch_review": matured_volume_repeated_watch_review,
         "volume_blocker_closure_plan": {
             "available": bool(volume_blocker_closure_plan),
             "classification": volume_blocker_closure_plan.get("classification"),
