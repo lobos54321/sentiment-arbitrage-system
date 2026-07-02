@@ -443,6 +443,16 @@ def context_failed_conditions(context, volume_kline, context_monitor=None):
                     original_blocker=blocker,
                 )
     blockers = set((context.get("blockers") or []))
+    volume = volume_kline.get("volume_context") or {}
+    kline = volume_kline.get("raw_gold_silver_kline") or {}
+    p1_volume_cleared = bool(
+        volume.get("coverage_method_version") == "p1_matured_recompute_v2"
+        and not volume.get("blocker")
+    )
+    p1_kline_cleared = bool(
+        kline.get("coverage_method_version") == "p1_confidence_time_legal_v2"
+        and not kline.get("blocker")
+    )
     for blocker in sorted(blockers):
         if blocker in {
             "source_quote_clean_coverage_below_80pct",
@@ -468,11 +478,13 @@ def context_failed_conditions(context, volume_kline, context_monitor=None):
                 "source_component_coverage_below_80pct",
             }:
                 continue
+            if blocker == "volume_profile_coverage_below_80pct" and p1_volume_cleared:
+                continue
+            if blocker == "kline_coverage_below_80pct" and p1_kline_cleared:
+                continue
             add_failed_condition(failed, blocker, "context_coverage_audit")
-    volume = volume_kline.get("volume_context") or {}
     if volume.get("blocker"):
         add_failed_condition(failed, volume.get("blocker"), "volume_kline_coverage_audit")
-    kline = volume_kline.get("raw_gold_silver_kline") or {}
     if kline.get("blocker"):
         add_failed_condition(failed, kline.get("blocker"), "volume_kline_coverage_audit")
     return failed
