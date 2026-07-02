@@ -591,6 +591,43 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    matured_cross = verdict.get("matured_volume_capture_cross_audit") or {}
+    matured_queue = verdict.get("matured_volume_watch_queue") or {}
+    if matured_cross or matured_queue:
+        matured_context = matured_cross.get("matured_volume_context") or {}
+        h1 = matured_cross.get("h1_matured_building_volume") or {}
+        matured_payload = {
+            "summary": {
+                "classification": (matured_cross.get("overall") or {}).get("classification"),
+                "next_action": (matured_cross.get("overall") or {}).get("next_action"),
+                "h1_status": h1.get("status"),
+                "matured_volume_known_rate": matured_context.get("known_rate"),
+                "signals_with_matured_context": matured_context.get("signals_with_matured_context"),
+                "formal_denominator_changed": bool(matured_cross.get("formal_denominator_changed")),
+                "watch_queue_classification": matured_queue.get("classification"),
+                "watch_queue_count": matured_queue.get("queue_count"),
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+                "allowed_use": "shadow_only_matured_volume_context",
+            },
+            "matured_volume_profile_counts": matured_context.get("profile_counts") or {},
+            "h1_matured_building_volume": h1,
+            "watch_queue_items": (matured_queue.get("items") or [])[:8],
+            "interpretation": (
+                "Matured-volume rows are delayed-context discovery evidence while formal volume/kline coverage is blocked. "
+                "They can guide shadow-only watch/OOS collection but cannot promote runtime strategy."
+            ),
+        }
+        lines.extend([
+            "## Matured Volume Shadow Validation",
+            "",
+            "```json",
+            json.dumps(matured_payload, indent=2, sort_keys=False)[:12000],
+            "```",
+            "",
+        ])
     reconciliation = verdict.get("signal_identity_reconciliation") or {}
     if reconciliation:
         lines.extend([
@@ -1913,6 +1950,7 @@ def self_test():
     assert "handoff_needed: `false`" in text
     assert "Required Fixes" not in text
     assert "Volume / Kline Root Cause" in text
+    assert "Matured Volume Shadow Validation" in text
     assert "SHADOW_MATURED_VOLUME_PATH_AVAILABLE" in text
     assert "shadow_matured_volume_slices_evaluable: `true`" in text
     verdict["blockers"] = []
