@@ -92,6 +92,9 @@ DERIVED_READINESS_SIBLINGS = {
     "candidate_improvement_opportunities": "candidate_improvement_opportunities_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "capture_cross_validity": "capture_cross_validity_24h.json",
+    "clean_dimension_2d_capture_cross": "clean_dimension_2d_capture_cross_24h.json",
+    "quality_timing_reason_cross": "quality_timing_reason_cross_24h.json",
+    "strategy_memory_reason_cross": "strategy_memory_reason_cross_24h.json",
     "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
     "matured_kline_volume_recheck_audit": "matured_kline_volume_recheck_audit_24h.json",
     "matured_volume_capture_cross_audit": "matured_volume_capture_cross_audit_24h.json",
@@ -196,6 +199,53 @@ def boolish(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def compact_clean_dimension_cross_report(report, limit=12):
+    rows = report.get("top_rows") or report.get("rows") or []
+    compact_rows = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact_rows.append({
+            "cross_type": row.get("cross_type"),
+            "candidate_id": row.get("candidate_id"),
+            "hypothesis_id": row.get("hypothesis_id"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "slice_value": row.get("slice_value"),
+            "selected_raw_gs_events": row.get("selected_raw_gs_events"),
+            "raw_gs_recall": row.get("raw_gs_recall"),
+            "precision_signal_proxy": row.get("precision_signal_proxy"),
+            "decision_capture_lift_vs_global": row.get("decision_capture_lift_vs_global"),
+            "pass_allow_capture_lift_vs_global": row.get("pass_allow_capture_lift_vs_global"),
+            "pending_capture_lift_vs_global": row.get("pending_capture_lift_vs_global"),
+            "final_eligibility_lift_vs_global": row.get("final_eligibility_lift_vs_global"),
+            "mode_disabled_adjusted_final_eligibility_lift_vs_global": (
+                row.get("mode_disabled_adjusted_final_eligibility_lift_vs_global")
+            ),
+            "data_blockers": row.get("data_blockers") or [],
+            "verdict": row.get("verdict"),
+            "allowed_use": row.get("allowed_use") or "shadow_only",
+            "promotion_allowed": False,
+        })
+    return {
+        "available": bool(report),
+        "classification": report.get("classification"),
+        "next_action": report.get("next_action"),
+        "report_type": report.get("report_type"),
+        "evidence_level": report.get("evidence_level") or "discovery_same_window",
+        "allowed_use": report.get("allowed_use") or "shadow_only",
+        "row_count": report.get("row_count", len(rows) if rows else 0),
+        "raw_gold_silver_event_rows": report.get("raw_gold_silver_event_rows"),
+        "status_counts": report.get("status_counts") or {},
+        "global_stage_rates": report.get("global_stage_rates") or {},
+        "top_rows": compact_rows,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
 
 
 def compact_context_field_progress(field_audit, field_name, blocker_name):
@@ -1361,6 +1411,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
     shadow_candidate_improvement_queue = readiness_reports.get("shadow_candidate_improvement_queue") or {}
+    clean_dimension_2d_capture_cross = readiness_reports.get("clean_dimension_2d_capture_cross") or {}
+    quality_timing_reason_cross = readiness_reports.get("quality_timing_reason_cross") or {}
+    strategy_memory_reason_cross = readiness_reports.get("strategy_memory_reason_cross") or {}
     kline_coverage_resolution = readiness_reports.get("kline_coverage_resolution_audit") or {}
     pass_allow_60_post_freeze_oos_validation = (
         readiness_reports.get("pass_allow_60_post_freeze_oos_validation") or {}
@@ -2974,6 +3027,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "candidate_improvement_opportunities_summary": readiness_reports.get("candidate_improvement_opportunities") or {},
         "Markov_effectiveness_summary": readiness_reports.get("markov_effectiveness") or {},
         "two_d_cross_validity_summary": readiness_reports.get("capture_cross_validity") or {},
+        "clean_dimension_2d_capture_cross": compact_clean_dimension_cross_report(
+            clean_dimension_2d_capture_cross
+        ),
+        "quality_timing_reason_cross": compact_clean_dimension_cross_report(
+            quality_timing_reason_cross
+        ),
+        "strategy_memory_reason_cross": compact_clean_dimension_cross_report(
+            strategy_memory_reason_cross
+        ),
         "next_highest_priority_blocker": next_highest_priority_blocker,
         "denominator_audit": capture.get("denominator_audit") or {},
         "raw_dog_observation_join": raw_join,

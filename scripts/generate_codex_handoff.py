@@ -209,6 +209,52 @@ def compact_kline_coverage_resolution(audit):
     }
 
 
+def compact_clean_dimension_cross(report, limit=10):
+    rows = report.get("top_rows") or report.get("rows") or []
+    compact_rows = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact_rows.append({
+            "cross_type": row.get("cross_type"),
+            "candidate_id": row.get("candidate_id"),
+            "hypothesis_id": row.get("hypothesis_id"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "slice_value": row.get("slice_value"),
+            "selected_raw_gs_events": row.get("selected_raw_gs_events"),
+            "raw_gs_recall": row.get("raw_gs_recall"),
+            "precision_signal_proxy": row.get("precision_signal_proxy"),
+            "decision_capture_lift_vs_global": row.get("decision_capture_lift_vs_global"),
+            "pass_allow_capture_lift_vs_global": row.get("pass_allow_capture_lift_vs_global"),
+            "pending_capture_lift_vs_global": row.get("pending_capture_lift_vs_global"),
+            "final_eligibility_lift_vs_global": row.get("final_eligibility_lift_vs_global"),
+            "mode_disabled_adjusted_final_eligibility_lift_vs_global": (
+                row.get("mode_disabled_adjusted_final_eligibility_lift_vs_global")
+            ),
+            "data_blockers": row.get("data_blockers") or [],
+            "verdict": row.get("verdict"),
+            "allowed_use": row.get("allowed_use") or "shadow_only",
+            "promotion_allowed": False,
+        })
+    return {
+        "available": bool(report),
+        "classification": report.get("classification"),
+        "next_action": report.get("next_action"),
+        "report_type": report.get("report_type"),
+        "evidence_level": report.get("evidence_level") or "discovery_same_window",
+        "allowed_use": report.get("allowed_use") or "shadow_only",
+        "raw_gold_silver_event_rows": report.get("raw_gold_silver_event_rows"),
+        "row_count": report.get("row_count", len(rows) if rows else 0),
+        "status_counts": report.get("status_counts") or {},
+        "top_rows": compact_rows,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_handoff(verdict):
     blockers = verdict.get("blockers") or []
     actionable = actionable_blockers(verdict)
@@ -714,6 +760,28 @@ def build_handoff(verdict):
             "",
             "```json",
             json.dumps(compact_two_d, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
+    clean_cross_reports = {
+        "clean_dimension_2d_capture_cross": verdict.get("clean_dimension_2d_capture_cross") or {},
+        "quality_timing_reason_cross": verdict.get("quality_timing_reason_cross") or {},
+        "strategy_memory_reason_cross": verdict.get("strategy_memory_reason_cross") or {},
+    }
+    if any(clean_cross_reports.values()):
+        lines.extend([
+            "## Clean-Dimension 2D Capture Cross",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    name: compact_clean_dimension_cross(report)
+                    for name, report in clean_cross_reports.items()
+                    if report
+                },
+                indent=2,
+                sort_keys=True,
+            )[:16000],
             "```",
             "",
         ])

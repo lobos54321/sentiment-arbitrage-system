@@ -555,6 +555,23 @@ def stage_strategy(args, run_dir):
         path,
         timeout=int(args.report_timeout_sec),
     )]
+    rows.append(run_report(
+        "clean_dimension_2d_capture_cross_audit",
+        [
+            "scripts/clean_dimension_2d_capture_cross_audit.py",
+            "--db", args.paper_db,
+            "--raw-db", args.raw_db,
+            "--strategy-memory", str(path),
+            "--context-eligibility", str(run_dir / "context_dimension_eligibility.json"),
+            "--hours", str(hours),
+            "--expected-candidates", str(args.expected_candidates),
+            "--out", str(run_dir / f"clean_dimension_2d_capture_cross_{hours}h.json"),
+            "--quality-out", str(run_dir / f"quality_timing_reason_cross_{hours}h.json"),
+            "--strategy-out", str(run_dir / f"strategy_memory_reason_cross_{hours}h.json"),
+        ],
+        run_dir / f"clean_dimension_2d_capture_cross_{hours}h.json",
+        timeout=max(60, int(args.report_timeout_sec) * 2),
+    ))
     append_diagnostics(run_dir, rows)
     update_stage_state(run_dir, "strategy")
     return {"stage": "strategy", "diagnostics": rows}
@@ -665,6 +682,9 @@ def collect_paths(args, run_dir):
         "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
         "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
+        "clean_dimension_2d_capture_cross": f"clean_dimension_2d_capture_cross_{hours}h.json",
+        "quality_timing_reason_cross": f"quality_timing_reason_cross_{hours}h.json",
+        "strategy_memory_reason_cross": f"strategy_memory_reason_cross_{hours}h.json",
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
         "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
