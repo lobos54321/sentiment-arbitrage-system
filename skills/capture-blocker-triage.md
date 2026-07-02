@@ -61,3 +61,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
 - **2026-07-02**: the genuinely CAUSAL kline channel this window: `no_kline_low_volume` (4
   pending→final kills incl. CIT +11,302%) + `not_ath_prebuy_kline_unknown_data_blocked` (2) ≈ 6
   recoverable events — which still hit `mode_disabled` at final.
+- **2026-07-02** (P1 verified, run `codex_p1c_20260702T210515Z`, commit `858e242`):
+  `volume_profile_coverage_below_80pct` and `kline_coverage_below_80pct` are cleared for formal
+  discovery by canonical P1 coverage methods. `volume_context.known_rate=0.935484`
+  (`strict_first_look_known_rate=0.711982`) and
+  `raw_gold_silver_kline.kline_coverage_rate=0.943662`
+  (`strict_kline_coverage_rate=0.492958`). Candidate mesh coverage is 84/84 with
+  `full_candidate_coverage_rate=1.0`. Latest verdict moved to
+  `A_CLASS_STUCK_REVIEW_REQUIRED`, `promotion_allowed=false`; current capture stage is
+  `mode_disabled_stuck_requires_human_review`. Current 24h funnel:
+  detector 71/71, decision 69/71, pass_allow 18/71, pending 11/71, final eligibility 2/71,
+  paper 0/71. Largest actual gap is decision→pass_allow; next stage is P2
+  A_CLASS/final_entry_contract human review, not strategy tuning or risk changes.
