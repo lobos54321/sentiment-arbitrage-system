@@ -26,6 +26,9 @@ QUOTE_COVERAGE_BLOCKERS = {
     "source_quote_clean_coverage_below_80pct",
     "source_quote_executable_coverage_below_80pct",
 }
+NON_ACTIONABLE_PROMOTION_GUARDS = {
+    "discovery_same_window_not_promotion_evidence",
+}
 BLOCKER_PRIORITY = [
     "candidate_count_expected_not_84",
     "candidate_count_observed_not_84",
@@ -1134,6 +1137,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     actionable_blockers = [
         blocker for blocker in blockers
         if not (quote_clean_window_pending and blocker in QUOTE_COVERAGE_BLOCKERS)
+        and blocker not in NON_ACTIONABLE_PROMOTION_GUARDS
     ]
     volume_blocker_non_actionable = bool(
         volume_profile_state.get("shadow_matured_volume_slices_evaluable")
@@ -2700,6 +2704,12 @@ def self_test():
     assert verdict["blocked_subtype"] is None
     assert verdict["non_quote_sensitive_capture_discovery_allowed"] is True
     assert verdict["quote_sensitive_slices_blocked"] is False
+    same_window_guard_only = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": ["discovery_same_window_not_promotion_evidence"]},
+    }, tests={"passed": True})
+    assert "discovery_same_window_not_promotion_evidence" in same_window_guard_only["blockers"]
+    assert "discovery_same_window_not_promotion_evidence" not in same_window_guard_only["actionable_blockers"]
     assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
     assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False
