@@ -462,6 +462,49 @@ def classify_report(raw_count, items):
     return "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
 
 
+def refine_top_level_classification(base_classification, oos_data_availability):
+    """Make the top-level OOS verdict explain why the sample is too small.
+
+    The legacy classifier only knows the filtered raw gold/silver count. That
+    is enough for pass/fail, but not enough for the AutoLoop's next action:
+    zero post-freeze raw signals, zero post-freeze gold/silver rows, below-min
+    samples, and observation-join issues require different read-only followup.
+    """
+    if base_classification != "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL":
+        return base_classification
+    availability = (oos_data_availability or {}).get("classification")
+    mapping = {
+        "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_SIGNALS": (
+            "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_SIGNALS"
+        ),
+        "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER": (
+            "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER"
+        ),
+        "OOS_DATA_BELOW_MIN_RAW_EVENTS": (
+            "PASS_ALLOW_60_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS"
+        ),
+        "OOS_DATA_OBSERVATION_JOIN_BLOCKED": (
+            "PASS_ALLOW_60_POST_FREEZE_OOS_OBSERVATION_JOIN_BLOCKED"
+        ),
+    }
+    return mapping.get(availability, base_classification)
+
+
+def next_action_for_classification(classification, oos_data_availability):
+    if classification in {
+        "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_SIGNALS",
+        "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+        "PASS_ALLOW_60_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS",
+        "PASS_ALLOW_60_POST_FREEZE_OOS_OBSERVATION_JOIN_BLOCKED",
+    }:
+        return (oos_data_availability or {}).get("next_action") or "continue_collecting_post_freeze_oos_window"
+    if classification == "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL":
+        return "continue_collecting_post_freeze_oos_window"
+    if classification == "PASS_ALLOW_60_POST_FREEZE_REPEAT_WATCH":
+        return "review_repeated_post_freeze_pass_allow_evidence_without_promotion"
+    return "continue_shadow_oos_watch"
+
+
 def build_oos_data_availability(
     raw_count,
     args,
@@ -515,6 +558,7 @@ def build_oos_data_availability(
         "root_causes": root_causes,
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": min_raw_events,
+        "raw_gold_silver_event_rows_needed_for_min": max(0, min_raw_events - int(raw_count or 0)),
         "all_raw_rows_since_eval_start": all_raw_since_freeze,
         "raw_signal_rows_seen_after_freeze": (
             None if all_raw_since_freeze is None else int(all_raw_since_freeze or 0)
@@ -604,7 +648,6 @@ def build_report(args):
         and row.get("pass_allow_lift_vs_post_freeze_global") > 0
     ]
     repeated = [row for row in items if row.get("verdict") == "PASS_ALLOW_60_POST_FREEZE_REPEAT_WATCH"]
-    classification = classify_report(raw_count, items)
     post_freeze_usable_hours = round(max(0, now_ts - eval_start_ts) / 3600.0, 4)
     oos_data_availability = build_oos_data_availability(
         raw_count,
@@ -613,6 +656,8 @@ def build_report(args):
         post_freeze_usable_hours,
         post_freeze_source_activity,
     )
+    legacy_classification = classify_report(raw_count, items)
+    classification = refine_top_level_classification(legacy_classification, oos_data_availability)
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "pass_allow_60_post_freeze_oos_validation",
@@ -621,13 +666,10 @@ def build_report(args):
         "evidence_level": "post_freeze_oos_readiness_probe",
         "usage": "read_only_validation_only",
         "classification": classification,
-        "next_action": (
-            "continue_collecting_post_freeze_oos_window"
-            if classification == "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
-            else "review_repeated_post_freeze_pass_allow_evidence_without_promotion"
-            if classification == "PASS_ALLOW_60_POST_FREEZE_REPEAT_WATCH"
-            else "continue_shadow_oos_watch"
-        ),
+        "legacy_classification": legacy_classification,
+        "oos_data_availability_classification": oos_data_availability.get("classification"),
+        "oos_data_root_causes": oos_data_availability.get("root_causes") or [],
+        "next_action": next_action_for_classification(classification, oos_data_availability),
         "freeze_registry_available": bool(registry),
         "definition_set_frozen_at": registry.get("definition_set_frozen_at"),
         "freeze_generated_at": registry.get("generated_at"),
@@ -859,6 +901,15 @@ def run_self_test():
         assert zero_availability["classification"] == (
             "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         )
+        assert refine_top_level_classification(
+            "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
+            zero_availability,
+        ) == "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER"
+        assert next_action_for_classification(
+            "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+            zero_availability,
+        ) == "continue_collecting_post_freeze_raw_gold_silver_events"
+        assert zero_availability["raw_gold_silver_event_rows_needed_for_min"] == 1
         assert zero_availability["post_freeze_source_activity"]["all_raw_rows_since_eval_start"] == 49
         assert zero_availability["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 0
         assert zero_availability["candidate_observation_effective_status"] == (
@@ -880,6 +931,10 @@ def run_self_test():
         assert no_raw_availability["classification"] == (
             "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_SIGNALS"
         )
+        assert refine_top_level_classification(
+            "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
+            no_raw_availability,
+        ) == "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_SIGNALS"
         assert no_raw_availability["next_action"] == "wait_for_post_freeze_raw_signal_rows"
         assert no_raw_availability["root_causes"] == [
             "no_post_freeze_raw_signal_rows",

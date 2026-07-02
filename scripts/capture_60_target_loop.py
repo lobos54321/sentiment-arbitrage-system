@@ -3255,6 +3255,11 @@ def build_oos_summary(run_dir, reports=None):
             "available": True,
             "schema_version": pass_allow_post_freeze_validation.get("schema_version"),
             "classification": pass_allow_post_freeze_validation.get("classification"),
+            "legacy_classification": pass_allow_post_freeze_validation.get("legacy_classification"),
+            "oos_data_availability_classification": (
+                pass_allow_post_freeze_validation.get("oos_data_availability_classification")
+            ),
+            "oos_data_root_causes": pass_allow_post_freeze_validation.get("oos_data_root_causes") or [],
             "next_action": pass_allow_post_freeze_validation.get("next_action"),
             "raw_gold_silver_event_rows": pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows"),
             "raw_gold_silver_rows_since_eval_start_unfiltered": (
@@ -3269,6 +3274,14 @@ def build_oos_summary(run_dir, reports=None):
             ),
             "latest_raw_gold_silver_lag_sec_before_eval_start": (
                 pass_allow_post_freeze_validation.get("latest_raw_gold_silver_lag_sec_before_eval_start")
+            ),
+            "min_raw_events_for_oos_judgment": (
+                pass_allow_post_freeze_validation.get("min_raw_events_for_oos_judgment")
+            ),
+            "raw_gold_silver_event_rows_needed_for_min": (
+                (pass_allow_post_freeze_validation.get("oos_data_availability") or {}).get(
+                    "raw_gold_silver_event_rows_needed_for_min"
+                )
             ),
             "global_pass_allow_count": pass_allow_post_freeze_validation.get("global_pass_allow_count"),
             "global_pass_allow_rate": pass_allow_post_freeze_validation.get("global_pass_allow_rate"),
@@ -3990,14 +4003,21 @@ def self_test():
         post_freeze_summary = build_oos_summary(run_dir, reports={
             "pass_allow_60_post_freeze_oos_validation": {
                 "schema_version": "pass_allow_60_post_freeze_oos_validation.v3",
-                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
-                "next_action": "continue_collecting_post_freeze_oos_window",
+                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+                "legacy_classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
+                "oos_data_availability_classification": "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER",
+                "oos_data_root_causes": ["no_post_freeze_raw_gold_silver_events"],
+                "next_action": "continue_collecting_post_freeze_raw_gold_silver_events",
                 "raw_gold_silver_event_rows": 0,
                 "raw_gold_silver_rows_since_eval_start_unfiltered": 0,
                 "all_raw_rows_since_eval_start": 4,
                 "latest_raw_signal_age_sec": 90,
                 "latest_raw_gold_silver_age_sec": 900,
                 "latest_raw_gold_silver_lag_sec_before_eval_start": 600,
+                "min_raw_events_for_oos_judgment": 10,
+                "oos_data_availability": {
+                    "raw_gold_silver_event_rows_needed_for_min": 10,
+                },
                 "post_freeze_usable_hours": 0.3,
                 "validated_definition_count": 45,
                 "repeat_watch_count": 0,
@@ -4009,6 +4029,9 @@ def self_test():
         assert post_freeze["raw_gold_silver_rows_since_eval_start_unfiltered"] == 0
         assert post_freeze["all_raw_rows_since_eval_start"] == 4
         assert post_freeze["latest_raw_signal_age_sec"] == 90
+        assert post_freeze["legacy_classification"] == "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
+        assert post_freeze["oos_data_availability_classification"] == "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        assert post_freeze["raw_gold_silver_event_rows_needed_for_min"] == 10
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
