@@ -56,6 +56,7 @@ REQUIRED_FILES = {
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
+    "matured_volume_capture_cross_audit": "matured_volume_capture_cross_audit_24h.json",
     "kline_coverage_resolution_audit": "kline_coverage_resolution_audit_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
     "oos_refresh": "oos_readiness_probe_refresh.json",
@@ -1150,6 +1151,7 @@ def build_context_dimension_eligibility(reports):
     context_report = reports.get("context_coverage") or {}
     context_monitor = reports.get("context_blocker_monitor") or {}
     volume_kline = reports.get("volume_kline_coverage_audit") or {}
+    matured_volume_cross = reports.get("matured_volume_capture_cross_audit") or {}
     kline_resolution = reports.get("kline_coverage_resolution_audit") or {}
     markov = reports.get("markov_effectiveness") or {}
     strategy_memory = reports.get("strategy_memory_validation") or {}
@@ -1230,6 +1232,18 @@ def build_context_dimension_eligibility(reports):
             "unknown_diagnostics": volume_context.get("unknown_diagnostics") or {},
             "coverage_denominator_type": volume_context.get("coverage_denominator_type"),
             "blocker": volume_context.get("blocker"),
+        })
+    matured_volume_context = matured_volume_cross.get("matured_volume_context") or {}
+    if matured_volume_context:
+        volume_evidence.update({
+            "matured_volume_known_rate": matured_volume_context.get("known_rate"),
+            "matured_volume_field_present_rate": matured_volume_context.get("field_present_rate"),
+            "matured_volume_unknown_rate": matured_volume_context.get("unknown_rate"),
+            "matured_volume_cross_classification": (
+                (matured_volume_cross.get("overall") or {}).get("classification")
+            ),
+            "matured_volume_usage": matured_volume_cross.get("usage"),
+            "matured_volume_promotion_allowed": False,
         })
     kline_blockers = set(blocker for blocker in blockers if "kline" in blocker)
     if raw_gs_kline.get("blocker"):
@@ -1353,7 +1367,10 @@ def build_context_dimension_eligibility(reports):
     if (
         dimensions["volume"]["status"] != STATUS_CLEAN
         and (volume_kline.get("overall") or {}).get("classification") == "DATA_BLOCKED_VOLUME_KLINE"
-        and volume_kline.get("matured_volume_context")
+        and (
+            volume_kline.get("matured_volume_context")
+            or matured_volume_context
+        )
     ):
         research_only_dimensions.append("volume")
         dimensions["volume"]["research_only_recoverable"] = True
@@ -3850,6 +3867,10 @@ def create_self_test_run(root):
         "blockers": ["kline_coverage_below_80pct"],
     }
     volume_kline = {
+        "overall": {
+            "classification": "DATA_BLOCKED_VOLUME_KLINE",
+            "promotion_allowed": False,
+        },
         "volume_context": {
             "coverage_denominator_type": "signal_context_carrier_rows",
             "field_present_rate": 1.0,
@@ -4181,10 +4202,25 @@ def create_self_test_run(root):
         "profile_diagnostics": {},
         "non_informative_reasons": {"runtime": "insufficient"},
     }
+    matured_volume_cross = {
+        "overall": {
+            "classification": "MATURED_VOLUME_DISCOVERY_WATCH",
+            "next_action": "track_same_definition_in_next_clean_window_then_oos_if_repeated",
+            "promotion_allowed": False,
+        },
+        "usage": "shadow_only_matured_volume_context",
+        "matured_volume_context": {
+            "known_rate": 0.9,
+            "field_present_rate": 1.0,
+            "unknown_rate": 0.1,
+        },
+        "promotion_allowed": False,
+    }
     fixtures = {
         "capture": capture,
         "context_coverage": context,
         "volume_kline_coverage_audit": volume_kline,
+        "matured_volume_capture_cross_audit": matured_volume_cross,
         "context_blocker_monitor": context_blocker_monitor,
         "a_class": a_class,
         "strategy_memory_validation": strategy_validation,
@@ -4342,7 +4378,8 @@ def self_test():
         )
         assert context["dimension_eligibility"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimension_eligibility"]["volume"]["status"] == STATUS_BLOCKED
-        assert context["dimension_eligibility"]["volume"]["allowed_use"] == "blocked_no_promotion_evidence"
+        assert context["dimension_eligibility"]["volume"]["allowed_use"] == "research_only_no_promotion_evidence"
+        assert context["dimension_eligibility"]["volume"]["research_only_recoverable"] is True
         assert context["dimension_eligibility"]["kline"]["status"] == STATUS_PENDING
         assert context["dimension_eligibility"]["kline"]["allowed_use"] == "research_only_no_promotion_evidence"
         assert context["dimension_eligibility"]["kline"]["research_only_recoverable"] is True
@@ -4351,7 +4388,7 @@ def self_test():
         assert "kline" not in context["blocked_dimensions"]
         assert "volume" in context["blocked_dimensions"]
         assert "Markov" in context["blocked_dimensions"]
-        assert context["research_only_dimensions"] == ["kline"]
+        assert context["research_only_dimensions"] == ["kline", "volume"]
         assert (
             context["dimensions"]["kline"]["evidence"]["kline_resolution_classification"]
             == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
@@ -4367,6 +4404,8 @@ def self_test():
         assert context["dimensions"]["volume"]["coverage_rate"] == 0.5
         assert context["dimensions"]["volume"]["evidence"]["field_present_rate"] == 1.0
         assert context["dimensions"]["volume"]["evidence"]["known_rate"] == 0.5
+        assert context["dimensions"]["volume"]["evidence"]["matured_volume_known_rate"] == 0.9
+        assert context["dimensions"]["volume"]["research_only_recoverable"] is True
         assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
         assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
