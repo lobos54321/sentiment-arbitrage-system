@@ -2648,6 +2648,29 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
+            "registered_probe_count": pending_momentum_decay_validation.get(
+                "registered_probe_count"
+            ),
+            "current_cluster_event_count": pending_momentum_decay_validation.get(
+                "current_cluster_event_count"
+            ),
+            "current_cluster_unique_tokens": pending_momentum_decay_validation.get(
+                "current_cluster_unique_tokens"
+            ),
+            "validated_probe_count": pending_momentum_decay_validation.get(
+                "validated_probe_count"
+            ),
+            "repeated_probe_count": pending_momentum_decay_validation.get(
+                "repeated_probe_count"
+            ),
+            "repeated_probe_rate": pending_momentum_decay_validation.get(
+                "repeated_probe_rate"
+            ),
+            "oos_readiness_queue_count": (
+                (pending_momentum_decay_validation.get("oos_readiness_queue") or {}).get(
+                    "queue_count"
+                )
+            ),
             "denominator": pending_momentum_decay_validation.get("denominator") or {},
             "status_counts": pending_momentum_decay_validation.get("status_counts") or {},
             "current_momentum_decay_review": (
@@ -3798,6 +3821,63 @@ def self_test():
     assert qtp["oos_readiness_queue"]["classification"] == "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW"
     assert qtp["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
     assert qtp["top_repeated_probes"][0]["status"] == "REPEATED_SHADOW_PROBE"
+    pending_momentum_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "pending_momentum_decay_recheck_validation": {
+            "classification": "PENDING_MOMENTUM_DECAY_PROBES_REPEATED_SAME_WINDOW",
+            "next_action": "continue_shadow_probe_tracking_until_clean_window_then_oos",
+            "registered_probe_count": 3,
+            "current_cluster_event_count": 4,
+            "current_cluster_unique_tokens": 3,
+            "validated_probe_count": 3,
+            "repeated_probe_count": 2,
+            "repeated_probe_rate": 0.666667,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": {
+                "registered_probe_count": 3,
+                "validated_probe_count": 3,
+                "repeated_probe_count": 2,
+                "repeated_probe_rate": 0.666667,
+            },
+            "status_counts": {"REPEATED_SHADOW_PROBE": 2},
+            "oos_readiness_queue": {
+                "classification": "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+                "queue_count": 2,
+                "promotion_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "items": [
+                    {
+                        "hypothesis_id": "pending_momentum_decay:timeboxed_recheck_window",
+                        "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
+            "top_repeated_probes": [
+                {
+                    "hypothesis_id": "pending_momentum_decay:timeboxed_recheck_window",
+                    "status": "REPEATED_SHADOW_PROBE",
+                    "promotion_allowed": False,
+                }
+            ],
+        }
+    })
+    pmd = pending_momentum_verdict["pending_momentum_decay_recheck_validation"]
+    assert pmd["available"] is True
+    assert pmd["classification"] == "PENDING_MOMENTUM_DECAY_PROBES_REPEATED_SAME_WINDOW"
+    assert pmd["registered_probe_count"] == 3
+    assert pmd["current_cluster_event_count"] == 4
+    assert pmd["current_cluster_unique_tokens"] == 3
+    assert pmd["validated_probe_count"] == 3
+    assert pmd["repeated_probe_count"] == 2
+    assert pmd["repeated_probe_rate"] == 0.666667
+    assert pmd["oos_readiness_queue_count"] == 2
+    assert pmd["promotion_allowed"] is False
+    assert pmd["oos_readiness_queue"]["classification"] == (
+        "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+    )
     reconciled = {
         **capture,
         "raw_dog_observation_join": {"join_rate": 0.5},

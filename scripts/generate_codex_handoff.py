@@ -1128,6 +1128,29 @@ def build_handoff(verdict):
                     "strategy_change_allowed": False,
                     "automatic_runtime_change_allowed": False,
                     "paper_enablement_allowed": False,
+                    "registered_probe_count": pending_momentum_decay_validation.get(
+                        "registered_probe_count"
+                    ),
+                    "current_cluster_event_count": pending_momentum_decay_validation.get(
+                        "current_cluster_event_count"
+                    ),
+                    "current_cluster_unique_tokens": pending_momentum_decay_validation.get(
+                        "current_cluster_unique_tokens"
+                    ),
+                    "validated_probe_count": pending_momentum_decay_validation.get(
+                        "validated_probe_count"
+                    ),
+                    "repeated_probe_count": pending_momentum_decay_validation.get(
+                        "repeated_probe_count"
+                    ),
+                    "repeated_probe_rate": pending_momentum_decay_validation.get(
+                        "repeated_probe_rate"
+                    ),
+                    "oos_readiness_queue_count": (
+                        (pending_momentum_decay_validation.get("oos_readiness_queue") or {}).get(
+                            "queue_count"
+                        )
+                    ),
                     "denominator": pending_momentum_decay_validation.get("denominator") or {},
                     "status_counts": pending_momentum_decay_validation.get("status_counts") or {},
                     "current_momentum_decay_review": (
@@ -1697,6 +1720,51 @@ def self_test():
                 }
             ],
         },
+        "pending_momentum_decay_recheck_validation": {
+            "available": True,
+            "classification": "PENDING_MOMENTUM_DECAY_PROBES_REPEATED_SAME_WINDOW",
+            "next_action": "continue_shadow_probe_tracking_until_clean_window_then_oos",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "registered_probe_count": 3,
+            "current_cluster_event_count": 4,
+            "current_cluster_unique_tokens": 3,
+            "validated_probe_count": 3,
+            "repeated_probe_count": 2,
+            "repeated_probe_rate": 0.666667,
+            "denominator": {
+                "registered_probe_count": 3,
+                "validated_probe_count": 3,
+                "repeated_probe_count": 2,
+                "repeated_probe_rate": 0.666667,
+            },
+            "status_counts": {
+                "REPEATED_SHADOW_PROBE": 2,
+                "NOT_OBSERVED_CURRENT_WINDOW": 1,
+            },
+            "oos_readiness_queue": {
+                "classification": "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+                "queue_count": 2,
+                "promotion_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "items": [
+                    {
+                        "hypothesis_id": "pending_momentum_decay:timeboxed_recheck_window",
+                        "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
+            "top_repeated_probes": [
+                {
+                    "hypothesis_id": "pending_momentum_decay:timeboxed_recheck_window",
+                    "status": "REPEATED_SHADOW_PROBE",
+                    "promotion_allowed": False,
+                }
+            ],
+        },
         "quality_timing_shadow_review_queue": {
             "classification": "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY",
             "queue_count": 1,
@@ -1833,6 +1901,14 @@ def self_test():
     assert "REPEATED_SHADOW_PROBE" in text
     assert "quality_timing_probe:matrix_alignment_wait" in text
     assert "QUALITY_TIMING_OOS_QUEUE_PENDING_CLEAN_WINDOW" in text
+    assert "Pending Momentum Decay Recheck Validation" in text
+    assert "PENDING_MOMENTUM_DECAY_PROBES_REPEATED_SAME_WINDOW" in text
+    assert '"registered_probe_count": 3' in text
+    assert '"current_cluster_event_count": 4' in text
+    assert '"current_cluster_unique_tokens": 3' in text
+    assert '"repeated_probe_count": 2' in text
+    assert "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW" in text
+    assert "pending_momentum_decay:timeboxed_recheck_window" in text
     assert "Candidate Improvement Opportunities" in text
     assert "Markov Information Value" in text
     assert "candidate_source" in text
