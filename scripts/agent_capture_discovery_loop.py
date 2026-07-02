@@ -4450,6 +4450,10 @@ def write_materialized_artifacts(
             "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
             "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
             "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
+            "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+            "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
+            "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
+            "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
             "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
             "final_entry_readiness_audit": "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -4482,6 +4486,29 @@ def write_materialized_artifacts(
         diagnostics.append(result)
         if out_path.exists():
             readiness_paths["pass_allow_60_post_freeze_oos_validation"] = out_path
+        return result
+
+    def run_capture_cross_post_freeze_validation():
+        freeze_registry = run_dir / "capture_cross_oos_freeze_registry.json"
+        if not freeze_registry.exists():
+            return None
+        out_path = run_dir / "capture_cross_post_freeze_oos_validation.json"
+        result = command_result(
+            "capture_cross_post_freeze_oos_validation",
+            [
+                "scripts/capture_cross_post_freeze_oos_validation.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--kline-db", getattr(args, "kline_db", "/app/data/kline_cache.db"),
+                "--freeze-registry", str(freeze_registry),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(out_path),
+            ],
+            timeout=max(60, int(args.report_timeout_sec) * 2),
+        )
+        diagnostics.append(result)
+        if out_path.exists():
+            readiness_paths["capture_cross_post_freeze_oos_validation"] = out_path
         return result
 
     verdict = build_loop_verdict()
@@ -4635,8 +4662,9 @@ def write_materialized_artifacts(
         )
         run_capture_60_target_artifacts()
         run_pass_allow_60_post_freeze_validation()
+        run_capture_cross_post_freeze_validation()
         # Rebuild v3 target/OOS artifacts so oos_readiness_summary consumes the
-        # freshly refreshed post-freeze validation from the current finalize.
+        # freshly refreshed post-freeze validations from the current finalize.
         run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
