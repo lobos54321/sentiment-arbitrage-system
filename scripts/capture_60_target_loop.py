@@ -4754,6 +4754,143 @@ def build_oos_sample_progress_summary(pass_allow_validation, capture_cross_valid
     }
 
 
+def build_oos_preliminary_signal_track(track_name, validation):
+    validation = validation or {}
+    raw_rows = safe_int(validation.get("raw_gold_silver_event_rows"), 0)
+    minimum_rows = safe_int(
+        validation.get("minimum_raw_gold_silver_event_rows")
+        or validation.get("minimum_raw_gold_silver_event_rows_for_oos_judgment")
+        or validation.get("min_raw_events_for_oos_judgment"),
+        0,
+    )
+    repeat_watch_count = safe_int(validation.get("repeat_watch_count"), 0)
+    positive_lift_count = safe_int(validation.get("positive_lift_count"), 0)
+    supported_definition_count = safe_int(validation.get("supported_definition_count"), 0)
+    validated_definition_count = safe_int(validation.get("validated_definition_count"), 0)
+    if not validation:
+        classification = "OOS_PRELIMINARY_SIGNAL_UNAVAILABLE"
+        next_action = "run_post_freeze_oos_validation"
+    elif raw_rows < minimum_rows and repeat_watch_count > 0:
+        classification = "OOS_PRELIMINARY_REPEAT_SIGNAL_BELOW_MIN_SAMPLE"
+        next_action = "continue_collecting_until_min_sample_then_judge_repeat_signal"
+    elif raw_rows < minimum_rows and positive_lift_count > 0:
+        classification = "OOS_PRELIMINARY_POSITIVE_LIFT_BELOW_MIN_SAMPLE"
+        next_action = "continue_collecting_until_min_sample_then_judge_positive_lift"
+    elif raw_rows < minimum_rows:
+        classification = "OOS_PRELIMINARY_NO_SIGNAL_BELOW_MIN_SAMPLE"
+        next_action = "continue_collecting_until_min_sample"
+    elif repeat_watch_count > 0:
+        classification = "OOS_REPEAT_SIGNAL_READY_FOR_CONTEXT_GATED_REVIEW"
+        next_action = "review_repeat_signal_with_context_and_safety_blockers"
+    elif positive_lift_count > 0:
+        classification = "OOS_POSITIVE_LIFT_READY_FOR_CONTEXT_GATED_REVIEW"
+        next_action = "review_positive_lift_with_context_and_safety_blockers"
+    else:
+        classification = "OOS_NO_REPEAT_SIGNAL"
+        next_action = "continue_oos_collection_or_retire_weak_definitions"
+    return {
+        "track": track_name,
+        "available": bool(validation),
+        "classification": classification,
+        "validation_classification": validation.get("classification"),
+        "sample_status": "below_minimum" if raw_rows < minimum_rows else "minimum_reached",
+        "raw_gold_silver_event_rows": raw_rows,
+        "minimum_raw_gold_silver_event_rows": minimum_rows,
+        "repeat_watch_count": repeat_watch_count,
+        "positive_lift_count": positive_lift_count,
+        "supported_definition_count": supported_definition_count,
+        "validated_definition_count": validated_definition_count,
+        "status_counts": validation.get("status_counts") or {},
+        "source_counts": validation.get("source_counts") or {},
+        "top_repeat_watch_items": (validation.get("top_repeat_watch_items") or [])[:8],
+        "next_action": next_action,
+        "allowed_use": "oos_preliminary_diagnostic_only",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Preliminary repeat or positive-lift signals below the minimum raw gold/silver sample are directional diagnostics only.",
+            "They cannot promote candidates, change strategy, or enable paper/live execution before minimum sample, clean context, OOS review, and human approval.",
+        ],
+    }
+
+
+def build_oos_preliminary_signal_summary(pass_allow_validation, capture_cross_validation):
+    tracks = {
+        "pass_allow_60": build_oos_preliminary_signal_track(
+            "pass_allow_60",
+            pass_allow_validation,
+        ),
+        "capture_cross": build_oos_preliminary_signal_track(
+            "capture_cross",
+            capture_cross_validation,
+        ),
+    }
+    repeat_tracks = [
+        row for row in tracks.values()
+        if safe_int(row.get("repeat_watch_count"), 0) > 0
+    ]
+    positive_tracks = [
+        row for row in tracks.values()
+        if safe_int(row.get("positive_lift_count"), 0) > 0
+    ]
+    below_min_repeat_tracks = [
+        row["track"] for row in repeat_tracks
+        if row.get("sample_status") == "below_minimum"
+    ]
+    if below_min_repeat_tracks:
+        classification = "OOS_PRELIMINARY_REPEAT_SIGNAL_BELOW_MIN_SAMPLE"
+        next_action = "continue_collecting_min_sample_for_preliminary_repeat_tracks"
+    elif repeat_tracks:
+        classification = "OOS_REPEAT_SIGNAL_READY_FOR_CONTEXT_GATED_REVIEW"
+        next_action = "review_repeat_signal_with_context_and_safety_blockers"
+    elif positive_tracks:
+        classification = "OOS_PRELIMINARY_POSITIVE_LIFT_AVAILABLE"
+        next_action = "continue_collecting_or_review_positive_lift_tracks"
+    else:
+        classification = "OOS_PRELIMINARY_SIGNAL_ABSENT"
+        next_action = "continue_collecting_post_freeze_oos_window"
+    best_track = None
+    if repeat_tracks:
+        best_track = max(
+            repeat_tracks,
+            key=lambda row: (
+                safe_int(row.get("repeat_watch_count"), 0),
+                safe_int(row.get("positive_lift_count"), 0),
+                safe_int(row.get("raw_gold_silver_event_rows"), 0),
+            ),
+        )
+    elif positive_tracks:
+        best_track = max(
+            positive_tracks,
+            key=lambda row: (
+                safe_int(row.get("positive_lift_count"), 0),
+                safe_int(row.get("raw_gold_silver_event_rows"), 0),
+            ),
+        )
+    return {
+        "schema_version": "oos_preliminary_signal_summary.v1",
+        "classification": classification,
+        "next_action": next_action,
+        "tracks": tracks,
+        "repeat_signal_tracks": [row["track"] for row in repeat_tracks],
+        "below_minimum_repeat_signal_tracks": below_min_repeat_tracks,
+        "positive_lift_tracks": [row["track"] for row in positive_tracks],
+        "best_preliminary_track": best_track.get("track") if best_track else None,
+        "best_preliminary_repeat_watch_count": (
+            safe_int(best_track.get("repeat_watch_count"), 0) if best_track else 0
+        ),
+        "best_preliminary_positive_lift_count": (
+            safe_int(best_track.get("positive_lift_count"), 0) if best_track else 0
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_oos_summary(run_dir, reports=None):
     oos_reports = load_oos_reports(run_dir)
     input_reports = reports if reports is not None else {}
@@ -5304,6 +5441,23 @@ def build_oos_summary(run_dir, reports=None):
         )
         summary["oos_total_raw_gold_silver_event_rows_needed_to_minimum"] = (
             oos_sample_progress.get("total_raw_gold_silver_event_rows_needed_to_minimum")
+        )
+        oos_preliminary_signal = build_oos_preliminary_signal_summary(
+            pass_allow_post_freeze_validation,
+            capture_cross_post_freeze_validation,
+        )
+        summary["oos_preliminary_signal_summary"] = oos_preliminary_signal
+        summary["oos_preliminary_signal_classification"] = (
+            oos_preliminary_signal.get("classification")
+        )
+        summary["oos_preliminary_signal_next_action"] = (
+            oos_preliminary_signal.get("next_action")
+        )
+        summary["oos_best_preliminary_track"] = (
+            oos_preliminary_signal.get("best_preliminary_track")
+        )
+        summary["oos_best_preliminary_repeat_watch_count"] = (
+            oos_preliminary_signal.get("best_preliminary_repeat_watch_count")
         )
     return summary
 
@@ -6519,6 +6673,43 @@ def self_test():
         assert accumulating_progress["tracks"]["capture_cross"]["estimated_hours_to_minimum"] is None
         assert accumulating_progress["total_raw_gold_silver_event_rows_needed_to_minimum"] == 14
         assert accumulating_progress["promotion_allowed"] is False
+        preliminary_signal = build_oos_preliminary_signal_summary(
+            {
+                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS",
+                "raw_gold_silver_event_rows": 7,
+                "minimum_raw_gold_silver_event_rows": 10,
+                "repeat_watch_count": 13,
+                "positive_lift_count": 13,
+                "supported_definition_count": 38,
+                "validated_definition_count": 38,
+                "status_counts": {"PASS_ALLOW_60_POST_FREEZE_REPEAT_WATCH": 13},
+                "source_counts": {"clean_2d_pass_allow_lift_slice": 15},
+                "top_repeat_watch_items": [{"candidate_id": "entry_mode_registry:stage1"}],
+                "promotion_allowed": False,
+            },
+            {
+                "classification": "CAPTURE_CROSS_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+                "raw_gold_silver_event_rows": 0,
+                "minimum_raw_gold_silver_event_rows": 10,
+                "repeat_watch_count": 0,
+                "positive_lift_count": 0,
+                "supported_definition_count": 204,
+                "validated_definition_count": 204,
+                "promotion_allowed": False,
+            },
+        )
+        assert preliminary_signal["classification"] == (
+            "OOS_PRELIMINARY_REPEAT_SIGNAL_BELOW_MIN_SAMPLE"
+        )
+        assert preliminary_signal["best_preliminary_track"] == "pass_allow_60"
+        assert preliminary_signal["best_preliminary_repeat_watch_count"] == 13
+        assert preliminary_signal["below_minimum_repeat_signal_tracks"] == ["pass_allow_60"]
+        assert preliminary_signal["tracks"]["pass_allow_60"]["sample_status"] == "below_minimum"
+        assert preliminary_signal["tracks"]["pass_allow_60"]["top_repeat_watch_items"][0]["candidate_id"] == (
+            "entry_mode_registry:stage1"
+        )
+        assert preliminary_signal["tracks"]["pass_allow_60"]["promotion_allowed"] is False
+        assert preliminary_signal["promotion_allowed"] is False
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
