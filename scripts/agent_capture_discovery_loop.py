@@ -28,7 +28,7 @@ from generate_codex_handoff import build_handoff, write_text as write_handoff_te
 from review_agent_verdict import build_verdict, write_json
 
 
-SCHEMA_VERSION = "agent_capture_discovery_loop.v1"
+SCHEMA_VERSION = "agent_capture_discovery_loop.v2"
 DEFAULT_OUT_ROOT = "/app/data/agent_runs"
 DEFAULT_HANDOFF_DIR = "/app/data/agent_handoffs"
 DEFAULT_REGISTRY = "/app/data/hypothesis_registry.json"
@@ -2364,7 +2364,11 @@ def compact_quality_timing_shadow_hypothesis(row):
             )
         },
         "top_candidates": (row.get("top_candidates") or [])[:10],
+        "top_clean_candidates": (row.get("top_clean_candidates") or [])[:10],
+        "top_blocked_candidates": (row.get("top_blocked_candidates") or [])[:10],
         "top_families": (row.get("top_families") or [])[:10],
+        "top_clean_families": (row.get("top_clean_families") or [])[:10],
+        "top_blocked_families": (row.get("top_blocked_families") or [])[:10],
         "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:10],
         "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
         "next_validation": row.get("next_validation")
@@ -2384,11 +2388,28 @@ def is_quality_timing_probe_candidate(row):
     family = str(row.get("family") or "")
     if not candidate_id:
         return False
+    if row.get("blocked_context_dimensions"):
+        return False
     if candidate_id in {"current_all", "current_would_enter_all"}:
         return False
     if family == "runtime" or candidate_id.startswith("runtime:"):
         return False
+    candidate_text = candidate_id.lower()
+    family_text = family.lower()
+    if family_text == "kline" or candidate_text.startswith("kline:"):
+        return False
+    if family_text == "volume" or any(
+        marker in candidate_text
+        for marker in ("volume", "lowvol", "low_vol", "vol_", "_vol")
+    ):
+        return False
     return True
+
+
+def quality_timing_candidate_source_rows(cluster_row):
+    if not isinstance(cluster_row, dict):
+        return []
+    return cluster_row.get("top_clean_candidates") or cluster_row.get("top_candidates") or []
 
 
 def compact_quality_timing_candidate_probe(cluster_row, candidate_row, rank):
@@ -2441,7 +2462,7 @@ def build_quality_timing_candidate_probes(opportunities, *, per_cluster_limit=3,
         if not isinstance(cluster_row, dict) or not cluster_row.get("cluster"):
             continue
         rank = 0
-        for candidate_row in cluster_row.get("top_candidates") or []:
+        for candidate_row in quality_timing_candidate_source_rows(cluster_row):
             if not is_quality_timing_probe_candidate(candidate_row):
                 continue
             rank += 1
@@ -2479,7 +2500,7 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
         cluster = cluster_row.get("cluster")
         clusters[cluster] = cluster_row
         rank = 0
-        for candidate_row in cluster_row.get("top_candidates") or []:
+        for candidate_row in quality_timing_candidate_source_rows(cluster_row):
             if not is_quality_timing_probe_candidate(candidate_row):
                 continue
             rank += 1

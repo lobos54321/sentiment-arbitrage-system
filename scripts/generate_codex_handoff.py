@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v5"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v6"
 QUOTE_COVERAGE_BLOCKERS = {
     "source_quote_clean_coverage_below_80pct",
     "source_quote_executable_coverage_below_80pct",
@@ -771,6 +771,9 @@ def build_handoff(verdict):
                     "automatic_runtime_change_allowed": False,
                     "denominator": quality_timing.get("denominator") or {},
                     "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
+                    "blocked_context_dimensions_excluded_view": (
+                        quality_timing.get("blocked_context_dimensions_excluded_view") or {}
+                    ),
                     "stage_attribution": quality_timing.get("stage_attribution") or {},
                     "context_attribution": quality_timing.get("context_attribution") or {},
                     "shadow_only_review": quality_timing.get("shadow_only_review") or {},
@@ -1273,6 +1276,28 @@ def self_test():
                     {"candidate_id": "kline:active_mom20_first3", "family": "kline", "count": 3}
                 ]
             },
+            "blocked_context_dimensions_excluded_view": {
+                "classification": "CLEAN_CANDIDATE_ATTRIBUTION_READY",
+                "blocked_dimensions": ["kline", "volume"],
+                "clean_candidate_matched_any_events": 3,
+                "blocked_candidate_matched_any_events": 1,
+                "top_clean_candidates": [
+                    {
+                        "candidate_id": "entry_mode_registry:pullback_tiny_scout",
+                        "family": "entry_mode_registry",
+                        "count": 2,
+                        "blocked_context_dimensions": [],
+                    }
+                ],
+                "top_blocked_candidates": [
+                    {
+                        "candidate_id": "kline:active_mom20_first3",
+                        "family": "kline",
+                        "count": 3,
+                        "blocked_context_dimensions": ["kline"],
+                    }
+                ],
+            },
             "stage_attribution": {
                 "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 4}]
             },
@@ -1449,6 +1474,9 @@ def self_test():
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Quality / Timing Reject Research" in text
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
+    assert "blocked_context_dimensions_excluded_view" in text
+    assert "CLEAN_CANDIDATE_ATTRIBUTION_READY" in text
+    assert "entry_mode_registry:pullback_tiny_scout" in text
     assert "matrix_alignment_wait" in text
     assert "track_matrix_alignment_false_negative_shadow_probe" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text

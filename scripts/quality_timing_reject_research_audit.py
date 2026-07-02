@@ -39,10 +39,11 @@ from offline_raw_gold_silver_funnel_audit import (
 )
 
 
-SCHEMA_VERSION = "quality_timing_reject_research_audit.v1"
+SCHEMA_VERSION = "quality_timing_reject_research_audit.v2"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 READINESS_TARGET_RATE = 0.6
+BLOCKED_CONTEXT_DIMENSIONS = ["kline", "volume"]
 
 
 def utc_now():
@@ -229,6 +230,36 @@ def compact_counter(counter, names, limit=30):
         item = {names[idx]: key[idx] if idx < len(key) else None for idx in range(len(names))}
         item["count"] = count
         rows.append(item)
+    return rows
+
+
+def blocked_candidate_dimensions(candidate_id, family):
+    candidate_text = str(candidate_id or "").lower()
+    family_text = str(family or "").lower()
+    dimensions = []
+    if family_text == "kline" or candidate_text.startswith("kline:"):
+        dimensions.append("kline")
+    volume_markers = ("volume", "lowvol", "low_vol", "vol_", "_vol")
+    if family_text == "volume" or any(marker in candidate_text for marker in volume_markers):
+        dimensions.append("volume")
+    return sorted(set(dimensions))
+
+
+def is_blocked_context_candidate(candidate_id, family):
+    return bool(blocked_candidate_dimensions(candidate_id, family))
+
+
+def compact_candidate_counter_with_context(counter, limit=30):
+    rows = []
+    for (candidate_id, family), count in counter.most_common(limit):
+        dimensions = blocked_candidate_dimensions(candidate_id, family)
+        rows.append({
+            "candidate_id": candidate_id,
+            "family": family,
+            "count": count,
+            "blocked_context_dimensions": dimensions,
+            "context_clean_for_candidate_suggestion": not bool(dimensions),
+        })
     return rows
 
 
@@ -423,9 +454,15 @@ def build_shadow_only_review(
     cluster_stage_counts,
     cluster_candidate_counts,
     cluster_family_counts,
+    cluster_clean_candidate_counts,
+    cluster_clean_family_counts,
+    cluster_blocked_candidate_counts,
+    cluster_blocked_family_counts,
     cluster_context_counts,
     cluster_tokens,
     cluster_matched_any,
+    cluster_clean_matched_any,
+    cluster_blocked_matched_any,
     cluster_peak_pct,
     cluster_time_to_peak,
     readiness_impact_upper_bound,
@@ -449,6 +486,8 @@ def build_shadow_only_review(
             "share_of_raw_all_gold_silver": rate(count, len(raw_rows)),
             "unique_tokens": len(cluster_tokens.get(cluster) or set()),
             "candidate_matched_any_rate": rate(cluster_matched_any.get(cluster, 0), count),
+            "clean_candidate_matched_any_rate": rate(cluster_clean_matched_any.get(cluster, 0), count),
+            "blocked_candidate_matched_any_rate": rate(cluster_blocked_matched_any.get(cluster, 0), count),
             "max_sustained_peak_pct_max": max_or_none(cluster_peak_pct.get(cluster) or []),
             "time_to_sustained_peak_sec_median": median_or_none(cluster_time_to_peak.get(cluster) or []),
             "readiness_impact_upper_bound": cluster_impact.get(cluster) or {},
@@ -462,8 +501,26 @@ def build_shadow_only_review(
                 ["candidate_id", "family"],
                 limit,
             ),
+            "top_clean_candidates": compact_candidate_counter_with_context(
+                cluster_clean_candidate_counts.get(cluster) or Counter(),
+                limit,
+            ),
+            "top_blocked_candidates": compact_candidate_counter_with_context(
+                cluster_blocked_candidate_counts.get(cluster) or Counter(),
+                limit,
+            ),
             "top_families": compact_counter(
                 cluster_family_counts.get(cluster) or Counter(),
+                ["family"],
+                limit,
+            ),
+            "top_clean_families": compact_counter(
+                cluster_clean_family_counts.get(cluster) or Counter(),
+                ["family"],
+                limit,
+            ),
+            "top_blocked_families": compact_counter(
+                cluster_blocked_family_counts.get(cluster) or Counter(),
                 ["family"],
                 limit,
             ),
@@ -523,8 +580,56 @@ def build_shadow_only_review(
         "paper_enablement_allowed": False,
         "notes": [
             "Use these clusters to decide what shadow-only probes to add or watch next.",
+            "Prefer top_clean_candidates when generating shadow probes while kline/volume dimensions are blocked.",
             "Any change to thresholds, gates, final_entry_contract, runtime mode, executor, or risk requires human approval.",
         ],
+    }
+
+
+def build_blocked_context_excluded_view(
+    *,
+    qt_count,
+    clean_candidate_counts,
+    clean_family_counts,
+    blocked_candidate_counts,
+    blocked_family_counts,
+    clean_matched_any,
+    blocked_matched_any,
+    clean_observation_count,
+    blocked_observation_count,
+    limit,
+):
+    return {
+        "classification": (
+            "CLEAN_CANDIDATE_ATTRIBUTION_READY"
+            if qt_count
+            else "CLEAN_CANDIDATE_ATTRIBUTION_EMPTY"
+        ),
+        "blocked_dimensions": BLOCKED_CONTEXT_DIMENSIONS,
+        "interpretation": (
+            "Read-only candidate attribution that excludes candidates depending on blocked kline/volume dimensions. "
+            "Blocked candidates remain visible for diagnostics but must not drive shadow probe suggestions until the dimensions are clean."
+        ),
+        "quality_timing_reject_event_rows": qt_count,
+        "clean_candidate_matched_any_events": clean_matched_any,
+        "clean_candidate_matched_any_rate": rate(clean_matched_any, qt_count),
+        "blocked_candidate_matched_any_events": blocked_matched_any,
+        "blocked_candidate_matched_any_rate": rate(blocked_matched_any, qt_count),
+        "clean_candidate_observation_count": clean_observation_count,
+        "blocked_candidate_observation_count": blocked_observation_count,
+        "top_clean_candidates": compact_candidate_counter_with_context(clean_candidate_counts, limit),
+        "top_blocked_candidates": compact_candidate_counter_with_context(blocked_candidate_counts, limit),
+        "top_clean_families": compact_counter(clean_family_counts, ["family"], limit),
+        "top_blocked_families": compact_counter(blocked_family_counts, ["family"], limit),
+        "candidate_suggestion_policy": (
+            "Use top_clean_candidates for shadow-only quality/timing probe generation. "
+            "Do not use top_blocked_candidates while kline/volume context coverage is blocked."
+        ),
+        "evidence_level": EVIDENCE_LEVEL,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
     }
 
 
@@ -558,6 +663,10 @@ def build_report(args):
         reason_counts = Counter()
         candidate_counts = Counter()
         family_counts = Counter()
+        clean_candidate_counts = Counter()
+        clean_family_counts = Counter()
+        blocked_candidate_counts = Counter()
+        blocked_family_counts = Counter()
         context_counts = Counter()
         lifecycle_counts = Counter()
         source_counts = Counter()
@@ -569,14 +678,24 @@ def build_report(args):
         cluster_stage_counts = defaultdict(Counter)
         cluster_candidate_counts = defaultdict(Counter)
         cluster_family_counts = defaultdict(Counter)
+        cluster_clean_candidate_counts = defaultdict(Counter)
+        cluster_clean_family_counts = defaultdict(Counter)
+        cluster_blocked_candidate_counts = defaultdict(Counter)
+        cluster_blocked_family_counts = defaultdict(Counter)
         cluster_context_counts = defaultdict(Counter)
         cluster_tokens = defaultdict(set)
         cluster_matched_any = Counter()
+        cluster_clean_matched_any = Counter()
+        cluster_blocked_matched_any = Counter()
         cluster_peak_pct = defaultdict(list)
         cluster_time_to_peak = defaultdict(list)
         coverage_ok = 0
         matched_any = 0
+        clean_matched_any = 0
+        blocked_matched_any = 0
         total_obs_rows = 0
+        clean_observation_count = 0
+        blocked_observation_count = 0
 
         for signal_id, event in qt_events.items():
             audit = audits_by_signal.get(signal_id) or {}
@@ -609,13 +728,37 @@ def build_report(args):
                 cluster_matched_any[cluster] += 1
             cluster_peak_pct[cluster].append(audit.get("max_sustained_peak_pct"))
             cluster_time_to_peak[cluster].append(audit.get("time_to_sustained_peak_sec"))
+            event_has_clean_match = False
+            event_has_blocked_match = False
             for obs in matched_obs:
-                candidate_counts[(obs.get("candidate_id") or "UNKNOWN", obs.get("family") or "UNKNOWN")] += 1
-                family_counts[obs.get("family") or "UNKNOWN"] += 1
+                candidate_id = obs.get("candidate_id") or "UNKNOWN"
+                family = obs.get("family") or "UNKNOWN"
+                candidate_counts[(candidate_id, family)] += 1
+                family_counts[family] += 1
                 cluster_candidate_counts[cluster][
-                    (obs.get("candidate_id") or "UNKNOWN", obs.get("family") or "UNKNOWN")
+                    (candidate_id, family)
                 ] += 1
-                cluster_family_counts[cluster][obs.get("family") or "UNKNOWN"] += 1
+                cluster_family_counts[cluster][family] += 1
+                if is_blocked_context_candidate(candidate_id, family):
+                    blocked_candidate_counts[(candidate_id, family)] += 1
+                    blocked_family_counts[family] += 1
+                    cluster_blocked_candidate_counts[cluster][(candidate_id, family)] += 1
+                    cluster_blocked_family_counts[cluster][family] += 1
+                    blocked_observation_count += 1
+                    event_has_blocked_match = True
+                else:
+                    clean_candidate_counts[(candidate_id, family)] += 1
+                    clean_family_counts[family] += 1
+                    cluster_clean_candidate_counts[cluster][(candidate_id, family)] += 1
+                    cluster_clean_family_counts[cluster][family] += 1
+                    clean_observation_count += 1
+                    event_has_clean_match = True
+            if event_has_clean_match:
+                clean_matched_any += 1
+                cluster_clean_matched_any[cluster] += 1
+            if event_has_blocked_match:
+                blocked_matched_any += 1
+                cluster_blocked_matched_any[cluster] += 1
             qt_rows.append(
                 {
                     "signal_id": signal_id,
@@ -633,9 +776,23 @@ def build_report(args):
                             "candidate_id": obs.get("candidate_id"),
                             "family": obs.get("family"),
                             "reason": obs.get("reason"),
+                            "blocked_context_dimensions": blocked_candidate_dimensions(
+                                obs.get("candidate_id"),
+                                obs.get("family"),
+                            ),
                         }
                         for obs in matched_obs[:20]
                     ],
+                    "clean_matched_candidate_count": sum(
+                        1
+                        for obs in matched_obs
+                        if not is_blocked_context_candidate(obs.get("candidate_id"), obs.get("family"))
+                    ),
+                    "blocked_matched_candidate_count": sum(
+                        1
+                        for obs in matched_obs
+                        if is_blocked_context_candidate(obs.get("candidate_id"), obs.get("family"))
+                    ),
                     "lifecycle_profile": lifecycle,
                     "source_component": source,
                     "markov_bucket": audit.get("markov_bucket"),
@@ -664,6 +821,18 @@ def build_report(args):
             reached_final_signal_ids,
             cluster_counts,
         )
+        blocked_context_excluded_view = build_blocked_context_excluded_view(
+            qt_count=qt_count,
+            clean_candidate_counts=clean_candidate_counts,
+            clean_family_counts=clean_family_counts,
+            blocked_candidate_counts=blocked_candidate_counts,
+            blocked_family_counts=blocked_family_counts,
+            clean_matched_any=clean_matched_any,
+            blocked_matched_any=blocked_matched_any,
+            clean_observation_count=clean_observation_count,
+            blocked_observation_count=blocked_observation_count,
+            limit=args.limit,
+        )
         shadow_only_review = build_shadow_only_review(
             raw_rows=raw_rows,
             qt_count=qt_count,
@@ -672,9 +841,15 @@ def build_report(args):
             cluster_stage_counts=cluster_stage_counts,
             cluster_candidate_counts=cluster_candidate_counts,
             cluster_family_counts=cluster_family_counts,
+            cluster_clean_candidate_counts=cluster_clean_candidate_counts,
+            cluster_clean_family_counts=cluster_clean_family_counts,
+            cluster_blocked_candidate_counts=cluster_blocked_candidate_counts,
+            cluster_blocked_family_counts=cluster_blocked_family_counts,
             cluster_context_counts=cluster_context_counts,
             cluster_tokens=cluster_tokens,
             cluster_matched_any=cluster_matched_any,
+            cluster_clean_matched_any=cluster_clean_matched_any,
+            cluster_blocked_matched_any=cluster_blocked_matched_any,
             cluster_peak_pct=cluster_peak_pct,
             cluster_time_to_peak=cluster_time_to_peak,
             readiness_impact_upper_bound=readiness_impact_upper_bound,
@@ -722,6 +897,7 @@ def build_report(args):
                 "top_candidates": compact_counter(candidate_counts, ["candidate_id", "family"], args.limit),
                 "top_families": compact_counter(family_counts, ["family"], args.limit),
             },
+            "blocked_context_dimensions_excluded_view": blocked_context_excluded_view,
             "readiness_impact_upper_bound": readiness_impact_upper_bound,
             "stage_attribution": {
                 "stage_counts": compact_counter(stage_counts, ["stage"], args.limit),
@@ -773,6 +949,9 @@ def compact_summary(report):
         "automatic_runtime_change_allowed": False,
         "denominator": report.get("denominator") or {},
         "candidate_match_attribution": report.get("candidate_match_attribution") or {},
+        "blocked_context_dimensions_excluded_view": (
+            report.get("blocked_context_dimensions_excluded_view") or {}
+        ),
         "readiness_impact_upper_bound": report.get("readiness_impact_upper_bound") or {},
         "top_stage_counts": ((report.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
         "top_reason_counts": ((report.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
@@ -887,6 +1066,26 @@ def self_test():
         assert report["denominator"]["quality_timing_reject_event_rows"] == 2
         assert report["candidate_match_attribution"]["candidate_matched_any_events"] == 2
         assert report["candidate_match_attribution"]["full_candidate_coverage_rate"] == 1.0
+        clean_view = report["blocked_context_dimensions_excluded_view"]
+        assert clean_view["classification"] == "CLEAN_CANDIDATE_ATTRIBUTION_READY"
+        assert clean_view["blocked_dimensions"] == ["kline", "volume"]
+        assert clean_view["clean_candidate_matched_any_events"] == 2
+        assert clean_view["blocked_candidate_matched_any_events"] == 1
+        assert clean_view["clean_candidate_observation_count"] == 3
+        assert clean_view["blocked_candidate_observation_count"] == 1
+        assert any(
+            row["candidate_id"] == "entry_mode_registry:pullback_tiny_scout"
+            for row in clean_view["top_clean_candidates"]
+        )
+        assert all(
+            not row["blocked_context_dimensions"]
+            for row in clean_view["top_clean_candidates"]
+        )
+        assert any(
+            row["candidate_id"] == "kline:active_mom20_first3"
+            and "kline" in row["blocked_context_dimensions"]
+            for row in clean_view["top_blocked_candidates"]
+        )
         impact = report["readiness_impact_upper_bound"]
         assert impact["current_final_entry_contract_signal_count"] == 1
         assert impact["quality_timing_reject_event_rows"] == 2
@@ -901,6 +1100,8 @@ def self_test():
         assert review["research_opportunity_count"] >= 1
         assert review["top_research_opportunities"][0]["promotion_allowed"] is False
         assert review["top_research_opportunities"][0]["readiness_impact_upper_bound"]["promotion_allowed"] is False
+        assert "top_clean_candidates" in review["top_research_opportunities"][0]
+        assert "top_blocked_candidates" in review["top_research_opportunities"][0]
         stages = {row["stage"]: row["count"] for row in report["stage_attribution"]["stage_counts"]}
         assert stages["decision_no_pass_or_allow"] == 1
         assert stages["pass_or_allow_without_pending_entry"] == 1
@@ -908,6 +1109,7 @@ def self_test():
         compact = compact_summary(report)
         assert compact["promotion_allowed"] is False
         assert compact["shadow_only_review"]["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
+        assert compact["blocked_context_dimensions_excluded_view"]["classification"] == "CLEAN_CANDIDATE_ATTRIBUTION_READY"
     print("SELF_TEST_PASS quality_timing_reject_research_audit")
 
 
