@@ -929,6 +929,7 @@ def build_handoff(verdict):
         quality_timing_review = quality_timing.get("shadow_only_review") or {}
         quality_timing_denominator = quality_timing.get("denominator") or {}
         quality_timing_impact = quality_timing.get("readiness_impact_upper_bound") or {}
+        quality_timing_reason_breakout = quality_timing.get("reason_level_breakout") or {}
         quality_timing_opportunities = quality_timing_review.get("top_research_opportunities") or []
         quality_timing_top_clusters = quality_timing.get("top_quality_timing_clusters") or [
             {
@@ -1015,6 +1016,21 @@ def build_handoff(verdict):
                 "paper_enablement_allowed": False,
             },
             "top_quality_timing_clusters": quality_timing_top_clusters[:8],
+            "reason_level_breakout": {
+                "classification": quality_timing_reason_breakout.get("classification"),
+                "next_action": quality_timing_reason_breakout.get("next_action"),
+                "dominant_cluster": quality_timing_reason_breakout.get("dominant_cluster"),
+                "dominant_cluster_top_reasons": (
+                    quality_timing_reason_breakout.get("dominant_cluster_top_reasons") or []
+                )[:8],
+                "other_quality_timing_top_reasons": (
+                    quality_timing_reason_breakout.get("other_quality_timing_top_reasons") or []
+                )[:8],
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            },
             "denominator": quality_timing_denominator,
             "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
             "blocked_context_dimensions_excluded_view": (
@@ -1621,6 +1637,25 @@ def self_test():
                     }
                 ],
             },
+            "reason_level_breakout": {
+                "classification": "QUALITY_TIMING_REASON_LEVEL_READY",
+                "next_action": "review_dominant_quality_timing_reason_breakout_shadow_only",
+                "dominant_cluster": "matrix_alignment_wait",
+                "dominant_cluster_top_reasons": [
+                    {
+                        "stage": "decision_no_pass_or_allow",
+                        "component": "matrix_evaluator",
+                        "event_type": "timing_decision",
+                        "decision": "WAIT",
+                        "reason": "matrices not yet aligned",
+                        "count": 4,
+                        "suggested_shadow_only_action": "track_matrix_alignment_reason_shadow_only",
+                        "promotion_allowed": False,
+                    }
+                ],
+                "other_quality_timing_top_reasons": [],
+                "promotion_allowed": False,
+            },
             "shadow_only_next_actions": ["review_shadow_candidates_for_quality_timing_rejects"],
         },
         "quality_timing_candidate_probe_validation": {
@@ -1785,6 +1820,9 @@ def self_test():
     assert "entry_mode_registry:pullback_tiny_scout" in text
     assert "matrix_alignment_wait" in text
     assert "track_matrix_alignment_false_negative_shadow_probe" in text
+    assert "reason_level_breakout" in text
+    assert "QUALITY_TIMING_REASON_LEVEL_READY" in text
+    assert "track_matrix_alignment_reason_shadow_only" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
     assert "quality_timing_shadow_review_queue" in text
     assert "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY" in text

@@ -233,6 +233,62 @@ def compact_counter(counter, names, limit=30):
     return rows
 
 
+def compact_reason_counter(counter, limit=30):
+    rows = []
+    for key, count in (counter or Counter()).most_common(limit):
+        if not isinstance(key, tuple):
+            key = (key,)
+        stage, component, event_type, decision, reason = (list(key) + [None] * 5)[:5]
+        rows.append({
+            "stage": stage,
+            "component": component,
+            "event_type": event_type,
+            "decision": decision,
+            "reason": reason,
+            "count": count,
+            "suggested_shadow_only_action": reason_level_shadow_action(
+                stage=stage,
+                component=component,
+                event_type=event_type,
+                decision=decision,
+                reason=reason,
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return rows
+
+
+def reason_level_shadow_action(*, stage, component, event_type, decision, reason):
+    text = " ".join(
+        str(value or "").lower()
+        for value in [stage, component, event_type, decision, reason]
+    )
+    if "not_ath" in text or "notath" in text:
+        return "track_notath_upstream_skip_reason_shadow_only"
+    if "matrix" in text or "aligned" in text:
+        return "track_matrix_alignment_reason_shadow_only"
+    if "negative_trend" in text or "momentum_fading" in text:
+        return "track_momentum_fading_reason_shadow_only"
+    if "buy_pressure" in text or "weak_buying_pressure" in text:
+        return "track_buy_pressure_reason_shadow_only"
+    if "chasing_top" in text:
+        return "track_chasing_top_reason_shadow_only"
+    if "top10" in text or "concentration" in text:
+        return "track_holder_concentration_reason_shadow_only"
+    if "low_volume" in text or "low_vol" in text:
+        return "track_low_volume_reason_shadow_only"
+    if "timeout" in text or "retry" in text:
+        return "track_entry_timing_timeout_reason_shadow_only"
+    if "score" in text or "quality" in text:
+        return "track_score_quality_reason_shadow_only"
+    if "stale" in text or "too_late" in text or "late" in text:
+        return "track_timing_late_reason_shadow_only"
+    return "review_unclassified_quality_timing_reason_shadow_only"
+
+
 def blocked_candidate_dimensions(candidate_id, family):
     candidate_text = str(candidate_id or "").lower()
     family_text = str(family or "").lower()
@@ -451,6 +507,7 @@ def build_shadow_only_review(
     qt_count,
     stage_counts,
     cluster_counts,
+    cluster_reason_counts,
     cluster_stage_counts,
     cluster_candidate_counts,
     cluster_family_counts,
@@ -478,6 +535,10 @@ def build_shadow_only_review(
             cluster,
             SHADOW_REVIEW_CLUSTER_DETAILS["other_quality_timing_reject"],
         )
+        reason_level_breakout = compact_reason_counter(
+            cluster_reason_counts.get(cluster) or Counter(),
+            limit,
+        )
         opportunities.append({
             "cluster": cluster,
             "description": details["description"],
@@ -491,6 +552,13 @@ def build_shadow_only_review(
             "max_sustained_peak_pct_max": max_or_none(cluster_peak_pct.get(cluster) or []),
             "time_to_sustained_peak_sec_median": median_or_none(cluster_time_to_peak.get(cluster) or []),
             "readiness_impact_upper_bound": cluster_impact.get(cluster) or {},
+            "reason_level_breakout": reason_level_breakout,
+            "reason_level_breakout_count": len(reason_level_breakout),
+            "reason_level_review_status": (
+                "REASON_LEVEL_READY"
+                if reason_level_breakout
+                else "REASON_LEVEL_EMPTY"
+            ),
             "stage_counts": compact_counter(
                 cluster_stage_counts.get(cluster) or Counter(),
                 ["stage"],
@@ -586,6 +654,61 @@ def build_shadow_only_review(
     }
 
 
+def build_reason_level_breakout(*, cluster_counts, cluster_reason_counts, limit):
+    dominant_cluster = cluster_counts.most_common(1)[0][0] if cluster_counts else None
+    dominant_reasons = compact_reason_counter(
+        cluster_reason_counts.get(dominant_cluster) or Counter(),
+        limit,
+    ) if dominant_cluster else []
+    other_reasons = compact_reason_counter(
+        cluster_reason_counts.get("other_quality_timing_reject") or Counter(),
+        limit,
+    )
+    all_cluster_rows = []
+    for cluster, count in (cluster_counts or Counter()).most_common(limit):
+        reason_rows = compact_reason_counter(
+            cluster_reason_counts.get(cluster) or Counter(),
+            min(5, limit),
+        )
+        all_cluster_rows.append({
+            "cluster": cluster,
+            "event_count": count,
+            "reason_count": len(reason_rows),
+            "top_reasons": reason_rows,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    if other_reasons:
+        next_action = "review_other_quality_timing_reason_breakout_shadow_only"
+    elif dominant_reasons:
+        next_action = "review_dominant_quality_timing_reason_breakout_shadow_only"
+    else:
+        next_action = "continue_collecting_quality_timing_reason_evidence"
+    return {
+        "classification": (
+            "QUALITY_TIMING_REASON_LEVEL_READY"
+            if (dominant_reasons or other_reasons)
+            else "QUALITY_TIMING_REASON_LEVEL_EMPTY"
+        ),
+        "dominant_cluster": dominant_cluster,
+        "dominant_cluster_top_reasons": dominant_reasons,
+        "other_quality_timing_top_reasons": other_reasons,
+        "cluster_reason_breakouts": all_cluster_rows,
+        "next_action": next_action,
+        "interpretation": (
+            "Read-only reason-level decomposition of quality/timing rejects. "
+            "This narrows broad clusters such as other_quality_timing_reject into exact "
+            "stage/component/event_type/decision/reason signatures for shadow-only review."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_blocked_context_excluded_view(
     *,
     qt_count,
@@ -633,11 +756,21 @@ def build_blocked_context_excluded_view(
     }
 
 
-def build_top_level_summary(*, verdict, blockers, denominator, readiness_impact, shadow_review):
+def build_top_level_summary(
+    *,
+    verdict,
+    blockers,
+    denominator,
+    readiness_impact,
+    shadow_review,
+    reason_level_breakout=None,
+):
     opportunities = (shadow_review or {}).get("top_research_opportunities") or []
     dominant = opportunities[0] if opportunities else {}
     if blockers:
         next_action = "fix_quality_timing_audit_data_blockers"
+    elif (reason_level_breakout or {}).get("other_quality_timing_top_reasons"):
+        next_action = "review_other_quality_timing_reason_breakout_shadow_only"
     elif dominant:
         next_action = dominant.get("suggested_shadow_only_action") or "review_shadow_candidates_for_quality_timing_rejects"
     else:
@@ -651,6 +784,7 @@ def build_top_level_summary(*, verdict, blockers, denominator, readiness_impact,
             "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
             "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
             "next_validation": row.get("next_validation"),
+            "reason_level_breakout": (row.get("reason_level_breakout") or [])[:5],
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -680,6 +814,7 @@ def build_top_level_summary(*, verdict, blockers, denominator, readiness_impact,
             readiness_impact or {}
         ).get("would_all_quality_timing_resolution_reach_60pct_upper_bound"),
         "top_quality_timing_clusters": top_clusters,
+        "reason_level_breakout": reason_level_breakout or {},
         "allowed_scope": (shadow_review or {}).get("allowed_scope") or [
             "read-only evaluator/report improvements",
             "shadow-only candidate or context instrumentation",
@@ -742,6 +877,7 @@ def build_report(args):
         quote_clean_counts = Counter()
         quote_exec_counts = Counter()
         cluster_counts = Counter()
+        cluster_reason_counts = defaultdict(Counter)
         cluster_stage_counts = defaultdict(Counter)
         cluster_candidate_counts = defaultdict(Counter)
         cluster_family_counts = defaultdict(Counter)
@@ -787,6 +923,7 @@ def build_report(args):
             quote_exec_counts[str(audit.get("source_quote_executable"))] += 1
             cluster = classify_shadow_review_cluster(event["stage"], event["attribution"])
             cluster_counts[cluster] += 1
+            cluster_reason_counts[cluster][event["reason_key"]] += 1
             cluster_stage_counts[cluster][event["stage"]] += 1
             cluster_context_counts[cluster][(lifecycle, source)] += 1
             if audit.get("token_ca"):
@@ -905,6 +1042,7 @@ def build_report(args):
             qt_count=qt_count,
             stage_counts=stage_counts,
             cluster_counts=cluster_counts,
+            cluster_reason_counts=cluster_reason_counts,
             cluster_stage_counts=cluster_stage_counts,
             cluster_candidate_counts=cluster_candidate_counts,
             cluster_family_counts=cluster_family_counts,
@@ -920,6 +1058,11 @@ def build_report(args):
             cluster_peak_pct=cluster_peak_pct,
             cluster_time_to_peak=cluster_time_to_peak,
             readiness_impact_upper_bound=readiness_impact_upper_bound,
+            limit=args.limit,
+        )
+        reason_level_breakout = build_reason_level_breakout(
+            cluster_counts=cluster_counts,
+            cluster_reason_counts=cluster_reason_counts,
             limit=args.limit,
         )
         denominator = {
@@ -940,6 +1083,7 @@ def build_report(args):
             denominator=denominator,
             readiness_impact=readiness_impact_upper_bound,
             shadow_review=shadow_only_review,
+            reason_level_breakout=reason_level_breakout,
         )
 
         return {
@@ -973,6 +1117,7 @@ def build_report(args):
                 summary["residual_gap_to_60pct_after_all_quality_timing_upper_bound"]
             ),
             "top_quality_timing_clusters": summary["top_quality_timing_clusters"],
+            "reason_level_breakout": reason_level_breakout,
             "allowed_scope": summary["allowed_scope"],
             "human_approval_required_if_fix_requires": summary["human_approval_required_if_fix_requires"],
             "verdict": verdict,
@@ -1001,6 +1146,10 @@ def build_report(args):
                     ["stage", "component", "event_type", "decision", "reason"],
                     args.limit,
                 ),
+                "cluster_reason_counts": {
+                    cluster: compact_reason_counter(counter, args.limit)
+                    for cluster, counter in cluster_reason_counts.items()
+                },
             },
             "context_attribution": {
                 "lifecycle_profile_counts": compact_counter(lifecycle_counts, ["lifecycle_profile"], args.limit),
@@ -1048,6 +1197,7 @@ def compact_summary(report):
             report.get("blocked_context_dimensions_excluded_view") or {}
         ),
         "readiness_impact_upper_bound": report.get("readiness_impact_upper_bound") or {},
+        "reason_level_breakout": report.get("reason_level_breakout") or {},
         "top_stage_counts": ((report.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
         "top_reason_counts": ((report.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
         "top_candidates": ((report.get("candidate_match_attribution") or {}).get("top_candidates") or [])[:10],
@@ -1163,12 +1313,19 @@ def self_test():
             "track_score_quality_threshold_false_negative_shadow_probe",
             "track_newborn_pullback_timing_false_negative_shadow_probe",
             "continue_reason_level_shadow_review",
+            "review_other_quality_timing_reason_breakout_shadow_only",
+            "review_dominant_quality_timing_reason_breakout_shadow_only",
         }
         assert report["dominant_cluster"] is not None
         assert report["quality_timing_reject_event_rows"] == 2
         assert report["upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"] == 1.0
         assert report["would_all_quality_timing_resolution_reach_60pct_upper_bound"] is True
         assert report["top_quality_timing_clusters"]
+        reason_breakout = report["reason_level_breakout"]
+        assert reason_breakout["classification"] == "QUALITY_TIMING_REASON_LEVEL_READY"
+        assert reason_breakout["dominant_cluster_top_reasons"]
+        assert reason_breakout["promotion_allowed"] is False
+        assert report["summary"]["reason_level_breakout"]["classification"] == "QUALITY_TIMING_REASON_LEVEL_READY"
         assert report["allowed_scope"]
         assert report["summary"]["promotion_allowed"] is False
         assert report["summary"]["automatic_runtime_change_allowed"] is False
@@ -1210,6 +1367,8 @@ def self_test():
         assert review["research_opportunity_count"] >= 1
         assert review["top_research_opportunities"][0]["promotion_allowed"] is False
         assert review["top_research_opportunities"][0]["readiness_impact_upper_bound"]["promotion_allowed"] is False
+        assert review["top_research_opportunities"][0]["reason_level_breakout"]
+        assert review["top_research_opportunities"][0]["reason_level_review_status"] == "REASON_LEVEL_READY"
         assert "top_clean_candidates" in review["top_research_opportunities"][0]
         assert "top_blocked_candidates" in review["top_research_opportunities"][0]
         stages = {row["stage"]: row["count"] for row in report["stage_attribution"]["stage_counts"]}
@@ -1218,6 +1377,7 @@ def self_test():
         assert "pending_without_final_entry_contract" not in stages
         compact = compact_summary(report)
         assert compact["promotion_allowed"] is False
+        assert compact["reason_level_breakout"]["classification"] == "QUALITY_TIMING_REASON_LEVEL_READY"
         assert compact["shadow_only_review"]["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
         assert compact["blocked_context_dimensions_excluded_view"]["classification"] == "CLEAN_CANDIDATE_ATTRIBUTION_READY"
     print("SELF_TEST_PASS quality_timing_reject_research_audit")
