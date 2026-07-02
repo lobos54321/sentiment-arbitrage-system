@@ -1345,6 +1345,47 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    matrix_alignment_probe = verdict.get("matrix_alignment_false_negative_shadow_probe") or {}
+    if matrix_alignment_probe:
+        lines.extend([
+            "## Matrix Alignment False-Negative Shadow Probe",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": matrix_alignment_probe.get("available"),
+                    "classification": matrix_alignment_probe.get("classification"),
+                    "next_action": matrix_alignment_probe.get("next_action"),
+                    "cluster": matrix_alignment_probe.get("cluster"),
+                    "scope": matrix_alignment_probe.get("scope"),
+                    "evidence_level": matrix_alignment_probe.get("evidence_level"),
+                    "allowed_use": matrix_alignment_probe.get("allowed_use"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "denominator": matrix_alignment_probe.get("denominator") or {},
+                    "current_window": matrix_alignment_probe.get("current_window") or {},
+                    "candidate_probe_validation": (
+                        matrix_alignment_probe.get("candidate_probe_validation") or {}
+                    ),
+                    "decision_no_pass_watch_validation": (
+                        matrix_alignment_probe.get("decision_no_pass_watch_validation") or {}
+                    ),
+                    "shadow_candidate_improvement_queue": (
+                        matrix_alignment_probe.get("shadow_candidate_improvement_queue") or {}
+                    ),
+                    "readiness_gates": matrix_alignment_probe.get("readiness_gates") or {},
+                    "forbidden_runtime_actions": (
+                        matrix_alignment_probe.get("forbidden_runtime_actions") or []
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )[:14000],
+            "```",
+            "",
+        ])
     pending_momentum_decay_validation = verdict.get("pending_momentum_decay_recheck_validation") or {}
     if pending_momentum_decay_validation:
         lines.extend([

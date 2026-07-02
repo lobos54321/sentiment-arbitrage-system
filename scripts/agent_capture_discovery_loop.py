@@ -3040,6 +3040,221 @@ def build_decision_no_pass_quality_timing_watch_validation(registry, decision_no
     }
 
 
+def build_matrix_alignment_false_negative_shadow_probe(
+    quality_timing_report,
+    quality_timing_probe_validation,
+    decision_no_pass_watch_validation,
+    shadow_candidate_improvement_queue,
+    capture_60_gap_report,
+):
+    """Build a focused read-only dossier for matrix-alignment false negatives.
+
+    The broader quality/timing reports already identify the cluster and queue it
+    for clean-window/OOS review. This artifact makes that specific next action
+    auditable without changing runtime policy, gates, final_entry_contract,
+    A_CLASS mode, paper/live execution, or risk.
+    """
+    cluster = "matrix_alignment_wait"
+    quality_timing_report = quality_timing_report or {}
+    quality_timing_probe_validation = quality_timing_probe_validation or {}
+    decision_no_pass_watch_validation = decision_no_pass_watch_validation or {}
+    shadow_candidate_improvement_queue = shadow_candidate_improvement_queue or {}
+    capture_60_gap_report = capture_60_gap_report or {}
+
+    opportunities = (
+        (quality_timing_report.get("shadow_only_review") or {}).get("top_research_opportunities")
+        or []
+    )
+    cluster_opportunity = next(
+        (row for row in opportunities if row.get("cluster") == cluster),
+        {},
+    )
+    reason_breakout = [
+        row for row in (cluster_opportunity.get("reason_level_breakout") or [])
+        if isinstance(row, dict)
+    ]
+    clean_candidates = [
+        row for row in (cluster_opportunity.get("top_clean_candidates") or [])
+        if isinstance(row, dict)
+    ]
+    blocked_candidates = [
+        row for row in (cluster_opportunity.get("top_blocked_candidates") or [])
+        if isinstance(row, dict)
+    ]
+
+    candidate_probe_rows = [
+        row for row in (quality_timing_probe_validation.get("probe_validations") or [])
+        if (row.get("definition") or {}).get("quality_timing_cluster") == cluster
+    ]
+    repeated_candidate_probes = [
+        row for row in candidate_probe_rows
+        if row.get("status") == "REPEATED_SHADOW_PROBE"
+    ]
+    decision_watch_rows = [
+        row for row in (decision_no_pass_watch_validation.get("watch_validations") or [])
+        if (row.get("definition") or {}).get("cluster") == cluster
+    ]
+    repeated_decision_watch = [
+        row for row in decision_watch_rows
+        if row.get("status") == "REPEATED_SELECTED_CLUSTER"
+    ]
+    decision_oos_items = [
+        row for row in ((decision_no_pass_watch_validation.get("oos_readiness_queue") or {}).get("items") or [])
+        if row.get("cluster") == cluster
+    ]
+
+    queue_rows = [
+        row for row in (
+            shadow_candidate_improvement_queue.get("queue")
+            or shadow_candidate_improvement_queue.get("items")
+            or shadow_candidate_improvement_queue.get("top_items")
+            or []
+        )
+        if (
+            row.get("candidate_id") == "quality_timing:matrix_alignment_wait"
+            or ((row.get("evidence") or {}).get("cluster") == cluster)
+        )
+    ]
+
+    context_blockers = set()
+    for row in blocked_candidates:
+        for dim in row.get("blocked_context_dimensions") or []:
+            context_blockers.add(dim)
+    for row in decision_oos_items:
+        for dim in ((row.get("current_window") or {}).get("context_blockers") or []):
+            context_blockers.add(dim)
+
+    event_count = safe_int(
+        cluster_opportunity.get("event_count"),
+        safe_int(((repeated_decision_watch[0].get("current_window") if repeated_decision_watch else {}) or {}).get("decision_no_pass_event_count"), 0),
+    )
+    unique_tokens = safe_int(
+        cluster_opportunity.get("unique_tokens"),
+        safe_int(((repeated_decision_watch[0].get("current_window") if repeated_decision_watch else {}) or {}).get("unique_tokens"), 0),
+    )
+    raw_denominator = safe_int(
+        capture_60_gap_report.get("raw_gold_silver_denominator"),
+        safe_int((quality_timing_report.get("denominator") or {}).get("raw_all_gold_silver_event_rows"), 0),
+    )
+    target_count = safe_int(capture_60_gap_report.get("target_60_count"), 0)
+    final_count = safe_int(
+        capture_60_gap_report.get("mode_disabled_adjusted_final_eligibility_count"),
+        safe_int(capture_60_gap_report.get("final_eligibility_count"), 0),
+    )
+    impact = cluster_opportunity.get("readiness_impact_upper_bound") or {}
+    if not impact:
+        upper_count = final_count + event_count
+        impact = {
+            "cluster": cluster,
+            "current_final_eligibility_count": final_count,
+            "event_count": event_count,
+            "target_final_eligibility_event_count": target_count,
+            "upper_bound_final_eligibility_count_if_cluster_resolved": upper_count,
+            "upper_bound_final_eligibility_rate_if_cluster_resolved": safe_rate(upper_count, raw_denominator),
+            "residual_gap_to_60pct_after_cluster_upper_bound": max(0, target_count - upper_count),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+
+    if repeated_decision_watch or repeated_candidate_probes:
+        classification = "MATRIX_ALIGNMENT_FALSE_NEGATIVE_SHADOW_PROBE_REPEATED_SAME_WINDOW"
+        next_action = "evaluate_matrix_alignment_false_negative_probe_in_next_clean_non_overlapping_window"
+    elif cluster_opportunity:
+        classification = "MATRIX_ALIGNMENT_FALSE_NEGATIVE_SHADOW_PROBE_DISCOVERY_ONLY"
+        next_action = "continue_matrix_alignment_false_negative_shadow_tracking"
+    else:
+        classification = "MATRIX_ALIGNMENT_FALSE_NEGATIVE_SHADOW_PROBE_EMPTY"
+        next_action = "continue_quality_timing_cluster_discovery"
+
+    return {
+        "schema_version": "matrix_alignment_false_negative_shadow_probe.v1",
+        "report_type": "matrix_alignment_false_negative_shadow_probe",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "cluster": cluster,
+        "scope": "shadow_only_quality_timing_false_negative_probe",
+        "evidence_level": "discovery_same_window",
+        "allowed_use": "shadow_only_review",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "denominator": {
+            "raw_gold_silver_event_rows": raw_denominator,
+            "target_60_count": target_count,
+            "current_mode_disabled_adjusted_final_eligibility_count": final_count,
+            "cluster_event_count": event_count,
+            "cluster_unique_tokens": unique_tokens,
+            "cluster_share_of_raw_gold_silver": safe_rate(event_count, raw_denominator),
+            "registered_candidate_probe_count": len(candidate_probe_rows),
+            "repeated_candidate_probe_count": len(repeated_candidate_probes),
+            "registered_decision_watch_count": len(decision_watch_rows),
+            "repeated_decision_watch_count": len(repeated_decision_watch),
+            "shadow_queue_item_count": len(queue_rows),
+        },
+        "current_window": {
+            "cluster_opportunity": cluster_opportunity,
+            "reason_level_breakout": reason_breakout[:12],
+            "top_clean_candidates": clean_candidates[:8],
+            "top_blocked_candidates": blocked_candidates[:8],
+            "top_lifecycle_source_contexts": (
+                cluster_opportunity.get("top_lifecycle_source_contexts") or []
+            )[:8],
+            "readiness_impact_upper_bound": impact,
+            "context_blocker_dimensions": sorted(context_blockers),
+        },
+        "candidate_probe_validation": {
+            "classification": quality_timing_probe_validation.get("classification"),
+            "status_counts": quality_timing_probe_validation.get("status_counts") or {},
+            "repeated_candidate_probe_count": len(repeated_candidate_probes),
+            "repeated_candidate_probes": repeated_candidate_probes[:12],
+            "oos_readiness_queue": {
+                "classification": (
+                    quality_timing_probe_validation.get("oos_readiness_queue") or {}
+                ).get("classification"),
+                "queue_count": (
+                    quality_timing_probe_validation.get("oos_readiness_queue") or {}
+                ).get("queue_count"),
+            },
+        },
+        "decision_no_pass_watch_validation": {
+            "classification": decision_no_pass_watch_validation.get("classification"),
+            "status_counts": decision_no_pass_watch_validation.get("status_counts") or {},
+            "repeated_decision_watch_count": len(repeated_decision_watch),
+            "repeated_decision_watch": repeated_decision_watch[:8],
+            "oos_readiness_items": decision_oos_items[:8],
+        },
+        "shadow_candidate_improvement_queue": {
+            "classification": shadow_candidate_improvement_queue.get("classification"),
+            "queue_count": shadow_candidate_improvement_queue.get("queue_count"),
+            "matching_items": queue_rows[:8],
+        },
+        "readiness_gates": {
+            "same_window_repeated": bool(repeated_decision_watch or repeated_candidate_probes),
+            "context_clean_window_required": True,
+            "non_overlapping_oos_required": True,
+            "human_approval_required_before_promotion": True,
+            "promotion_allowed": False,
+        },
+        "forbidden_runtime_actions": [
+            "do_not_change_matrix_thresholds",
+            "do_not_treat_observe_or_wait_as_entry_eligible",
+            "do_not_change_final_entry_contract",
+            "do_not_change_a_class_mode",
+            "do_not_enable_paper_or_live_executor",
+            "do_not_change_gates_or_risk",
+        ],
+        "notes": [
+            "This artifact tracks a possible false-negative quality/timing cluster only.",
+            "It is not evidence that matrix alignment waits are wrong or safe to trade.",
+            "Runtime changes require clean-window/OOS validation and human approval.",
+        ],
+    }
+
+
 def compact_pending_momentum_decay_probe(row):
     probe_id = row.get("probe_id")
     return {
@@ -4604,6 +4819,9 @@ def write_materialized_artifacts(
             "final_entry_readiness_audit": "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
             "shadow_candidate_improvement_queue": "shadow_candidate_improvement_queue.json",
+            "matrix_alignment_false_negative_shadow_probe": (
+                f"matrix_alignment_false_negative_shadow_probe_{int(args.hours)}h.json"
+            ),
             "oos_readiness_summary": "oos_readiness_summary.json",
         }
         for key, filename in v3_outputs.items():
@@ -4705,6 +4923,55 @@ def write_materialized_artifacts(
                 return {}
         return {}
 
+    matrix_alignment_probe_path = (
+        run_dir / f"matrix_alignment_false_negative_shadow_probe_{int(args.hours)}h.json"
+    )
+
+    def load_report_from_paths(name, fallback_name=None):
+        path = readiness_paths.get(name)
+        if path and Path(path).exists():
+            try:
+                return load_json(path)
+            except Exception:
+                return {}
+        fallback = run_dir / (fallback_name or f"{name}.json")
+        if fallback.exists():
+            try:
+                return load_json(fallback)
+            except Exception:
+                return {}
+        return {}
+
+    def write_matrix_alignment_probe_report():
+        quality_probe_report = load_report_from_paths(
+            "quality_timing_candidate_probe_validation",
+            f"quality_timing_candidate_probe_validation_{int(args.hours)}h.json",
+        )
+        decision_watch_report = load_report_from_paths(
+            "decision_no_pass_quality_timing_watch_validation",
+            f"decision_no_pass_quality_timing_watch_validation_{int(args.hours)}h.json",
+        )
+        shadow_queue = load_report_from_paths(
+            "shadow_candidate_improvement_queue",
+            "shadow_candidate_improvement_queue.json",
+        )
+        capture_gap = load_report_from_paths(
+            "capture_60_gap_report",
+            "capture_60_gap_report.json",
+        )
+        write_json(
+            matrix_alignment_probe_path,
+            build_matrix_alignment_false_negative_shadow_probe(
+                quality_timing_report,
+                quality_probe_report,
+                decision_watch_report,
+                shadow_queue,
+                capture_gap,
+            ),
+        )
+        readiness_paths["matrix_alignment_false_negative_shadow_probe"] = matrix_alignment_probe_path
+        return matrix_alignment_probe_path
+
     write_json(
         quality_timing_probe_validation_path,
         build_quality_timing_candidate_probe_validation(registry, quality_timing_report),
@@ -4735,6 +5002,7 @@ def write_materialized_artifacts(
     readiness_paths["pending_stale_before_final_watch_validation"] = (
         pending_stale_before_final_validation_path
     )
+    write_matrix_alignment_probe_report()
     verdict = build_loop_verdict()
     verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
     write_json(verdict_path, verdict)
@@ -4810,11 +5078,13 @@ def write_materialized_artifacts(
             pending_stale_before_final_validation_path
         )
         run_capture_60_target_artifacts()
+        write_matrix_alignment_probe_report()
         run_pass_allow_60_post_freeze_validation()
         run_capture_cross_post_freeze_validation()
         # Rebuild v3 target/OOS artifacts so oos_readiness_summary consumes the
         # freshly refreshed post-freeze validations from the current finalize.
         run_capture_60_target_artifacts()
+        write_matrix_alignment_probe_report()
         verdict = build_loop_verdict()
         verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
         write_json(verdict_path, verdict)

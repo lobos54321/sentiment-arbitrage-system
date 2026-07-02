@@ -103,6 +103,7 @@ DERIVED_READINESS_SIBLINGS = {
     "quality_timing_reject_research_audit": "quality_timing_reject_research_audit_24h.json",
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
+    "matrix_alignment_false_negative_shadow_probe": "matrix_alignment_false_negative_shadow_probe_24h.json",
     "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
     "pending_stale_before_final_watch_validation": "pending_stale_before_final_watch_validation_24h.json",
     "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
@@ -1529,6 +1530,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     quality_timing_probe_validation = readiness_reports.get("quality_timing_candidate_probe_validation") or {}
     decision_no_pass_watch_validation = (
         readiness_reports.get("decision_no_pass_quality_timing_watch_validation") or {}
+    )
+    matrix_alignment_false_negative_probe = (
+        readiness_reports.get("matrix_alignment_false_negative_shadow_probe") or {}
     )
     pending_momentum_decay_validation = readiness_reports.get("pending_momentum_decay_recheck_validation") or {}
     pending_stale_before_final_validation = (
@@ -3082,6 +3086,59 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "top_repeated_clusters": (
                 decision_no_pass_watch_validation.get("top_repeated_clusters") or []
             )[:10],
+        },
+        "matrix_alignment_false_negative_shadow_probe": {
+            "available": bool(matrix_alignment_false_negative_probe),
+            "classification": matrix_alignment_false_negative_probe.get("classification"),
+            "next_action": matrix_alignment_false_negative_probe.get("next_action"),
+            "cluster": matrix_alignment_false_negative_probe.get("cluster"),
+            "scope": matrix_alignment_false_negative_probe.get("scope"),
+            "evidence_level": matrix_alignment_false_negative_probe.get("evidence_level"),
+            "allowed_use": matrix_alignment_false_negative_probe.get("allowed_use") or "shadow_only_review",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "denominator": matrix_alignment_false_negative_probe.get("denominator") or {},
+            "current_window": {
+                "readiness_impact_upper_bound": (
+                    (matrix_alignment_false_negative_probe.get("current_window") or {}).get(
+                        "readiness_impact_upper_bound"
+                    )
+                    or {}
+                ),
+                "context_blocker_dimensions": (
+                    (matrix_alignment_false_negative_probe.get("current_window") or {}).get(
+                        "context_blocker_dimensions"
+                    )
+                    or []
+                ),
+                "top_clean_candidates": (
+                    (matrix_alignment_false_negative_probe.get("current_window") or {}).get(
+                        "top_clean_candidates"
+                    )
+                    or []
+                )[:8],
+                "reason_level_breakout": (
+                    (matrix_alignment_false_negative_probe.get("current_window") or {}).get(
+                        "reason_level_breakout"
+                    )
+                    or []
+                )[:8],
+            },
+            "candidate_probe_validation": (
+                matrix_alignment_false_negative_probe.get("candidate_probe_validation") or {}
+            ),
+            "decision_no_pass_watch_validation": (
+                matrix_alignment_false_negative_probe.get("decision_no_pass_watch_validation") or {}
+            ),
+            "shadow_candidate_improvement_queue": (
+                matrix_alignment_false_negative_probe.get("shadow_candidate_improvement_queue") or {}
+            ),
+            "readiness_gates": matrix_alignment_false_negative_probe.get("readiness_gates") or {},
+            "forbidden_runtime_actions": (
+                matrix_alignment_false_negative_probe.get("forbidden_runtime_actions") or []
+            ),
         },
         "pending_momentum_decay_recheck_validation": {
             "available": bool(pending_momentum_decay_validation),
