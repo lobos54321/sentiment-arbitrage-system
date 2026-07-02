@@ -1216,6 +1216,21 @@ def build_markov_effectiveness_report(markov_reports, capture):
             "coverage": coverage,
             "usage": report.get("usage") or "discovery_only",
         }
+    total_bucket_count = total_green + total_yellow + total_red + total_insufficient
+    total_informative_buckets = total_green + total_yellow
+    total_closed_virtual_rows = sum(row.get("closed_virtual_rows") or 0 for row in profile_diagnostics.values())
+    total_keys_emitted = sum(row.get("keys_emitted") or 0 for row in profile_diagnostics.values())
+    insufficient_rate = (
+        round(total_insufficient / total_bucket_count, 6)
+        if total_bucket_count
+        else None
+    )
+    informative_bucket_rate = (
+        round(total_informative_buckets / total_bucket_count, 6)
+        if total_bucket_count
+        else None
+    )
+    coverage_sufficient = bool(total_closed_virtual_rows and total_keys_emitted and total_informative_buckets)
     observed_profiles = set(markov_reports)
     recommended_shadow_profiles = [
         {
@@ -1304,10 +1319,30 @@ def build_markov_effectiveness_report(markov_reports, capture):
         "usage": "research_only_markov_information_value",
         "promotion_allowed": False,
         "markov_used_for_promotion": False,
+        "profile_count": len(profiles),
+        "closed_virtual_rows": total_closed_virtual_rows,
+        "keys_emitted": total_keys_emitted,
         "total_green_buckets": total_green,
         "total_yellow_buckets": total_yellow,
         "total_red_buckets": total_red,
         "total_insufficient_buckets": total_insufficient,
+        "total_bucket_count": total_bucket_count,
+        "informative_bucket_count": total_informative_buckets,
+        "informative_bucket_rate": informative_bucket_rate,
+        "insufficient_rate": insufficient_rate,
+        "coverage_sufficient": coverage_sufficient,
+        "insufficient_rate_acceptable": (
+            insufficient_rate is not None and insufficient_rate < 0.5
+        ),
+        "capture_lift_available": False,
+        "coverage_on_raw_dogs": None,
+        "coverage_on_raw_dogs_status": "not_joined_to_raw_gold_silver_events_in_this_report",
+        "raw_dog_density_lift": None,
+        "decision_capture_lift": None,
+        "pending_capture_lift": None,
+        "final_eligibility_lift": None,
+        "mode_disabled_adjusted_final_eligibility_lift": None,
+        "oos_status": "OOS_REQUIRED_BEFORE_PROMOTION",
         "profiles": profiles,
         "profile_diagnostics": profile_diagnostics,
         "non_informative_reasons": non_informative_reasons,

@@ -498,6 +498,16 @@ def build_strategy_memory_rows(
 def top_level_payload(*, report_type, rows, raw_count, global_rates, min_raw_events, extra=None):
     counts = Counter(row.get("verdict") for row in rows)
     improvement = counts.get("SHADOW_IMPROVEMENT_CANDIDATE", 0)
+    blocked = sum(count for verdict, count in counts.items() if str(verdict or "").startswith("BLOCKED"))
+    too_small = counts.get("TOO_SMALL", 0)
+    rejected = sum(count for verdict, count in counts.items() if "REJECTED" in str(verdict or ""))
+    watch = counts.get("DISCOVERY_WATCH", 0)
+    valid = max(0, len(rows) - blocked - too_small - rejected)
+
+    def max_lift(field):
+        values = [safe_float(row.get(field)) for row in rows if safe_float(row.get(field)) is not None]
+        return round(max(values), 6) if values else None
+
     if improvement:
         classification = "CLEAN_DIMENSION_2D_SHADOW_IMPROVEMENT_CANDIDATES"
         next_action = "freeze_repeated_clean_dimension_crosses_for_oos_if_context_remains_clean"
@@ -519,8 +529,30 @@ def top_level_payload(*, report_type, rows, raw_count, global_rates, min_raw_eve
         "min_raw_events": min_raw_events,
         "global_stage_rates": global_rates,
         "row_count": len(rows),
+        "cross_count": len(rows),
+        "valid_cross_count": valid,
+        "invalid_cross_count": len(rows) - valid,
+        "shadow_improvement_candidate_count": improvement,
+        "discovery_hit_count": improvement,
+        "watch_count": watch,
+        "blocked_cross_count": blocked,
+        "too_small_cross_count": too_small,
+        "rejected_cross_count": rejected,
         "status_counts": dict(counts),
+        "same_window_discovery_only": True,
+        "oos_required_before_promotion": True,
+        "oos_status": "OOS_PENDING",
+        "best_lifts_vs_global": {
+            "decision_capture_lift": max_lift("decision_capture_lift_vs_global"),
+            "pass_allow_capture_lift": max_lift("pass_allow_capture_lift_vs_global"),
+            "pending_capture_lift": max_lift("pending_capture_lift_vs_global"),
+            "final_eligibility_lift": max_lift("final_eligibility_lift_vs_global"),
+            "mode_disabled_adjusted_final_eligibility_lift": max_lift(
+                "mode_disabled_adjusted_final_eligibility_lift_vs_global"
+            ),
+        },
         "top_rows": rows[:40],
+        "top_crosses": rows[:40],
         "rows": rows,
         "promotion_allowed": False,
         "strategy_change_allowed": False,
