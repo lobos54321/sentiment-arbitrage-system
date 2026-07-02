@@ -3924,16 +3924,37 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     items = sorted(items, key=improvement_queue_priority)
     status_counts = Counter(row.get("hypothesis_source") for row in items)
     top_items = items[:75]
+    top_next_actions = []
+    for item in top_items:
+        action = item.get("next_action")
+        if action and action not in top_next_actions:
+            top_next_actions.append(action)
+        if len(top_next_actions) >= 10:
+            break
+    if items:
+        classification = "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
+        next_action = (
+            top_next_actions[0]
+            if top_next_actions
+            else "track_shadow_only_candidate_improvement_queue_until_clean_oos"
+        )
+    else:
+        classification = "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_EMPTY"
+        next_action = "continue_capture_discovery_until_shadow_candidate_queue_has_items"
     return {
         "schema_version": "shadow_candidate_improvement_queue.v3",
         "report_type": "shadow_candidate_improvement_queue",
         "generated_at": utc_now(),
+        "classification": classification,
+        "evidence_level": "discovery_shadow_only",
+        "next_action": next_action,
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
         "queue_count": len(items),
         "source_counts": dict(status_counts),
+        "top_next_actions": top_next_actions,
         "top_items": top_items,
         "top_opportunities": top_items,
         "strategy_memory_status_counts": strategy_memory_validation.get("status_counts") or {},
@@ -5152,12 +5173,16 @@ def self_test():
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
         assert queue["schema_version"] == "shadow_candidate_improvement_queue.v3"
+        assert queue["classification"] == "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
+        assert queue["evidence_level"] == "discovery_shadow_only"
+        assert queue["next_action"]
         assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
         assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 2
         assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
         assert queue["source_counts"]["pending_momentum_decay_shadow_probe"] == 3
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
+        assert queue["top_next_actions"]
         assert queue["top_opportunities"] == queue["top_items"]
         assert any(
             item.get("hypothesis_source") == "clean_2d_capture_cross_slice"

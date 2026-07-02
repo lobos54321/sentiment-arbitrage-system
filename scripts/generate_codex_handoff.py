@@ -330,8 +330,12 @@ def build_handoff(verdict):
                     "shadow_candidate_improvement_queue": {
                         key: shadow_queue.get(key)
                         for key in (
+                            "classification",
+                            "evidence_level",
+                            "next_action",
                             "queue_count",
                             "source_counts",
+                            "top_next_actions",
                             "promotion_allowed",
                         )
                     },
@@ -1459,8 +1463,12 @@ def self_test():
         "per_candidate_effectiveness_summary": {"candidate_count": 84},
         "candidate_improvement_opportunities_summary": {"opportunity_count": 2},
         "shadow_candidate_improvement_queue": {
+            "classification": "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY",
+            "evidence_level": "discovery_shadow_only",
+            "next_action": "track_notath_upstream_skip_shadow_probe",
             "queue_count": 1,
             "source_counts": {"quality_timing_reject_cluster": 1},
+            "top_next_actions": ["track_notath_upstream_skip_shadow_probe"],
             "promotion_allowed": False,
             "top_items": [
                 {
@@ -1952,6 +1960,9 @@ def self_test():
     assert "Readiness Summaries" in text
     assert "context_clean_window_progress" in text
     assert "candidate_improvement_opportunities_summary" in text
+    assert "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY" in text
+    assert "discovery_shadow_only" in text
+    assert "track_notath_upstream_skip_shadow_probe" in text
     assert "shadow_candidate_improvement_top_items" in text
     assert "quality_timing:notath_upstream_skip" in text
     assert "Kline Coverage Resolution" in text

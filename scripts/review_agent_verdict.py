@@ -1790,8 +1790,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         },
         "shadow_candidate_improvement_queue": {
             "available": bool(shadow_candidate_improvement_queue),
+            "classification": shadow_candidate_improvement_queue.get("classification"),
+            "evidence_level": shadow_candidate_improvement_queue.get("evidence_level"),
+            "next_action": shadow_candidate_improvement_queue.get("next_action"),
             "queue_count": shadow_candidate_improvement_queue.get("queue_count", 0),
             "source_counts": shadow_candidate_improvement_queue.get("source_counts") or {},
+            "top_next_actions": shadow_candidate_improvement_queue.get("top_next_actions") or [],
             "top_items": (shadow_candidate_improvement_queue.get("top_items") or [])[:12],
             "promotion_allowed": False,
         },
@@ -3941,6 +3945,24 @@ def self_test():
             "schema_version": "capture_cross_validity_report.v1",
             "valid_cross_count": 3,
         })
+        write_json(root / "shadow_candidate_improvement_queue.json", {
+            "schema_version": "shadow_candidate_improvement_queue.v3",
+            "report_type": "shadow_candidate_improvement_queue",
+            "classification": "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY",
+            "evidence_level": "discovery_shadow_only",
+            "next_action": "track_notath_upstream_skip_shadow_probe",
+            "queue_count": 1,
+            "source_counts": {"quality_timing_reject_cluster": 1},
+            "top_next_actions": ["track_notath_upstream_skip_shadow_probe"],
+            "promotion_allowed": False,
+            "top_items": [
+                {
+                    "candidate_id": "quality_timing:notath_upstream_skip",
+                    "hypothesis_source": "quality_timing_reject_cluster",
+                    "promotion_allowed": False,
+                }
+            ],
+        })
         write_json(root / "volume_kline_coverage_audit_24h.json", {
             "schema_version": "volume_kline_coverage_audit.v1",
             "overall": {
@@ -4091,6 +4113,12 @@ def self_test():
         assert sibling_verdict["candidate_improvement_opportunities_summary"]["opportunity_count"] == 2
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
+        shadow_queue = sibling_verdict["shadow_candidate_improvement_queue"]
+        assert shadow_queue["classification"] == "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
+        assert shadow_queue["evidence_level"] == "discovery_shadow_only"
+        assert shadow_queue["next_action"] == "track_notath_upstream_skip_shadow_probe"
+        assert shadow_queue["top_next_actions"] == ["track_notath_upstream_skip_shadow_probe"]
+        assert shadow_queue["promotion_allowed"] is False
         volume_resolution = sibling_verdict["volume_kline_root_cause_audit"]["volume_context_resolution"]
         assert volume_resolution["classification"] == (
             "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE"
