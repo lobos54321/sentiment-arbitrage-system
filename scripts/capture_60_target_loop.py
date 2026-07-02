@@ -56,6 +56,7 @@ REQUIRED_FILES = {
     "capture_cross": "capture_cross_validity_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
+    "kline_coverage_resolution_audit": "kline_coverage_resolution_audit_24h.json",
     "pnl_secondary": "pnl_cross_secondary_24h.json",
     "oos_refresh": "oos_readiness_probe_refresh.json",
 }
@@ -3552,6 +3553,30 @@ def create_self_test_run(root):
             "kline_uncovered_root_cause_counts": {"baseline_confidence_low_low_30_60s": 3},
         },
     }
+    kline_resolution = {
+        "overall": {
+            "classification": "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE",
+            "next_action": "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection",
+            "research_kline_recoverable": True,
+            "promotion_allowed": False,
+        },
+        "formal_kline_coverage": {
+            "formal_coverage_rate": 0.4,
+            "additional_formal_rows_needed_to_80pct": 2,
+        },
+        "research_recoverability": {
+            "confidence_adjusted_research_kline_coverage_rate": 0.8,
+            "time_legal_recoverable_rows": 2,
+            "confidence_adjusted_reaches_80pct": True,
+        },
+        "allowed_resolution_tracks": [
+            {
+                "track": "low_confidence_time_legal_research",
+                "allowed_use": "research_only",
+                "promotion_allowed": False,
+            }
+        ],
+    }
     context_blocker_monitor = {
         "overall_verdict": {
             "quote_writer_fix": "VERIFIED_POST_DEPLOY",
@@ -3850,6 +3875,7 @@ def create_self_test_run(root):
         "decision_no_pass_quality_timing_watch_validation": decision_no_pass_watch_validation,
         "capture_cross": capture_cross,
         "markov_effectiveness": markov,
+        "kline_coverage_resolution_audit": kline_resolution,
     }
     for key, filename in REQUIRED_FILES.items():
         write_json(run_dir / filename, fixtures.get(key, {}))
@@ -3959,13 +3985,21 @@ def self_test():
         assert context["dimensions"]["quote-sensitive"]["eligible_for_capture_cross"] is True
         assert "quote-sensitive" not in context["blocked_dimensions"]
         assert context["classification"] == "BLOCKED_CONTEXT_COVERAGE"
-        assert context["next_action"] == "continue_matured_volume_shadow_recheck_and_collect_formal_volume_context"
+        assert context["next_action"] == (
+            "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
+        )
         assert context["dimension_eligibility"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimension_eligibility"]["volume"]["status"] == STATUS_BLOCKED
         assert context["dimension_eligibility"]["volume"]["allowed_use"] == "blocked_no_promotion_evidence"
         assert context["dimension_eligibility"]["kline"]["status"] == STATUS_BLOCKED
+        assert context["dimension_eligibility"]["kline"]["allowed_use"] == "research_only_no_promotion_evidence"
+        assert context["dimension_eligibility"]["kline"]["research_only_recoverable"] is True
         assert context["dimension_eligibility"]["kline"]["promotion_allowed"] is False
-        assert context["research_only_dimensions"] == []
+        assert context["research_only_dimensions"] == ["kline"]
+        assert (
+            context["dimensions"]["kline"]["evidence"]["kline_resolution_classification"]
+            == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+        )
         assert (
             context["dimensions"]["quote-sensitive"]["evidence"][
                 "quote_clean_window_pending_reconciled_by_current_coverage"
