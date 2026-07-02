@@ -608,7 +608,11 @@ def build_handoff(verdict):
                 "",
                 "```json",
                 json.dumps(
-                    compact_volume_kline["volume_context_resolution"],
+                    {
+                        "volume_context_resolution": compact_volume_kline[
+                            "volume_context_resolution"
+                        ],
+                    },
                     indent=2,
                     sort_keys=True,
                 ),
