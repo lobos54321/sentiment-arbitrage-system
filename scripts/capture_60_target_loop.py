@@ -76,6 +76,7 @@ V3_OUTPUT_FILES = {
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
     "shadow_candidate_improvement_queue": "shadow_candidate_improvement_queue.json",
+    "capture_cross": "capture_cross_validity_24h.json",
     "oos_readiness_summary": "oos_readiness_summary.json",
 }
 
@@ -3033,21 +3034,26 @@ def freeze_item_required_dimension_groups(item):
         groups.add(dimension_group)
     dimension = definition.get("dimension")
     if dimension:
-        if "quote" in str(dimension):
+        dimension_text = str(dimension)
+        if "matured_volume" in dimension_text:
+            groups.add("matured_volume")
+        elif "quote" in dimension_text:
             groups.add("quote-sensitive")
-        elif "source" in str(dimension):
+        elif "source" in dimension_text:
             groups.add("source_component")
-        elif "lifecycle" in str(dimension):
+        elif "lifecycle" in dimension_text:
             groups.add("lifecycle")
-        elif "volume" in str(dimension):
+        elif "volume" in dimension_text:
             groups.add("volume")
-        elif "kline" in str(dimension) or "candle" in str(dimension):
+        elif "kline" in dimension_text or "candle" in dimension_text:
             groups.add("kline")
-        elif "markov" in str(dimension):
+        elif "markov" in dimension_text:
             groups.add("Markov")
     for blocker in definition.get("context_blockers") or item.get("context_blockers") or []:
         blocker_text = str(blocker)
-        if "quote" in blocker_text or "schema" in blocker_text:
+        if "matured_volume" in blocker_text:
+            groups.add("matured_volume")
+        elif "quote" in blocker_text or "schema" in blocker_text:
             groups.add("quote-sensitive")
         elif "source_component" in blocker_text:
             groups.add("source_component")
@@ -3408,6 +3414,201 @@ def clean_cross_downstream_evidence(row):
         "mode_adjusted_final_eligibility_lift": row.get("mode_adjusted_final_eligibility_lift"),
         "paper_capture_lift": row.get("paper_capture_lift"),
     }
+
+
+def stage_rate(stage_metrics, stage_name, top_level_key):
+    if stage_metrics.get(top_level_key) is not None:
+        return safe_float(stage_metrics.get(top_level_key))
+    stage_counts = stage_metrics.get("stage_counts") or {}
+    row = stage_counts.get(stage_name) or {}
+    return safe_float(row.get("rate"))
+
+
+def lift_against(rate_value, global_rate):
+    if rate_value is None or global_rate is None:
+        return None
+    return round(float(rate_value) - float(global_rate), 6)
+
+
+def candidate_downstream_proxy(candidate_id, candidate_downstream, stage_metrics):
+    by_candidate = {
+        row.get("candidate_id"): row
+        for row in (candidate_downstream.get("all_candidates") or [])
+        if isinstance(row, dict) and row.get("candidate_id")
+    }
+    row = by_candidate.get(candidate_id) or {}
+    global_rates = {
+        "decision": stage_rate(stage_metrics, "decision_capture", "decision_capture_rate"),
+        "pass_allow": stage_rate(stage_metrics, "pass_allow_capture", "pass_allow_capture_rate"),
+        "pending": stage_rate(stage_metrics, "pending_capture", "pending_capture_rate"),
+        "final_entry": stage_rate(stage_metrics, "final_eligibility", "final_eligibility_capture_rate"),
+        "mode_adjusted_final": stage_rate(
+            stage_metrics,
+            "mode_disabled_adjusted_final_eligibility",
+            "mode_disabled_adjusted_final_eligibility_rate",
+        ),
+        "paper": stage_rate(stage_metrics, "paper_capture", "paper_capture_rate"),
+    }
+    proxy = {
+        "downstream_lift_available": bool(row),
+        "downstream_lift_scope": "candidate_level_after_match_proxy_not_slice_specific",
+        "downstream_slice_join_available": False,
+        "downstream_slice_join_required_for_promotion_evidence": True,
+        "slice_downstream_signal_count": row.get("matched_raw_gs_signals"),
+        "decision_capture_rate_after_match": row.get("decision_record_rate_after_match"),
+        "pass_allow_capture_rate_after_match": row.get("pass_allow_rate_after_match"),
+        "pending_capture_rate_after_match": row.get("pending_rate_after_match"),
+        "final_entry_rate_after_match": row.get("final_entry_contract_rate_after_match"),
+        "mode_adjusted_final_eligibility_rate_after_match": (
+            row.get("mode_disabled_adjusted_final_eligibility_rate_after_match")
+        ),
+        "paper_capture_rate_after_match": row.get("paper_trade_committed_rate_after_match"),
+        "decision_count_after_match": row.get("decision_record_count_after_match"),
+        "pass_allow_count_after_match": row.get("pass_allow_count_after_match"),
+        "pending_count_after_match": row.get("pending_count_after_match"),
+        "final_entry_count_after_match": row.get("final_entry_contract_count_after_match"),
+        "mode_adjusted_final_eligibility_count_after_match": (
+            row.get("mode_disabled_final_entry_count_after_match")
+        ),
+        "paper_capture_count_after_match": row.get("paper_trade_committed_count_after_match"),
+    }
+    proxy.update({
+        "decision_lift": lift_against(
+            safe_float(proxy.get("decision_capture_rate_after_match")),
+            global_rates["decision"],
+        ),
+        "pass_allow_lift": lift_against(
+            safe_float(proxy.get("pass_allow_capture_rate_after_match")),
+            global_rates["pass_allow"],
+        ),
+        "pending_lift": lift_against(
+            safe_float(proxy.get("pending_capture_rate_after_match")),
+            global_rates["pending"],
+        ),
+        "final_entry_lift": lift_against(
+            safe_float(proxy.get("final_entry_rate_after_match")),
+            global_rates["final_entry"],
+        ),
+        "mode_adjusted_final_eligibility_lift": lift_against(
+            safe_float(proxy.get("mode_adjusted_final_eligibility_rate_after_match")),
+            global_rates["mode_adjusted_final"],
+        ),
+        "paper_capture_lift": lift_against(
+            safe_float(proxy.get("paper_capture_rate_after_match")),
+            global_rates["paper"],
+        ),
+    })
+    return proxy
+
+
+def matured_volume_cross_rows(matured_volume_cross, candidate_downstream, stage_metrics, context_eligibility):
+    dimension = (context_eligibility.get("dimension_eligibility") or {}).get("matured_volume") or {}
+    if dimension.get("status") != STATUS_CLEAN or not dimension.get("eligible_for_capture_cross"):
+        return []
+    candidates = []
+    seen = set()
+    for source in (
+        (matured_volume_cross.get("top_watch_slices") or []),
+        (matured_volume_cross.get("top_slices") or []),
+        ((matured_volume_cross.get("h1_matured_building_volume") or {}).get("rows") or []),
+    ):
+        for row in source:
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("candidate_id"), row.get("dimension"), row.get("slice_value"))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(row)
+    out = []
+    for row in candidates:
+        verdict = row.get("verdict") or row.get("judgment")
+        if verdict not in {"MATURED_VOLUME_DISCOVERY_WATCH", "MATURED_VOLUME_DISCOVERY_HIT", "WATCH", "DISCOVERY_HIT"}:
+            continue
+        judgment = "DISCOVERY_HIT" if str(verdict).endswith("_HIT") else "WATCH"
+        item = {
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": "matured_volume_profile",
+            "dimension_group": "matured_volume",
+            "dimension_eligibility_status": STATUS_CLEAN,
+            "slice_value": row.get("slice_value"),
+            "judgment": judgment,
+            "matched_gold_silver_events": row.get("matched_gs_count"),
+            "match_recall_event": row.get("match_recall_event"),
+            "match_precision_event": row.get("match_precision_event"),
+            "recall_lift_vs_candidate_baseline": row.get("recall_lift_vs_candidate_baseline"),
+            "precision_lift_vs_candidate_baseline": row.get("precision_lift_vs_candidate_baseline"),
+            "valid": True,
+            "invalid_reasons": [],
+            "data_blockers": [],
+            "evidence_source": "matured_volume_capture_cross_audit",
+            "evidence_level": "discovery_same_window_shadow_only",
+            "pnl_secondary_status": "secondary_pnl_report_required_not_used_for_capture_cross",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        item.update(candidate_downstream_proxy(row.get("candidate_id"), candidate_downstream, stage_metrics))
+        out.append(item)
+    return out
+
+
+def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility, stage_metrics):
+    capture_cross = dict(reports.get("capture_cross") or {})
+    matured_rows = matured_volume_cross_rows(
+        reports.get("matured_volume_capture_cross_audit") or {},
+        reports.get("candidate_downstream") or {},
+        stage_metrics,
+        context_eligibility,
+    )
+    if not capture_cross:
+        capture_cross = {
+            "schema_version": "capture_cross_validity_report.v1",
+            "report_type": "capture_cross_validity_24h",
+            "valid_top_crosses": [],
+            "invalid_sample": [],
+            "criteria": {},
+            "dimension_registry": {},
+            "notes": [],
+            "can_promote_live": False,
+            "evidence_level": "discovery_same_window",
+        }
+    existing = list(capture_cross.get("valid_top_crosses") or [])
+    existing_keys = {
+        (row.get("candidate_id"), row.get("dimension"), row.get("slice_value"))
+        for row in existing
+        if isinstance(row, dict)
+    }
+    appended = [
+        row for row in matured_rows
+        if (row.get("candidate_id"), row.get("dimension"), row.get("slice_value")) not in existing_keys
+    ]
+    capture_cross["valid_top_crosses"] = existing + appended
+    capture_cross["valid_cross_count"] = len(capture_cross["valid_top_crosses"])
+    capture_cross["shadow_matured_volume_top_crosses"] = matured_rows
+    capture_cross["shadow_matured_volume_cross_count"] = len(matured_rows)
+    capture_cross.setdefault("dimension_registry", {})["matured_volume"] = ["matured_volume_profile"]
+    capture_cross["dimension_group_counts"] = dict(Counter(
+        row.get("dimension_group") or "unknown"
+        for row in capture_cross.get("valid_top_crosses") or []
+    ))
+    capture_cross["dimension_status_counts"] = dict(Counter(
+        row.get("dimension_eligibility_status") or "unknown"
+        for row in (capture_cross.get("valid_top_crosses") or []) + (capture_cross.get("invalid_sample") or [])
+    ))
+    notes = list(capture_cross.get("notes") or [])
+    note = (
+        "shadow_matured_volume_top_crosses are read-only delayed-context discovery evidence; "
+        "formal volume remains blocked until its own coverage passes."
+    )
+    if note not in notes:
+        notes.append(note)
+    capture_cross["notes"] = notes
+    capture_cross["can_promote_live"] = False
+    capture_cross["promotion_allowed"] = False
+    return capture_cross
 
 
 def build_shadow_candidate_improvement_queue(reports, context_eligibility):
@@ -3980,6 +4181,11 @@ def assemble_reports(run_dir, out_dir=None):
     stage_metrics = build_capture_stage_metrics(reports.get("a_class") or {})
     context_eligibility = build_context_dimension_eligibility(reports)
     reports["context_dimension_eligibility"] = context_eligibility
+    reports["capture_cross"] = enrich_capture_cross_with_shadow_matured_volume(
+        reports,
+        context_eligibility,
+        stage_metrics,
+    )
     pending_audit = build_pending_to_final_entry_audit(reports.get("a_class") or {})
     pending_audit["stale_before_final_review"] = build_stale_before_final_review(
         pending_audit,
@@ -4036,6 +4242,7 @@ def assemble_reports(run_dir, out_dir=None):
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
         "context_dimension_eligibility": context_eligibility,
+        "capture_cross": reports["capture_cross"],
         "decision_capture_60_gap_audit": decision_capture_gap_audit,
         "pass_allow_capture_gap_audit": pass_allow_gap_audit,
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
@@ -4270,6 +4477,27 @@ def create_self_test_run(root):
             }
         ]
     }
+    candidate_downstream = {
+        "all_candidates": [
+            {
+                "candidate_id": "entry_mode_registry:stage1",
+                "family": "entry_mode_registry",
+                "matched_raw_gs_signals": 2,
+                "decision_record_rate_after_match": 1.0,
+                "pass_allow_rate_after_match": 1.0,
+                "pending_rate_after_match": 0.5,
+                "final_entry_contract_rate_after_match": 0.0,
+                "mode_disabled_adjusted_final_eligibility_rate_after_match": 0.0,
+                "paper_trade_committed_rate_after_match": 0.0,
+                "decision_record_count_after_match": 2,
+                "pass_allow_count_after_match": 2,
+                "pending_count_after_match": 1,
+                "final_entry_contract_count_after_match": 0,
+                "mode_disabled_final_entry_count_after_match": 0,
+                "paper_trade_committed_count_after_match": 0,
+            }
+        ]
+    }
     quality_timing = {
         "stage_attribution": {
             "reason_counts": [
@@ -4449,6 +4677,20 @@ def create_self_test_run(root):
             "field_present_rate": 1.0,
             "unknown_rate": 0.1,
         },
+        "top_slices": [
+            {
+                "candidate_id": "entry_mode_registry:stage1",
+                "family": "entry_mode_registry",
+                "dimension": "matured_volume_profile",
+                "slice_value": "building",
+                "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                "matched_gs_count": 2,
+                "match_recall_event": 0.5,
+                "match_precision_event": 0.25,
+                "recall_lift_vs_candidate_baseline": 0.2,
+                "precision_lift_vs_candidate_baseline": 0.1,
+            }
+        ],
         "promotion_allowed": False,
     }
     fixtures = {
@@ -4460,6 +4702,7 @@ def create_self_test_run(root):
         "a_class": a_class,
         "strategy_memory_validation": strategy_validation,
         "strategy_memory_ingestion": ingestion,
+        "candidate_downstream": candidate_downstream,
         "candidate_improvement": candidate_improvement,
         "quality_timing_reject_research": quality_timing,
         "quality_timing_candidate_probe_validation": quality_timing_probe_validation,
@@ -4618,9 +4861,9 @@ def self_test():
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         residual_tracks = closure_plan["residual_gap_supplemental_tracks"]
         assert residual_tracks["residual_gap_after_selected_clusters"] == 0
-        assert residual_tracks["clean_2d_pass_allow_lift_slice_count"] == 1
-        assert residual_tracks["clean_2d_positive_pass_allow_lift_count"] == 1
-        assert residual_tracks["clean_2d_non_dedup_upper_bound_event_count"] == 3
+        assert residual_tracks["clean_2d_pass_allow_lift_slice_count"] == 2
+        assert residual_tracks["clean_2d_positive_pass_allow_lift_count"] == 2
+        assert residual_tracks["clean_2d_non_dedup_upper_bound_event_count"] == 5
         assert residual_tracks["blocked_2d_research_slice_count"] == 1
         assert residual_tracks["blocked_2d_research_non_dedup_upper_bound_event_count"] == 9
         assert residual_tracks["blocked_2d_research_upper_bound_excluded_from_residual"] is True
@@ -4629,15 +4872,24 @@ def self_test():
         assert blocked_2d_top["source_dimension_eligibility_status"] == "CLEAN"
         assert residual_tracks["supplemental_tracks_can_cover_residual_upper_bound"] is True
         assert residual_tracks["promotion_allowed"] is False
-        assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
+        assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 2
         assert closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["count"] == 1
         blocked_track_item = closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["items"][0]
         assert blocked_track_item["dimension_eligibility_status"] == "BLOCKED_CONTEXT_COVERAGE"
         assert blocked_track_item["source_dimension_eligibility_status"] == "CLEAN"
-        clean_2d_item = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]
+        clean_items = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"]
+        clean_2d_item = next(
+            row for row in clean_items
+            if row.get("downstream_lift_scope") == "slice_level_matched_gold_silver_signal_id"
+        )
         assert clean_2d_item["pass_allow_lift"] == 0.25
         assert clean_2d_item["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id"
         assert clean_2d_item["slice_downstream_signal_count"] == 3
+        assert any(
+            row.get("dimension_group") == "matured_volume"
+            and row.get("promotion_allowed") is False
+            for row in closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"]
+        )
         freeze_registry = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
@@ -4699,6 +4951,20 @@ def self_test():
         assert "matured_volume" in context["clean_dimensions"]
         assert "matured_volume" not in context["blocked_dimensions"]
         assert context["dimension_eligibility"]["matured_volume"]["allowed_use"] == "shadow_only_matured_volume_context"
+        capture_cross = load_json(run_dir / "capture_cross_validity_24h.json")
+        matured_cross_rows = capture_cross["shadow_matured_volume_top_crosses"]
+        assert matured_cross_rows
+        assert matured_cross_rows[0]["dimension_group"] == "matured_volume"
+        assert matured_cross_rows[0]["dimension_eligibility_status"] == STATUS_CLEAN
+        assert matured_cross_rows[0]["promotion_allowed"] is False
+        assert matured_cross_rows[0]["downstream_lift_scope"] == (
+            "candidate_level_after_match_proxy_not_slice_specific"
+        )
+        assert matured_cross_rows[0]["pass_allow_lift"] == 0.4
+        assert any(
+            row.get("dimension_group") == "matured_volume"
+            for row in capture_cross["valid_top_crosses"]
+        )
         assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
         assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
@@ -4749,11 +5015,17 @@ def self_test():
         assert queue["schema_version"] == "shadow_candidate_improvement_queue.v3"
         assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
-        assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 1
+        assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 2
         assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
         assert queue["source_counts"]["pending_momentum_decay_shadow_probe"] == 3
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
         assert queue["top_opportunities"] == queue["top_items"]
+        assert any(
+            item.get("hypothesis_source") == "clean_2d_capture_cross_slice"
+            and item.get("dimension_group") == "matured_volume"
+            and item.get("promotion_allowed") is False
+            for item in queue["top_items"]
+        )
         qt_probe_items = [
             item for item in queue["top_items"]
             if item.get("hypothesis_source") == "quality_timing_candidate_probe"
