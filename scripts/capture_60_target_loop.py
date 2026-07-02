@@ -1622,6 +1622,22 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
 
     blocked_dimensions = context_eligibility.get("blocked_dimensions") or []
     clean_dimensions = context_eligibility.get("clean_dimensions") or []
+    review_queue = (
+        [
+            {
+                "queue_source": "shadow_decision_bridge",
+                **row,
+            }
+            for row in shadow_review_items
+        ]
+        + [
+            {
+                "queue_source": "decision_no_pass_quality_timing",
+                **row,
+            }
+            for row in qt_review_items[:12]
+        ]
+    )
     return {
         "schema_version": "pass_allow_capture_gap_audit.v2",
         "report_type": "pass_allow_capture_gap_audit",
@@ -1638,6 +1654,13 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
         "runtime_effect": "none",
+        "raw_gold_silver_denominator": raw_den,
+        "target_60_count": target,
+        "current_pass_allow_count": pass_allow_count,
+        "additional_count_needed_to_60": additional_needed,
+        "potential_sources": potential_sources,
+        "review_queue_count": len(review_queue),
+        "review_queue": review_queue[:24],
         "target_gap": {
             "raw_gold_silver_denominator": raw_den,
             "target_capture_rate": TARGET_RATE,
@@ -2236,6 +2259,26 @@ def build_pass_allow_60_closure_plan(
         classification = "PASS_ALLOW_60_CLOSURE_PLAN_EMPTY"
         next_action = "continue_pass_allow_reason_decomposition"
 
+    candidate_plan_count = (
+        len(selected_cluster_items)
+        + len(clean_cross_items)
+        + len(shadow_pass_allow_items)
+    )
+    research_only_plan_count = len(blocked_cross_items)
+    potential_sources = {
+        "decision_no_pass_quality_timing_cluster_upper_bound": cumulative,
+        "clean_2d_non_dedup_upper_bound_event_count": clean_2d_non_dedup_upper_bound,
+        "shadow_queue_non_dedup_upper_bound_event_count": shadow_queue_non_dedup_upper_bound,
+        "blocked_2d_research_non_dedup_upper_bound_event_count": (
+            blocked_2d_research_non_dedup_upper_bound
+        ),
+        "blocked_2d_research_excluded_from_formal_closure": True,
+        "supplemental_non_dedup_upper_bound_event_count": supplemental_non_dedup_upper_bound,
+        "combined_selected_plus_supplemental_upper_bound_event_count": (
+            cumulative + supplemental_non_dedup_upper_bound
+        ),
+    }
+
     return {
         "schema_version": "pass_allow_60_closure_plan.v4",
         "report_type": "pass_allow_60_closure_plan",
@@ -2250,6 +2293,14 @@ def build_pass_allow_60_closure_plan(
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
         "runtime_effect": "none",
+        "raw_gold_silver_denominator": raw_den,
+        "target_60_count": target_60,
+        "current_pass_allow_count": current_pass_allow,
+        "additional_count_needed_to_60": additional_needed,
+        "candidate_plan_count": candidate_plan_count,
+        "research_only_plan_count": research_only_plan_count,
+        "potential_sources": potential_sources,
+        "review_queue_count": len(selected_cluster_items),
         "target_gap": {
             "raw_gold_silver_denominator": raw_den,
             "target_capture_rate": TARGET_RATE,
@@ -3935,6 +3986,9 @@ def self_test():
         assert pass_allow_gap["dominant_blocker"] is None
         assert pass_allow_gap["next_action"] == "pass_allow_capture_target_reached_continue_downstream_gap_audit"
         assert pass_allow_gap["promotion_allowed"] is False
+        assert pass_allow_gap["additional_count_needed_to_60"] == 0
+        assert isinstance(pass_allow_gap["potential_sources"], dict)
+        assert pass_allow_gap["review_queue_count"] == len(pass_allow_gap["review_queue"])
         dnp_review = load_json(run_dir / "decision_no_pass_quality_timing_review.json")
         assert dnp_review["schema_version"] == "decision_no_pass_quality_timing_review.v2"
         assert dnp_review["promotion_allowed"] is False
@@ -3955,6 +4009,12 @@ def self_test():
         assert closure_plan["promotion_allowed"] is False
         assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v4"
         assert closure_plan["classification"] == "PASS_ALLOW_60_CLOSURE_NOT_NEEDED"
+        assert closure_plan["additional_count_needed_to_60"] == 0
+        assert isinstance(closure_plan["potential_sources"], dict)
+        assert closure_plan["candidate_plan_count"] >= 1
+        assert closure_plan["review_queue_count"] == (
+            closure_plan["closure_tracks"]["decision_no_pass_quality_timing_clusters"]["count"]
+        )
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         residual_tracks = closure_plan["residual_gap_supplemental_tracks"]
         assert residual_tracks["residual_gap_after_selected_clusters"] == 0
