@@ -1981,12 +1981,23 @@ console.warn = (...args) => {
 
 let db;
 function openDashboardSqlite(dbPath, options) {
-  const database = options === undefined ? new Database(dbPath) : new Database(dbPath, options);
+  const defaultTimeoutMs = envInt('DASHBOARD_SQLITE_BUSY_TIMEOUT_MS', 30000, 0, 120000);
+  const sqliteOptions = {
+    ...(options || {}),
+    timeout: Number.isFinite(Number(options?.timeout)) ? Number(options.timeout) : defaultTimeoutMs,
+  };
+  const database = new Database(dbPath, sqliteOptions);
   try {
     database.pragma('mmap_size = 0');
   } catch {
     // Best-effort SIGBUS mitigation. Some readonly or older SQLite builds can
     // reject the pragma; the caller should still be able to use the connection.
+  }
+  try {
+    database.pragma(`busy_timeout = ${Math.max(0, sqliteOptions.timeout || 0)}`);
+  } catch {
+    // Best-effort lock tolerance. better-sqlite3 also receives the timeout
+    // option above, but the pragma keeps behavior explicit for SQLite itself.
   }
   return database;
 }
