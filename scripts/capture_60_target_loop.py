@@ -2278,6 +2278,127 @@ def build_pass_allow_60_closure_plan(
             cumulative + supplemental_non_dedup_upper_bound
         ),
     }
+    prioritized_closure_queue = []
+
+    def append_priority_item(source, bucket, source_weight, row):
+        if not isinstance(row, dict):
+            return
+        contribution = safe_float(
+            row.get("events_contributing_to_current_60pct_gap_upper_bound")
+            or row.get("events_contributing_to_60pct_gap_upper_bound")
+            or row.get("matched_gold_silver_events")
+            or row.get("event_count"),
+            0.0,
+        )
+        pass_allow_lift = safe_float(row.get("pass_allow_lift"), 0.0)
+        precision = safe_float(row.get("match_precision_event"), 0.0)
+        priority_score = round(
+            source_weight * 100000
+            + contribution * 100
+            + max(0.0, pass_allow_lift) * 10
+            + max(0.0, precision),
+            6,
+        )
+        prioritized_closure_queue.append({
+            "priority_rank": None,
+            "priority_bucket": bucket,
+            "priority_score": priority_score,
+            "formal_closure_eligible": not bool(row.get("context_blockers")),
+            "oos_freeze_ready": True,
+            "plan_item_id": row.get("plan_item_id"),
+            "evidence_source": source,
+            "candidate_id": row.get("candidate_id"),
+            "cluster": row.get("cluster"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "slice_value": row.get("slice_value"),
+            "expected_capture_stage_improved": row.get("expected_capture_stage_improved") or "pass_allow_capture",
+            "non_dedup_upper_bound_event_count": contribution,
+            "events_contributing_to_current_60pct_gap_upper_bound": (
+                row.get("events_contributing_to_current_60pct_gap_upper_bound")
+            ),
+            "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+            "pass_allow_lift": row.get("pass_allow_lift"),
+            "match_precision_event": row.get("match_precision_event"),
+            "context_blockers": row.get("context_blockers") or [],
+            "status": row.get("status"),
+            "next_action": row.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    for row in selected_cluster_items:
+        append_priority_item(
+            "decision_no_pass_quality_timing_review",
+            "P0_DIRECT_PASS_ALLOW_GAP_CLUSTER",
+            3,
+            row,
+        )
+    for row in clean_cross_items:
+        append_priority_item(
+            "capture_cross_validity_24h",
+            "P1_CLEAN_2D_PASS_ALLOW_LIFT",
+            2,
+            row,
+        )
+    for row in shadow_pass_allow_items:
+        append_priority_item(
+            "shadow_candidate_improvement_queue",
+            "P2_SHADOW_QUEUE_PASS_ALLOW",
+            1,
+            row,
+        )
+    prioritized_closure_queue = sorted(
+        prioritized_closure_queue,
+        key=lambda row: (
+            safe_float(row.get("priority_score"), 0.0),
+            safe_float(row.get("non_dedup_upper_bound_event_count"), 0.0),
+            str(row.get("plan_item_id") or ""),
+        ),
+        reverse=True,
+    )
+    for idx, row in enumerate(prioritized_closure_queue, 1):
+        row["priority_rank"] = idx
+
+    research_only_priority_queue = []
+    for row in blocked_cross_items:
+        contribution = safe_float(row.get("matched_gold_silver_events"), 0.0)
+        research_only_priority_queue.append({
+            "priority_rank": None,
+            "priority_bucket": "R_BLOCKED_2D_RESEARCH_ONLY",
+            "priority_score": round(contribution * 100 + max(0.0, safe_float(row.get("pass_allow_lift"), 0.0)) * 10, 6),
+            "formal_closure_eligible": False,
+            "oos_freeze_ready": False,
+            "plan_item_id": row.get("plan_item_id"),
+            "evidence_source": row.get("evidence_source"),
+            "candidate_id": row.get("candidate_id"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "slice_value": row.get("slice_value"),
+            "non_dedup_upper_bound_event_count": contribution,
+            "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+            "pass_allow_lift": row.get("pass_allow_lift"),
+            "context_blockers": row.get("context_blockers") or [],
+            "status": "RESEARCH_ONLY_CONTEXT_BLOCKED",
+            "next_action": "hold_until_context_dimension_clean_before_oos",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    research_only_priority_queue = sorted(
+        research_only_priority_queue,
+        key=lambda row: (
+            safe_float(row.get("priority_score"), 0.0),
+            safe_float(row.get("non_dedup_upper_bound_event_count"), 0.0),
+            str(row.get("plan_item_id") or ""),
+        ),
+        reverse=True,
+    )
+    for idx, row in enumerate(research_only_priority_queue, 1):
+        row["priority_rank"] = idx
 
     return {
         "schema_version": "pass_allow_60_closure_plan.v4",
@@ -2301,6 +2422,10 @@ def build_pass_allow_60_closure_plan(
         "research_only_plan_count": research_only_plan_count,
         "potential_sources": potential_sources,
         "review_queue_count": len(selected_cluster_items),
+        "priority_queue_count": len(prioritized_closure_queue),
+        "prioritized_closure_queue": prioritized_closure_queue,
+        "research_only_priority_queue_count": len(research_only_priority_queue),
+        "research_only_priority_queue": research_only_priority_queue,
         "target_gap": {
             "raw_gold_silver_denominator": raw_den,
             "target_capture_rate": TARGET_RATE,
@@ -2392,6 +2517,11 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
     now = utc_now()
     tracks = pass_allow_closure_plan.get("closure_tracks") or {}
     target_gap = pass_allow_closure_plan.get("target_gap") or {}
+    priority_by_plan_item = {
+        row.get("plan_item_id"): row
+        for row in pass_allow_closure_plan.get("prioritized_closure_queue") or []
+        if isinstance(row, dict) and row.get("plan_item_id")
+    }
     items = []
 
     def append_item(source, source_item, freeze_definition, expected_stage="pass_allow_capture"):
@@ -2401,11 +2531,16 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
         freeze_id = f"pass_allow_60:{source}:{fingerprint}"
         previous = previous_items_by_id.get(freeze_id) or {}
         frozen_at = previous.get("frozen_at") or previous_registry.get("definition_set_frozen_at") or previous_registry.get("generated_at") or now
+        priority = priority_by_plan_item.get(source_item.get("plan_item_id")) or {}
         items.append({
             "freeze_id": freeze_id,
             "source": source,
             "source_plan_item_id": source_item.get("plan_item_id"),
             "expected_capture_stage_improved": expected_stage,
+            "priority_rank": priority.get("priority_rank"),
+            "priority_bucket": priority.get("priority_bucket"),
+            "priority_score": priority.get("priority_score"),
+            "formal_closure_eligible": priority.get("formal_closure_eligible", True),
             "definition_fingerprint": fingerprint,
             "frozen_at": frozen_at,
             "freeze_definition": freeze_definition,
@@ -2508,6 +2643,14 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
         )
 
     source_counts = Counter(row.get("source") for row in items)
+    items = sorted(
+        items,
+        key=lambda row: (
+            safe_int(row.get("priority_rank"), 10**9),
+            -safe_float(row.get("priority_score"), 0.0),
+            str(row.get("freeze_id") or ""),
+        ),
+    )
     additional_needed = safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0)
     if additional_needed <= 0:
         classification = "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
@@ -2532,6 +2675,19 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
         "source_closure_plan_classification": pass_allow_closure_plan.get("classification"),
         "target_gap": target_gap,
         "frozen_definition_count": len(items),
+        "priority_queue_count": len(priority_by_plan_item),
+        "top_priority_items": [
+            {
+                "freeze_id": row.get("freeze_id"),
+                "source": row.get("source"),
+                "source_plan_item_id": row.get("source_plan_item_id"),
+                "priority_rank": row.get("priority_rank"),
+                "priority_bucket": row.get("priority_bucket"),
+                "priority_score": row.get("priority_score"),
+                "current_window_evidence": row.get("current_window_evidence") or {},
+            }
+            for row in items[:10]
+        ],
         "source_counts": dict(source_counts),
         "items": items,
         "oos_requirements": {
@@ -4015,6 +4171,13 @@ def self_test():
         assert closure_plan["review_queue_count"] == (
             closure_plan["closure_tracks"]["decision_no_pass_quality_timing_clusters"]["count"]
         )
+        assert closure_plan["priority_queue_count"] == closure_plan["candidate_plan_count"]
+        assert closure_plan["prioritized_closure_queue"]
+        assert closure_plan["prioritized_closure_queue"][0]["priority_rank"] == 1
+        assert closure_plan["prioritized_closure_queue"][0]["formal_closure_eligible"] is True
+        assert closure_plan["research_only_priority_queue_count"] == (
+            closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["count"]
+        )
         assert closure_plan["target_gap"]["additional_pass_allow_events_needed_to_60"] == 0
         residual_tracks = closure_plan["residual_gap_supplemental_tracks"]
         assert residual_tracks["residual_gap_after_selected_clusters"] == 0
@@ -4039,6 +4202,8 @@ def self_test():
         assert freeze_registry["definition_set_frozen_at"]
         assert freeze_registry["items"][0]["frozen_at"]
         assert freeze_registry["items"][0]["definition_fingerprint"]
+        assert freeze_registry["items"][0]["priority_rank"] == 1
+        assert freeze_registry["top_priority_items"][0]["priority_rank"] == 1
         assert freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["quote-sensitive"]["status"] == STATUS_CLEAN
