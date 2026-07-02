@@ -66,6 +66,7 @@ V3_OUTPUT_FILES = {
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
@@ -1556,6 +1557,124 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
             "current_target_* fields describe the active readiness target while A_CLASS/final_entry are not paper-ready.",
             "target_shortfall_stage is the first stage below 60%; largest_transition_dropoff is the biggest adjacent funnel loss. They can differ and should be audited separately.",
             "All suggested actions are constrained to evaluator, data, shadow-only, or human-approval handoff paths.",
+        ],
+    }
+
+
+def build_decision_capture_60_gap_audit(stage_metrics, gap_report, reports, context_eligibility):
+    stage_counts = stage_metrics.get("stage_counts") or {}
+    decision_gap = stage_gap_to_target(stage_counts, "decision_capture") or {}
+    shadow_bridge = reports.get("shadow_decision_bridge") or {}
+    shadow_den = shadow_bridge.get("denominator") or {}
+    decision_no_pass_validation = reports.get("decision_no_pass_quality_timing_watch_validation") or {}
+    decision_no_pass_queue = decision_no_pass_validation.get("oos_readiness_queue") or {}
+    quality_probe_validation = reports.get("quality_timing_candidate_probe_validation") or {}
+    quality_probe_queue = quality_probe_validation.get("oos_readiness_queue") or {}
+    raw_denominator = safe_int(stage_counts.get("raw_gold_silver_denominator"), 0)
+    current_decision_count = safe_int((stage_counts.get("decision_capture") or {}).get("count"), 0)
+    target_count = safe_int(stage_counts.get("target_60_count"), 0)
+    additional_needed = safe_int(decision_gap.get("additional_count_needed_to_60"), 0)
+    no_decision = safe_int(shadow_den.get("raw_signals_without_decision_record"), 0)
+    shadow_bridge_gap = safe_int(
+        shadow_den.get("shadow_entry_hypotheses_matched_no_decision_bridge"),
+        0,
+    )
+    optimistic_count = safe_int(
+        shadow_den.get("optimistic_decision_record_count_if_shadow_gap_logged"),
+        current_decision_count,
+    )
+    optimistic_rate = shadow_den.get("optimistic_decision_record_rate_if_shadow_gap_logged")
+    mirror_complete = (
+        shadow_bridge.get("status") == "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE"
+        and safe_float(shadow_den.get("mirror_event_coverage_vs_shadow_bridge_gap")) is not None
+        and safe_float(shadow_den.get("mirror_event_coverage_vs_shadow_bridge_gap")) >= 1.0
+        and not boolish(shadow_den.get("mirror_event_truncated"))
+    )
+    clean_blockers = context_eligibility.get("blocked_dimensions") or []
+    if gap_report.get("biggest_gap_stage") != "decision_capture":
+        classification = "DECISION_CAPTURE_60_NOT_CURRENT_TARGET_GAP"
+        next_action = "follow_current_capture_60_gap_stage"
+    elif current_decision_count >= target_count:
+        classification = "DECISION_CAPTURE_60_REACHED"
+        next_action = "continue_downstream_capture_readiness_audit"
+    elif mirror_complete and optimistic_count >= target_count:
+        classification = "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW"
+        next_action = "keep_shadow_bridge_instrumentation_read_only_and_validate_in_clean_non_overlapping_oos"
+    elif shadow_bridge_gap > 0:
+        classification = "DECISION_CAPTURE_60_SHADOW_BRIDGE_GAP_REQUIRES_MORE_EVIDENCE"
+        next_action = "continue_shadow_decision_bridge_monitoring"
+    else:
+        classification = "DECISION_CAPTURE_60_UNATTRIBUTED_NO_DECISION_GAP"
+        next_action = "audit_no_decision_record_bridge"
+    selected_clusters = []
+    for row in (decision_no_pass_queue.get("items") or [])[:8]:
+        selected_clusters.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "cluster": row.get("cluster"),
+            "status": row.get("status"),
+            "decision_no_pass_event_count": (row.get("current_window") or {}).get(
+                "decision_no_pass_event_count"
+            ),
+            "next_action": row.get("next_action"),
+            "promotion_allowed": False,
+        })
+    quality_probes = []
+    for row in (quality_probe_queue.get("items") or [])[:8]:
+        quality_probes.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "candidate_id": row.get("candidate_id"),
+            "quality_timing_cluster": row.get("quality_timing_cluster"),
+            "status": row.get("status"),
+            "next_action": row.get("next_action"),
+            "promotion_allowed": False,
+        })
+    return {
+        "schema_version": "decision_capture_60_gap_audit.v1",
+        "report_type": "decision_capture_60_gap_audit",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "raw_gold_silver_denominator": raw_denominator,
+        "target_60_count": target_count,
+        "current_decision_capture_count": current_decision_count,
+        "current_decision_capture_rate": (stage_counts.get("decision_capture") or {}).get("rate"),
+        "additional_decision_records_needed_to_60": additional_needed,
+        "raw_signals_without_decision_record": no_decision,
+        "shadow_entry_hypotheses_matched_no_decision_bridge": shadow_bridge_gap,
+        "shadow_bridge_gap_share_of_no_decision": shadow_den.get("shadow_bridge_gap_share_of_no_decision"),
+        "mirror_event_coverage_vs_shadow_bridge_gap": shadow_den.get(
+            "mirror_event_coverage_vs_shadow_bridge_gap"
+        ),
+        "mirror_event_truncated": boolish(shadow_den.get("mirror_event_truncated")),
+        "shadow_bridge_mirror_complete": mirror_complete,
+        "optimistic_decision_record_count_if_shadow_gap_logged": optimistic_count,
+        "optimistic_decision_record_rate_if_shadow_gap_logged": optimistic_rate,
+        "remaining_no_decision_after_shadow_gap_logged": shadow_den.get(
+            "remaining_no_decision_after_shadow_gap_logged"
+        ),
+        "blocked_context_dimensions_excluded": clean_blockers,
+        "decision_no_pass_oos_queue": {
+            "classification": decision_no_pass_queue.get("classification"),
+            "queue_count": decision_no_pass_queue.get("queue_count"),
+            "pending_clean_window_count": decision_no_pass_queue.get("pending_clean_window_count"),
+            "items": selected_clusters,
+            "promotion_allowed": False,
+        },
+        "quality_timing_probe_oos_queue": {
+            "classification": quality_probe_queue.get("classification"),
+            "queue_count": quality_probe_queue.get("queue_count"),
+            "items": quality_probes,
+            "promotion_allowed": False,
+        },
+        "notes": [
+            "This report only explains the decision-capture gap to the 60% target.",
+            "Shadow bridge optimistic rates are same-window instrumentation evidence, not promotion evidence.",
+            "Any runtime, strategy, gate, final_entry_contract, A_CLASS, executor, canary, or risk change requires human approval.",
         ],
     }
 
@@ -3790,6 +3909,12 @@ def assemble_reports(run_dir, out_dir=None):
     )
     reports["pending_to_final_entry_audit"] = pending_audit
     gap_report = build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit)
+    decision_capture_gap_audit = build_decision_capture_60_gap_audit(
+        stage_metrics,
+        gap_report,
+        reports,
+        context_eligibility,
+    )
     pass_allow_gap_audit = build_pass_allow_capture_gap_audit(
         stage_metrics,
         pending_audit,
@@ -3832,6 +3957,7 @@ def assemble_reports(run_dir, out_dir=None):
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
         "context_dimension_eligibility": context_eligibility,
+        "decision_capture_60_gap_audit": decision_capture_gap_audit,
         "pass_allow_capture_gap_audit": pass_allow_gap_audit,
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
@@ -3859,6 +3985,8 @@ def assemble_reports(run_dir, out_dir=None):
             "biggest_gap_stage": gap_report.get("biggest_gap_stage"),
             "additional_count_needed_to_60": gap_report.get("additional_count_needed_to_60"),
             "next_best_allowed_action": gap_report.get("next_best_allowed_action"),
+            "decision_capture_60_gap_classification": decision_capture_gap_audit.get("classification"),
+            "decision_capture_60_gap_next_action": decision_capture_gap_audit.get("next_action"),
             "pass_allow_gap_next_action": pass_allow_gap_audit.get("next_action"),
             "decision_no_pass_review_next_action": decision_no_pass_review.get("next_action"),
             "pass_allow_60_closure_classification": pass_allow_closure_plan.get("classification"),
@@ -4304,6 +4432,46 @@ def self_test():
         assert gap["next_best_allowed_action"] == (
             "audit_pass_allow_to_pending_bridge_shadow_only_with_blocked_context_dimensions_excluded"
         )
+        decision_gap_audit = load_json(run_dir / "decision_capture_60_gap_audit.json")
+        assert decision_gap_audit["promotion_allowed"] is False
+        assert decision_gap_audit["classification"] == "DECISION_CAPTURE_60_NOT_CURRENT_TARGET_GAP"
+        synthetic_stage_metrics = {
+            "stage_counts": {
+                "raw_gold_silver_denominator": 10,
+                "target_60_count": 6,
+                "detector_capture": {"count": 10, "rate": 1.0},
+                "decision_capture": {"count": 5, "rate": 0.5},
+                "pass_allow_capture": {"count": 4, "rate": 0.4},
+                "pending_capture": {"count": 3, "rate": 0.3},
+                "final_eligibility": {"count": 1, "rate": 0.1},
+                "mode_disabled_adjusted_final_eligibility": {"count": 1, "rate": 0.1},
+                "paper_capture": {"count": 0, "rate": 0.0},
+                "realized_capture": {"count": 0, "rate": 0.0},
+            }
+        }
+        synthetic_decision_gap = build_decision_capture_60_gap_audit(
+            synthetic_stage_metrics,
+            {"biggest_gap_stage": "decision_capture"},
+            {
+                "shadow_decision_bridge": {
+                    "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
+                    "denominator": {
+                        "raw_signals_without_decision_record": 5,
+                        "shadow_entry_hypotheses_matched_no_decision_bridge": 4,
+                        "mirror_event_coverage_vs_shadow_bridge_gap": 1.0,
+                        "mirror_event_truncated": False,
+                        "optimistic_decision_record_count_if_shadow_gap_logged": 9,
+                        "optimistic_decision_record_rate_if_shadow_gap_logged": 0.9,
+                    },
+                }
+            },
+            {"blocked_dimensions": ["volume"]},
+        )
+        assert synthetic_decision_gap["classification"] == (
+            "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW"
+        )
+        assert synthetic_decision_gap["additional_decision_records_needed_to_60"] == 1
+        assert synthetic_decision_gap["shadow_bridge_mirror_complete"] is True
         stage_metrics = load_json(run_dir / "capture_stage_metrics.json")
         assert stage_metrics["raw_gold_silver_denominator"] == 5
         assert stage_metrics["target_60_count"] == 3

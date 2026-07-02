@@ -271,6 +271,9 @@ def build_handoff(verdict):
         f"- capture_60_current_target_rate: `{(verdict.get('capture_60_target_loop') or {}).get('current_target_rate')}`",
         f"- capture_60_current_target_additional_count_needed: `{(verdict.get('capture_60_target_loop') or {}).get('current_target_additional_count_needed_to_60')}`",
         f"- capture_60_current_target_next_best_allowed_action: `{(verdict.get('capture_60_target_loop') or {}).get('current_target_next_best_allowed_action')}`",
+        f"- decision_capture_60_gap_classification: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('classification')}`",
+        f"- decision_capture_60_shadow_bridge_mirror_complete: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('shadow_bridge_mirror_complete')}`",
+        f"- decision_capture_60_optimistic_rate_if_shadow_gap_logged: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('optimistic_decision_record_rate_if_shadow_gap_logged')}`",
         f"- handoff_needed: `{str(needed).lower()}`",
         "",
         "## Guardrails",
@@ -1197,6 +1200,12 @@ def self_test():
             "next_best_allowed_action": "audit_decision_bridge_and_quality_timing_shadow_only",
             "promotion_allowed": False,
         },
+        "decision_capture_60_gap_audit": {
+            "classification": "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW",
+            "shadow_bridge_mirror_complete": True,
+            "optimistic_decision_record_rate_if_shadow_gap_logged": 0.9,
+            "promotion_allowed": False,
+        },
         "oos_readiness_summary": {
             "classification": "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED",
             "available_probe_count": 1,
@@ -1643,6 +1652,10 @@ def self_test():
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
     assert "capture_60_gap_classification: `CAPTURE_PASS_ALLOW_GAP_BELOW_60`" in text
+    assert (
+        "decision_capture_60_gap_classification: `DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW`"
+        in text
+    )
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Quality / Timing Reject Research" in text
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text

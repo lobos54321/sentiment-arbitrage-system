@@ -124,6 +124,7 @@ DERIVED_READINESS_SIBLINGS = {
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
+    "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
     "kline_coverage_resolution_audit": "kline_coverage_resolution_audit_24h.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
@@ -1290,6 +1291,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     strategy_memory_delay_summary = readiness_reports.get("strategy_memory_delay_replay_summary") or {}
     capture_60_gap_report = readiness_reports.get("capture_60_gap_report") or {}
     capture_stage_metrics_v3 = readiness_reports.get("capture_stage_metrics") or {}
+    decision_capture_60_gap_audit = readiness_reports.get("decision_capture_60_gap_audit") or {}
     pending_to_final_entry_audit_v3 = readiness_reports.get("pending_to_final_entry_audit") or {}
     final_entry_readiness_audit_v3 = readiness_reports.get("final_entry_readiness_audit") or {}
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
@@ -2005,6 +2007,49 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "review_queue": shadow_bridge_review_queue,
             "promotion_allowed": False,
             "automatic_bridge_to_entry_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "decision_capture_60_gap_audit": {
+            "available": bool(decision_capture_60_gap_audit),
+            "classification": decision_capture_60_gap_audit.get("classification"),
+            "next_action": decision_capture_60_gap_audit.get("next_action"),
+            "raw_gold_silver_denominator": decision_capture_60_gap_audit.get(
+                "raw_gold_silver_denominator"
+            ),
+            "target_60_count": decision_capture_60_gap_audit.get("target_60_count"),
+            "current_decision_capture_count": decision_capture_60_gap_audit.get(
+                "current_decision_capture_count"
+            ),
+            "current_decision_capture_rate": decision_capture_60_gap_audit.get(
+                "current_decision_capture_rate"
+            ),
+            "additional_decision_records_needed_to_60": decision_capture_60_gap_audit.get(
+                "additional_decision_records_needed_to_60"
+            ),
+            "raw_signals_without_decision_record": decision_capture_60_gap_audit.get(
+                "raw_signals_without_decision_record"
+            ),
+            "shadow_entry_hypotheses_matched_no_decision_bridge": decision_capture_60_gap_audit.get(
+                "shadow_entry_hypotheses_matched_no_decision_bridge"
+            ),
+            "shadow_bridge_mirror_complete": decision_capture_60_gap_audit.get(
+                "shadow_bridge_mirror_complete"
+            ),
+            "optimistic_decision_record_count_if_shadow_gap_logged": decision_capture_60_gap_audit.get(
+                "optimistic_decision_record_count_if_shadow_gap_logged"
+            ),
+            "optimistic_decision_record_rate_if_shadow_gap_logged": decision_capture_60_gap_audit.get(
+                "optimistic_decision_record_rate_if_shadow_gap_logged"
+            ),
+            "decision_no_pass_oos_queue": decision_capture_60_gap_audit.get(
+                "decision_no_pass_oos_queue"
+            ) or {},
+            "quality_timing_probe_oos_queue": decision_capture_60_gap_audit.get(
+                "quality_timing_probe_oos_queue"
+            ) or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         },
         "pass_allow_capture_gap_audit": {
@@ -2944,6 +2989,23 @@ def self_test():
             ),
             "mode_disabled_adjusted_final_eligibility_rate": 0.1,
         },
+        "decision_capture_60_gap_audit": {
+            "classification": "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW",
+            "next_action": "keep_shadow_bridge_instrumentation_read_only_and_validate_in_clean_non_overlapping_oos",
+            "raw_gold_silver_denominator": 10,
+            "target_60_count": 6,
+            "current_decision_capture_count": 5,
+            "current_decision_capture_rate": 0.5,
+            "additional_decision_records_needed_to_60": 1,
+            "raw_signals_without_decision_record": 5,
+            "shadow_entry_hypotheses_matched_no_decision_bridge": 4,
+            "shadow_bridge_mirror_complete": True,
+            "optimistic_decision_record_count_if_shadow_gap_logged": 9,
+            "optimistic_decision_record_rate_if_shadow_gap_logged": 0.9,
+            "decision_no_pass_oos_queue": {"queue_count": 1, "promotion_allowed": False},
+            "quality_timing_probe_oos_queue": {"queue_count": 2, "promotion_allowed": False},
+            "promotion_allowed": False,
+        },
         "shadow_decision_bridge_audit": {
             "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
             "denominator": {
@@ -3016,6 +3078,13 @@ def self_test():
     assert shadow_bridge_summary["top_candidate_counts"][0]["candidate_id"] == "notath_quote_clean"
     assert shadow_bridge_summary["review_queue"]["classification"] == "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY"
     assert shadow_bridge_summary["review_queue"]["automatic_runtime_change_allowed"] is False
+    decision_capture_gap_summary = stage_verdict["decision_capture_60_gap_audit"]
+    assert decision_capture_gap_summary["classification"] == (
+        "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW"
+    )
+    assert decision_capture_gap_summary["additional_decision_records_needed_to_60"] == 1
+    assert decision_capture_gap_summary["shadow_bridge_mirror_complete"] is True
+    assert decision_capture_gap_summary["promotion_allowed"] is False
     assert stage_verdict["upstream_funnel_gap_summary"]["upstream_gap_priority"]["current_shortfall_to_60_pending"] == 3
     blocked = build_verdict({**capture, "raw_gold_silver_denominator": {"rows_complete_against_summary": False}}, tests={"passed": True})
     assert blocked["classification"] == "BLOCKED_DATA"
