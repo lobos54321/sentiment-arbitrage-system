@@ -502,10 +502,19 @@ def top_level_payload(*, report_type, rows, raw_count, global_rates, min_raw_eve
     too_small = counts.get("TOO_SMALL", 0)
     rejected = sum(count for verdict, count in counts.items() if "REJECTED" in str(verdict or ""))
     watch = counts.get("DISCOVERY_WATCH", 0)
-    valid = max(0, len(rows) - blocked - too_small - rejected)
+    def is_valid_cross(row):
+        verdict = str(row.get("verdict") or "")
+        if verdict == "TOO_SMALL" or "REJECTED" in verdict or verdict.startswith("BLOCKED"):
+            return False
+        if row.get("data_blockers"):
+            return False
+        return True
+
+    valid_rows = [row for row in rows if is_valid_cross(row)]
+    valid = len(valid_rows)
 
     def max_lift(field):
-        values = [safe_float(row.get(field)) for row in rows if safe_float(row.get(field)) is not None]
+        values = [safe_float(row.get(field)) for row in valid_rows if safe_float(row.get(field)) is not None]
         return round(max(values), 6) if values else None
 
     if improvement:
