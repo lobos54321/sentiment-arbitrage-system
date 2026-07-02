@@ -41,6 +41,27 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+def stale_validation_reasons(registry: dict, validation: dict) -> list[str]:
+    registry = registry or {}
+    validation = validation or {}
+    reasons = []
+    registry_count = int(registry.get("frozen_definition_count") or 0)
+    validation_count = int(validation.get("validated_definition_count") or 0)
+    if registry_count and validation_count != registry_count:
+        reasons.append("validated_definition_count_differs_from_latest_freeze_registry")
+    registry_sources = registry.get("source_counts") or {}
+    validation_sources = validation.get("source_counts") or {}
+    for source, count in registry_sources.items():
+        if int(validation_sources.get(source) or 0) < int(count or 0):
+            reasons.append("latest_freeze_sources_missing_from_post_freeze_validation")
+            break
+    registry_frozen_at = registry.get("definition_set_frozen_at")
+    validation_frozen_at = validation.get("definition_set_frozen_at")
+    if registry_frozen_at and validation_frozen_at and registry_frozen_at != validation_frozen_at:
+        reasons.append("definition_set_frozen_at_differs")
+    return reasons
+
+
 def status_payload(args: argparse.Namespace, **fields) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -202,8 +223,12 @@ def run_refresh_once(args: argparse.Namespace) -> dict:
         stdout_tail = (proc.stdout or "")[-8000:]
         stderr_tail = (proc.stderr or "")[-8000:]
         verdict = read_json(run_dir / "reviewer_verdict.json")
+        capture_registry = read_json(run_dir / "capture_cross_oos_freeze_registry.json")
         capture_oos = read_json(run_dir / "capture_cross_post_freeze_oos_validation.json")
+        pass_allow_registry = read_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
         pass_allow_oos = read_json(run_dir / "pass_allow_60_post_freeze_oos_validation.json")
+        capture_oos_stale_reasons = stale_validation_reasons(capture_registry, capture_oos)
+        pass_allow_oos_stale_reasons = stale_validation_reasons(pass_allow_registry, pass_allow_oos)
         payload = status_payload(
             args,
             running=False,
@@ -217,11 +242,22 @@ def run_refresh_once(args: argparse.Namespace) -> dict:
             stderr_tail=stderr_tail,
             verdict_classification=verdict.get("classification"),
             verdict_next_action=verdict.get("next_action"),
+            capture_cross_oos_freeze_frozen_definition_count=capture_registry.get("frozen_definition_count"),
+            capture_cross_oos_freeze_source_counts=capture_registry.get("source_counts") or {},
             capture_cross_post_freeze_oos_classification=capture_oos.get("classification"),
             capture_cross_post_freeze_raw_gold_silver_event_rows=capture_oos.get("raw_gold_silver_event_rows"),
             capture_cross_post_freeze_validated_definition_count=capture_oos.get("validated_definition_count"),
+            capture_cross_post_freeze_source_counts=capture_oos.get("source_counts") or {},
+            capture_cross_post_freeze_validation_stale_vs_latest_freeze_registry=bool(capture_oos_stale_reasons),
+            capture_cross_post_freeze_validation_stale_reasons=capture_oos_stale_reasons,
+            pass_allow_oos_freeze_frozen_definition_count=pass_allow_registry.get("frozen_definition_count"),
+            pass_allow_oos_freeze_source_counts=pass_allow_registry.get("source_counts") or {},
             pass_allow_post_freeze_oos_classification=pass_allow_oos.get("classification"),
             pass_allow_post_freeze_raw_gold_silver_event_rows=pass_allow_oos.get("raw_gold_silver_event_rows"),
+            pass_allow_post_freeze_validated_definition_count=pass_allow_oos.get("validated_definition_count"),
+            pass_allow_post_freeze_source_counts=pass_allow_oos.get("source_counts") or {},
+            pass_allow_post_freeze_validation_stale_vs_latest_freeze_registry=bool(pass_allow_oos_stale_reasons),
+            pass_allow_post_freeze_validation_stale_reasons=pass_allow_oos_stale_reasons,
         )
         write_json(Path(args.status_out), payload)
         print(json.dumps(payload, sort_keys=True), flush=True)

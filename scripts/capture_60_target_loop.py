@@ -4417,6 +4417,53 @@ def load_oos_reports(run_dir):
     return reports
 
 
+def build_oos_validation_freshness(registry, validation):
+    registry = registry or {}
+    validation = validation or {}
+    registry_count = safe_int(registry.get("frozen_definition_count"), 0)
+    validation_count = safe_int(validation.get("validated_definition_count"), 0)
+    registry_sources = registry.get("source_counts") or {}
+    validation_sources = validation.get("source_counts") or {}
+    missing_source_counts = {}
+    for source, count in registry_sources.items():
+        missing = safe_int(count, 0) - safe_int(validation_sources.get(source), 0)
+        if missing > 0:
+            missing_source_counts[source] = missing
+    stale_reasons = []
+    if registry_count and validation_count != registry_count:
+        stale_reasons.append("validated_definition_count_differs_from_latest_freeze_registry")
+    if missing_source_counts:
+        stale_reasons.append("latest_freeze_sources_missing_from_post_freeze_validation")
+    registry_frozen_at = registry.get("definition_set_frozen_at")
+    validation_frozen_at = validation.get("definition_set_frozen_at")
+    if registry_frozen_at and validation_frozen_at and registry_frozen_at != validation_frozen_at:
+        stale_reasons.append("definition_set_frozen_at_differs")
+    return {
+        "available": bool(registry or validation),
+        "registry_frozen_definition_count": registry_count,
+        "validation_validated_definition_count": validation_count,
+        "registry_source_counts": registry_sources,
+        "validation_source_counts": validation_sources,
+        "missing_source_counts": missing_source_counts,
+        "registry_definition_set_frozen_at": registry_frozen_at,
+        "validation_definition_set_frozen_at": validation_frozen_at,
+        "registry_generated_at": registry.get("generated_at"),
+        "validation_generated_at": validation.get("generated_at"),
+        "validation_matches_latest_freeze_registry": not stale_reasons,
+        "validation_stale_vs_latest_freeze_registry": bool(stale_reasons),
+        "stale_reasons": stale_reasons,
+        "next_action": (
+            "rerun_post_freeze_oos_validation_against_latest_freeze_registry"
+            if stale_reasons
+            else "continue_collecting_post_freeze_window_before_judging_oos"
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_oos_summary(run_dir, reports=None):
     oos_reports = load_oos_reports(run_dir)
     input_reports = reports if reports is not None else {}
@@ -4645,6 +4692,10 @@ def build_oos_summary(run_dir, reports=None):
         )
         summary["next_capture_cross_oos_action"] = capture_cross_freeze_registry.get("next_action")
     if capture_cross_post_freeze_validation:
+        capture_cross_validation_freshness = build_oos_validation_freshness(
+            capture_cross_freeze_registry,
+            capture_cross_post_freeze_validation,
+        )
         oos_data_availability = capture_cross_post_freeze_validation.get("oos_data_availability") or {}
         raw_gold_silver_event_rows = capture_cross_post_freeze_validation.get("raw_gold_silver_event_rows")
         raw_gold_silver_event_rows_needed = oos_data_availability.get(
@@ -4702,12 +4753,17 @@ def build_oos_summary(run_dir, reports=None):
             "top_repeat_watch_items": (
                 capture_cross_post_freeze_validation.get("top_repeat_watch_items") or []
             )[:12],
+            "validation_freshness": capture_cross_validation_freshness,
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         }
         summary["capture_cross_post_freeze_oos_validation"] = post_freeze_cross_summary
+        summary["capture_cross_oos_validation_freshness"] = capture_cross_validation_freshness
+        summary["capture_cross_oos_validation_stale_vs_latest_freeze_registry"] = (
+            capture_cross_validation_freshness.get("validation_stale_vs_latest_freeze_registry")
+        )
         summary["capture_cross_post_freeze_oos_classification"] = (
             capture_cross_post_freeze_validation.get("classification")
         )
@@ -4715,6 +4771,10 @@ def build_oos_summary(run_dir, reports=None):
             capture_cross_post_freeze_validation.get("repeat_watch_count")
         )
     if pass_allow_post_freeze_validation:
+        pass_allow_validation_freshness = build_oos_validation_freshness(
+            pass_allow_freeze_registry,
+            pass_allow_post_freeze_validation,
+        )
         oos_data_availability = pass_allow_post_freeze_validation.get("oos_data_availability") or {}
         raw_gold_silver_event_rows = pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
         raw_gold_silver_event_rows_needed = oos_data_availability.get(
@@ -4766,12 +4826,17 @@ def build_oos_summary(run_dir, reports=None):
             "top_repeat_watch_items": (
                 pass_allow_post_freeze_validation.get("top_repeat_watch_items") or []
             )[:12],
+            "validation_freshness": pass_allow_validation_freshness,
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         }
         summary["pass_allow_60_post_freeze_oos_validation"] = post_freeze_oos_summary
+        summary["pass_allow_60_oos_validation_freshness"] = pass_allow_validation_freshness
+        summary["pass_allow_60_oos_validation_stale_vs_latest_freeze_registry"] = (
+            pass_allow_validation_freshness.get("validation_stale_vs_latest_freeze_registry")
+        )
         summary["post_freeze_oos_data_availability"] = {
             "available": True,
             "classification": (
