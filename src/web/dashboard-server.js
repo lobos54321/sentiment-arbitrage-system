@@ -2043,6 +2043,8 @@ function agentCaptureArtifactPaths() {
   const agentLog = process.env.AGENT_CAPTURE_DISCOVERY_LOG || join(dirname(getPaperDbPath()), 'agent-capture-discovery.log');
   const runnerStatus = process.env.AGENT_CAPTURE_DISCOVERY_RUNNER_STATUS
     || join(dirname(getPaperDbPath()), 'agent-capture-discovery-runner-status.json');
+  const oosRefreshStatus = process.env.AUTOLOOP_OOS_REFRESH_STATUS
+    || join(dirname(getPaperDbPath()), 'autoloop-oos-refresh-status.json');
   return {
     verdict: join(latestDir, 'reviewer_verdict.json'),
     summary: join(latestDir, 'run_summary.md'),
@@ -2081,6 +2083,7 @@ function agentCaptureArtifactPaths() {
     quality_timing_probe_validation: join(latestDir, 'quality_timing_candidate_probe_validation_24h.json'),
     runtime_health: join(latestDir, 'runtime_health_snapshot_24h.json'),
     runner_status: runnerStatus,
+    autoloop_oos_refresh_status: oosRefreshStatus,
     tests: join(latestDir, 'tests.json'),
     log: agentLog,
   };
@@ -11579,6 +11582,9 @@ const server = http.createServer(async (req, res) => {
       quality_timing_probe_validation: 'quality_timing_probe_validation',
       runtime_health: 'runtime_health',
       runner_status: 'runner_status',
+      oos_refresh_status: 'autoloop_oos_refresh_status',
+      autoloop_oos_refresh: 'autoloop_oos_refresh_status',
+      autoloop_oos_refresh_status: 'autoloop_oos_refresh_status',
       self_tests: 'tests',
       agent_log: 'log',
     };
@@ -11667,6 +11673,7 @@ const server = http.createServer(async (req, res) => {
         agent_quality_timing_probe_validation_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=quality_timing_probe_validation`,
         agent_runtime_health_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=runtime_health`,
         agent_runner_status_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=runner_status`,
+        agent_autoloop_oos_refresh_status_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=autoloop_oos_refresh_status`,
         agent_self_tests_json: `${origin}/api/data/download/agent-capture-discovery?token=${tokenHint}&artifact=tests`,
       },
       review_apis: {

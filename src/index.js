@@ -879,6 +879,7 @@ function startIndexRuntimeSupervisor() {
   global.__shadowDataSidecars = [
     ...startCandidateShadowObserver({}),
     ...startAgentCaptureDiscoveryLoop({}),
+    ...startAutoloopOosRefreshWorker({}),
   ];
   startRawPathObserverSupervisor();
   startRawDogDiscoverySupervisor();
@@ -1122,6 +1123,59 @@ function startAgentCaptureDiscoveryLoop(config) {
         DB_PATH: signalDb,
         KLINE_DB: klineDb,
         SIDECAR_MAX_RUNTIME_SEC: process.env.AGENT_CAPTURE_DISCOVERY_CHILD_MAX_RUNTIME_SEC || '0',
+      },
+    }),
+  ];
+}
+
+function startAutoloopOosRefreshWorker(config) {
+  if (!envFlag('AUTOLOOP_OOS_REFRESH_ENABLED', true)) {
+    console.log('[AutoLoopOOSRefresh] disabled by AUTOLOOP_OOS_REFRESH_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = runtimeDataDir();
+  const paperDb = runtimePaperDbPath();
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
+  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
+  const klineDb = process.env.KLINE_DB || process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(dataDir, 'kline_cache.db');
+  const runsDir = process.env.AGENT_CAPTURE_RUNS_DIR || process.env.AGENT_RUNS_DIR || join(dataDir, 'agent_runs');
+  const handoffDir = process.env.AGENT_CAPTURE_HANDOFFS_DIR || process.env.AGENT_HANDOFFS_DIR || join(dataDir, 'agent_handoffs');
+  const registry = process.env.AGENT_CAPTURE_HYPOTHESIS_REGISTRY || process.env.HYPOTHESIS_REGISTRY_PATH || join(dataDir, 'hypothesis_registry.json');
+
+  return [
+    startPythonSidecar({
+      name: 'autoloop-oos-refresh',
+      logPath: process.env.AUTOLOOP_OOS_REFRESH_LOG || join(dataDir, 'autoloop-oos-refresh.log'),
+      args: [
+        'scripts/autoloop_oos_refresh_worker.py',
+        '--paper-db', paperDb,
+        '--raw-db', rawDb,
+        '--kline-db', klineDb,
+        '--data-dir', dataDir,
+        '--hours', process.env.AUTOLOOP_OOS_REFRESH_HOURS || process.env.AGENT_CAPTURE_DISCOVERY_HOURS || '24',
+        '--capture-hours', process.env.AUTOLOOP_OOS_REFRESH_CAPTURE_HOURS || process.env.AGENT_CAPTURE_CAPTURE_HOURS || '24',
+        '--expected-candidates', process.env.AGENT_CAPTURE_EXPECTED_CANDIDATES || '84',
+        '--out-root', runsDir,
+        '--handoff-dir', handoffDir,
+        '--registry', registry,
+        '--report-timeout-sec', process.env.AUTOLOOP_OOS_REFRESH_REPORT_TIMEOUT_SEC || '300',
+        '--test-timeout-sec', process.env.AUTOLOOP_OOS_REFRESH_TEST_TIMEOUT_SEC || '120',
+        '--max-scan-rows', process.env.AUTOLOOP_OOS_REFRESH_MAX_SCAN_ROWS || process.env.AGENT_CAPTURE_MAX_SCAN_ROWS || '2000000',
+        '--oos-probe-hours', process.env.AUTOLOOP_OOS_REFRESH_PROBE_HOURS || '0.25,0.5,1',
+        '--interval-sec', process.env.AUTOLOOP_OOS_REFRESH_INTERVAL_SEC || '900',
+        '--initial-delay-sec', process.env.AUTOLOOP_OOS_REFRESH_INITIAL_DELAY_SEC || '180',
+        '--run-timeout-sec', process.env.AUTOLOOP_OOS_REFRESH_RUN_TIMEOUT_SEC || '900',
+        '--status-out', process.env.AUTOLOOP_OOS_REFRESH_STATUS || join(dataDir, 'autoloop-oos-refresh-status.json'),
+        '--lock-file', process.env.AUTOLOOP_OOS_REFRESH_LOCK_FILE || '/tmp/autoloop-oos-refresh.lock',
+      ],
+      env: {
+        PAPER_DB: paperDb,
+        RAW_SIGNAL_OUTCOMES_DB: rawDb,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+        KLINE_DB: klineDb,
+        SIDECAR_MAX_RUNTIME_SEC: process.env.AUTOLOOP_OOS_REFRESH_CHILD_MAX_RUNTIME_SEC || '0',
       },
     }),
   ];
