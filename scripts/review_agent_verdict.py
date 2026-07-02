@@ -2056,6 +2056,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "validated_definition_count": capture_cross_post_freeze_oos_validation.get(
                 "validated_definition_count"
             ),
+            "source_counts": capture_cross_post_freeze_oos_validation.get("source_counts") or {},
+            "stage_counts": capture_cross_post_freeze_oos_validation.get("stage_counts") or {},
             "repeat_watch_count": capture_cross_post_freeze_oos_validation.get("repeat_watch_count"),
             "eval_start_iso": capture_cross_post_freeze_oos_validation.get("eval_start_iso"),
             "promotion_allowed": False,

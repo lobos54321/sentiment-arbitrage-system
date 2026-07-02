@@ -746,6 +746,8 @@ def build_handoff(verdict):
                 "post_freeze_usable_hours": cross_post_freeze.get("post_freeze_usable_hours"),
                 "validated_definition_count": cross_post_freeze.get("validated_definition_count"),
                 "repeat_watch_count": cross_post_freeze.get("repeat_watch_count"),
+                "source_counts": cross_post_freeze.get("source_counts") or {},
+                "stage_counts": cross_post_freeze.get("stage_counts") or {},
                 "all_raw_rows_since_eval_start": cross_post_freeze.get("all_raw_rows_since_eval_start"),
                 "post_freeze_signal_observation_coverage": (
                     cross_post_freeze.get("post_freeze_signal_observation_coverage") or {}
