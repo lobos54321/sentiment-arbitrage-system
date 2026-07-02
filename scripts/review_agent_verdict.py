@@ -470,7 +470,138 @@ def compact_oos_refresh_probe(row):
         "oos_repeated_watch_count": validation.get("oos_repeated_watch_count"),
         "repeated_watch_count": validation.get("repeated_watch_count"),
         "registry_frozen_before_eval_window": validation.get("registry_frozen_before_eval_window"),
+        "validation_path": validation.get("path"),
+        "cross_path": cross.get("path"),
         "source": "oos_readiness_probe_refresh",
+    }
+
+
+def compact_oos_repeated_watch_hypothesis(row):
+    current = row.get("current_slice") or {}
+    registry_metrics = row.get("registry_latest_metrics") or {}
+    definition = row.get("definition") or {}
+    return {
+        "hypothesis_id": row.get("hypothesis_id"),
+        "status": row.get("status"),
+        "scope": row.get("scope"),
+        "definition": definition,
+        "candidate_id": definition.get("candidate_id") or current.get("candidate_id"),
+        "dimension": definition.get("dimension") or current.get("dimension"),
+        "slice_value": definition.get("slice_value") or current.get("slice_value"),
+        "current_slice": {
+            "verdict": current.get("verdict"),
+            "slice_signal_count": current.get("slice_signal_count"),
+            "slice_raw_gs_count": current.get("slice_raw_gs_count"),
+            "matched_gs_count": current.get("matched_gs_count"),
+            "candidate_match_count": current.get("candidate_match_count"),
+            "match_recall_event": current.get("match_recall_event"),
+            "match_precision_event": current.get("match_precision_event"),
+            "recall_lift_vs_candidate_baseline": current.get("recall_lift_vs_candidate_baseline"),
+            "precision_lift_vs_candidate_baseline": current.get("precision_lift_vs_candidate_baseline"),
+        },
+        "registry_latest_metrics": {
+            "verdict": registry_metrics.get("verdict"),
+            "slice_signal_count": registry_metrics.get("slice_signal_count"),
+            "slice_raw_gs_count": registry_metrics.get("slice_raw_gs_count"),
+            "matched_gs_count": registry_metrics.get("matched_gs_count"),
+            "candidate_match_count": registry_metrics.get("candidate_match_count"),
+            "match_recall_event": registry_metrics.get("match_recall_event"),
+            "match_precision_event": registry_metrics.get("match_precision_event"),
+            "recall_lift_vs_candidate_baseline": registry_metrics.get("recall_lift_vs_candidate_baseline"),
+            "precision_lift_vs_candidate_baseline": registry_metrics.get("precision_lift_vs_candidate_baseline"),
+        },
+        "registry_frozen_before_eval_window": row.get("registry_frozen_before_eval_window"),
+        "oos_window_sufficient": row.get("oos_window_sufficient"),
+        "oos_evaluable": row.get("oos_evaluable"),
+        "promotion_allowed": False,
+        "allowed_use": "shadow_only_review",
+        "review_verdict": "REPEATED_WATCH_SHADOW_REVIEW_ONLY",
+        "not_promotion_reasons": [
+            "repeated_watch_is_not_promotion_evidence",
+            "requires_additional_non_overlapping_window_or_human_review",
+            "runtime_strategy_gate_risk_changes_forbidden",
+        ],
+    }
+
+
+def build_oos_repeated_watch_review(repeated_probes):
+    rows = []
+    load_errors = []
+    for probe in repeated_probes or []:
+        validation_path = probe.get("validation_path")
+        report = None
+        if validation_path:
+            try:
+                report = load_json(validation_path)
+            except Exception as exc:  # pragma: no cover - defensive path audit.
+                load_errors.append({
+                    "probe": probe.get("probe"),
+                    "validation_path": validation_path,
+                    "error": str(exc),
+                })
+        validation = (report or {}).get("matured_volume_hypothesis_validation") or {}
+        hypotheses = [
+            row for row in (validation.get("hypotheses") or [])
+            if row.get("status") == "OOS_REPEATED_WATCH_PENDING_REVIEW"
+        ]
+        rows.append({
+            "probe": probe.get("probe"),
+            "source": probe.get("source"),
+            "validation_path": validation_path,
+            "classification": probe.get("classification"),
+            "sufficient_for_oos_judgment": bool(probe.get("sufficient_for_oos_judgment")),
+            "registry_frozen_before_eval_window": probe.get("registry_frozen_before_eval_window"),
+            "signals_scanned": probe.get("signals_scanned"),
+            "evaluable_raw_gs_event_rows": probe.get("evaluable_raw_gs_event_rows"),
+            "matured_volume_known_rate": probe.get("matured_volume_known_rate"),
+            "min_oos_signals": probe.get("min_oos_signals"),
+            "min_oos_raw_gs_events": probe.get("min_oos_raw_gs_events"),
+            "min_oos_matured_volume_known_rate": probe.get("min_oos_matured_volume_known_rate"),
+            "oos_repeated_watch_count": probe.get("oos_repeated_watch_count"),
+            "repeated_watch_count": probe.get("repeated_watch_count"),
+            "loaded_repeated_hypothesis_count": len(hypotheses),
+            "top_repeated_hypotheses": [
+                compact_oos_repeated_watch_hypothesis(row)
+                for row in hypotheses[:12]
+            ],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "review_status": (
+                "REPEATED_WATCH_DETAILS_LOADED"
+                if hypotheses
+                else "REPEATED_WATCH_DETAILS_MISSING"
+            ),
+        })
+    repeated_watch_total = sum(
+        as_int(row.get("oos_repeated_watch_count"), 0) or 0
+        for row in rows
+    )
+    return {
+        "schema_version": "oos_repeated_watch_review.v1",
+        "classification": (
+            "OOS_REPEATED_WATCH_REVIEW_READY"
+            if rows
+            else "OOS_REPEATED_WATCH_REVIEW_EMPTY"
+        ),
+        "next_action": (
+            "continue_shadow_oos_review_and_collect_additional_non_overlapping_window"
+            if rows
+            else "continue_oos_collection"
+        ),
+        "repeated_probe_count": len(rows),
+        "repeated_watch_total": repeated_watch_total,
+        "load_errors": load_errors,
+        "probes": rows,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Repeated OOS WATCH is review evidence only.",
+            "It does not authorize production strategy, gate, final_entry_contract, A_CLASS, executor, paper, or risk changes.",
+        ],
     }
 
 
@@ -701,6 +832,7 @@ def build_oos_readiness_summary(readiness_reports):
         classification = "OOS_NO_REPEAT_CONTINUE_WATCH"
         next_action = "continue_watchlist_validation"
     readiness_delta = build_oos_readiness_delta(probes, refresh_report)
+    repeated_watch_review = build_oos_repeated_watch_review(repeated)
     return {
         "available_probe_count": len(available),
         "sufficient_probe_count": len(sufficient),
@@ -720,6 +852,7 @@ def build_oos_readiness_summary(readiness_reports):
         "classification": classification,
         "next_action": next_action,
         "readiness_delta": readiness_delta,
+        "oos_repeated_watch_review": repeated_watch_review,
         "promotion_allowed": False,
         "human_action_required": False,
         "probes": probes,
@@ -4502,6 +4635,99 @@ def self_test():
         assert sibling_verdict["oos_readiness_summary_v3"]["next_matured_volume_oos_action"] == (
             "continue_collecting_post_freeze_window_before_judging_oos"
         )
+        repeated_detail_path = root / "hypothesis_validation_audit_oos_probe_9p3611h.json"
+        write_json(repeated_detail_path, {
+            "schema_version": "hypothesis_validation_audit.v1",
+            "overall": {
+                "classification": "OOS_WATCH_REPEATED_PENDING_REVIEW",
+                "promotion_allowed": False,
+            },
+            "matured_volume_hypothesis_validation": {
+                "registered_hypothesis_count": 1,
+                "found_in_current_report_count": 1,
+                "repeated_watch_count": 1,
+                "oos_repeated_watch_count": 1,
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "matured_volume:entry_mode_registry:explosive_newborn_direct_scout:mixed",
+                        "scope": "shadow_only_matured_volume_context",
+                        "status": "OOS_REPEATED_WATCH_PENDING_REVIEW",
+                        "definition": {
+                            "candidate_id": "entry_mode_registry:explosive_newborn_direct_scout",
+                            "dimension": "matured_volume_profile",
+                            "slice_value": "mixed",
+                        },
+                        "current_slice": {
+                            "candidate_id": "entry_mode_registry:explosive_newborn_direct_scout",
+                            "dimension": "matured_volume_profile",
+                            "slice_value": "mixed",
+                            "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                            "slice_signal_count": 66,
+                            "slice_raw_gs_count": 8,
+                            "matched_gs_count": 8,
+                            "candidate_match_count": 52,
+                            "match_recall_event": 1.0,
+                            "match_precision_event": 0.153846,
+                            "recall_lift_vs_candidate_baseline": 0.1,
+                            "precision_lift_vs_candidate_baseline": 0.080076,
+                        },
+                        "registry_latest_metrics": {
+                            "verdict": "MATURED_VOLUME_DISCOVERY_WATCH",
+                            "matched_gs_count": 13,
+                            "match_recall_event": 0.866667,
+                            "match_precision_event": 0.068063,
+                        },
+                        "registry_frozen_before_eval_window": True,
+                        "oos_window_sufficient": True,
+                        "oos_evaluable": True,
+                        "promotion_allowed": False,
+                    }
+                ],
+            },
+            "promotion_allowed": False,
+        })
+        repeated_summary = build_oos_readiness_summary({
+            "oos_readiness_probe_refresh": {
+                "classification": "OOS_PROBES_REFRESHED",
+                "executed_probe_count": 1,
+                "probe_count": 1,
+                "probes": [
+                    {
+                        "probe": "9p3611h",
+                        "cross": {
+                            "classification": "MATURED_VOLUME_DISCOVERY_WATCH",
+                            "signals_scanned": 173,
+                            "evaluable_raw_gs_event_rows": 10,
+                            "matured_volume_known_rate": 0.855491,
+                        },
+                        "validation": {
+                            "classification": "OOS_WATCH_REPEATED_PENDING_REVIEW",
+                            "signals_scanned": 173,
+                            "evaluable_raw_gs_event_rows": 10,
+                            "matured_volume_known_rate": 0.855491,
+                            "min_oos_signals": 50,
+                            "min_oos_raw_gs_events": 10,
+                            "min_oos_matured_volume_known_rate": 0.8,
+                            "sufficient_for_oos_judgment": True,
+                            "registry_frozen_before_eval_window": True,
+                            "repeated_watch_count": 1,
+                            "oos_repeated_watch_count": 1,
+                            "path": str(repeated_detail_path),
+                        },
+                    }
+                ],
+            }
+        })
+        repeated_review = repeated_summary["oos_repeated_watch_review"]
+        assert repeated_summary["classification"] == "OOS_REPEATED_WATCH_PENDING_REVIEW"
+        assert repeated_review["classification"] == "OOS_REPEATED_WATCH_REVIEW_READY"
+        assert repeated_review["repeated_probe_count"] == 1
+        assert repeated_review["repeated_watch_total"] == 1
+        assert repeated_review["probes"][0]["loaded_repeated_hypothesis_count"] == 1
+        assert repeated_review["probes"][0]["top_repeated_hypotheses"][0]["review_verdict"] == (
+            "REPEATED_WATCH_SHADOW_REVIEW_ONLY"
+        )
+        assert repeated_review["promotion_allowed"] is False
         dnp_oos_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
             "oos_readiness_summary_v3": {
                 "classification": "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED",

@@ -1004,6 +1004,7 @@ def build_handoff(verdict):
             },
             "next_action": oos_readiness.get("next_action"),
             "readiness_delta": oos_readiness.get("readiness_delta") or {},
+            "oos_repeated_watch_review": oos_readiness.get("oos_repeated_watch_review") or {},
             "pass_allow_60_post_freeze": {
                 "classification": pass_allow_post_freeze.get("classification"),
                 "raw_gold_silver_event_rows": pass_allow_post_freeze.get(
@@ -1676,6 +1677,26 @@ def self_test():
             "sufficient_probe_count": 0,
             "oos_repeated_watch_probe_count": 0,
             "next_action": "continue_collecting_post_freeze_window_before_judging_oos",
+            "oos_repeated_watch_review": {
+                "classification": "OOS_REPEATED_WATCH_REVIEW_READY",
+                "repeated_probe_count": 1,
+                "repeated_watch_total": 1,
+                "promotion_allowed": False,
+                "probes": [
+                    {
+                        "probe": "9p3611h",
+                        "loaded_repeated_hypothesis_count": 1,
+                        "top_repeated_hypotheses": [
+                            {
+                                "hypothesis_id": "matured_volume:entry_mode_registry:explosive_newborn_direct_scout:mixed",
+                                "candidate_id": "entry_mode_registry:explosive_newborn_direct_scout",
+                                "review_verdict": "REPEATED_WATCH_SHADOW_REVIEW_ONLY",
+                                "promotion_allowed": False,
+                            }
+                        ],
+                    }
+                ],
+            },
             "pass_allow_60_post_freeze_oos_validation": {
                 "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL",
                 "raw_gold_silver_event_rows": 0,
@@ -2276,6 +2297,9 @@ def self_test():
     assert "not_applicable_no_raw_signal_ids" in text
     assert "candidate_observation_join_blocked" in text
     assert "continue_collecting_post_freeze_raw_gold_silver_events" in text
+    assert "OOS_REPEATED_WATCH_REVIEW_READY" in text
+    assert "REPEATED_WATCH_SHADOW_REVIEW_ONLY" in text
+    assert "matured_volume:entry_mode_registry:explosive_newborn_direct_scout:mixed" in text
     assert "Runtime Health Snapshot" in text
     assert "runtime_paper_review_snapshot_stale" in text
     quote_pending_verdict = {
