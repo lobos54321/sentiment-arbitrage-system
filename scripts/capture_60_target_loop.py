@@ -3576,6 +3576,7 @@ def build_oos_summary(run_dir, reports=None):
         summary["pass_allow_60_post_freeze_oos_validation"] = {
             "available": True,
             "schema_version": pass_allow_post_freeze_validation.get("schema_version"),
+            "generated_at": pass_allow_post_freeze_validation.get("generated_at"),
             "classification": pass_allow_post_freeze_validation.get("classification"),
             "legacy_classification": pass_allow_post_freeze_validation.get("legacy_classification"),
             "oos_data_availability_classification": (
@@ -3615,6 +3616,8 @@ def build_oos_summary(run_dir, reports=None):
             "too_small_definition_count": pass_allow_post_freeze_validation.get("too_small_definition_count"),
             "post_freeze_usable_hours": pass_allow_post_freeze_validation.get("post_freeze_usable_hours"),
             "definition_set_frozen_at": pass_allow_post_freeze_validation.get("definition_set_frozen_at"),
+            "freeze_generated_at": pass_allow_post_freeze_validation.get("freeze_generated_at"),
+            "eval_start_iso": pass_allow_post_freeze_validation.get("eval_start_iso"),
             "oos_data_availability": pass_allow_post_freeze_validation.get("oos_data_availability") or {},
             "status_counts": pass_allow_post_freeze_validation.get("status_counts") or {},
             "top_repeat_watch_items": (

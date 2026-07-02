@@ -4115,6 +4115,28 @@ def write_materialized_artifacts(
                 readiness_paths[key] = path
         return result
 
+    def run_pass_allow_60_post_freeze_validation():
+        freeze_registry = run_dir / "pass_allow_60_oos_freeze_registry.json"
+        if not freeze_registry.exists():
+            return None
+        out_path = run_dir / "pass_allow_60_post_freeze_oos_validation.json"
+        result = command_result(
+            "pass_allow_60_post_freeze_oos_validation",
+            [
+                "scripts/pass_allow_60_post_freeze_oos_validation.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--freeze-registry", str(freeze_registry),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(out_path),
+            ],
+            timeout=max(60, int(args.report_timeout_sec) * 2),
+        )
+        diagnostics.append(result)
+        if out_path.exists():
+            readiness_paths["pass_allow_60_post_freeze_oos_validation"] = out_path
+        return result
+
     verdict = build_loop_verdict()
     verdict_path = run_dir / "reviewer_verdict.json"
     strategy_memory_summary = {}
@@ -4240,6 +4262,10 @@ def write_materialized_artifacts(
             build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
         )
         readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
+        run_capture_60_target_artifacts()
+        run_pass_allow_60_post_freeze_validation()
+        # Rebuild v3 target/OOS artifacts so oos_readiness_summary consumes the
+        # freshly refreshed post-freeze validation from the current finalize.
         run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
         write_json(verdict_path, verdict)
