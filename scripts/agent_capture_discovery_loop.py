@@ -974,8 +974,8 @@ def build_candidate_improvement_opportunities_report(capture, candidate_effectiv
         row.get("candidate_id"): row
         for row in (candidate_effectiveness.get("top_candidates") or [])
     }
-    valid_crosses = list(cross_validity.get("valid_top_crosses") or [])
-    invalid_crosses = list(cross_validity.get("invalid_sample") or [])
+    valid_crosses = list(cross_validity.get("valid_crosses") or cross_validity.get("valid_top_crosses") or [])
+    invalid_crosses = list(cross_validity.get("invalid_crosses") or cross_validity.get("invalid_sample") or [])
     watchlist = list(capture.get("watchlist_hypotheses") or [])
     opportunities = []
 
@@ -1698,11 +1698,13 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
         "report_type": "capture_cross_validity_24h",
         "valid_cross_count": len(valid),
         "invalid_cross_count": len(invalid),
+        "valid_crosses": valid,
         "valid_top_crosses": valid[:50],
         "invalid_reason_counts": {
             reason: sum(1 for row in invalid for reason in row["invalid_reasons"])
             for reason in sorted({reason for row in invalid for reason in row["invalid_reasons"]})
         },
+        "invalid_crosses": invalid,
         "invalid_sample": invalid[:50],
         "criteria": {
             "quote_sensitive_requires_present_rate_gte": 0.8,
@@ -1748,7 +1750,7 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
                 if slice_downstream_available
                 else "They are useful for discovery ranking but are not slice-specific promotion evidence until a raw observation to decision join is added."
             ),
-            "valid_top_crosses only includes registered dimensions with clean coverage or explicitly allowed core metadata dimensions.",
+            "valid_crosses includes all registered dimensions with clean coverage or explicitly allowed core metadata dimensions; valid_top_crosses is a compact ranked subset.",
             "promotion_allowed remains false.",
         ],
     }
@@ -1757,7 +1759,10 @@ def build_capture_cross_validity_report(capture, context_report, candidate_downs
 
 
 def apply_capture_cross_verdict(report):
-    valid = [row for row in report.get("valid_top_crosses") or [] if isinstance(row, dict)]
+    valid = [
+        row for row in report.get("valid_crosses") or report.get("valid_top_crosses") or []
+        if isinstance(row, dict)
+    ]
     invalid_count = int(report.get("invalid_cross_count") or 0)
     valid_count = int(report.get("valid_cross_count") or len(valid))
     judgment_counts = Counter(str(row.get("judgment") or "UNKNOWN") for row in valid)
@@ -5390,6 +5395,8 @@ def self_test():
         else:
             assert capture_cross_validity["criteria"]["slice_level_downstream_join_required_for_promotion_evidence"] is True
         if capture_cross_validity.get("valid_top_crosses"):
+            assert "valid_crosses" in capture_cross_validity
+            assert len(capture_cross_validity["valid_crosses"]) == capture_cross_validity["valid_cross_count"]
             first_cross = capture_cross_validity["valid_top_crosses"][0]
             assert "decision_lift" in first_cross
             assert "pass_allow_lift" in first_cross

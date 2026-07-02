@@ -2447,7 +2447,7 @@ def build_pass_allow_60_closure_plan(
             return "kline"
         return dimension
 
-    for row in capture_cross.get("valid_top_crosses") or []:
+    for row in capture_cross.get("valid_crosses") or capture_cross.get("valid_top_crosses") or []:
         if not isinstance(row, dict):
             continue
         if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
@@ -3790,7 +3790,9 @@ def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility
         capture_cross = {
             "schema_version": "capture_cross_validity_report.v1",
             "report_type": "capture_cross_validity_24h",
+            "valid_crosses": [],
             "valid_top_crosses": [],
+            "invalid_crosses": [],
             "invalid_sample": [],
             "criteria": {},
             "dimension_registry": {},
@@ -3798,7 +3800,11 @@ def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility
             "can_promote_live": False,
             "evidence_level": "discovery_same_window",
         }
-    existing = list(capture_cross.get("valid_top_crosses") or [])
+    existing = list(
+        capture_cross.get("valid_crosses")
+        or capture_cross.get("valid_top_crosses")
+        or []
+    )
     existing_keys = {
         (row.get("candidate_id"), row.get("dimension"), row.get("slice_value"))
         for row in existing
@@ -3808,18 +3814,20 @@ def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility
         row for row in matured_rows
         if (row.get("candidate_id"), row.get("dimension"), row.get("slice_value")) not in existing_keys
     ]
-    capture_cross["valid_top_crosses"] = existing + appended
-    capture_cross["valid_cross_count"] = len(capture_cross["valid_top_crosses"])
+    all_valid = existing + appended
+    capture_cross["valid_crosses"] = all_valid
+    capture_cross["valid_top_crosses"] = all_valid[:75]
+    capture_cross["valid_cross_count"] = len(all_valid)
     capture_cross["shadow_matured_volume_top_crosses"] = matured_rows
     capture_cross["shadow_matured_volume_cross_count"] = len(matured_rows)
     capture_cross.setdefault("dimension_registry", {})["matured_volume"] = ["matured_volume_profile"]
     capture_cross["dimension_group_counts"] = dict(Counter(
         row.get("dimension_group") or "unknown"
-        for row in capture_cross.get("valid_top_crosses") or []
+        for row in capture_cross.get("valid_crosses") or []
     ))
     capture_cross["dimension_status_counts"] = dict(Counter(
         row.get("dimension_eligibility_status") or "unknown"
-        for row in (capture_cross.get("valid_top_crosses") or []) + (capture_cross.get("invalid_sample") or [])
+        for row in (capture_cross.get("valid_crosses") or []) + (capture_cross.get("invalid_crosses") or capture_cross.get("invalid_sample") or [])
     ))
     notes = list(capture_cross.get("notes") or [])
     note = (
@@ -3836,7 +3844,7 @@ def enrich_capture_cross_with_shadow_matured_volume(reports, context_eligibility
 
 def apply_capture_cross_verdict(capture_cross):
     valid = [
-        row for row in capture_cross.get("valid_top_crosses") or []
+        row for row in capture_cross.get("valid_crosses") or capture_cross.get("valid_top_crosses") or []
         if isinstance(row, dict)
     ]
     invalid_count = int(capture_cross.get("invalid_cross_count") or 0)
@@ -4101,7 +4109,7 @@ def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=Non
     }
     now = utc_now()
     items = []
-    for row in capture_cross.get("valid_top_crosses") or []:
+    for row in capture_cross.get("valid_crosses") or capture_cross.get("valid_top_crosses") or []:
         if not isinstance(row, dict):
             continue
         if str(row.get("judgment") or "").upper() not in {
@@ -4293,7 +4301,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "evidence": row.get("metrics") or {},
             "next_action": row.get("suggested_action"),
         })
-    for row in capture_cross.get("valid_top_crosses") or []:
+    for row in capture_cross.get("valid_crosses") or capture_cross.get("valid_top_crosses") or []:
         if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
             continue
         dimension = row.get("dimension")
@@ -4540,6 +4548,8 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
         "queue_count": len(items),
         "source_counts": dict(status_counts),
         "top_next_actions": top_next_actions,
+        "items": items,
+        "queue": items,
         "top_items": top_items,
         "top_opportunities": top_items,
         "strategy_memory_status_counts": strategy_memory_validation.get("status_counts") or {},
@@ -6356,9 +6366,11 @@ def self_test():
             "candidate_level_after_match_proxy_not_slice_specific"
         )
         assert matured_cross_rows[0]["pass_allow_lift"] == 0.4
+        assert "valid_crosses" in capture_cross
+        assert len(capture_cross["valid_crosses"]) == capture_cross["valid_cross_count"]
         assert any(
             row.get("dimension_group") == "matured_volume"
-            for row in capture_cross["valid_top_crosses"]
+            for row in capture_cross["valid_crosses"]
         )
         assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
@@ -6454,6 +6466,10 @@ def self_test():
         assert queue["evidence_level"] == "discovery_shadow_only"
         assert queue["next_action"]
         assert queue["queue_count"] >= 3
+        assert "items" in queue
+        assert "queue" in queue
+        assert len(queue["items"]) == queue["queue_count"]
+        assert queue["queue"] == queue["items"]
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
         assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 2
         assert queue["source_counts"]["pending_to_final_stale_before_final_cluster"] == 1
