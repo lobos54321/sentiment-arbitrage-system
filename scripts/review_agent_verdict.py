@@ -1561,6 +1561,17 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             capture_60_gap_report.get("current_target_next_best_allowed_action")
         ),
         "capture_60_next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
+        "decision_capture_60_gap_classification": decision_capture_60_gap_audit.get("classification"),
+        "decision_capture_60_gap_next_action": decision_capture_60_gap_audit.get("next_action"),
+        "decision_capture_60_additional_count_needed": (
+            decision_capture_60_gap_audit.get("additional_decision_records_needed_to_60")
+        ),
+        "decision_capture_60_shadow_bridge_mirror_complete": (
+            decision_capture_60_gap_audit.get("shadow_bridge_mirror_complete")
+        ),
+        "decision_capture_60_optimistic_rate_if_shadow_gap_logged": (
+            decision_capture_60_gap_audit.get("optimistic_decision_record_rate_if_shadow_gap_logged")
+        ),
         "capture_60_target_loop": {
             "available": bool(capture_60_gap_report),
             "classification": capture_60_gap_report.get("classification"),
@@ -3067,6 +3078,12 @@ def self_test():
     assert stage_verdict["capture_60_target_loop"]["current_target_next_best_allowed_action"] == (
         "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
     )
+    assert stage_verdict["decision_capture_60_gap_classification"] == (
+        "DECISION_CAPTURE_60_SHADOW_BRIDGE_CAN_CLOSE_GAP_SAME_WINDOW"
+    )
+    assert stage_verdict["decision_capture_60_additional_count_needed"] == 1
+    assert stage_verdict["decision_capture_60_shadow_bridge_mirror_complete"] is True
+    assert stage_verdict["decision_capture_60_optimistic_rate_if_shadow_gap_logged"] == 0.9
     assert stage_verdict["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 5
     assert stage_verdict["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
     assert stage_verdict["upstream_funnel_gap_summary"]["total_upstream_gap"] == 7
