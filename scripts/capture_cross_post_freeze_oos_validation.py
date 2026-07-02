@@ -36,6 +36,10 @@ from pass_allow_60_post_freeze_oos_validation import (
     table_exists,
     write_json,
 )
+from quality_timing_reject_research_audit import (
+    classify_shadow_review_cluster,
+    stage_quality_timing_events,
+)
 
 
 SCHEMA_VERSION = "capture_cross_post_freeze_oos_validation.v1"
@@ -53,6 +57,11 @@ SUPPORTED_STAGES = {
     "mode_disabled_adjusted_final_eligibility",
     "paper_capture",
     "realized_capture",
+}
+CAPTURE_CROSS_FREEZE_SOURCES = {
+    "capture_first_2d_cross",
+    "clean_dimension_2d_capture_cross",
+    "quality_timing_reason_cross",
 }
 
 
@@ -263,6 +272,23 @@ def signal_stage_rates(signal_ids, stages):
     return out
 
 
+def quality_reason_signature(event):
+    if not event:
+        return None
+    stage, component, event_type, decision, reason = (list(event.get("reason_key") or []) + [None] * 5)[:5]
+    return "|".join(str(part or "UNKNOWN") for part in [stage, component, event_type, decision, reason])
+
+
+def quality_timing_value(event, dimension):
+    if not event:
+        return None
+    if dimension == "quality_timing_cluster":
+        return classify_shadow_review_cluster(event.get("stage"), event.get("attribution"))
+    if dimension == "quality_timing_reason":
+        return quality_reason_signature(event)
+    return None
+
+
 def selected_status(selected_count, selected_stage_rate, global_stage_rate, min_selected_events):
     lift = (
         None
@@ -283,6 +309,7 @@ def validate_capture_cross_item(
     raw_rows,
     matched_candidates,
     context_by_signal,
+    quality_timing_by_signal,
     stages,
     global_stage_rates,
     min_selected_events,
@@ -304,7 +331,13 @@ def validate_capture_cross_item(
         if candidate_id and candidate_id not in matched_candidates.get(signal_id, set()):
             continue
         if dimension:
-            observed_value = context_value(context_by_signal.get(signal_id) or {}, dimension)
+            if dimension in {"quality_timing_cluster", "quality_timing_reason"}:
+                observed_value = quality_timing_value(
+                    (quality_timing_by_signal or {}).get(signal_id),
+                    dimension,
+                )
+            else:
+                observed_value = context_value(context_by_signal.get(signal_id) or {}, dimension)
             if norm_value(observed_value) != norm_value(slice_value):
                 continue
         selected.append(signal_id)
@@ -450,6 +483,7 @@ def build_report(args):
         paper_db.close()
 
     _obs_by_signal, matched_candidates, context_by_signal, candidate_sets, _full = build_observation_indexes(observations)
+    quality_timing_by_signal = stage_quality_timing_events(raw_rows, decisions)
     raw_signal_set = {row.get("signal_id_key") for row in raw_rows if row.get("signal_id_key")}
     observed_signal_set = set(candidate_sets)
     full_coverage_signal_count = sum(
@@ -465,12 +499,13 @@ def build_report(args):
             raw_rows,
             matched_candidates,
             context_by_signal,
+            quality_timing_by_signal,
             stages,
             global_stage_rates,
             int(args.min_selected_events),
         )
         for item in (registry.get("items") or [])
-        if isinstance(item, dict) and item.get("source") == "capture_first_2d_cross"
+        if isinstance(item, dict) and item.get("source") in CAPTURE_CROSS_FREEZE_SOURCES
     ]
     status_counts = Counter(row.get("verdict") for row in items)
     repeat_watch = [row for row in items if row.get("verdict") == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"]
@@ -598,6 +633,19 @@ def create_self_test_inputs(root):
                     "slice_value": "matrix_evaluator",
                     "expected_capture_stage_improved": "pending_capture",
                 },
+            },
+            {
+                "freeze_id": "quality-cross-1",
+                "source": "quality_timing_reason_cross",
+                "definition_fingerprint": "def",
+                "frozen_at": iso_from_ts(frozen_ts),
+                "expected_capture_stage_improved": "decision_capture",
+                "freeze_definition": {
+                    "candidate_id": "notath_quote_clean",
+                    "dimension": "quality_timing_cluster",
+                    "slice_value": "matrix_alignment_wait",
+                    "expected_capture_stage_improved": "decision_capture",
+                },
             }
         ],
     })
@@ -689,7 +737,10 @@ def create_self_test_inputs(root):
                 now - 160, 101, "token-a", "A", "final_entry_contract",
                 "mode disabled", "entry_block", "BLOCK", json.dumps({"hard_blockers": ["mode_disabled"]}),
             ),
-            (now - 165, 102, "token-b", "B", "matrix_evaluator", "wait", "timing_decision", "WAIT", "{}"),
+            (
+                now - 165, 102, "token-b", "B", "matrix_evaluator",
+                "lotto_timing_negative_m5", "timing_decision", "REJECT", "{}",
+            ),
         ],
     )
     paper.commit()
@@ -718,8 +769,10 @@ def run_self_test():
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
         assert payload["oos_data_availability_classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
-        assert payload["validated_definition_count"] == 1
+        assert payload["validated_definition_count"] == 2
         assert payload["repeat_watch_count"] == 1
+        assert payload["source_counts"]["capture_first_2d_cross"] == 1
+        assert payload["source_counts"]["quality_timing_reason_cross"] == 1
         assert payload["classification"] == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"
         assert payload["post_freeze_global_stage_rates"]["decision_capture_rate"] == 1.0
         assert payload["post_freeze_global_stage_rates"]["pending_capture_rate"] == 0.5
@@ -728,6 +781,12 @@ def run_self_test():
         assert item["selected_stage_rates"]["pending_capture_rate"] == 1.0
         assert item["expected_stage_lift_vs_post_freeze_global"] == 0.5
         assert item["verdict"] == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"
+        quality_item = [
+            row for row in payload["items"]
+            if row.get("source") == "quality_timing_reason_cross"
+        ][0]
+        assert quality_item["selected_raw_gold_silver_events"] == 1
+        assert quality_item["dimension"] == "quality_timing_cluster"
         assert out.exists()
         availability = build_oos_data_availability(
             0,

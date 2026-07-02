@@ -55,6 +55,9 @@ REQUIRED_FILES = {
     "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
+    "clean_dimension_2d_capture_cross": "clean_dimension_2d_capture_cross_24h.json",
+    "quality_timing_reason_cross": "quality_timing_reason_cross_24h.json",
+    "strategy_memory_reason_cross": "strategy_memory_reason_cross_24h.json",
     "markov_effectiveness": "markov_effectiveness_24h.json",
     "volume_kline_coverage_audit": "volume_kline_coverage_audit_24h.json",
     "matured_volume_capture_cross_audit": "matured_volume_capture_cross_audit_24h.json",
@@ -3741,9 +3744,109 @@ def capture_cross_expected_stage(row):
     return "capture_discovery"
 
 
-def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=None):
+def clean_dimension_cross_expected_stage(row):
+    stage_lifts = [
+        (
+            "mode_disabled_adjusted_final_eligibility",
+            row.get("mode_disabled_adjusted_final_eligibility_lift_vs_global"),
+        ),
+        ("final_eligibility", row.get("final_eligibility_lift_vs_global")),
+        ("pending_capture", row.get("pending_capture_lift_vs_global")),
+        ("pass_allow_capture", row.get("pass_allow_capture_lift_vs_global")),
+        ("decision_capture", row.get("decision_capture_lift_vs_global")),
+        ("detector_capture", row.get("detector_capture_lift_vs_global")),
+    ]
+    positive = [
+        (stage, safe_float(value, 0.0))
+        for stage, value in stage_lifts
+        if safe_float(value, 0.0) > 0
+    ]
+    if positive:
+        return max(positive, key=lambda item: item[1])[0]
+    return "capture_discovery"
+
+
+def build_clean_dimension_freeze_items(report, *, source, previous_items_by_id, now):
+    items = []
+    for row in report.get("rows") or report.get("top_rows") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("verdict") or "").upper() != "SHADOW_IMPROVEMENT_CANDIDATE":
+            continue
+        if row.get("data_blockers"):
+            continue
+        if row.get("dimension_group") in {"volume", "kline"}:
+            continue
+        if row.get("dimension") in {"volume_profile", "kline_profile"}:
+            continue
+        if safe_int(row.get("selected_raw_gs_events"), 0) <= 0:
+            continue
+        freeze_definition = {
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "dimension_eligibility_status": row.get("dimension_status"),
+            "slice_value": row.get("slice_value"),
+            "cross_type": row.get("cross_type"),
+            "verdict": row.get("verdict"),
+            "expected_capture_stage_improved": clean_dimension_cross_expected_stage(row),
+            "evidence_source": row.get("report_type") or source,
+        }
+        fingerprint = stable_fingerprint(freeze_definition)
+        freeze_id = f"{source}:{fingerprint}"
+        previous = previous_items_by_id.get(freeze_id) or {}
+        current_window_evidence = {
+            key: row.get(key)
+            for key in (
+                "selected_raw_gs_events",
+                "raw_gs_recall",
+                "precision_signal_proxy",
+                "precision_scope",
+                "decision_capture_rate",
+                "decision_capture_lift_vs_global",
+                "pass_allow_capture_rate",
+                "pass_allow_capture_lift_vs_global",
+                "pending_capture_rate",
+                "pending_capture_lift_vs_global",
+                "final_eligibility_rate",
+                "final_eligibility_lift_vs_global",
+                "mode_disabled_adjusted_final_eligibility_rate",
+                "mode_disabled_adjusted_final_eligibility_lift_vs_global",
+                "paper_capture_rate",
+                "paper_capture_lift_vs_global",
+            )
+            if row.get(key) is not None
+        }
+        items.append({
+            "freeze_id": freeze_id,
+            "source": source,
+            "expected_capture_stage_improved": freeze_definition["expected_capture_stage_improved"],
+            "definition_fingerprint": fingerprint,
+            "frozen_at": previous.get("frozen_at") or now,
+            "freeze_definition": freeze_definition,
+            "current_window_evidence": current_window_evidence,
+            "status": "FROZEN_PENDING_CLEAN_NON_OVERLAPPING_OOS",
+            "oos_requirements": {
+                "definition_must_match_fingerprint": True,
+                "train_window_must_not_overlap_eval_window": True,
+                "overlap": False,
+                "context_clean_window_required": True,
+                "same_window_evidence_is_not_promotion_evidence": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return items
+
+
+def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=None, additional_cross_reports=None):
     """Freeze clean same-window 2D cross hits for future non-overlapping OOS."""
     previous_registry = previous_registry or {}
+    additional_cross_reports = additional_cross_reports or {}
     previous_items_by_id = {
         row.get("freeze_id"): row
         for row in previous_registry.get("items") or []
@@ -3834,9 +3937,22 @@ def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=Non
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         })
+    items.extend(build_clean_dimension_freeze_items(
+        additional_cross_reports.get("clean_dimension_2d_capture_cross") or {},
+        source="clean_dimension_2d_capture_cross",
+        previous_items_by_id=previous_items_by_id,
+        now=now,
+    ))
+    items.extend(build_clean_dimension_freeze_items(
+        additional_cross_reports.get("quality_timing_reason_cross") or {},
+        source="quality_timing_reason_cross",
+        previous_items_by_id=previous_items_by_id,
+        now=now,
+    ))
     items = sorted(
         items,
         key=lambda row: (
+            str(row.get("source") or ""),
             str((row.get("freeze_definition") or {}).get("candidate_id") or ""),
             str((row.get("freeze_definition") or {}).get("dimension") or ""),
             str((row.get("freeze_definition") or {}).get("slice_value") or ""),
@@ -4676,6 +4792,10 @@ def assemble_reports(run_dir, out_dir=None):
     capture_cross_freeze_registry = build_capture_cross_oos_freeze_registry(
         reports["capture_cross"],
         previous_capture_cross_freeze_registry,
+        {
+            "clean_dimension_2d_capture_cross": reports.get("clean_dimension_2d_capture_cross") or {},
+            "quality_timing_reason_cross": reports.get("quality_timing_reason_cross") or {},
+        },
     )
     reports["capture_cross_oos_freeze_registry"] = capture_cross_freeze_registry
     oos_summary = build_oos_summary(run_dir, reports)
