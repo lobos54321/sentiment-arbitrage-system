@@ -1367,6 +1367,20 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     pass_allow_60_shadow_queue = (
         pass_allow_60_closure_tracks.get("shadow_queue_pass_allow_items") or {}
     )
+    pass_allow_60_priority_queue = (
+        pass_allow_60_closure_plan.get("prioritized_closure_queue") or []
+    )
+    pass_allow_60_research_only_priority_queue = (
+        pass_allow_60_closure_plan.get("research_only_priority_queue") or []
+    )
+    pass_allow_60_oos_queue = (
+        oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue") or {}
+    )
+    pass_allow_60_freeze_top_priority_items = (
+        pass_allow_60_oos_freeze_registry.get("top_priority_items")
+        or pass_allow_60_oos_freeze_registry.get("items")
+        or []
+    )
     shadow_bridge_review_queue_items = []
     for row in shadow_bridge_candidate_counts[:10]:
         if not isinstance(row, dict):
@@ -1554,6 +1568,48 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "realized_capture_rate": capture_60_gap_report.get("realized_capture_rate"),
             "promotion_allowed": False,
         },
+        "pass_allow_60_closure_priority_queue": {
+            "available": bool(pass_allow_60_closure_plan),
+            "classification": pass_allow_60_closure_plan.get("classification"),
+            "next_action": pass_allow_60_closure_plan.get("next_action"),
+            "target_gap": pass_allow_60_closure_plan.get("target_gap") or {},
+            "additional_count_needed_to_60": (
+                pass_allow_60_closure_plan.get("additional_count_needed_to_60")
+                or (pass_allow_60_closure_plan.get("target_gap") or {}).get(
+                    "additional_count_needed_to_60"
+                )
+                or capture_60_gap_report.get("additional_count_needed_to_60")
+            ),
+            "priority_queue_count": (
+                pass_allow_60_closure_plan.get("priority_queue_count")
+                if pass_allow_60_closure_plan.get("priority_queue_count") is not None
+                else len(pass_allow_60_priority_queue)
+            ),
+            "research_only_priority_queue_count": (
+                pass_allow_60_closure_plan.get("research_only_priority_queue_count")
+                if pass_allow_60_closure_plan.get("research_only_priority_queue_count") is not None
+                else len(pass_allow_60_research_only_priority_queue)
+            ),
+            "formal_blocked_count": pass_allow_60_closure_plan.get("formal_blocked_count"),
+            "top_priority_items": pass_allow_60_priority_queue[:8],
+            "research_only_top_priority_items": pass_allow_60_research_only_priority_queue[:5],
+            "oos_freeze_ready_count": len([
+                row for row in pass_allow_60_priority_queue
+                if isinstance(row, dict) and row.get("oos_freeze_ready")
+            ]),
+            "oos_queue_count": (
+                oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue_count")
+                or pass_allow_60_oos_queue.get("queue_count")
+            ),
+            "next_oos_action": (
+                oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
+                or pass_allow_60_oos_queue.get("next_action")
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
         "capture_stage_metrics_v3": {
             "available": bool(capture_stage_metrics_v3),
             "stage_counts": capture_stage_metrics_v3.get("stage_counts") or {},
@@ -1659,6 +1715,29 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 oos_readiness_summary_v3.get("pass_allow_60_post_freeze_oos_validation") or {}
             ),
             "promotion_allowed": False,
+        },
+        "pass_allow_60_closure_oos_queue_count": (
+            oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue_count")
+            or pass_allow_60_oos_queue.get("queue_count")
+        ),
+        "next_pass_allow_60_closure_oos_action": (
+            oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
+            or pass_allow_60_oos_queue.get("next_action")
+        ),
+        "pass_allow_60_closure_oos_queue": pass_allow_60_oos_queue,
+        "pass_allow_60_oos_freeze_priority_queue": {
+            "available": bool(pass_allow_60_oos_freeze_registry),
+            "classification": pass_allow_60_oos_freeze_registry.get("classification"),
+            "priority_queue_count": pass_allow_60_oos_freeze_registry.get("priority_queue_count"),
+            "frozen_definition_count": pass_allow_60_oos_freeze_registry.get("frozen_definition_count"),
+            "unique_priority_plan_item_count": (
+                pass_allow_60_oos_freeze_registry.get("unique_priority_plan_item_count")
+            ),
+            "top_priority_items": pass_allow_60_freeze_top_priority_items[:8],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
         },
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
@@ -1885,6 +1964,19 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "available": bool(pass_allow_60_closure_plan),
             "classification": pass_allow_60_closure_plan.get("classification"),
             "next_action": pass_allow_60_closure_plan.get("next_action"),
+            "priority_queue_count": (
+                pass_allow_60_closure_plan.get("priority_queue_count")
+                if pass_allow_60_closure_plan.get("priority_queue_count") is not None
+                else len(pass_allow_60_priority_queue)
+            ),
+            "research_only_priority_queue_count": (
+                pass_allow_60_closure_plan.get("research_only_priority_queue_count")
+                if pass_allow_60_closure_plan.get("research_only_priority_queue_count") is not None
+                else len(pass_allow_60_research_only_priority_queue)
+            ),
+            "formal_blocked_count": pass_allow_60_closure_plan.get("formal_blocked_count"),
+            "top_priority_items": pass_allow_60_priority_queue[:8],
+            "research_only_top_priority_items": pass_allow_60_research_only_priority_queue[:5],
             "target_gap": pass_allow_60_closure_plan.get("target_gap") or {},
             "residual_gap_supplemental_tracks": (
                 pass_allow_60_closure_plan.get("residual_gap_supplemental_tracks") or {}
@@ -1908,8 +2000,13 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "available": bool(pass_allow_60_oos_freeze_registry),
             "classification": pass_allow_60_oos_freeze_registry.get("classification"),
             "frozen_definition_count": pass_allow_60_oos_freeze_registry.get("frozen_definition_count"),
+            "priority_queue_count": pass_allow_60_oos_freeze_registry.get("priority_queue_count"),
+            "unique_priority_plan_item_count": (
+                pass_allow_60_oos_freeze_registry.get("unique_priority_plan_item_count")
+            ),
             "source_counts": pass_allow_60_oos_freeze_registry.get("source_counts") or {},
             "oos_requirements": pass_allow_60_oos_freeze_registry.get("oos_requirements") or {},
+            "top_priority_items": pass_allow_60_freeze_top_priority_items[:8],
             "items": (pass_allow_60_oos_freeze_registry.get("items") or [])[:12],
             "promotion_allowed": False,
             "strategy_change_allowed": False,

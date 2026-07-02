@@ -121,6 +121,41 @@ def compact_shadow_queue_items(items, limit=5):
     return compact
 
 
+def compact_pass_allow_queue_items(items, limit=5):
+    compact = []
+    for item in (items or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        current_evidence = item.get("current_window_evidence") or {}
+        compact.append({
+            "priority_rank": item.get("priority_rank"),
+            "priority_bucket": item.get("priority_bucket"),
+            "plan_item_id": item.get("plan_item_id") or item.get("source_plan_item_id"),
+            "freeze_id": item.get("freeze_id"),
+            "candidate_id": item.get("candidate_id"),
+            "cluster": item.get("cluster"),
+            "dimension": item.get("dimension"),
+            "slice_value": item.get("slice_value"),
+            "expected_capture_stage_improved": item.get("expected_capture_stage_improved"),
+            "events_contributing_to_current_60pct_gap_upper_bound": (
+                item.get("events_contributing_to_current_60pct_gap_upper_bound")
+                if item.get("events_contributing_to_current_60pct_gap_upper_bound") is not None
+                else current_evidence.get("events_contributing_to_current_60pct_gap_upper_bound")
+            ),
+            "non_dedup_upper_bound_event_count": item.get("non_dedup_upper_bound_event_count"),
+            "matched_gold_silver_events": item.get("matched_gold_silver_events"),
+            "pass_allow_lift": item.get("pass_allow_lift"),
+            "status": item.get("status"),
+            "next_action": item.get("next_action"),
+            "context_blockers": item.get("context_blockers") or [],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return compact
+
+
 def compact_kline_coverage_resolution(audit):
     if not isinstance(audit, dict) or not audit:
         return {}
@@ -300,6 +335,85 @@ def build_handoff(verdict):
                 indent=2,
                 sort_keys=True,
             ),
+            "```",
+            "",
+        ])
+    pass_allow_priority = verdict.get("pass_allow_60_closure_priority_queue") or {}
+    pass_allow_freeze_priority = verdict.get("pass_allow_60_oos_freeze_priority_queue") or {}
+    pass_allow_oos_queue = verdict.get("pass_allow_60_closure_oos_queue") or {}
+    if pass_allow_priority or pass_allow_freeze_priority or pass_allow_oos_queue:
+        lines.extend([
+            "## Pass Allow 60 Closure Priority Queue",
+            "",
+            "This queue is shadow-only. It identifies the next evidence to collect for closing the pass_allow gap to 60%; it does not authorize strategy, gate, final_entry_contract, A_CLASS, executor, paper/live, canary, wallet, or risk changes.",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "closure_priority_queue": {
+                        "available": pass_allow_priority.get("available"),
+                        "classification": pass_allow_priority.get("classification"),
+                        "additional_count_needed_to_60": pass_allow_priority.get(
+                            "additional_count_needed_to_60"
+                        ),
+                        "priority_queue_count": pass_allow_priority.get("priority_queue_count"),
+                        "research_only_priority_queue_count": pass_allow_priority.get(
+                            "research_only_priority_queue_count"
+                        ),
+                        "formal_blocked_count": pass_allow_priority.get("formal_blocked_count"),
+                        "oos_freeze_ready_count": pass_allow_priority.get("oos_freeze_ready_count"),
+                        "next_oos_action": pass_allow_priority.get("next_oos_action"),
+                        "promotion_allowed": False,
+                    },
+                    "top_priority_items": compact_pass_allow_queue_items(
+                        pass_allow_priority.get("top_priority_items") or [],
+                        limit=5,
+                    ),
+                    "research_only_top_priority_items": compact_pass_allow_queue_items(
+                        pass_allow_priority.get("research_only_top_priority_items") or [],
+                        limit=5,
+                    ),
+                    "oos_freeze_priority_queue": {
+                        "available": pass_allow_freeze_priority.get("available"),
+                        "classification": pass_allow_freeze_priority.get("classification"),
+                        "priority_queue_count": pass_allow_freeze_priority.get(
+                            "priority_queue_count"
+                        ),
+                        "frozen_definition_count": pass_allow_freeze_priority.get(
+                            "frozen_definition_count"
+                        ),
+                        "unique_priority_plan_item_count": pass_allow_freeze_priority.get(
+                            "unique_priority_plan_item_count"
+                        ),
+                        "top_priority_items": compact_pass_allow_queue_items(
+                            pass_allow_freeze_priority.get("top_priority_items") or [],
+                            limit=5,
+                        ),
+                        "promotion_allowed": False,
+                    },
+                    "closure_oos_queue": {
+                        "classification": pass_allow_oos_queue.get("classification"),
+                        "queue_count": (
+                            verdict.get("pass_allow_60_closure_oos_queue_count")
+                            or pass_allow_oos_queue.get("queue_count")
+                        ),
+                        "next_action": (
+                            verdict.get("next_pass_allow_60_closure_oos_action")
+                            or pass_allow_oos_queue.get("next_action")
+                        ),
+                        "blocked_until": pass_allow_oos_queue.get("blocked_until"),
+                        "decision_no_pass_cluster_count": pass_allow_oos_queue.get(
+                            "decision_no_pass_cluster_count"
+                        ),
+                        "clean_2d_pass_allow_lift_slice_count": pass_allow_oos_queue.get(
+                            "clean_2d_pass_allow_lift_slice_count"
+                        ),
+                        "promotion_allowed": False,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
             "```",
             "",
         ])
