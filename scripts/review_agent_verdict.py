@@ -826,6 +826,66 @@ def context_dimension_formal_blockers(context_dimension_eligibility):
     return sorted(set(blockers))
 
 
+def summarize_context_dimension_eligibility(context_dimension_eligibility):
+    report = context_dimension_eligibility or {}
+    dimensions = report.get("dimensions") or report.get("dimension_eligibility") or {}
+    status_counts = dict(report.get("status_counts") or {})
+    if not status_counts and dimensions:
+        for row in dimensions.values():
+            status = row.get("status") or "UNKNOWN"
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+    clean_dimensions = list(report.get("clean_dimensions") or [])
+    pending_dimensions = list(report.get("pending_dimensions") or [])
+    blocked_dimensions = list(report.get("blocked_dimensions") or [])
+
+    for name, row in dimensions.items():
+        status = row.get("status")
+        if status == "CLEAN" and name not in clean_dimensions:
+            clean_dimensions.append(name)
+        elif status == "CLEAN_WINDOW_PENDING" and name not in pending_dimensions:
+            pending_dimensions.append(name)
+        elif status not in {"CLEAN", "NOT_APPLICABLE", "CLEAN_WINDOW_PENDING"}:
+            if name not in blocked_dimensions:
+                blocked_dimensions.append(name)
+
+    dimension_statuses = {}
+    eligible_for_capture_cross = []
+    blocked_for_capture_cross = []
+    top_blockers = set()
+    for name, row in dimensions.items():
+        blockers = [blocker for blocker in (row.get("blockers") or []) if blocker]
+        top_blockers.update(blockers)
+        eligible = boolish(row.get("eligible_for_capture_cross"))
+        if eligible:
+            eligible_for_capture_cross.append(name)
+        else:
+            blocked_for_capture_cross.append(name)
+        dimension_statuses[name] = {
+            "status": row.get("status"),
+            "coverage_rate": row.get("coverage_rate"),
+            "eligible_for_capture_cross": eligible,
+            "blockers": blockers,
+            "allowed_use": row.get("allowed_use"),
+            "research_only_recoverable": boolish(row.get("research_only_recoverable")),
+            "promotion_allowed": False,
+        }
+
+    return {
+        "available": bool(report),
+        "classification": report.get("classification"),
+        "status_counts": status_counts,
+        "clean_dimensions": clean_dimensions,
+        "pending_dimensions": pending_dimensions,
+        "blocked_dimensions": blocked_dimensions,
+        "eligible_for_capture_cross_dimensions": eligible_for_capture_cross,
+        "blocked_for_capture_cross_dimensions": blocked_for_capture_cross,
+        "top_blockers": sorted(top_blockers),
+        "dimension_statuses": dimension_statuses,
+        "promotion_allowed": False,
+    }
+
+
 def top_slice_key(row):
     return (
         JUDGMENT_ORDER.get(row.get("judgment"), -1),
@@ -1011,6 +1071,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     runtime_health_blockers = list(runtime_health_snapshot.get("blockers") or [])
     runtime_health_warnings = list(runtime_health_snapshot.get("warnings") or [])
     context_dimension_eligibility = readiness_reports.get("context_dimension_eligibility") or {}
+    context_dimension_eligibility_summary = summarize_context_dimension_eligibility(
+        context_dimension_eligibility
+    )
     context_dimension_blockers = context_dimension_formal_blockers(context_dimension_eligibility)
     quote_writer_fix_status = (
         context_monitor_overall.get("quote_writer_fix")
@@ -1695,6 +1758,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "dimensions": context_dimension_eligibility.get("dimensions") or {},
             "promotion_allowed": False,
         },
+        "context_dimension_eligibility_summary": context_dimension_eligibility_summary,
         "pending_to_final_entry_audit_v3": {
             "available": bool(pending_to_final_entry_audit_v3),
             "dropoff_counts": pending_to_final_entry_audit_v3.get("dropoff_counts") or {},
@@ -3158,6 +3222,13 @@ def self_test():
     assert volume_blocked_by_context_eligibility["formal_volume_sensitive_slices_blocked"] is True
     assert "volume_profile_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
     assert "kline_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
+    context_summary = volume_blocked_by_context_eligibility["context_dimension_eligibility_summary"]
+    assert context_summary["available"] is True
+    assert context_summary["dimension_statuses"]["volume"]["status"] == "BLOCKED_UNKNOWN"
+    assert context_summary["dimension_statuses"]["kline"]["status"] == "BLOCKED_UNKNOWN"
+    assert "volume" in context_summary["blocked_dimensions"]
+    assert "kline" in context_summary["blocked_dimensions"]
+    assert "volume_profile_coverage_below_80pct" in context_summary["top_blockers"]
     kline_pending_by_context_eligibility = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": []},
@@ -3186,6 +3257,10 @@ def self_test():
     })
     assert "volume_profile_coverage_below_80pct" in kline_pending_by_context_eligibility["blockers"]
     assert "kline_coverage_below_80pct" not in kline_pending_by_context_eligibility["blockers"]
+    pending_context_summary = kline_pending_by_context_eligibility["context_dimension_eligibility_summary"]
+    assert pending_context_summary["dimension_statuses"]["kline"]["status"] == "CLEAN_WINDOW_PENDING"
+    assert "kline" in pending_context_summary["pending_dimensions"]
+    assert "kline" in pending_context_summary["blocked_for_capture_cross_dimensions"]
     kline_resolution_verdict = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["kline_coverage_below_80pct"]},
