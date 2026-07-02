@@ -1537,6 +1537,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "capture_60_additional_count_needed": (
             capture_60_gap_report.get("additional_count_needed_to_60")
         ),
+        "capture_60_current_target_stage": capture_60_gap_report.get("current_target_stage"),
+        "capture_60_current_target_count": capture_60_gap_report.get("current_target_count"),
+        "capture_60_current_target_rate": capture_60_gap_report.get("current_target_rate"),
+        "capture_60_current_target_additional_count_needed": (
+            capture_60_gap_report.get("current_target_additional_count_needed_to_60")
+        ),
+        "capture_60_current_target_next_best_allowed_action": (
+            capture_60_gap_report.get("current_target_next_best_allowed_action")
+        ),
         "capture_60_next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
         "capture_60_target_loop": {
             "available": bool(capture_60_gap_report),
@@ -1556,6 +1565,16 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "gap_interpretation": capture_60_gap_report.get("gap_interpretation") or {},
             "additional_count_needed_to_60": capture_60_gap_report.get("additional_count_needed_to_60"),
             "next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
+            "current_target_stage": capture_60_gap_report.get("current_target_stage"),
+            "current_target_count": capture_60_gap_report.get("current_target_count"),
+            "current_target_rate": capture_60_gap_report.get("current_target_rate"),
+            "current_target_additional_count_needed_to_60": capture_60_gap_report.get(
+                "current_target_additional_count_needed_to_60"
+            ),
+            "current_target_reached": capture_60_gap_report.get("current_target_reached"),
+            "current_target_next_best_allowed_action": capture_60_gap_report.get(
+                "current_target_next_best_allowed_action"
+            ),
             "detector_capture_rate": capture_60_gap_report.get("detector_capture_rate"),
             "decision_capture_rate": capture_60_gap_report.get("decision_capture_rate"),
             "pass_allow_capture_rate": capture_60_gap_report.get("pass_allow_capture_rate"),
@@ -2816,6 +2835,14 @@ def self_test():
             "next_best_allowed_action": (
                 "audit_decision_bridge_and_quality_timing_shadow_only_with_blocked_context_dimensions_excluded"
             ),
+            "current_target_stage": "mode_disabled_adjusted_final_eligibility",
+            "current_target_count": 1,
+            "current_target_rate": 0.1,
+            "current_target_additional_count_needed_to_60": 5,
+            "current_target_reached": False,
+            "current_target_next_best_allowed_action": (
+                "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
+            ),
             "mode_disabled_adjusted_final_eligibility_rate": 0.1,
         },
         "shadow_decision_bridge_audit": {
@@ -2867,8 +2894,15 @@ def self_test():
     assert stage_verdict["capture_60_biggest_gap_stage"] == "pass_allow_capture"
     assert stage_verdict["capture_60_target_shortfall_stage"] == "pass_allow_capture"
     assert stage_verdict["capture_60_additional_count_needed"] == 1
+    assert stage_verdict["capture_60_current_target_stage"] == "mode_disabled_adjusted_final_eligibility"
+    assert stage_verdict["capture_60_current_target_count"] == 1
+    assert stage_verdict["capture_60_current_target_rate"] == 0.1
+    assert stage_verdict["capture_60_current_target_additional_count_needed"] == 5
     assert stage_verdict["capture_60_next_best_allowed_action"] == (
         "audit_decision_bridge_and_quality_timing_shadow_only_with_blocked_context_dimensions_excluded"
+    )
+    assert stage_verdict["capture_60_target_loop"]["current_target_next_best_allowed_action"] == (
+        "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
     )
     assert stage_verdict["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 5
     assert stage_verdict["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"

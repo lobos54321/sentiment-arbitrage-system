@@ -257,6 +257,26 @@ def first_stage_below_target(stage_counts):
     return "target_reached", 0
 
 
+def stage_gap_to_target(stage_counts, stage_name):
+    target = stage_counts.get("target_60_count")
+    if target is None or not stage_name:
+        return None
+    row = stage_counts.get(stage_name) or {}
+    count = safe_int(row.get("count"), 0)
+    return {
+        "stage": stage_name,
+        "count": count,
+        "rate": row.get("rate"),
+        "target_60_count": target,
+        "additional_count_needed_to_60": max(0, safe_int(target, 0) - count),
+        "target_reached": count >= safe_int(target, 0),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def largest_stage_dropoff(stage_counts):
     rows = []
     previous_name = "raw_gold_silver_denominator"
@@ -301,7 +321,14 @@ def transition_dropoff_allowed_action(dropoff, pending_audit):
     return stage_specific_allowed_action(to_stage, pending_audit)
 
 
-def gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pending_audit):
+def gap_interpretation(
+    stage_metrics,
+    biggest_gap_stage,
+    additional_needed,
+    pending_audit,
+    current_target_stage=None,
+    current_target_gap=None,
+):
     largest_dropoff = stage_metrics.get("largest_stage_dropoff") or {}
     target_track = {
         "track": "target_shortfall_to_60",
@@ -312,6 +339,25 @@ def gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pend
             "target-driven shadow/evaluator action."
         ),
         "next_action": stage_specific_allowed_action(biggest_gap_stage, pending_audit),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+    current_target_track = {
+        "track": "current_readiness_target_to_60",
+        "stage": current_target_stage,
+        "additional_count_needed_to_60": (
+            (current_target_gap or {}).get("additional_count_needed_to_60")
+        ),
+        "count": (current_target_gap or {}).get("count"),
+        "rate": (current_target_gap or {}).get("rate"),
+        "meaning": (
+            "Current operating target while A_CLASS/final_entry are not paper-ready. "
+            "This is the readiness proxy that must move toward 60% before paper "
+            "capture can be claimed."
+        ),
+        "next_action": stage_specific_allowed_action(current_target_stage, pending_audit),
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
@@ -336,9 +382,11 @@ def gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pend
     }
     return {
         "target_shortfall_stage": biggest_gap_stage,
+        "current_target_stage": current_target_stage,
+        "current_target_gap": current_target_gap or {},
         "largest_transition_dropoff_stage": largest_dropoff.get("to_stage"),
         "largest_transition_dropoff": largest_dropoff,
-        "tracks": [target_track, transition_track],
+        "tracks": [current_target_track, target_track, transition_track],
         "promotion_allowed": False,
     }
 
@@ -1379,7 +1427,19 @@ def build_context_dimension_eligibility(reports):
 def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit):
     stage_counts = stage_metrics["stage_counts"]
     biggest_gap_stage, additional_needed = first_stage_below_target(stage_counts)
-    interpretation = gap_interpretation(stage_metrics, biggest_gap_stage, additional_needed, pending_audit)
+    current_target_stage = (
+        stage_metrics.get("target_stage_while_shadow")
+        or "mode_disabled_adjusted_final_eligibility"
+    )
+    current_target_gap = stage_gap_to_target(stage_counts, current_target_stage) or {}
+    interpretation = gap_interpretation(
+        stage_metrics,
+        biggest_gap_stage,
+        additional_needed,
+        pending_audit,
+        current_target_stage=current_target_stage,
+        current_target_gap=current_target_gap,
+    )
     return {
         "schema_version": "capture_60_gap_report.v1",
         "report_type": "capture_60_gap_report",
@@ -1405,6 +1465,18 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         "paper_capture_rate": stage_counts["paper_capture"]["rate"],
         "realized_capture_count": stage_counts["realized_capture"]["count"],
         "realized_capture_rate": stage_counts["realized_capture"]["rate"],
+        "current_target_stage": current_target_stage,
+        "current_target_count": current_target_gap.get("count"),
+        "current_target_rate": current_target_gap.get("rate"),
+        "current_target_additional_count_needed_to_60": current_target_gap.get(
+            "additional_count_needed_to_60"
+        ),
+        "current_target_reached": current_target_gap.get("target_reached"),
+        "current_target_next_best_allowed_action": next_best_allowed_action(
+            current_target_stage,
+            context_eligibility,
+            pending_audit,
+        ),
         "biggest_gap_stage": biggest_gap_stage,
         "target_shortfall_stage": biggest_gap_stage,
         "largest_stage_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
@@ -1416,6 +1488,7 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         "human_approval_required_before_runtime_change": True,
         "notes": [
             "This is a target-gap report, not a promotion report.",
+            "current_target_* fields describe the active readiness target while A_CLASS/final_entry are not paper-ready.",
             "target_shortfall_stage is the first stage below 60%; largest_transition_dropoff is the biggest adjacent funnel loss. They can differ and should be audited separately.",
             "All suggested actions are constrained to evaluator, data, shadow-only, or human-approval handoff paths.",
         ],
@@ -4122,6 +4195,14 @@ def self_test():
         assert gap["target_60_count"] == 3
         assert gap["biggest_gap_stage"] == "pending_capture"
         assert gap["target_shortfall_stage"] == "pending_capture"
+        assert gap["current_target_stage"] == "mode_disabled_adjusted_final_eligibility"
+        assert gap["current_target_count"] == 1
+        assert gap["current_target_rate"] == 0.2
+        assert gap["current_target_additional_count_needed_to_60"] == 2
+        assert gap["current_target_reached"] is False
+        assert gap["current_target_next_best_allowed_action"] == (
+            "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
+        )
         assert gap["largest_transition_dropoff"]["to_stage"] in {
             "detector_capture",
             "decision_capture",
@@ -4132,7 +4213,7 @@ def self_test():
             "paper_capture",
             "realized_capture",
         }
-        assert len(gap["recommended_parallel_tracks"]) == 2
+        assert len(gap["recommended_parallel_tracks"]) == 3
         assert all(item["promotion_allowed"] is False for item in gap["recommended_parallel_tracks"])
         assert gap["additional_count_needed_to_60"] == 1
         assert gap["next_best_allowed_action"] == (
