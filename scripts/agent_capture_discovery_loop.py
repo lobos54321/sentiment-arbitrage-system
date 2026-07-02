@@ -3879,6 +3879,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- final_eligibility_capture_rate: `{verdict.get('final_eligibility_capture_rate')}`",
         f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
         f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
+        f"- capture_60_gap_classification: `{(verdict.get('capture_60_target_loop') or {}).get('classification') or verdict.get('capture_60_gap_classification')}`",
         f"- capture_60_biggest_gap_stage: `{(verdict.get('capture_60_target_loop') or {}).get('biggest_gap_stage')}`",
         f"- capture_60_target_shortfall_stage: `{(verdict.get('capture_60_target_loop') or {}).get('target_shortfall_stage')}`",
         f"- capture_60_largest_transition_dropoff: `{json.dumps((verdict.get('capture_60_target_loop') or {}).get('largest_transition_dropoff') or {}, sort_keys=True)}`",
@@ -4945,6 +4946,8 @@ def self_test():
         ]
         missing = [field for field in required_verdict_fields if field not in verdict]
         assert not missing, missing
+        summary_text = Path(result["latest_summary"]).read_text(encoding="utf-8")
+        assert "capture_60_gap_classification:" in summary_text
         markov_summary = verdict["Markov_effectiveness_summary"]
         assert markov_summary["usage"] == "research_only_markov_information_value"
         assert markov_summary["classification"] in {
