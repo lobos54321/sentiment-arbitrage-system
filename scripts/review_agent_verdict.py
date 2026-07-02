@@ -1828,7 +1828,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "stage2_entry_funnel_summary": stage2_flat,
         "detector_capture_rate": capture_stage_rates.get("detector_capture_rate"),
         "decision_record_capture_rate": capture_stage_rates.get("decision_record_capture_rate"),
-        "decision_capture_rate": capture_stage_rates.get("pass_allow_capture_rate"),
+        "decision_capture_rate": (
+            capture_stage_rates.get("decision_capture_rate")
+            if "decision_capture_rate" in capture_stage_rates
+            else capture_stage_rates.get("decision_record_capture_rate")
+        ),
+        "pass_allow_capture_rate": capture_stage_rates.get("pass_allow_capture_rate"),
         "pending_capture_rate": capture_stage_rates.get("pending_capture_rate"),
         "final_entry_contract_reach_rate": capture_stage_rates.get("final_entry_contract_reach_rate"),
         "final_eligibility_capture_rate": (
@@ -2715,6 +2720,7 @@ def self_test():
             },
             "capture_stage_rates": {
                 "detector_capture_rate": 1.0,
+                "decision_capture_rate": 0.9,
                 "decision_record_capture_rate": 0.9,
                 "pass_allow_capture_rate": 0.5,
                 "pending_capture_rate": 0.3,
@@ -2852,7 +2858,8 @@ def self_test():
     assert stage_verdict["paper_trade_committed"] == 0
     assert stage_verdict["stage2_entry_funnel_summary"]["paper_enablement_allowed"] is False
     assert stage_verdict["detector_capture_rate"] == 1.0
-    assert stage_verdict["decision_capture_rate"] == 0.5
+    assert stage_verdict["decision_capture_rate"] == 0.9
+    assert stage_verdict["pass_allow_capture_rate"] == 0.5
     assert stage_verdict["pending_capture_rate"] == 0.3
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
     assert stage_verdict["paper_trade_intent_rate"] == 0.0
