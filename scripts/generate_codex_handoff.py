@@ -965,11 +965,29 @@ def build_handoff(verdict):
             or verdict.get("capture_cross_post_freeze_oos_validation")
             or {}
         )
+        preliminary_signal_summary = (
+            oos_readiness.get("oos_preliminary_signal_summary")
+            or (verdict.get("oos_readiness_summary_v3") or {}).get("oos_preliminary_signal_summary")
+            or {}
+        )
         compact_oos = {
             "classification": oos_readiness.get("classification"),
             "available_probe_count": oos_readiness.get("available_probe_count"),
             "sufficient_probe_count": oos_readiness.get("sufficient_probe_count"),
             "oos_repeated_watch_probe_count": oos_readiness.get("oos_repeated_watch_probe_count"),
+            "preliminary_signal": {
+                "classification": preliminary_signal_summary.get("classification"),
+                "next_action": preliminary_signal_summary.get("next_action"),
+                "best_preliminary_track": preliminary_signal_summary.get("best_preliminary_track"),
+                "best_preliminary_repeat_watch_count": preliminary_signal_summary.get(
+                    "best_preliminary_repeat_watch_count"
+                ),
+                "below_minimum_repeat_signal_tracks": preliminary_signal_summary.get(
+                    "below_minimum_repeat_signal_tracks"
+                ) or [],
+                "repeat_signal_tracks": preliminary_signal_summary.get("repeat_signal_tracks") or [],
+                "promotion_allowed": False,
+            },
             "next_action": oos_readiness.get("next_action"),
             "readiness_delta": oos_readiness.get("readiness_delta") or {},
             "pass_allow_60_post_freeze": {
