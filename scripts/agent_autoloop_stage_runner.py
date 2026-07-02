@@ -695,6 +695,7 @@ def collect_paths(args, run_dir):
         "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
         "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
         "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
+        "oos_readiness_summary": "oos_readiness_summary.json",
     }
     readiness = {}
     for key, filename in readiness_names.items():
