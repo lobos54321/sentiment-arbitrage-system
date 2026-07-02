@@ -54,6 +54,7 @@ REQUIRED_FILES = {
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
+    "pending_stale_before_final_watch_validation": "pending_stale_before_final_watch_validation_24h.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "clean_dimension_2d_capture_cross": "clean_dimension_2d_capture_cross_24h.json",
     "quality_timing_reason_cross": "quality_timing_reason_cross_24h.json",
@@ -4558,6 +4559,9 @@ def build_oos_summary(run_dir, reports=None):
     pending_momentum_decay_validation = (
         (input_reports or {}).get("pending_momentum_decay_recheck_validation") or {}
     )
+    pending_stale_before_final_validation = (
+        (input_reports or {}).get("pending_stale_before_final_watch_validation") or {}
+    )
     pass_allow_closure_plan = (
         (input_reports or {}).get("pass_allow_60_closure_plan") or {}
     )
@@ -4662,6 +4666,40 @@ def build_oos_summary(run_dir, reports=None):
         if pmd_queue_count:
             summary["next_pending_momentum_decay_oos_action"] = (
                 "hold_repeated_pending_momentum_decay_probes_until_clean_window_then_non_overlapping_oos"
+            )
+    psbf_oos_queue = pending_stale_before_final_validation.get("oos_readiness_queue") or {}
+    psbf_queue_count = safe_int(psbf_oos_queue.get("queue_count"), 0)
+    if pending_stale_before_final_validation:
+        summary["pending_stale_before_final_watch_validation"] = {
+            "available": True,
+            "classification": pending_stale_before_final_validation.get("classification"),
+            "next_action": pending_stale_before_final_validation.get("next_action"),
+            "registered_watch_count": pending_stale_before_final_validation.get("registered_watch_count"),
+            "validated_watch_count": pending_stale_before_final_validation.get("validated_watch_count"),
+            "repeated_selected_cluster_count": (
+                pending_stale_before_final_validation.get("repeated_selected_cluster_count")
+            ),
+            "repeated_selected_cluster_rate": (
+                pending_stale_before_final_validation.get("repeated_selected_cluster_rate")
+            ),
+            "current_stale_before_final_event_count": (
+                pending_stale_before_final_validation.get("current_stale_before_final_event_count")
+            ),
+            "current_selected_cluster_count": (
+                pending_stale_before_final_validation.get("current_selected_cluster_count")
+            ),
+            "oos_readiness_queue_count": psbf_queue_count,
+            "oos_queue_classification": psbf_oos_queue.get("classification"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "blocked_until": "context_clean_window_and_non_overlapping_eval",
+        }
+        summary["pending_stale_before_final_oos_queue_count"] = psbf_queue_count
+        if psbf_queue_count:
+            summary["next_pending_stale_before_final_oos_action"] = (
+                "hold_repeated_pending_stale_before_final_clusters_until_clean_window_then_non_overlapping_oos"
             )
     if pass_allow_closure_plan:
         closure_tracks = pass_allow_closure_plan.get("closure_tracks") or {}
@@ -5433,6 +5471,22 @@ def create_self_test_run(root):
         },
         "promotion_allowed": False,
     }
+    pending_stale_before_final_validation = {
+        "classification": "PENDING_STALE_BEFORE_FINAL_WATCH_REPEATED_SAME_WINDOW",
+        "next_action": "continue_stale_cluster_tracking_until_clean_window_then_oos",
+        "registered_watch_count": 3,
+        "validated_watch_count": 3,
+        "repeated_selected_cluster_count": 2,
+        "repeated_selected_cluster_rate": 0.666667,
+        "current_stale_before_final_event_count": 4,
+        "current_selected_cluster_count": 2,
+        "oos_readiness_queue": {
+            "classification": "PENDING_STALE_BEFORE_FINAL_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+            "queue_count": 2,
+            "promotion_allowed": False,
+        },
+        "promotion_allowed": False,
+    }
     capture_cross = {
         "valid_top_crosses": [
             {
@@ -5520,6 +5574,7 @@ def create_self_test_run(root):
         "quality_timing_candidate_probe_validation": quality_timing_probe_validation,
         "decision_no_pass_quality_timing_watch_validation": decision_no_pass_watch_validation,
         "pending_momentum_decay_recheck_validation": pending_momentum_decay_validation,
+        "pending_stale_before_final_watch_validation": pending_stale_before_final_validation,
         "capture_cross": capture_cross,
         "markov_effectiveness": markov,
         "kline_coverage_resolution_audit": kline_resolution,
@@ -5976,6 +6031,20 @@ def self_test():
         assert oos["pending_momentum_decay_oos_queue_count"] == 2
         assert oos["next_pending_momentum_decay_oos_action"] == (
             "hold_repeated_pending_momentum_decay_probes_until_clean_window_then_non_overlapping_oos"
+        )
+        assert oos["pending_stale_before_final_watch_validation"]["classification"] == (
+            "PENDING_STALE_BEFORE_FINAL_WATCH_REPEATED_SAME_WINDOW"
+        )
+        assert oos["pending_stale_before_final_watch_validation"]["registered_watch_count"] == 3
+        assert oos["pending_stale_before_final_watch_validation"]["validated_watch_count"] == 3
+        assert oos["pending_stale_before_final_watch_validation"]["repeated_selected_cluster_count"] == 2
+        assert oos["pending_stale_before_final_watch_validation"]["repeated_selected_cluster_rate"] == 0.666667
+        assert oos["pending_stale_before_final_watch_validation"]["current_stale_before_final_event_count"] == 4
+        assert oos["pending_stale_before_final_watch_validation"]["current_selected_cluster_count"] == 2
+        assert oos["pending_stale_before_final_watch_validation"]["oos_readiness_queue_count"] == 2
+        assert oos["pending_stale_before_final_oos_queue_count"] == 2
+        assert oos["next_pending_stale_before_final_oos_action"] == (
+            "hold_repeated_pending_stale_before_final_clusters_until_clean_window_then_non_overlapping_oos"
         )
         assert oos["pass_allow_60_closure_plan"]["available"] is True
         assert oos["pass_allow_60_closure_oos_queue"]["classification"] == (

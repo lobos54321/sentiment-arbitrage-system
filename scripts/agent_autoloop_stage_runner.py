@@ -678,6 +678,7 @@ def collect_paths(args, run_dir):
         "context_blocker_monitor": f"context_blocker_monitor_{hours}h.json",
         "decision_no_pass_quality_timing_watch_validation": f"decision_no_pass_quality_timing_watch_validation_{hours}h.json",
         "pending_momentum_decay_recheck_validation": f"pending_momentum_decay_recheck_validation_{hours}h.json",
+        "pending_stale_before_final_watch_validation": f"pending_stale_before_final_watch_validation_{hours}h.json",
         "strategy_memory_validation": "strategy_memory_validation_24h.json",
         "strategy_memory_filtered_winner_bridge": "strategy_memory_filtered_winner_bridge.json",
         "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
