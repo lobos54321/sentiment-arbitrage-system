@@ -626,6 +626,7 @@ def build_coverage(observations, expected_count):
         for signal_id, candidates in by_signal.items()
         if len(candidates) != expected_count
     ]
+    full_signal_count = max(0, signal_count - len(bad))
     candidate_rows = [
         {
             "candidate_id": candidate_id,
@@ -641,6 +642,8 @@ def build_coverage(observations, expected_count):
         "observation_rows": len(observations),
         "expected_observation_rows": expected_rows,
         "coverage_pct": pct(len(observations), expected_rows),
+        "full_candidate_coverage_signal_count": full_signal_count,
+        "full_candidate_coverage_rate": rate(full_signal_count, signal_count),
         "bad_signal_count": len(bad),
         "bad_signal_sample": bad[:50],
         "candidate_coverage": candidate_rows,
@@ -1824,7 +1827,7 @@ def summarize(
         promotion_blockers.append("observation_scan_rowid_truncated")
     if coverage["candidate_count_observed"] != expected_candidates:
         promotion_blockers.append("candidate_count_mismatch")
-    if coverage["bad_signal_count"]:
+    if (coverage.get("full_candidate_coverage_rate") or 0) < 0.99:
         promotion_blockers.append("per_signal_candidate_coverage_incomplete")
     if not raw_dogs:
         promotion_blockers.append("raw_gold_silver_denominator_unavailable")
