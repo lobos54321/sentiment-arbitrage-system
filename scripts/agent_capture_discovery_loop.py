@@ -1102,6 +1102,7 @@ def build_markov_effectiveness_report(markov_reports, capture):
     profiles = {}
     total_green = 0
     total_yellow = 0
+    total_red = 0
     total_insufficient = 0
     profile_diagnostics = {}
     non_informative_reasons = {}
@@ -1205,6 +1206,7 @@ def build_markov_effectiveness_report(markov_reports, capture):
             non_informative_reasons[name] = diagnostic["non_informative_reason"]
         total_green += diagnostic["green_buckets"]
         total_yellow += diagnostic["yellow_buckets"]
+        total_red += diagnostic["red_buckets"]
         total_insufficient += diagnostic["insufficient_buckets"]
         profiles[name] = {
             "schema_version": report.get("schema_version"),
@@ -1278,19 +1280,24 @@ def build_markov_effectiveness_report(markov_reports, capture):
     ]
     if total_green or total_yellow:
         status = "informative_discovery_only"
+        classification = "MARKOV_DISCOVERY_INFORMATIVE"
         next_action = "keep_markov_discovery_only_and_require_capture_oos_before_promotion"
     elif any(row["keys_emitted"] == 0 and row["closed_virtual_rows"] for row in profile_diagnostics.values()):
         status = "profile_fragmented_or_uninformative"
+        classification = "MARKOV_PROFILE_FRAGMENTED_OR_UNINFORMATIVE"
         next_action = "run_or_review_coarse_non_quote_non_kline_profiles_before_claiming_markov_value"
     elif any(row["red_buckets"] for row in profile_diagnostics.values()):
         status = "red_only_non_informative"
+        classification = "MARKOV_RED_ONLY_NON_INFORMATIVE"
         next_action = "do_not_use_markov_as_positive_evidence; keep as discovery_risk_context_only"
     else:
         status = "insufficient_or_uninformative"
+        classification = "MARKOV_INSUFFICIENT_OR_UNINFORMATIVE"
         next_action = "collect_more_closed_virtual_rows_and_keep_markov_out_of_promotion"
     return {
         "schema_version": "markov_effectiveness_report.v2",
         "report_type": "markov_effectiveness_24h",
+        "classification": classification,
         "status": status,
         "next_action": next_action,
         "evidence_level": "discovery_same_window",
@@ -1299,6 +1306,7 @@ def build_markov_effectiveness_report(markov_reports, capture):
         "markov_used_for_promotion": False,
         "total_green_buckets": total_green,
         "total_yellow_buckets": total_yellow,
+        "total_red_buckets": total_red,
         "total_insufficient_buckets": total_insufficient,
         "profiles": profiles,
         "profile_diagnostics": profile_diagnostics,
@@ -4939,6 +4947,13 @@ def self_test():
         assert not missing, missing
         markov_summary = verdict["Markov_effectiveness_summary"]
         assert markov_summary["usage"] == "research_only_markov_information_value"
+        assert markov_summary["classification"] in {
+            "MARKOV_DISCOVERY_INFORMATIVE",
+            "MARKOV_PROFILE_FRAGMENTED_OR_UNINFORMATIVE",
+            "MARKOV_RED_ONLY_NON_INFORMATIVE",
+            "MARKOV_INSUFFICIENT_OR_UNINFORMATIVE",
+        }
+        assert "total_red_buckets" in markov_summary
         assert "profile_diagnostics" in markov_summary
         assert "recommended_shadow_profiles" in markov_summary
         assert markov_summary["promotion_allowed"] is False
