@@ -407,6 +407,28 @@ def build_time_legality_summary(raw_rows, low_rows, denominator):
     }
 
 
+def low_confidence_next_action(verdict, blockers, time_legality):
+    if verdict == "LOW_CONFIDENCE_RESEARCH_EMPTY":
+        return "continue_formal_kline_collection_until_low_confidence_research_rows_exist"
+    if blockers:
+        return "resolve_low_confidence_research_data_blockers_before_oos"
+    classification = time_legality.get("classification")
+    if classification == "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_RECOVERABLE":
+        return "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
+    return "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator"
+
+
+def low_confidence_classification(verdict, blockers, time_legality):
+    if verdict == "LOW_CONFIDENCE_RESEARCH_EMPTY":
+        return "LOW_CONFIDENCE_RESEARCH_EMPTY"
+    if blockers:
+        return "LOW_CONFIDENCE_RESEARCH_BLOCKED_DATA"
+    classification = time_legality.get("classification")
+    if classification == "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_RECOVERABLE":
+        return "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_READY"
+    return "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_INSUFFICIENT"
+
+
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
@@ -438,6 +460,47 @@ def build_report(args):
             verdict = "LOW_CONFIDENCE_RESEARCH_EMPTY"
         elif blockers:
             verdict = "LOW_CONFIDENCE_RESEARCH_BLOCKED_DATA"
+        classification = low_confidence_classification(verdict, blockers, time_legality)
+        next_action = low_confidence_next_action(verdict, blockers, time_legality)
+        research_summary = {
+            "classification": classification,
+            "next_action": next_action,
+            "raw_all_gold_silver_event_rows": (
+                (denominator.get("raw_all_gold_silver") or {}).get("event_rows")
+            ),
+            "formal_evaluable_event_rows": (
+                (denominator.get("formal_evaluable_gold_silver") or {}).get("event_rows")
+            ),
+            "low_confidence_research_event_rows": (
+                (denominator.get("low_confidence_research_gold_silver") or {}).get("event_rows")
+            ),
+            "baseline_before_sustained_peak_rows": time_legality.get(
+                "baseline_before_sustained_peak_rows"
+            ),
+            "baseline_after_or_unknown_peak_rows": time_legality.get(
+                "baseline_after_or_unknown_peak_rows"
+            ),
+            "formal_plus_time_legal_recoverable_rate": time_legality.get(
+                "formal_plus_time_legal_recoverable_rate"
+            ),
+            "reaches_80pct_if_research_rows_accepted": time_legality.get(
+                "reaches_80pct_if_research_rows_accepted"
+            ),
+            "candidate_match_any_rate": candidate_layer.get("candidate_match_any_rate"),
+            "decision_record_rate": decision_layer.get("decision_record_rate"),
+            "would_enter_rate": decision_layer.get("would_enter_rate"),
+            "entered_rate": decision_layer.get("entered_rate"),
+            "interpretation": (
+                "Read-only low-confidence kline research track. It can explain whether "
+                "formally excluded low-confidence rows are time-legal and candidate-visible, "
+                "but it does not change the formal denominator or authorize strategy, gate, "
+                "final_entry, A_CLASS, executor, paper, canary, or risk changes."
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
         return {
             "schema_version": SCHEMA_VERSION,
             "report_type": "low_confidence_research_capture_audit",
@@ -452,6 +515,11 @@ def build_report(args):
             "canonical_backfill_performed": False,
             "formal_denominator_changed": False,
             "verdict": verdict,
+            "classification": classification,
+            "next_action": next_action,
+            "research_summary": research_summary,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
             "blockers": blockers,
             "observation_load": obs_meta,
             "denominator": denominator,
@@ -497,8 +565,11 @@ def compact_summary(report):
     time_legality = report.get("time_legality") or {}
     return {
         "verdict": report.get("verdict"),
+        "classification": report.get("classification"),
+        "next_action": report.get("next_action"),
         "promotion_allowed": False,
         "formal_denominator_changed": False,
+        "research_summary": report.get("research_summary") or {},
         "low_confidence_research_event_rows": low_den.get("event_rows"),
         "low_confidence_research_unique_tokens": low_den.get("unique_tokens"),
         "low_confidence_31_60_event_rows": (
@@ -618,6 +689,14 @@ def self_test():
         report = build_report(args)
         assert report["promotion_allowed"] is False
         assert report["formal_denominator_changed"] is False
+        assert report["classification"] == "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_INSUFFICIENT"
+        assert report["next_action"] == (
+            "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator"
+        )
+        assert report["research_summary"]["low_confidence_research_event_rows"] == 2
+        assert report["research_summary"]["formal_plus_time_legal_recoverable_rate"] == 0.75
+        assert report["research_summary"]["candidate_match_any_rate"] == 1.0
+        assert report["research_summary"]["promotion_allowed"] is False
         assert report["denominator"]["raw_all_gold_silver"]["event_rows"] == 4
         assert report["denominator"]["formal_evaluable_gold_silver"]["event_rows"] == 1
         assert report["denominator"]["low_confidence_research_gold_silver"]["event_rows"] == 2
@@ -631,6 +710,11 @@ def self_test():
         assert report["candidate_layer"]["full_candidate_coverage_rate"] == 1.0
         assert report["decision_layer"]["events_with_decision_record"] == 1
         compact = compact_summary(report)
+        assert compact["classification"] == "LOW_CONFIDENCE_TIME_LEGAL_RESEARCH_INSUFFICIENT"
+        assert compact["next_action"] == (
+            "audit_low_confidence_baseline_lag_time_legality_without_changing_formal_denominator"
+        )
+        assert compact["research_summary"]["promotion_allowed"] is False
         assert compact["low_confidence_research_event_rows"] == 2
         assert compact["time_legality"]["baseline_before_sustained_peak_rows"] == 2
         assert compact["promotion_allowed"] is False
