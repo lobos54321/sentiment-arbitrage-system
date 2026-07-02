@@ -2981,6 +2981,21 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                     "queue_count"
                 )
             ),
+            "clean_oos_candidate_count": (
+                (pending_momentum_decay_validation.get("oos_readiness_queue") or {}).get(
+                    "clean_oos_candidate_count"
+                )
+            ),
+            "context_blocked_oos_candidate_count": (
+                (pending_momentum_decay_validation.get("oos_readiness_queue") or {}).get(
+                    "context_blocked_oos_candidate_count"
+                )
+            ),
+            "blocked_context_dimensions": (
+                (pending_momentum_decay_validation.get("oos_readiness_queue") or {}).get(
+                    "blocked_context_dimensions"
+                ) or []
+            ),
             "denominator": pending_momentum_decay_validation.get("denominator") or {},
             "status_counts": pending_momentum_decay_validation.get("status_counts") or {},
             "current_momentum_decay_review": (
@@ -4162,14 +4177,22 @@ def self_test():
             },
             "status_counts": {"REPEATED_SHADOW_PROBE": 2},
             "oos_readiness_queue": {
-                "classification": "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW",
+                "classification": "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PARTIAL_CONTEXT_BLOCKED",
                 "queue_count": 2,
+                "clean_oos_candidate_count": 1,
+                "context_blocked_oos_candidate_count": 1,
+                "blocked_context_dimensions": ["kline"],
                 "promotion_allowed": False,
                 "automatic_runtime_change_allowed": False,
                 "items": [
                     {
                         "hypothesis_id": "pending_momentum_decay:timeboxed_recheck_window",
                         "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+                        "promotion_allowed": False,
+                    },
+                    {
+                        "hypothesis_id": "pending_momentum_decay:kline_confirmation_recheck",
+                        "status": "BLOCKED_CONTEXT_COVERAGE_PENDING_CLEAN_WINDOW",
                         "promotion_allowed": False,
                     }
                 ],
@@ -4193,9 +4216,12 @@ def self_test():
     assert pmd["repeated_probe_count"] == 2
     assert pmd["repeated_probe_rate"] == 0.666667
     assert pmd["oos_readiness_queue_count"] == 2
+    assert pmd["clean_oos_candidate_count"] == 1
+    assert pmd["context_blocked_oos_candidate_count"] == 1
+    assert pmd["blocked_context_dimensions"] == ["kline"]
     assert pmd["promotion_allowed"] is False
     assert pmd["oos_readiness_queue"]["classification"] == (
-        "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+        "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PARTIAL_CONTEXT_BLOCKED"
     )
     reconciled = {
         **capture,

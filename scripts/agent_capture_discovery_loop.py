@@ -3065,10 +3065,26 @@ def compact_pending_momentum_decay_probe(row):
                 (row.get("evidence") or {}).get("recheck_window_classification")
             ),
         },
+        "context_blockers": row.get("context_blockers") or [],
+        "context_blocker_dimensions": row.get("context_blocker_dimensions") or [],
+        "formal_oos_eligible": bool(row.get("formal_oos_eligible")),
+        "oos_readiness_status": row.get("oos_readiness_status"),
         "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
         "next_validation": row.get("next_action")
         or "validate_pending_momentum_decay_recheck_window_shadow_only",
     }
+
+
+def context_blocker_dimensions(blockers):
+    dimensions = []
+    for blocker in blockers or []:
+        if isinstance(blocker, dict):
+            dimension = blocker.get("dimension")
+        else:
+            dimension = blocker
+        if dimension:
+            dimensions.append(str(dimension))
+    return sorted(set(dimensions))
 
 
 def build_pending_momentum_decay_probe_validation(registry, pending_to_final_audit):
@@ -3095,6 +3111,14 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
         definition = probe.get("definition") or {}
         probe_id = definition.get("probe_id")
         current = current_probes.get(probe_id) or {}
+        current_context_blockers = (
+            current.get("context_blockers")
+            or probe.get("context_blockers")
+            or []
+        )
+        current_context_blocker_dimensions = context_blocker_dimensions(
+            current_context_blockers
+        )
         status = "NOT_OBSERVED_CURRENT_WINDOW"
         if current:
             status = "REPEATED_SHADOW_PROBE"
@@ -3126,7 +3150,18 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
                 "max_sustained_peak_pct_max": momentum.get("max_sustained_peak_pct_max"),
                 "recheck_window_classification": momentum.get("recheck_window_classification"),
                 "example_peak_lag_band_counts": momentum.get("example_peak_lag_band_counts") or {},
-                "context_blockers": momentum.get("context_blockers") or [],
+                "context_blockers": current_context_blockers,
+                "context_blocker_dimensions": current_context_blocker_dimensions,
+                "formal_oos_eligible": bool(current) and not current_context_blockers,
+                "oos_readiness_status": (
+                    "PENDING_CLEAN_WINDOW_THEN_OOS"
+                    if bool(current) and not current_context_blockers
+                    else (
+                        "BLOCKED_CONTEXT_COVERAGE_PENDING_CLEAN_WINDOW"
+                        if current_context_blockers
+                        else None
+                    )
+                ),
             },
             "next_validation": "continue_shadow_only_recheck_tracking_until_clean_window_then_oos",
         })
@@ -3167,11 +3202,27 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
         ),
     }
     oos_items = []
+    clean_oos_candidate_count = 0
+    context_blocked_oos_candidate_count = 0
+    blocked_context_dimensions = set()
     for row in repeated_rows:
         current_window = row.get("current_window") or {}
+        blockers = current_window.get("context_blockers") or []
+        blocker_dimensions = context_blocker_dimensions(blockers)
+        for dimension in blocker_dimensions:
+            blocked_context_dimensions.add(dimension)
+        context_blocked = bool(blockers)
+        if context_blocked:
+            context_blocked_oos_candidate_count += 1
+            status = "BLOCKED_CONTEXT_COVERAGE_PENDING_CLEAN_WINDOW"
+            next_oos_action = "wait_for_context_clean_window_before_oos_probe_validation"
+        else:
+            clean_oos_candidate_count += 1
+            status = "PENDING_CLEAN_WINDOW_THEN_OOS"
+            next_oos_action = "evaluate_recheck_probe_in_next_clean_non_overlapping_window"
         oos_items.append({
             "hypothesis_id": row.get("hypothesis_id"),
-            "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+            "status": status,
             "scope": "shadow_only_pending_momentum_decay_recheck_probe",
             "probe_id": (row.get("definition") or {}).get("probe_id"),
             "cluster": (row.get("definition") or {}).get("cluster"),
@@ -3190,10 +3241,15 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
                 "share_of_quality_timing_rejects": (
                     current_window.get("share_of_quality_timing_rejects")
                 ),
+                "context_blockers": blockers,
+                "context_blocker_dimensions": blocker_dimensions,
+                "formal_oos_eligible": not context_blocked,
             },
             "readiness_gates": {
                 "same_window_repeated": True,
                 "context_clean_window_required": True,
+                "context_blocked": context_blocked,
+                "blocked_context_dimensions": blocker_dimensions,
                 "non_overlapping_oos_required": True,
                 "human_approval_required_before_promotion": True,
             },
@@ -3201,8 +3257,17 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
-            "next_action": "evaluate_recheck_probe_in_next_clean_non_overlapping_window",
+            "next_action": next_oos_action,
         })
+
+    if not oos_items:
+        oos_queue_classification = "PENDING_MOMENTUM_DECAY_OOS_QUEUE_EMPTY"
+    elif clean_oos_candidate_count and context_blocked_oos_candidate_count:
+        oos_queue_classification = "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PARTIAL_CONTEXT_BLOCKED"
+    elif context_blocked_oos_candidate_count:
+        oos_queue_classification = "PENDING_MOMENTUM_DECAY_OOS_QUEUE_BLOCKED_CONTEXT_COVERAGE"
+    else:
+        oos_queue_classification = "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW"
 
     return {
         "schema_version": "pending_momentum_decay_probe_validation.v1",
@@ -3221,6 +3286,9 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
         "validated_probe_count": denominator["validated_probe_count"],
         "repeated_probe_count": denominator["repeated_probe_count"],
         "repeated_probe_rate": denominator["repeated_probe_rate"],
+        "clean_oos_candidate_count": clean_oos_candidate_count,
+        "context_blocked_oos_candidate_count": context_blocked_oos_candidate_count,
+        "blocked_context_dimensions": sorted(blocked_context_dimensions),
         "denominator": denominator,
         "status_counts": dict(status_counts),
         "current_momentum_decay_review": {
@@ -3237,13 +3305,12 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
             )
         },
         "oos_readiness_queue": {
-            "classification": (
-                "PENDING_MOMENTUM_DECAY_OOS_QUEUE_PENDING_CLEAN_WINDOW"
-                if oos_items
-                else "PENDING_MOMENTUM_DECAY_OOS_QUEUE_EMPTY"
-            ),
+            "classification": oos_queue_classification,
             "queue_count": len(oos_items),
-            "pending_clean_window_count": len(oos_items),
+            "pending_clean_window_count": clean_oos_candidate_count,
+            "clean_oos_candidate_count": clean_oos_candidate_count,
+            "context_blocked_oos_candidate_count": context_blocked_oos_candidate_count,
+            "blocked_context_dimensions": sorted(blocked_context_dimensions),
             "ready_for_runtime_change_count": 0,
             "promotion_allowed": False,
             "strategy_change_allowed": False,
@@ -5508,6 +5575,16 @@ def self_test():
         assert "probe_validations" in pending_momentum_validation
         assert "oos_readiness_queue" in pending_momentum_validation
         assert pending_momentum_validation["oos_readiness_queue"]["promotion_allowed"] is False
+        assert "clean_oos_candidate_count" in pending_momentum_validation["oos_readiness_queue"]
+        assert "context_blocked_oos_candidate_count" in pending_momentum_validation["oos_readiness_queue"]
+        assert "blocked_context_dimensions" in pending_momentum_validation["oos_readiness_queue"]
+        for item in pending_momentum_validation["oos_readiness_queue"].get("items") or []:
+            if item.get("probe_id") == "pending_momentum_decay:kline_confirmation_recheck":
+                assert item["status"] == "BLOCKED_CONTEXT_COVERAGE_PENDING_CLEAN_WINDOW"
+                assert item["readiness_gates"]["context_blocked"] is True
+                assert "kline" in item["readiness_gates"]["blocked_context_dimensions"]
+            if item.get("probe_id") == "pending_momentum_decay:timeboxed_recheck_window":
+                assert item["readiness_gates"]["context_blocked"] is False
         strategy_memory = load_json(latest_dir / "strategy_memory_ingestion_summary.json")
         assert strategy_memory["promotion_allowed"] is False
         assert strategy_memory["allowed_use"] == "shadow_only"

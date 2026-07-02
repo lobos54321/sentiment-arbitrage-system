@@ -1037,17 +1037,51 @@ def build_pending_momentum_decay_review(clusters, quality_timing, context_eligib
         })
 
     for probe in selected_probes:
+        context_blockers = pending_momentum_decay_probe_context_blockers(
+            probe,
+            context_eligibility,
+        )
+        context_blocker_dimensions = sorted({
+            blocker.get("dimension")
+            for blocker in context_blockers
+            if blocker.get("dimension")
+        })
         probe.update({
             "allowed_use": "shadow_only",
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
+            "context_blockers": context_blockers,
+            "context_blocker_dimensions": context_blocker_dimensions,
+            "context_blocker_count": len(context_blockers),
+            "formal_oos_eligible": not context_blockers,
+            "oos_readiness_status": (
+                "PENDING_CLEAN_WINDOW_THEN_OOS"
+                if not context_blockers
+                else "BLOCKED_CONTEXT_COVERAGE_PENDING_CLEAN_WINDOW"
+            ),
             "human_approval_required_if_fix_requires": (
                 "changing momentum/trend thresholds, entry policy, final_entry_contract, "
                 "A_CLASS mode, executor, paper enablement, or risk"
             ),
         })
+    formal_oos_eligible_probe_count = sum(
+        1 for row in selected_probes if row.get("formal_oos_eligible")
+    )
+    context_blocked_probe_count = sum(
+        1 for row in selected_probes if row.get("context_blockers")
+    )
+    probe_context_blockers_by_probe = [
+        {
+            "probe_id": row.get("probe_id"),
+            "context_blockers": row.get("context_blockers") or [],
+            "context_blocker_dimensions": row.get("context_blocker_dimensions") or [],
+            "formal_oos_eligible": bool(row.get("formal_oos_eligible")),
+            "oos_readiness_status": row.get("oos_readiness_status"),
+        }
+        for row in selected_probes
+    ]
 
     return {
         "schema_version": "pending_momentum_decay_review.v1",
@@ -1077,6 +1111,10 @@ def build_pending_momentum_decay_review(clusters, quality_timing, context_eligib
         if opportunity
         else [],
         "selected_shadow_probes": selected_probes,
+        "selected_probe_count": len(selected_probes),
+        "formal_oos_eligible_probe_count": formal_oos_eligible_probe_count,
+        "context_blocked_probe_count": context_blocked_probe_count,
+        "probe_context_blockers_by_probe": probe_context_blockers_by_probe,
         "next_action": next_action,
         "interpretation": (
             "This only identifies whether momentum-fading gold/silver misses had a possible shadow recheck window. "
@@ -3977,6 +4015,57 @@ def quality_timing_context_blockers(row, context_eligibility):
     return blockers
 
 
+def context_dimension_blocker(context_eligibility, dimension, reason):
+    dimensions = (context_eligibility or {}).get("dimensions") or {}
+    row = dimensions.get(dimension) or {}
+    status = row.get("status") or STATUS_BLOCKED
+    eligible = bool(row.get("eligible_for_capture_cross"))
+    if status == STATUS_CLEAN and eligible:
+        return None
+    return {
+        "dimension": dimension,
+        "status": status,
+        "eligible_for_capture_cross": eligible,
+        "coverage_rate": row.get("coverage_rate"),
+        "reason": reason,
+        "dimension_blockers": row.get("blockers") or [],
+    }
+
+
+def pending_momentum_decay_probe_context_blockers(probe, context_eligibility):
+    probe_id = str((probe or {}).get("probe_id") or "").lower()
+    required_features = {
+        str(feature).lower()
+        for feature in ((probe or {}).get("required_features") or [])
+    }
+    required_dimensions = []
+    if (
+        "kline_candidate_id" in required_features
+        or "feature_available_at_ts" in required_features
+        or "kline" in probe_id
+    ):
+        required_dimensions.append((
+            "kline",
+            "kline_recheck_probe_requires_clean_kline_context",
+        ))
+    if "lifecycle_profile" in required_features or "entry_mode_registry" in probe_id:
+        required_dimensions.append((
+            "lifecycle",
+            "entry_mode_recheck_probe_requires_clean_lifecycle_context",
+        ))
+
+    blockers = []
+    seen = set()
+    for dimension, reason in required_dimensions:
+        if dimension in seen:
+            continue
+        seen.add(dimension)
+        blocker = context_dimension_blocker(context_eligibility, dimension, reason)
+        if blocker:
+            blockers.append(blocker)
+    return blockers
+
+
 def improvement_queue_priority(item):
     source_priority = {
         "quality_timing_reject_cluster": 0,
@@ -4859,7 +4948,10 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
             "expected_capture_stage_improved": row.get("expected_capture_stage_improved") or "final_eligibility",
             "required_features": row.get("required_features") or [],
             "time_legal_status": "shadow_recheck_window_time_legal_not_proven",
-            "context_blockers": momentum_decay_review.get("context_blockers") or [],
+            "context_blockers": row.get("context_blockers") or [],
+            "context_blocker_dimensions": row.get("context_blocker_dimensions") or [],
+            "formal_oos_eligible": bool(row.get("formal_oos_eligible")),
+            "oos_readiness_status": row.get("oos_readiness_status"),
             "allowed_use": "shadow_only",
             "promotion_allowed": False,
             "strategy_change_allowed": False,
@@ -5442,6 +5534,11 @@ def build_oos_summary(run_dir, reports=None):
             ),
             "oos_readiness_queue_count": pmd_queue_count,
             "oos_queue_classification": pmd_oos_queue.get("classification"),
+            "clean_oos_candidate_count": pmd_oos_queue.get("clean_oos_candidate_count"),
+            "context_blocked_oos_candidate_count": pmd_oos_queue.get(
+                "context_blocked_oos_candidate_count"
+            ),
+            "blocked_context_dimensions": pmd_oos_queue.get("blocked_context_dimensions") or [],
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -6901,6 +6998,17 @@ def self_test():
         assert momentum_review["promotion_allowed"] is False
         assert momentum_review["recheck_window_classification"] == "RECHECK_WINDOW_EXISTS_BEFORE_SUSTAINED_PEAK"
         assert len(momentum_review["selected_shadow_probes"]) == 3
+        assert momentum_review["selected_probe_count"] == 3
+        assert momentum_review["formal_oos_eligible_probe_count"] == 2
+        assert momentum_review["context_blocked_probe_count"] == 1
+        probes_by_id = {
+            row["probe_id"]: row
+            for row in momentum_review["selected_shadow_probes"]
+        }
+        assert probes_by_id["pending_momentum_decay:timeboxed_recheck_window"]["formal_oos_eligible"] is True
+        assert probes_by_id["pending_momentum_decay:kline_confirmation_recheck"]["formal_oos_eligible"] is False
+        assert probes_by_id["pending_momentum_decay:kline_confirmation_recheck"]["context_blocker_dimensions"] == ["kline"]
+        assert probes_by_id["pending_momentum_decay:entry_mode_registry_recheck"]["formal_oos_eligible"] is True
         final_readiness = load_json(run_dir / "final_entry_readiness_audit.json")
         assert final_readiness["classification"] == "A_CLASS_EXPECTED_SHADOW"
         assert final_readiness["next_action"] == "continue_clean_window_and_shadow_readiness_collection"
