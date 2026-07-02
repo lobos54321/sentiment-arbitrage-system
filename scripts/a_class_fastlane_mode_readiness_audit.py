@@ -21,6 +21,8 @@ from pathlib import Path
 
 SCHEMA_VERSION = "a_class_fastlane_mode_readiness_audit.v2"
 MODE_KEY = "A_CLASS_FASTLANE"
+CLEAN_WINDOW_COUNTER_SCHEMA_VERSION = "a_class_clean_window_counter.v1"
+CLEAN_WINDOW_COUNTER_BUCKET_SEC = 3600
 
 
 def utc_now():
@@ -178,6 +180,111 @@ def load_runtime_state(db, now_ts):
         "reason": None if row is not None else "a_class_fastlane_row_missing",
         "mode_state": state,
     }
+
+
+def clean_condition_code(row):
+    if isinstance(row, dict):
+        return str(row.get("condition") or row.get("blocker") or row.get("reason") or "unknown")
+    return str(row or "unknown")
+
+
+def window_bucket(now_ts, bucket_sec=CLEAN_WINDOW_COUNTER_BUCKET_SEC):
+    bucket_sec = max(1, int(bucket_sec or CLEAN_WINDOW_COUNTER_BUCKET_SEC))
+    bucket = int(float(now_ts) // bucket_sec)
+    return {
+        "bucket": bucket,
+        "bucket_sec": bucket_sec,
+        "window_key": f"{bucket_sec}s:{bucket}",
+        "previous_bucket": bucket - 1,
+    }
+
+
+def clean_window_counter_from_detail(detail):
+    if not isinstance(detail, dict):
+        return {}
+    value = detail.get("clean_window_counter")
+    return value if isinstance(value, dict) else {}
+
+
+def clean_window_counter_summary(state, clean_windows_passed, failed_conditions, now_ts):
+    required = max(0, safe_int(state.get("clean_windows_required"), 4))
+    detail = state.get("detail") if isinstance(state, dict) else {}
+    previous = clean_window_counter_from_detail(detail)
+    bucket = window_bucket(now_ts)
+    current_key = bucket["window_key"]
+    current_bucket = bucket["bucket"]
+    previous_key = previous.get("last_window_key")
+    previous_bucket = safe_int(previous.get("last_window_bucket"), None)
+    previous_streak = safe_int(previous.get("streak"), 0)
+    previous_passed = truthy(previous.get("last_passed"))
+    failed_codes = [clean_condition_code(row) for row in failed_conditions or []]
+    if clean_windows_passed:
+        if previous_key == current_key:
+            streak = max(1, previous_streak)
+        elif previous_passed and previous_bucket == current_bucket - 1:
+            streak = previous_streak + 1
+        else:
+            streak = 1
+    else:
+        streak = 0
+    sufficient = bool(required <= 0 or streak >= required)
+    return {
+        "schema_version": CLEAN_WINDOW_COUNTER_SCHEMA_VERSION,
+        "mode_key": MODE_KEY,
+        "counter_bucket_sec": bucket["bucket_sec"],
+        "last_window_key": current_key,
+        "last_window_bucket": current_bucket,
+        "last_passed": bool(clean_windows_passed),
+        "streak": int(streak),
+        "required": int(required),
+        "sufficient": sufficient,
+        "failed_condition_codes": failed_codes,
+        "updated_at": float(now_ts),
+        "promotion_allowed": False,
+        "automatic_runtime_change_allowed": False,
+    }
+
+
+def persist_clean_window_counter(db, state, clean_windows_passed, failed_conditions, now_ts):
+    result = {
+        "schema_version": CLEAN_WINDOW_COUNTER_SCHEMA_VERSION,
+        "attempted": True,
+        "available": False,
+        "mode_key": MODE_KEY,
+        "promotion_allowed": False,
+        "changes_runtime_mode": False,
+        "changes_circuit_breaker": False,
+    }
+    if not table_exists(db, "a_class_mode_runtime_state"):
+        result["reason"] = "a_class_mode_runtime_state_table_missing"
+        return result
+    row = db.execute(
+        "SELECT detail_json FROM a_class_mode_runtime_state WHERE mode_key = ?",
+        (MODE_KEY,),
+    ).fetchone()
+    if row is None:
+        result["reason"] = "a_class_fastlane_row_missing"
+        return result
+    detail = jloads(row_value(row, "detail_json"), {})
+    if not isinstance(detail, dict):
+        detail = {}
+    counter = clean_window_counter_summary(state, clean_windows_passed, failed_conditions, now_ts)
+    detail["clean_window_counter"] = counter
+    db.execute(
+        """
+        UPDATE a_class_mode_runtime_state
+        SET detail_json = ?, updated_at = ?
+        WHERE mode_key = ?
+        """,
+        (json.dumps(detail, sort_keys=True), float(now_ts), MODE_KEY),
+    )
+    db.commit()
+    result.update({
+        "available": True,
+        "reason": "persisted",
+        "counter": counter,
+    })
+    return result
 
 
 def extract_hard_blockers(payload):
@@ -1146,22 +1253,18 @@ def build_readiness_shortfall_summary(capture_stage_rates):
     }
 
 
-def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions):
+def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions, clean_counter):
     mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
     rate_value = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
     events = capture_stage_rates.get("events") or {}
     reasons = []
-    if rate_value is None or rate_value < 0.6:
-        reasons.append("mode_disabled_adjusted_final_eligibility_below_60pct")
     if failed_conditions:
         reasons.append("clean_window_conditions_not_passed")
-    if safe_int(events.get("paper_trade_intent"), 0) == 0:
-        reasons.append("paper_trade_entry_intent_zero")
-    if safe_int(events.get("paper_committed"), 0) == 0:
-        reasons.append("paper_trade_committed_zero")
+    if clean_counter and not clean_counter.get("sufficient"):
+        reasons.append("clean_window_streak_below_required")
     final_status = classification.get("final_entry_status")
-    if final_status == "FUNNEL_BLOCKED_STUCK":
-        status = "HUMAN_REVIEW_REQUIRED_BUT_NOT_PROPOSAL_READY"
+    if final_status == "FUNNEL_BLOCKED_STUCK" and not reasons:
+        status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
     elif final_status == "FUNNEL_READY_FOR_PAPER_PROPOSAL" and not reasons:
         status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
     else:
@@ -1172,8 +1275,12 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
         "current_capture_stage": classification.get("current_capture_stage"),
         "mode_disabled_adjusted_final_eligibility_rate": rate_value,
         "mode_disabled_adjusted_final_eligibility_status": mode_adjusted.get("status"),
+        "mode_disabled_adjusted_final_eligibility_target_met": bool(rate_value is not None and rate_value >= 0.6),
         "paper_trade_intent_count": safe_int(events.get("paper_trade_intent"), 0),
         "paper_committed_count": safe_int(events.get("paper_committed"), 0),
+        "paper_intent_required_while_shadow": False,
+        "paper_committed_required_while_shadow": False,
+        "clean_window_counter": clean_counter or {},
         "blocking_reasons": reasons,
         "human_action_required_before_enabling": True,
         "promotion_allowed": False,
@@ -1182,7 +1289,7 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
     }
 
 
-def classify(runtime, final_contract, failed_conditions):
+def classify(runtime, final_contract, failed_conditions, clean_counter=None):
     state = runtime.get("mode_state") or {}
     hard_blockers = final_contract.get("hard_blockers") or {}
     mode_disabled_count = int(hard_blockers.get("mode_disabled") or 0)
@@ -1191,16 +1298,17 @@ def classify(runtime, final_contract, failed_conditions):
     status = str(state.get("status") or state.get("action") or "LIVE").upper()
     recovery_required = truthy(state.get("recovery_required"))
     clean_windows_passed = not failed_conditions
+    clean_window_streak_sufficient = bool(clean_windows_passed and (clean_counter or {}).get("sufficient"))
     human = False
     if status == "CIRCUIT_BROKEN" or cooldown_remaining > 0:
         verdict = "FUNNEL_BLOCKED_EXPECTED"
         reason = "a_class_runtime_cooldown_active"
         current_capture_stage = "final_entry_cooldown"
-    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and not clean_windows_passed:
+    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and not clean_window_streak_sufficient:
         verdict = "FUNNEL_BLOCKED_EXPECTED"
-        reason = "cooldown_elapsed_requires_clean_windows"
+        reason = "clean_window_streak_below_required" if clean_windows_passed else "cooldown_elapsed_requires_clean_windows"
         current_capture_stage = "mode_disabled_clean_window_pending"
-    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and clean_windows_passed:
+    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and clean_window_streak_sufficient:
         verdict = "FUNNEL_BLOCKED_STUCK"
         reason = "mode_disabled_after_clean_windows_passed"
         human = True
@@ -1219,11 +1327,12 @@ def classify(runtime, final_contract, failed_conditions):
         "reason": reason,
         "human_action_required": human,
         "clean_windows_passed": clean_windows_passed,
+        "clean_window_streak_sufficient": clean_window_streak_sufficient,
         "current_capture_stage": current_capture_stage,
     }
 
 
-def build_stage2_flat_summary(runtime, classification, failed_conditions, capture_stage_rates, final_contract):
+def build_stage2_flat_summary(runtime, classification, failed_conditions, capture_stage_rates, final_contract, clean_counter=None):
     state = runtime.get("mode_state") or {}
     events = capture_stage_rates.get("events") or {}
     hard_blockers = final_contract.get("hard_blockers") or {}
@@ -1247,6 +1356,9 @@ def build_stage2_flat_summary(runtime, classification, failed_conditions, captur
         "condition": "context_coverage_clean_window",
         "clean_windows_required": state.get("clean_windows_required"),
         "passed": clean_windows_passed,
+        "streak": (clean_counter or {}).get("streak"),
+        "streak_sufficient": (clean_counter or {}).get("sufficient"),
+        "counter_bucket_sec": (clean_counter or {}).get("counter_bucket_sec"),
     }
     return {
         "mode_status": status or None,
@@ -1259,6 +1371,7 @@ def build_stage2_flat_summary(runtime, classification, failed_conditions, captur
         "clean_window_required_conditions": [required_clean_window],
         "clean_window_passed_conditions": [required_clean_window] if clean_windows_passed else [],
         "clean_window_failed_conditions": failed_conditions,
+        "clean_window_counter": clean_counter or {},
         "raw_gs_events": capture_stage_rates.get("denominator_raw_gold_silver_events"),
         "raw_gs_signal_ids": capture_stage_rates.get("denominator_raw_signal_ids"),
         "candidate_matched_any": events.get("candidate_matched_any"),
@@ -1293,11 +1406,23 @@ def build_report(args):
     try:
         runtime = load_runtime_state(db, now_ts)
         final_contract = load_final_entry_contract_events(db, since_ts, now_ts)
+        failed = context_failed_conditions(context, volume_kline, context_monitor)
+        current_clean_passed = not failed
+        clean_counter_persistence = persist_clean_window_counter(
+            db,
+            runtime.get("mode_state") or {},
+            current_clean_passed,
+            failed,
+            now_ts,
+        )
+        runtime = load_runtime_state(db, now_ts)
     finally:
         db.close()
-    failed = context_failed_conditions(context, volume_kline, context_monitor)
+    clean_counter = clean_window_counter_from_detail((runtime.get("mode_state") or {}).get("detail") or {})
+    if not clean_counter and clean_counter_persistence.get("counter"):
+        clean_counter = clean_counter_persistence.get("counter") or {}
     quote_reconciliation = quote_window_pending_reconciliation(context_monitor)
-    classification = classify(runtime, final_contract, failed)
+    classification = classify(runtime, final_contract, failed, clean_counter)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
     capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
     readiness_shortfall = build_readiness_shortfall_summary(capture_stage_rates)
@@ -1305,6 +1430,7 @@ def build_report(args):
         classification,
         capture_stage_rates,
         failed,
+        clean_counter,
     )
     flat_summary = build_stage2_flat_summary(
         runtime,
@@ -1312,6 +1438,7 @@ def build_report(args):
         failed,
         capture_stage_rates,
         final_contract,
+        clean_counter,
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1339,6 +1466,8 @@ def build_report(args):
         "clean_window_required_conditions": flat_summary["clean_window_required_conditions"],
         "clean_window_passed_conditions": flat_summary["clean_window_passed_conditions"],
         "clean_window_failed_conditions": flat_summary["clean_window_failed_conditions"],
+        "clean_window_counter": flat_summary["clean_window_counter"],
+        "clean_window_counter_persistence": clean_counter_persistence,
         "raw_gs_events": flat_summary["raw_gs_events"],
         "raw_gs_signal_ids": flat_summary["raw_gs_signal_ids"],
         "candidate_matched_any": flat_summary["candidate_matched_any"],
@@ -1364,6 +1493,9 @@ def build_report(args):
         "current_capture_stage": classification["current_capture_stage"],
         "clean_window_conditions": {
             "passed": classification["clean_windows_passed"],
+            "streak_sufficient": classification.get("clean_window_streak_sufficient"),
+            "clean_window_counter": clean_counter,
+            "clean_window_counter_persistence": clean_counter_persistence,
             "failed_conditions": failed,
             "reconciled_conditions": [
                 {
@@ -1448,6 +1580,8 @@ def compact_summary(report):
         "human_action_required": report.get("human_action_required"),
         "promotion_allowed": False,
         "clean_windows_passed": (report.get("clean_window_conditions") or {}).get("passed"),
+        "clean_window_streak_sufficient": (report.get("clean_window_conditions") or {}).get("streak_sufficient"),
+        "clean_window_counter": report.get("clean_window_counter"),
         "failed_clean_window_conditions": (report.get("clean_window_conditions") or {}).get("failed_conditions"),
         "effective_runtime_mode_state": report.get("effective_runtime_mode_state"),
         "final_entry_contract_blocker_breakdown": report.get("final_entry_contract_blocker_breakdown"),
@@ -1667,9 +1801,11 @@ def self_test():
         assert report["readiness_shortfall_summary"]["shortfall_to_60_final_eligibility"] == 2
         assert report["readiness_shortfall_summary"]["shortfall_to_60_pending"] == 1
         assert report["paper_entry_proposal_readiness"]["status"] == "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
-        assert "mode_disabled_adjusted_final_eligibility_below_60pct" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
-        assert "paper_trade_entry_intent_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
-        assert "paper_trade_committed_zero" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert "clean_window_conditions_not_passed" in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert "paper_trade_entry_intent_zero" not in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert "paper_trade_committed_zero" not in report["paper_entry_proposal_readiness"]["blocking_reasons"]
+        assert report["clean_window_counter"]["streak"] == 0
+        assert report["clean_window_counter_persistence"]["changes_runtime_mode"] is False
         write_json(context_monitor_path, {
             "overall_verdict": {
                 "rolling24_quote_status": "QUOTE_CLEAN_WINDOW_PENDING",
@@ -1759,10 +1895,38 @@ def self_test():
         assert report["clean_window_monitor"]["quote_clean_window_reconciliation"]["rows_scanned"] == 100
         args.context_blocker_monitor = None
         write_json(context_path, {"blockers": []})
+        bucket = window_bucket(now)
+        previous_counter = {
+            "schema_version": CLEAN_WINDOW_COUNTER_SCHEMA_VERSION,
+            "mode_key": MODE_KEY,
+            "counter_bucket_sec": bucket["bucket_sec"],
+            "last_window_key": f"{bucket['bucket_sec']}s:{bucket['previous_bucket']}",
+            "last_window_bucket": bucket["previous_bucket"],
+            "last_passed": True,
+            "streak": 3,
+            "required": 4,
+            "sufficient": False,
+            "failed_condition_codes": [],
+            "updated_at": now - bucket["bucket_sec"],
+            "promotion_allowed": False,
+            "automatic_runtime_change_allowed": False,
+        }
+        db = sqlite3.connect(db_path)
+        db.execute(
+            "UPDATE a_class_mode_runtime_state SET detail_json=? WHERE mode_key=?",
+            (json.dumps({"clean_window_counter": previous_counter}, sort_keys=True), MODE_KEY),
+        )
+        db.commit()
+        db.close()
         report = build_report(args)
         assert report["final_entry_status"] == "FUNNEL_BLOCKED_STUCK"
         assert report["human_action_required"] is True
         assert report["clean_window_conditions"]["passed"] is True
+        assert report["clean_window_conditions"]["streak_sufficient"] is True
+        assert report["clean_window_counter"]["streak"] == 4
+        assert report["paper_entry_proposal_readiness"]["status"] == "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+        assert report["paper_entry_proposal_readiness"]["paper_intent_required_while_shadow"] is False
+        assert report["paper_entry_proposal_readiness"]["mode_disabled_adjusted_final_eligibility_target_met"] is False
     print("SELF_TEST_PASS a_class_fastlane_mode_readiness_audit")
 
 
