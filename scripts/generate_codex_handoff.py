@@ -889,63 +889,67 @@ def build_handoff(verdict):
         ])
     quality_timing = verdict.get("quality_timing_reject_research_audit") or {}
     if quality_timing:
+        quality_timing_payload = {
+            "summary": {
+                "available": quality_timing.get("available"),
+                "classification": quality_timing.get("classification"),
+                "verdict": quality_timing.get("verdict"),
+                "next_action": quality_timing.get("next_action"),
+                "dominant_cluster": quality_timing.get("dominant_cluster"),
+                "dominant_stage": quality_timing.get("dominant_stage"),
+                "quality_timing_reject_event_rows": (
+                    quality_timing.get("quality_timing_reject_event_rows")
+                ),
+                "quality_timing_reject_share_of_raw_all": (
+                    quality_timing.get("quality_timing_reject_share_of_raw_all")
+                ),
+                "current_final_entry_contract_rate": (
+                    quality_timing.get("current_final_entry_contract_rate")
+                ),
+                "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
+                    quality_timing.get(
+                        "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"
+                    )
+                ),
+                "residual_gap_to_60pct_after_all_quality_timing_upper_bound": (
+                    quality_timing.get(
+                        "residual_gap_to_60pct_after_all_quality_timing_upper_bound"
+                    )
+                ),
+                "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
+                    quality_timing.get(
+                        "would_all_quality_timing_resolution_reach_60pct_upper_bound"
+                    )
+                ),
+                "human_approval_required_if_fix_requires": (
+                    quality_timing.get("human_approval_required_if_fix_requires")
+                ),
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            },
+            "top_quality_timing_clusters": (
+                quality_timing.get("top_quality_timing_clusters") or []
+            )[:8],
+            "denominator": quality_timing.get("denominator") or {},
+            "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
+            "blocked_context_dimensions_excluded_view": (
+                quality_timing.get("blocked_context_dimensions_excluded_view") or {}
+            ),
+            "stage_attribution": quality_timing.get("stage_attribution") or {},
+            "context_attribution": quality_timing.get("context_attribution") or {},
+            "shadow_only_review": quality_timing.get("shadow_only_review") or {},
+            "shadow_only_next_actions": quality_timing.get("shadow_only_next_actions") or [],
+        }
         lines.extend([
             "## Quality / Timing Reject Research",
             "",
             "```json",
             json.dumps(
-                {
-                    "available": quality_timing.get("available"),
-                    "classification": quality_timing.get("classification"),
-                    "verdict": quality_timing.get("verdict"),
-                    "next_action": quality_timing.get("next_action"),
-                    "dominant_cluster": quality_timing.get("dominant_cluster"),
-                    "dominant_stage": quality_timing.get("dominant_stage"),
-                    "quality_timing_reject_event_rows": (
-                        quality_timing.get("quality_timing_reject_event_rows")
-                    ),
-                    "quality_timing_reject_share_of_raw_all": (
-                        quality_timing.get("quality_timing_reject_share_of_raw_all")
-                    ),
-                    "current_final_entry_contract_rate": (
-                        quality_timing.get("current_final_entry_contract_rate")
-                    ),
-                    "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
-                        quality_timing.get(
-                            "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"
-                        )
-                    ),
-                    "residual_gap_to_60pct_after_all_quality_timing_upper_bound": (
-                        quality_timing.get(
-                            "residual_gap_to_60pct_after_all_quality_timing_upper_bound"
-                        )
-                    ),
-                    "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
-                        quality_timing.get(
-                            "would_all_quality_timing_resolution_reach_60pct_upper_bound"
-                        )
-                    ),
-                    "top_quality_timing_clusters": (
-                        quality_timing.get("top_quality_timing_clusters") or []
-                    )[:8],
-                    "human_approval_required_if_fix_requires": (
-                        quality_timing.get("human_approval_required_if_fix_requires")
-                    ),
-                    "promotion_allowed": False,
-                    "strategy_change_allowed": False,
-                    "automatic_runtime_change_allowed": False,
-                    "denominator": quality_timing.get("denominator") or {},
-                    "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
-                    "blocked_context_dimensions_excluded_view": (
-                        quality_timing.get("blocked_context_dimensions_excluded_view") or {}
-                    ),
-                    "stage_attribution": quality_timing.get("stage_attribution") or {},
-                    "context_attribution": quality_timing.get("context_attribution") or {},
-                    "shadow_only_review": quality_timing.get("shadow_only_review") or {},
-                    "shadow_only_next_actions": quality_timing.get("shadow_only_next_actions") or [],
-                },
+                quality_timing_payload,
                 indent=2,
-                sort_keys=True,
+                sort_keys=False,
             )[:12000],
             "```",
             "",
