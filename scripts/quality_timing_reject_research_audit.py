@@ -270,8 +270,10 @@ def reason_level_shadow_action(*, stage, component, event_type, decision, reason
         return "track_notath_upstream_skip_reason_shadow_only"
     if "matrix" in text or "aligned" in text:
         return "track_matrix_alignment_reason_shadow_only"
-    if "negative_trend" in text or "momentum_fading" in text:
+    if "negative_trend" in text or "momentum_fading" in text or "negative_m5" in text:
         return "track_momentum_fading_reason_shadow_only"
+    if "dead_cat" in text or "below_high" in text:
+        return "track_dead_cat_below_high_reason_shadow_only"
     if "buy_pressure" in text or "weak_buying_pressure" in text:
         return "track_buy_pressure_reason_shadow_only"
     if "chasing_top" in text:
@@ -407,8 +409,12 @@ def classify_shadow_review_cluster(stage, attribution):
         return "chasing_top_timing_reject"
     if "score_too_low" in reason or "quality_score" in reason:
         return "score_or_quality_too_low"
-    if "negative_trend" in reason or "momentum_fading" in reason:
+    if "negative_trend" in reason or "momentum_fading" in reason or "negative_m5" in reason:
         return "momentum_fading_or_negative_trend"
+    if "dead_cat" in reason or "below_high" in reason:
+        return "dead_cat_bounce_timing_reject"
+    if "stale" in reason or "too_late" in reason or "late" in reason:
+        return "entry_signal_stale_before_final"
     if "entry_node_timeout" in reason or "retry_watch_scheduled" in reason:
         return "entry_timing_timeout_or_retry"
     if "final_entry" in component or "final_entry" in reason:
@@ -460,6 +466,16 @@ SHADOW_REVIEW_CLUSTER_DETAILS = {
         "description": "Raw gold/silver was rejected for fading momentum or negative trend.",
         "suggested_shadow_only_action": "track_momentum_fading_false_negative_shadow_probe",
         "human_approval_required_if_fix_requires": "changing momentum/trend rejection policy",
+    },
+    "dead_cat_bounce_timing_reject": {
+        "description": "Raw gold/silver was rejected as a dead-cat or too-far-below-high timing setup.",
+        "suggested_shadow_only_action": "track_dead_cat_below_high_false_negative_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing dead-cat, pullback, or below-high timing policy",
+    },
+    "entry_signal_stale_before_final": {
+        "description": "Raw gold/silver became stale before final-entry eligibility.",
+        "suggested_shadow_only_action": "track_entry_signal_stale_before_final_shadow_probe",
+        "human_approval_required_if_fix_requires": "changing freshness, stale-entry, final_entry_contract, or execution timing policy",
     },
     "entry_timing_timeout_or_retry": {
         "description": "Raw gold/silver was delayed or timed out around entry retry/timing logic.",
@@ -1208,6 +1224,40 @@ def compact_summary(report):
 
 
 def self_test():
+    assert classify_shadow_review_cluster(
+        "pending_without_final_entry_contract",
+        {
+            "component": "entry_execution_eligibility",
+            "event_type": "entry_block",
+            "decision": "watch_only",
+            "reason": "entry_execution_signal_stale",
+        },
+    ) == "entry_signal_stale_before_final"
+    assert classify_shadow_review_cluster(
+        "pass_or_allow_without_pending_entry",
+        {
+            "component": "lotto_entry_gate",
+            "event_type": "entry_gate",
+            "decision": "wait",
+            "reason": "lotto_timing_negative_m5",
+        },
+    ) == "momentum_fading_or_negative_trend"
+    assert classify_shadow_review_cluster(
+        "pending_without_final_entry_contract",
+        {
+            "component": "smart_entry",
+            "event_type": "timing_decision",
+            "decision": "reject",
+            "reason": "dead_cat_below_high_15.7pct_gt_10.0pct",
+        },
+    ) == "dead_cat_bounce_timing_reject"
+    assert reason_level_shadow_action(
+        stage="pending_without_final_entry_contract",
+        component="smart_entry",
+        event_type="timing_decision",
+        decision="reject",
+        reason="dead_cat_below_high_15.7pct_gt_10.0pct",
+    ) == "track_dead_cat_below_high_reason_shadow_only"
     now = 2_000_000
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
