@@ -1101,6 +1101,7 @@ def build_context_dimension_eligibility(reports):
     context_report = reports.get("context_coverage") or {}
     context_monitor = reports.get("context_blocker_monitor") or {}
     volume_kline = reports.get("volume_kline_coverage_audit") or {}
+    kline_resolution = reports.get("kline_coverage_resolution_audit") or {}
     markov = reports.get("markov_effectiveness") or {}
     strategy_memory = reports.get("strategy_memory_validation") or {}
     report_health = capture.get("report_health") or {}
@@ -1197,6 +1198,14 @@ def build_context_dimension_eligibility(reports):
             "kline_uncovered_root_cause_counts": raw_gs_kline.get("kline_uncovered_root_cause_counts") or {},
             "low_confidence_research_audit": raw_gs_kline.get("low_confidence_research_audit") or {},
         })
+    if kline_resolution:
+        kline_evidence.update({
+            "kline_resolution_classification": (kline_resolution.get("overall") or {}).get("classification"),
+            "kline_resolution_next_action": (kline_resolution.get("overall") or {}).get("next_action"),
+            "formal_kline_coverage": kline_resolution.get("formal_kline_coverage") or {},
+            "research_recoverability": kline_resolution.get("research_recoverability") or {},
+            "allowed_resolution_tracks": kline_resolution.get("allowed_resolution_tracks") or [],
+        })
     dimensions = {
         "quote-sensitive": {
             "status": quote_status,
@@ -1264,16 +1273,104 @@ def build_context_dimension_eligibility(reports):
             },
         },
     }
+    research_only_dimensions = []
+    if (
+        dimensions["kline"]["status"] != STATUS_CLEAN
+        and (kline_resolution.get("overall") or {}).get("research_kline_recoverable")
+    ):
+        research_only_dimensions.append("kline")
+        dimensions["kline"]["research_only_recoverable"] = True
+        dimensions["kline"]["research_only_reason"] = (
+            (kline_resolution.get("overall") or {}).get("next_action")
+            or "formal_kline_blocked_research_recoverable"
+        )
+    if (
+        dimensions["volume"]["status"] != STATUS_CLEAN
+        and (volume_kline.get("overall") or {}).get("classification") == "DATA_BLOCKED_VOLUME_KLINE"
+        and volume_kline.get("matured_volume_context")
+    ):
+        research_only_dimensions.append("volume")
+        dimensions["volume"]["research_only_recoverable"] = True
+        dimensions["volume"]["research_only_reason"] = "matured_volume_shadow_recheck_only"
+    for name, row in dimensions.items():
+        row["promotion_allowed"] = False
+        row["strategy_change_allowed"] = False
+        row["automatic_runtime_change_allowed"] = False
+        if row["status"] == STATUS_CLEAN:
+            row["allowed_use"] = (
+                "discovery_only_historical_prior"
+                if name == "Strategy Memory"
+                else "discovery_context_evidence"
+            )
+        elif row["status"] == STATUS_NA:
+            row["allowed_use"] = "not_applicable"
+        elif name in research_only_dimensions:
+            row["allowed_use"] = "research_only_no_promotion_evidence"
+        elif row["status"] == STATUS_PENDING:
+            row["allowed_use"] = "clean_window_pending_no_promotion_evidence"
+        elif row["status"] == STATUS_WRITER_BUG:
+            row["allowed_use"] = "blocked_writer_bug_no_evidence"
+        else:
+            row["allowed_use"] = "blocked_no_promotion_evidence"
     status_counts = Counter(row["status"] for row in dimensions.values())
+    clean_dimensions = [name for name, row in dimensions.items() if row["status"] == STATUS_CLEAN]
+    blocked_dimensions = [
+        name for name, row in dimensions.items()
+        if row["status"] not in {STATUS_CLEAN, STATUS_NA}
+    ]
+    pending_dimensions = [
+        name for name, row in dimensions.items()
+        if row["status"] == STATUS_PENDING
+    ]
+    writer_bug_dimensions = [
+        name for name, row in dimensions.items()
+        if row["status"] == STATUS_WRITER_BUG
+    ]
+    if writer_bug_dimensions:
+        classification = "BLOCKED_CONTEXT_WRITER_BUG"
+    elif blocked_dimensions:
+        classification = "BLOCKED_CONTEXT_COVERAGE"
+    elif pending_dimensions:
+        classification = "CONTEXT_CLEAN_WINDOW_PENDING"
+    else:
+        classification = "CONTEXT_DIMENSIONS_READY"
+    if "kline" in blocked_dimensions and (kline_resolution.get("overall") or {}).get("next_action"):
+        next_action = (kline_resolution.get("overall") or {}).get("next_action")
+    elif "volume" in blocked_dimensions:
+        next_action = "continue_matured_volume_shadow_recheck_and_collect_formal_volume_context"
+    elif pending_dimensions:
+        next_action = "wait_for_context_clean_window"
+    else:
+        next_action = "run_capture_cross_on_clean_dimensions_only"
+    dimension_eligibility = {
+        name: {
+            "status": row.get("status"),
+            "allowed_use": row.get("allowed_use"),
+            "eligible_for_capture_cross": bool(row.get("eligible_for_capture_cross")),
+            "coverage_rate": row.get("coverage_rate"),
+            "blockers": row.get("blockers") or [],
+            "research_only_recoverable": bool(row.get("research_only_recoverable")),
+            "promotion_allowed": False,
+        }
+        for name, row in dimensions.items()
+    }
     return {
         "schema_version": "context_dimension_eligibility.v1",
         "report_type": "context_dimension_eligibility",
         "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
         "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
         "status_counts": dict(status_counts),
         "dimensions": dimensions,
-        "clean_dimensions": [name for name, row in dimensions.items() if row["status"] == STATUS_CLEAN],
-        "blocked_dimensions": [name for name, row in dimensions.items() if row["status"] not in {STATUS_CLEAN, STATUS_NA}],
+        "dimension_eligibility": dimension_eligibility,
+        "clean_dimensions": clean_dimensions,
+        "blocked_dimensions": blocked_dimensions,
+        "pending_dimensions": pending_dimensions,
+        "writer_bug_dimensions": writer_bug_dimensions,
+        "research_only_dimensions": research_only_dimensions,
         "rule": "Only dimensions with status CLEAN may contribute capture-cross or OOS evidence.",
     }
 
@@ -3861,6 +3958,14 @@ def self_test():
         assert context["dimensions"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["quote-sensitive"]["eligible_for_capture_cross"] is True
         assert "quote-sensitive" not in context["blocked_dimensions"]
+        assert context["classification"] == "BLOCKED_CONTEXT_COVERAGE"
+        assert context["next_action"] == "continue_matured_volume_shadow_recheck_and_collect_formal_volume_context"
+        assert context["dimension_eligibility"]["quote-sensitive"]["status"] == STATUS_CLEAN
+        assert context["dimension_eligibility"]["volume"]["status"] == STATUS_BLOCKED
+        assert context["dimension_eligibility"]["volume"]["allowed_use"] == "blocked_no_promotion_evidence"
+        assert context["dimension_eligibility"]["kline"]["status"] == STATUS_BLOCKED
+        assert context["dimension_eligibility"]["kline"]["promotion_allowed"] is False
+        assert context["research_only_dimensions"] == []
         assert (
             context["dimensions"]["quote-sensitive"]["evidence"][
                 "quote_clean_window_pending_reconciled_by_current_coverage"
