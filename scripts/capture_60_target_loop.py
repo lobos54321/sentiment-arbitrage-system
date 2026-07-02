@@ -2664,6 +2664,9 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
             str(row.get("freeze_id") or ""),
         ),
     )
+    prioritized_frozen_definition_count = sum(
+        1 for row in items if row.get("priority_rank") is not None
+    )
     additional_needed = safe_int(target_gap.get("additional_pass_allow_events_needed_to_60"), 0)
     if additional_needed <= 0:
         classification = "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
@@ -2688,7 +2691,8 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
         "source_closure_plan_classification": pass_allow_closure_plan.get("classification"),
         "target_gap": target_gap,
         "frozen_definition_count": len(items),
-        "priority_queue_count": len(priority_by_plan_item),
+        "priority_queue_count": prioritized_frozen_definition_count,
+        "unique_priority_plan_item_count": len(priority_by_plan_item),
         "top_priority_items": [
             {
                 "freeze_id": row.get("freeze_id"),
@@ -4216,6 +4220,8 @@ def self_test():
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
         assert freeze_registry["frozen_definition_count"] >= 1
+        assert freeze_registry["priority_queue_count"] == freeze_registry["frozen_definition_count"]
+        assert freeze_registry["unique_priority_plan_item_count"] >= 1
         assert freeze_registry["definition_set_frozen_at"]
         assert freeze_registry["items"][0]["frozen_at"]
         assert freeze_registry["items"][0]["definition_fingerprint"]
