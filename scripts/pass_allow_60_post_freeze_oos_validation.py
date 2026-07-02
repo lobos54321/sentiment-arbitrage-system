@@ -558,7 +558,10 @@ def build_oos_data_availability(
         "root_causes": root_causes,
         "raw_gold_silver_event_rows": raw_count,
         "min_raw_events_for_oos_judgment": min_raw_events,
+        "minimum_raw_gold_silver_event_rows": min_raw_events,
+        "minimum_raw_gold_silver_event_rows_for_oos_judgment": min_raw_events,
         "raw_gold_silver_event_rows_needed_for_min": max(0, min_raw_events - int(raw_count or 0)),
+        "raw_gold_silver_event_rows_needed_to_minimum": max(0, min_raw_events - int(raw_count or 0)),
         "all_raw_rows_since_eval_start": all_raw_since_freeze,
         "raw_signal_rows_seen_after_freeze": (
             None if all_raw_since_freeze is None else int(all_raw_since_freeze or 0)
@@ -691,7 +694,12 @@ def build_report(args):
             post_freeze_source_activity.get("latest_raw_gold_silver_lag_sec_before_eval_start")
         ),
         "min_raw_events_for_oos_judgment": int(args.min_raw_events),
+        "minimum_raw_gold_silver_event_rows": int(args.min_raw_events),
+        "minimum_raw_gold_silver_event_rows_for_oos_judgment": int(args.min_raw_events),
         "raw_gold_silver_event_rows_needed_for_min": (
+            oos_data_availability.get("raw_gold_silver_event_rows_needed_for_min")
+        ),
+        "raw_gold_silver_event_rows_needed_to_minimum": (
             oos_data_availability.get("raw_gold_silver_event_rows_needed_for_min")
         ),
         "raw_signal_rows_seen_after_freeze": (
