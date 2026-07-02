@@ -1730,6 +1730,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "next_pass_allow_60_closure_oos_action": (
                 oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
             ),
+            "decision_no_pass_quality_timing_oos_queue_count": (
+                oos_readiness_summary_v3.get("decision_no_pass_quality_timing_oos_queue_count")
+            ),
+            "next_decision_no_pass_quality_timing_oos_action": (
+                oos_readiness_summary_v3.get("next_decision_no_pass_quality_timing_oos_action")
+            ),
             "pass_allow_60_closure_oos_queue": (
                 oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue") or {}
             ),
@@ -1773,6 +1779,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "next_pass_allow_60_closure_oos_action": (
             oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
             or pass_allow_60_oos_queue.get("next_action")
+        ),
+        "decision_no_pass_quality_timing_oos_queue_count": (
+            oos_readiness_summary_v3.get("decision_no_pass_quality_timing_oos_queue_count")
+        ),
+        "next_decision_no_pass_quality_timing_oos_action": (
+            oos_readiness_summary_v3.get("next_decision_no_pass_quality_timing_oos_action")
         ),
         "pass_allow_60_closure_oos_queue": pass_allow_60_oos_queue,
         "pass_allow_60_oos_freeze_priority_queue": {
@@ -3676,6 +3688,23 @@ def self_test():
         assert sibling_verdict["oos_readiness_summary_v3"]["available"] is True
         assert sibling_verdict["oos_readiness_summary_v3"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
         assert sibling_verdict["oos_readiness_summary_v3"]["available_probe_count"] == 2
+        dnp_oos_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+            "oos_readiness_summary_v3": {
+                "classification": "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED",
+                "decision_no_pass_quality_timing_oos_queue_count": 3,
+                "next_decision_no_pass_quality_timing_oos_action": (
+                    "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
+                ),
+                "promotion_allowed": False,
+            }
+        })
+        assert dnp_oos_verdict["decision_no_pass_quality_timing_oos_queue_count"] == 3
+        assert dnp_oos_verdict["next_decision_no_pass_quality_timing_oos_action"] == (
+            "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
+        )
+        assert dnp_oos_verdict["oos_readiness_summary_v3"][
+            "next_decision_no_pass_quality_timing_oos_action"
+        ] == "hold_repeated_decision_no_pass_clusters_until_clean_window_then_non_overlapping_oos"
         assert sibling_verdict["oos_probe_refresh_status"]["available"] is True
         assert sibling_verdict["oos_probe_refresh_status"]["failed_command_count"] == 0
         assert sibling_verdict["oos_probe_refresh_status"]["probes"][0]["probe"] == "0p1h"
