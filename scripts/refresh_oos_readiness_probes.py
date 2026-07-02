@@ -219,6 +219,20 @@ def build_report(args: argparse.Namespace) -> dict:
             "validation": compact_validation(validation_path),
         })
     failed = [cmd for cmd in commands if not cmd["ok"]]
+    requested_probe_count = len(probes)
+    executed_probe_count = len(results)
+    if failed:
+        classification = "OOS_PROBE_REFRESH_FAILED"
+        next_action = "inspect_failed_probe_command"
+    elif executed_probe_count == 0 and post_freeze_probe.get("reason") == "post_freeze_window_too_young":
+        classification = "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW"
+        next_action = "wait_for_post_freeze_oos_window"
+    elif executed_probe_count == 0:
+        classification = "OOS_PROBES_NOT_RUN"
+        next_action = "provide_probe_hours_or_wait_for_post_freeze_oos_window"
+    else:
+        classification = "OOS_PROBES_REFRESHED"
+        next_action = "rerun_reviewer_or_wait_for_sufficient_oos_raw_gs_events"
     summary = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -238,13 +252,13 @@ def build_report(args: argparse.Namespace) -> dict:
         "post_freeze_probe": post_freeze_probe,
         "commands": commands,
         "probes": results,
+        "requested_probe_count": requested_probe_count,
+        "executed_probe_count": executed_probe_count,
+        "probe_count": executed_probe_count,
+        "skipped_probe_count": max(0, requested_probe_count - executed_probe_count),
         "failed_command_count": len(failed),
-        "classification": "OOS_PROBE_REFRESH_FAILED" if failed else "OOS_PROBES_REFRESHED",
-        "next_action": (
-            "inspect_failed_probe_command"
-            if failed
-            else "rerun_reviewer_or_wait_for_sufficient_oos_raw_gs_events"
-        ),
+        "classification": classification,
+        "next_action": next_action,
     }
     if args.out:
         write_json(Path(args.out), summary)
@@ -291,10 +305,43 @@ def self_test() -> None:
         assert report["promotion_allowed"] is False
         assert report["strategy_change_allowed"] is False
         assert len(report["probes"]) == 2
+        assert report["executed_probe_count"] == 2
+        assert report["classification"] == "OOS_PROBES_REFRESHED"
         assert report["post_freeze_probe"]["added"] is True
         assert (run_dir / "matured_volume_capture_cross_audit_oos_probe_0p25h.json").exists()
         assert (run_dir / "hypothesis_validation_audit_oos_probe_0p25h.json").exists()
         assert Path(args.out).exists()
+
+        young_registry = root / "young_hypothesis_registry.json"
+        young_run_dir = root / "agent_runs" / "young"
+        young_run_dir.mkdir(parents=True)
+        write_json(young_registry, {
+            "schema_version": "hypothesis_registry.v2",
+            "updated_at": int(time.time()),
+            "promotion_allowed": False,
+            "shadow_only_matured_volume_watch": [],
+        })
+        young_args = argparse.Namespace(
+            db=str(paper),
+            raw_db=str(raw),
+            kline_db=str(kline),
+            registry=str(young_registry),
+            run_dir=str(young_run_dir),
+            probe_hours="",
+            expected_candidates=84,
+            max_scan_rows=1000,
+            timeout_sec=30,
+            post_freeze_probe=True,
+            post_freeze_min_hours=0.05,
+            post_freeze_safety_sec=120,
+            out=str(root / "young_summary.json"),
+        )
+        young_report = build_report(young_args)
+        assert young_report["classification"] == "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW"
+        assert young_report["next_action"] == "wait_for_post_freeze_oos_window"
+        assert young_report["requested_probe_count"] == 0
+        assert young_report["executed_probe_count"] == 0
+        assert young_report["post_freeze_probe"]["reason"] == "post_freeze_window_too_young"
     print("SELF_TEST_PASS refresh_oos_readiness_probes")
 
 
@@ -323,7 +370,8 @@ def main() -> int:
     print(json.dumps({
         "classification": report["classification"],
         "failed_command_count": report["failed_command_count"],
-        "probe_count": len(report["probes"]),
+        "probe_count": report.get("probe_count", len(report["probes"])),
+        "executed_probe_count": report.get("executed_probe_count", len(report["probes"])),
         "out": args.out,
     }, sort_keys=True))
     return 1 if report["failed_command_count"] else 0

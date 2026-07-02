@@ -560,6 +560,21 @@ def build_oos_readiness_delta(probes, refresh_report=None):
 
 
 def build_oos_readiness_summary(readiness_reports):
+    refresh_report = readiness_reports.get("oos_readiness_probe_refresh") or {}
+    refresh_has_execution_accounting = bool(refresh_report) and (
+        "executed_probe_count" in refresh_report
+        or "requested_probe_count" in refresh_report
+        or "probe_count" in refresh_report
+    )
+    refresh_executed_probe_count = as_int(
+        refresh_report.get("executed_probe_count", refresh_report.get("probe_count")),
+        None,
+    )
+    refresh_probe_labels = {
+        str(row.get("probe"))
+        for row in (refresh_report.get("probes") or [])
+        if row.get("probe")
+    }
     probe_specs = (
         (
             "0p1h",
@@ -582,7 +597,8 @@ def build_oos_readiness_summary(readiness_reports):
             "matured_volume_cross_oos_probe_1h",
         ),
     )
-    probes = [
+    fixed_labels = {label for label, _hypothesis_key, _cross_key in probe_specs}
+    all_fixed_probes = [
         compact_oos_probe(
             label,
             readiness_reports.get(hypothesis_key) or {},
@@ -590,8 +606,21 @@ def build_oos_readiness_summary(readiness_reports):
         )
         for label, hypothesis_key, cross_key in probe_specs
     ]
-    fixed_labels = {label for label, _hypothesis_key, _cross_key in probe_specs}
-    refresh_report = readiness_reports.get("oos_readiness_probe_refresh") or {}
+    if refresh_has_execution_accounting:
+        if (refresh_executed_probe_count or 0) <= 0:
+            current_fixed_labels = set()
+        else:
+            current_fixed_labels = refresh_probe_labels & fixed_labels
+    else:
+        current_fixed_labels = fixed_labels
+    probes = [
+        row for row in all_fixed_probes
+        if row.get("probe") in current_fixed_labels
+    ]
+    stale_fixed_probes = [
+        row for row in all_fixed_probes
+        if row.get("available") and row.get("probe") not in current_fixed_labels
+    ]
     for row in refresh_report.get("probes") or []:
         label = row.get("probe")
         if not label or label in fixed_labels:
@@ -617,6 +646,18 @@ def build_oos_readiness_summary(readiness_reports):
         "available_probe_count": len(available),
         "sufficient_probe_count": len(sufficient),
         "oos_repeated_watch_probe_count": len(repeated),
+        "current_oos_probe_count": len(available),
+        "stale_oos_probe_files_ignored_count": len(stale_fixed_probes),
+        "stale_oos_probe_files_ignored": [
+            row.get("probe") for row in stale_fixed_probes
+        ],
+        "oos_probe_refresh_classification": refresh_report.get("classification"),
+        "oos_probe_refresh_executed_probe_count": refresh_executed_probe_count,
+        "oos_probe_refresh_requested_probe_count": refresh_report.get("requested_probe_count"),
+        "oos_probe_refresh_probe_count": refresh_report.get("probe_count"),
+        "oos_probe_refresh_post_freeze_reason": (
+            (refresh_report.get("post_freeze_probe") or {}).get("reason")
+        ),
         "classification": classification,
         "next_action": next_action,
         "readiness_delta": readiness_delta,
@@ -656,12 +697,15 @@ def compact_oos_probe_refresh(report):
         "classification": report.get("classification"),
         "generated_at": report.get("generated_at"),
         "failed_command_count": report.get("failed_command_count"),
+        "requested_probe_count": report.get("requested_probe_count"),
+        "executed_probe_count": report.get("executed_probe_count", report.get("probe_count")),
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
         "probe_count": len(probes),
         "probes": probes,
         "next_action": report.get("next_action"),
+        "post_freeze_reason": ((report.get("post_freeze_probe") or {}).get("reason")),
     }
 
 
@@ -3403,6 +3447,34 @@ def self_test():
         assert sibling_verdict["oos_probe_refresh_status"]["available"] is True
         assert sibling_verdict["oos_probe_refresh_status"]["failed_command_count"] == 0
         assert sibling_verdict["oos_probe_refresh_status"]["probes"][0]["probe"] == "0p1h"
+        write_json(root / "oos_readiness_probe_refresh.json", {
+            "schema_version": "refresh_oos_readiness_probes.v1",
+            "classification": "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW",
+            "generated_at": "2026-06-30T00:05:00Z",
+            "failed_command_count": 0,
+            "requested_probe_count": 0,
+            "executed_probe_count": 0,
+            "probe_count": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "post_freeze_probe": {
+                "reason": "post_freeze_window_too_young",
+                "hours": 0.0,
+            },
+            "probes": [],
+        })
+        waiting_siblings = load_sibling_readiness_reports(str(capture_path))
+        waiting_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports=waiting_siblings)
+        waiting_oos = waiting_verdict["oos_readiness_summary"]
+        assert waiting_oos["available_probe_count"] == 0
+        assert waiting_oos["current_oos_probe_count"] == 0
+        assert waiting_oos["stale_oos_probe_files_ignored_count"] == 1
+        assert waiting_oos["oos_probe_refresh_classification"] == "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW"
+        assert waiting_oos["oos_probe_refresh_executed_probe_count"] == 0
+        assert waiting_oos["oos_probe_refresh_post_freeze_reason"] == "post_freeze_window_too_young"
+        assert waiting_verdict["oos_probe_refresh_status"]["classification"] == "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW"
+        assert waiting_verdict["oos_probe_refresh_status"]["executed_probe_count"] == 0
     print("SELF_TEST_PASS review_agent_verdict")
 
 
