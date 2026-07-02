@@ -4726,6 +4726,7 @@ def write_materialized_artifacts(
         # freshly refreshed post-freeze validations from the current finalize.
         run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
+        verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
         write_json(verdict_path, verdict)
 
     handoff_text = build_handoff(verdict)
