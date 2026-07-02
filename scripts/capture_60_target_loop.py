@@ -5616,6 +5616,7 @@ def load_oos_reports(run_dir):
         "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation.json",
         "capture_cross_post_freeze_oos_validation.json",
+        "final_eligibility_60_post_freeze_oos_validation.json",
     ):
         path = run_dir / name
         if path.exists():
@@ -5741,7 +5742,11 @@ def build_oos_track_sample_progress(track_name, validation):
     }
 
 
-def build_oos_sample_progress_summary(pass_allow_validation, capture_cross_validation):
+def build_oos_sample_progress_summary(
+    pass_allow_validation,
+    capture_cross_validation,
+    final_eligibility_validation=None,
+):
     tracks = {
         "pass_allow_60": build_oos_track_sample_progress(
             "pass_allow_60",
@@ -5752,6 +5757,11 @@ def build_oos_sample_progress_summary(pass_allow_validation, capture_cross_valid
             capture_cross_validation,
         ),
     }
+    if final_eligibility_validation is not None:
+        tracks["final_eligibility_60"] = build_oos_track_sample_progress(
+            "final_eligibility_60",
+            final_eligibility_validation,
+        )
     track_values = list(tracks.values())
     tracks_at_minimum = [
         row["track"] for row in track_values
@@ -5868,7 +5878,11 @@ def build_oos_preliminary_signal_track(track_name, validation):
     }
 
 
-def build_oos_preliminary_signal_summary(pass_allow_validation, capture_cross_validation):
+def build_oos_preliminary_signal_summary(
+    pass_allow_validation,
+    capture_cross_validation,
+    final_eligibility_validation=None,
+):
     tracks = {
         "pass_allow_60": build_oos_preliminary_signal_track(
             "pass_allow_60",
@@ -5879,6 +5893,11 @@ def build_oos_preliminary_signal_summary(pass_allow_validation, capture_cross_va
             capture_cross_validation,
         ),
     }
+    if final_eligibility_validation is not None:
+        tracks["final_eligibility_60"] = build_oos_preliminary_signal_track(
+            "final_eligibility_60",
+            final_eligibility_validation,
+        )
     repeat_tracks = [
         row for row in tracks.values()
         if safe_int(row.get("repeat_watch_count"), 0) > 0
@@ -5991,6 +6010,11 @@ def build_oos_summary(run_dir, reports=None):
     capture_cross_post_freeze_validation = (
         (input_reports or {}).get("capture_cross_post_freeze_oos_validation")
         or oos_reports.get("capture_cross_post_freeze_oos_validation")
+        or {}
+    )
+    final_eligibility_post_freeze_validation = (
+        (input_reports or {}).get("final_eligibility_60_post_freeze_oos_validation")
+        or oos_reports.get("final_eligibility_60_post_freeze_oos_validation")
         or {}
     )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
@@ -6217,6 +6241,126 @@ def build_oos_summary(run_dir, reports=None):
             0,
         )
         summary["final_eligibility_60_oos_readiness_monitor"] = final_oos_monitor
+    if final_eligibility_post_freeze_validation:
+        final_validation_freshness = build_oos_validation_freshness(
+            final_eligibility_freeze_registry,
+            final_eligibility_post_freeze_validation,
+        )
+        oos_data_availability = (
+            final_eligibility_post_freeze_validation.get("oos_data_availability") or {}
+        )
+        raw_gold_silver_event_rows = final_eligibility_post_freeze_validation.get(
+            "raw_gold_silver_event_rows"
+        )
+        raw_gold_silver_event_rows_needed = oos_data_availability.get(
+            "raw_gold_silver_event_rows_needed_for_min"
+        )
+        final_post_freeze_summary = {
+            "available": True,
+            "schema_version": final_eligibility_post_freeze_validation.get("schema_version"),
+            "generated_at": final_eligibility_post_freeze_validation.get("generated_at"),
+            "classification": final_eligibility_post_freeze_validation.get("classification"),
+            "legacy_classification": final_eligibility_post_freeze_validation.get("legacy_classification"),
+            "oos_data_availability_classification": (
+                final_eligibility_post_freeze_validation.get("oos_data_availability_classification")
+            ),
+            "oos_data_root_causes": (
+                final_eligibility_post_freeze_validation.get("oos_data_root_causes") or []
+            ),
+            "next_action": final_eligibility_post_freeze_validation.get("next_action"),
+            "raw_gold_silver_event_rows": raw_gold_silver_event_rows,
+            "raw_gold_silver_rows_since_eval_start_unfiltered": (
+                final_eligibility_post_freeze_validation.get(
+                    "raw_gold_silver_rows_since_eval_start_unfiltered"
+                )
+            ),
+            "all_raw_rows_since_eval_start": (
+                final_eligibility_post_freeze_validation.get("all_raw_rows_since_eval_start")
+            ),
+            "latest_raw_signal_age_sec": (
+                final_eligibility_post_freeze_validation.get("latest_raw_signal_age_sec")
+            ),
+            "latest_raw_gold_silver_age_sec": (
+                final_eligibility_post_freeze_validation.get("latest_raw_gold_silver_age_sec")
+            ),
+            "min_raw_events_for_oos_judgment": (
+                final_eligibility_post_freeze_validation.get("min_raw_events_for_oos_judgment")
+            ),
+            "raw_gold_silver_event_rows_needed_for_min": raw_gold_silver_event_rows_needed,
+            "post_freeze_global_stage_rates": (
+                final_eligibility_post_freeze_validation.get("post_freeze_global_stage_rates") or {}
+            ),
+            "post_freeze_transition_counts": (
+                final_eligibility_post_freeze_validation.get("post_freeze_transition_counts") or {}
+            ),
+            "post_freeze_final_blocker_category_counts": (
+                final_eligibility_post_freeze_validation.get(
+                    "post_freeze_final_blocker_category_counts"
+                ) or {}
+            ),
+            "post_freeze_signal_observation_coverage": (
+                final_eligibility_post_freeze_validation.get(
+                    "post_freeze_signal_observation_coverage"
+                ) or {}
+            ),
+            "frozen_definition_count": (
+                final_eligibility_post_freeze_validation.get("frozen_definition_count")
+            ),
+            "validated_definition_count": (
+                final_eligibility_post_freeze_validation.get("validated_definition_count")
+            ),
+            "supported_definition_count": (
+                final_eligibility_post_freeze_validation.get("supported_definition_count")
+            ),
+            "repeat_watch_count": final_eligibility_post_freeze_validation.get("repeat_watch_count"),
+            "positive_lift_count": final_eligibility_post_freeze_validation.get("positive_lift_count"),
+            "repeated_blocker_count": (
+                final_eligibility_post_freeze_validation.get("repeated_blocker_count")
+            ),
+            "too_small_definition_count": (
+                final_eligibility_post_freeze_validation.get("too_small_definition_count")
+            ),
+            "post_freeze_usable_hours": (
+                final_eligibility_post_freeze_validation.get("post_freeze_usable_hours")
+            ),
+            "definition_set_frozen_at": (
+                final_eligibility_post_freeze_validation.get("definition_set_frozen_at")
+            ),
+            "freeze_generated_at": final_eligibility_post_freeze_validation.get("freeze_generated_at"),
+            "eval_start_iso": final_eligibility_post_freeze_validation.get("eval_start_iso"),
+            "oos_data_availability": oos_data_availability,
+            "status_counts": final_eligibility_post_freeze_validation.get("status_counts") or {},
+            "source_counts": final_eligibility_post_freeze_validation.get("source_counts") or {},
+            "stage_counts": final_eligibility_post_freeze_validation.get("stage_counts") or {},
+            "validation_role_counts": (
+                final_eligibility_post_freeze_validation.get("validation_role_counts") or {}
+            ),
+            "top_repeat_watch_items": (
+                final_eligibility_post_freeze_validation.get("top_repeat_watch_items") or []
+            )[:12],
+            "top_repeated_blocker_items": (
+                final_eligibility_post_freeze_validation.get("top_repeated_blocker_items") or []
+            )[:12],
+            "validation_freshness": final_validation_freshness,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["final_eligibility_60_post_freeze_oos_validation"] = final_post_freeze_summary
+        summary["final_eligibility_60_oos_validation_freshness"] = final_validation_freshness
+        summary["final_eligibility_60_oos_validation_stale_vs_latest_freeze_registry"] = (
+            final_validation_freshness.get("validation_stale_vs_latest_freeze_registry")
+        )
+        summary["final_eligibility_60_post_freeze_oos_classification"] = (
+            final_eligibility_post_freeze_validation.get("classification")
+        )
+        summary["final_eligibility_60_post_freeze_oos_repeat_watch_count"] = (
+            final_eligibility_post_freeze_validation.get("repeat_watch_count")
+        )
+        summary["final_eligibility_60_post_freeze_oos_repeated_blocker_count"] = (
+            final_eligibility_post_freeze_validation.get("repeated_blocker_count")
+        )
     if capture_cross_freeze_registry:
         summary["capture_cross_oos_freeze_registry"] = {
             "available": True,
@@ -6423,7 +6567,11 @@ def build_oos_summary(run_dir, reports=None):
         summary["pass_allow_60_post_freeze_oos_repeat_watch_count"] = (
             pass_allow_post_freeze_validation.get("repeat_watch_count")
         )
-    if pass_allow_post_freeze_validation or capture_cross_post_freeze_validation:
+    if (
+        pass_allow_post_freeze_validation
+        or capture_cross_post_freeze_validation
+        or final_eligibility_post_freeze_validation
+    ):
         pass_allow_raw_rows = (
             pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
             if pass_allow_post_freeze_validation
@@ -6432,6 +6580,11 @@ def build_oos_summary(run_dir, reports=None):
         capture_cross_raw_rows = (
             capture_cross_post_freeze_validation.get("raw_gold_silver_event_rows")
             if capture_cross_post_freeze_validation
+            else None
+        )
+        final_eligibility_raw_rows = (
+            final_eligibility_post_freeze_validation.get("raw_gold_silver_event_rows")
+            if final_eligibility_post_freeze_validation
             else None
         )
         pass_allow_eval_start = (
@@ -6444,22 +6597,30 @@ def build_oos_summary(run_dir, reports=None):
             if capture_cross_post_freeze_validation
             else None
         )
-        raw_counts_match = (
-            pass_allow_raw_rows is not None
-            and capture_cross_raw_rows is not None
-            and pass_allow_raw_rows == capture_cross_raw_rows
+        final_eligibility_eval_start = (
+            final_eligibility_post_freeze_validation.get("eval_start_iso")
+            if final_eligibility_post_freeze_validation
+            else None
         )
-        eval_starts_match = (
-            pass_allow_eval_start is not None
-            and capture_cross_eval_start is not None
-            and pass_allow_eval_start == capture_cross_eval_start
-        )
+        raw_row_values = [
+            value for value in (pass_allow_raw_rows, capture_cross_raw_rows, final_eligibility_raw_rows)
+            if value is not None
+        ]
+        eval_start_values = [
+            value for value in (pass_allow_eval_start, capture_cross_eval_start, final_eligibility_eval_start)
+            if value is not None
+        ]
+        raw_counts_match = bool(raw_row_values) and len(set(raw_row_values)) == 1
+        eval_starts_match = bool(eval_start_values) and len(set(eval_start_values)) == 1
         summary["pass_allow_60_post_freeze_raw_gold_silver_event_rows"] = pass_allow_raw_rows
         summary["capture_cross_post_freeze_raw_gold_silver_event_rows"] = capture_cross_raw_rows
+        summary["final_eligibility_60_post_freeze_raw_gold_silver_event_rows"] = final_eligibility_raw_rows
         summary["post_freeze_raw_gold_silver_event_rows_source"] = (
             "pass_allow_60_post_freeze_oos_validation"
             if pass_allow_post_freeze_validation
             else "capture_cross_post_freeze_oos_validation"
+            if capture_cross_post_freeze_validation
+            else "final_eligibility_60_post_freeze_oos_validation"
         )
         summary["oos_validation_scope_reconciliation"] = {
             "schema_version": "oos_validation_scope_reconciliation.v1",
@@ -6502,6 +6663,21 @@ def build_oos_summary(run_dir, reports=None):
                 "classification": capture_cross_post_freeze_validation.get("classification"),
                 "generated_at": capture_cross_post_freeze_validation.get("generated_at"),
             },
+            "final_eligibility_60": {
+                "available": bool(final_eligibility_post_freeze_validation),
+                "definition_set_frozen_at": (
+                    final_eligibility_post_freeze_validation.get("definition_set_frozen_at")
+                ),
+                "eval_start_iso": final_eligibility_eval_start,
+                "raw_gold_silver_event_rows": final_eligibility_raw_rows,
+                "raw_gold_silver_event_rows_needed_for_min": (
+                    (final_eligibility_post_freeze_validation.get("oos_data_availability") or {}).get(
+                        "raw_gold_silver_event_rows_needed_for_min"
+                    )
+                ),
+                "classification": final_eligibility_post_freeze_validation.get("classification"),
+                "generated_at": final_eligibility_post_freeze_validation.get("generated_at"),
+            },
             "raw_gold_silver_event_rows_match": raw_counts_match,
             "eval_start_iso_match": eval_starts_match,
             "promotion_allowed": False,
@@ -6512,6 +6688,7 @@ def build_oos_summary(run_dir, reports=None):
         oos_sample_progress = build_oos_sample_progress_summary(
             pass_allow_post_freeze_validation,
             capture_cross_post_freeze_validation,
+            final_eligibility_post_freeze_validation,
         )
         summary["oos_sample_progress"] = oos_sample_progress
         summary["oos_sample_progress_classification"] = oos_sample_progress.get("classification")
@@ -6526,6 +6703,7 @@ def build_oos_summary(run_dir, reports=None):
         oos_preliminary_signal = build_oos_preliminary_signal_summary(
             pass_allow_post_freeze_validation,
             capture_cross_post_freeze_validation,
+            final_eligibility_post_freeze_validation,
         )
         summary["oos_preliminary_signal_summary"] = oos_preliminary_signal
         summary["oos_preliminary_signal_classification"] = (

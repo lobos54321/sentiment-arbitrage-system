@@ -602,6 +602,13 @@ def stage_oos(args, run_dir):
         )
         if latest_capture_cross_registry.exists():
             capture_cross_freeze_registry = latest_capture_cross_registry
+    final_eligibility_freeze_registry = run_dir / "final_eligibility_60_oos_freeze_registry.json"
+    if not final_eligibility_freeze_registry.exists():
+        latest_final_registry = (
+            Path(args.out_root) / "latest" / "final_eligibility_60_oos_freeze_registry.json"
+        )
+        if latest_final_registry.exists():
+            final_eligibility_freeze_registry = latest_final_registry
     rows = [
         run_report(
             "oos_readiness_probe_refresh",
@@ -647,6 +654,20 @@ def stage_oos(args, run_dir):
                 "--out", str(run_dir / "capture_cross_post_freeze_oos_validation.json"),
             ],
             run_dir / "capture_cross_post_freeze_oos_validation.json",
+            timeout=max(60, int(args.report_timeout_sec) * 2),
+        ),
+        run_report(
+            "final_eligibility_60_post_freeze_oos_validation",
+            [
+                "scripts/final_eligibility_60_post_freeze_oos_validation.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
+                "--freeze-registry", str(final_eligibility_freeze_registry),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(run_dir / "final_eligibility_60_post_freeze_oos_validation.json"),
+            ],
+            run_dir / "final_eligibility_60_post_freeze_oos_validation.json",
             timeout=max(60, int(args.report_timeout_sec) * 2),
         ),
     ]
@@ -697,6 +718,9 @@ def collect_paths(args, run_dir):
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
         "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
+        "final_eligibility_60_post_freeze_oos_validation": (
+            "final_eligibility_60_post_freeze_oos_validation.json"
+        ),
         "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
         "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
         "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",

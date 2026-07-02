@@ -497,6 +497,11 @@ def build_handoff(verdict):
     if final_eligibility_priority:
         final_freeze = final_eligibility_priority.get("oos_freeze_registry") or {}
         final_monitor = final_eligibility_priority.get("oos_readiness_monitor") or {}
+        final_post_freeze = (
+            final_eligibility_priority.get("post_freeze_oos_validation")
+            or verdict.get("final_eligibility_60_post_freeze_oos_validation")
+            or {}
+        )
         lines.extend([
             "## Final Eligibility 60 Closure Priority Queue",
             "",
@@ -555,6 +560,28 @@ def build_handoff(verdict):
                         "usable_post_freeze_hours": final_monitor.get(
                             "usable_post_freeze_hours"
                         ),
+                        "promotion_allowed": False,
+                    },
+                    "post_freeze_oos_validation": {
+                        "available": bool(final_post_freeze),
+                        "classification": final_post_freeze.get("classification"),
+                        "raw_gold_silver_event_rows": final_post_freeze.get(
+                            "raw_gold_silver_event_rows"
+                        ),
+                        "validated_definition_count": final_post_freeze.get(
+                            "validated_definition_count"
+                        ),
+                        "repeat_watch_count": final_post_freeze.get("repeat_watch_count"),
+                        "repeated_blocker_count": final_post_freeze.get(
+                            "repeated_blocker_count"
+                        ),
+                        "post_freeze_transition_counts": (
+                            final_post_freeze.get("post_freeze_transition_counts") or {}
+                        ),
+                        "post_freeze_final_blocker_category_counts": (
+                            final_post_freeze.get("post_freeze_final_blocker_category_counts") or {}
+                        ),
+                        "oos_data_next_action": final_post_freeze.get("oos_data_next_action"),
                         "promotion_allowed": False,
                     },
                 },
@@ -1078,6 +1105,17 @@ def build_handoff(verdict):
             or verdict.get("capture_cross_post_freeze_oos_validation")
             or {}
         )
+        final_eligibility_post_freeze = (
+            oos_readiness.get("final_eligibility_60_post_freeze_oos_validation")
+            or (verdict.get("oos_readiness_summary_v3") or {}).get(
+                "final_eligibility_60_post_freeze_oos_validation"
+            )
+            or verdict.get("final_eligibility_60_post_freeze_oos_validation")
+            or ((verdict.get("final_eligibility_60_closure_priority_queue") or {}).get(
+                "post_freeze_oos_validation"
+            ))
+            or {}
+        )
         preliminary_signal_summary = (
             oos_readiness.get("oos_preliminary_signal_summary")
             or (verdict.get("oos_readiness_summary_v3") or {}).get("oos_preliminary_signal_summary")
@@ -1155,6 +1193,35 @@ def build_handoff(verdict):
                     capture_cross_post_freeze.get("post_freeze_signal_observation_coverage") or {}
                 ),
                 "oos_data_next_action": capture_cross_post_freeze.get("oos_data_next_action"),
+                "promotion_allowed": False,
+            },
+            "final_eligibility_60_post_freeze": {
+                "classification": final_eligibility_post_freeze.get("classification"),
+                "raw_gold_silver_event_rows": final_eligibility_post_freeze.get(
+                    "raw_gold_silver_event_rows"
+                ),
+                "post_freeze_usable_hours": final_eligibility_post_freeze.get(
+                    "post_freeze_usable_hours"
+                ),
+                "validated_definition_count": final_eligibility_post_freeze.get(
+                    "validated_definition_count"
+                ),
+                "repeat_watch_count": final_eligibility_post_freeze.get("repeat_watch_count"),
+                "repeated_blocker_count": final_eligibility_post_freeze.get(
+                    "repeated_blocker_count"
+                ),
+                "all_raw_rows_since_eval_start": final_eligibility_post_freeze.get(
+                    "all_raw_rows_since_eval_start"
+                ),
+                "post_freeze_transition_counts": (
+                    final_eligibility_post_freeze.get("post_freeze_transition_counts") or {}
+                ),
+                "post_freeze_final_blocker_category_counts": (
+                    final_eligibility_post_freeze.get(
+                        "post_freeze_final_blocker_category_counts"
+                    ) or {}
+                ),
+                "oos_data_next_action": final_eligibility_post_freeze.get("oos_data_next_action"),
                 "promotion_allowed": False,
             },
             "promotion_allowed": False,
