@@ -131,6 +131,7 @@ DERIVED_READINESS_SIBLINGS = {
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+    "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1433,6 +1434,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
     pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
+    capture_cross_oos_freeze_registry = readiness_reports.get("capture_cross_oos_freeze_registry") or {}
     pass_allow_60_closure_tracks = pass_allow_60_closure_plan.get("closure_tracks") or {}
     pass_allow_60_dnp_clusters = (
         pass_allow_60_closure_tracks.get("decision_no_pass_quality_timing_clusters") or {}
@@ -1834,6 +1836,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "pass_allow_60_oos_freeze_registry": (
                 oos_readiness_summary_v3.get("pass_allow_60_oos_freeze_registry") or {}
             ),
+            "capture_cross_oos_freeze_registry": (
+                oos_readiness_summary_v3.get("capture_cross_oos_freeze_registry") or {}
+            ),
             "pass_allow_60_oos_readiness_monitor": (
                 oos_readiness_summary_v3.get("pass_allow_60_oos_readiness_monitor")
                 or readiness_reports.get("pass_allow_60_oos_readiness_monitor")
@@ -1918,6 +1923,24 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 pass_allow_60_oos_freeze_registry.get("unique_priority_plan_item_count")
             ),
             "top_priority_items": pass_allow_60_freeze_top_priority_items[:8],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "capture_cross_oos_freeze_registry": {
+            "available": bool(capture_cross_oos_freeze_registry),
+            "classification": capture_cross_oos_freeze_registry.get("classification"),
+            "next_action": capture_cross_oos_freeze_registry.get("next_action"),
+            "frozen_definition_count": capture_cross_oos_freeze_registry.get("frozen_definition_count"),
+            "source_counts": capture_cross_oos_freeze_registry.get("source_counts") or {},
+            "stage_counts": capture_cross_oos_freeze_registry.get("stage_counts") or {},
+            "oos_requirements": capture_cross_oos_freeze_registry.get("oos_requirements") or {},
+            "top_items": (
+                capture_cross_oos_freeze_registry.get("top_items")
+                or capture_cross_oos_freeze_registry.get("items")
+                or []
+            )[:12],
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -3970,6 +3993,26 @@ def self_test():
             "valid_cross_count": 3,
             "promotion_allowed": False,
         })
+        write_json(root / "capture_cross_oos_freeze_registry.json", {
+            "schema_version": "capture_cross_oos_freeze_registry.v1",
+            "classification": "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW",
+            "next_action": "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window",
+            "frozen_definition_count": 1,
+            "stage_counts": {"pass_allow_capture": 1},
+            "items": [
+                {
+                    "freeze_id": "capture_cross:test",
+                    "definition_fingerprint": "abc123",
+                    "freeze_definition": {
+                        "candidate_id": "current_all",
+                        "dimension": "source_component",
+                        "slice_value": "matrix_evaluator",
+                    },
+                    "promotion_allowed": False,
+                }
+            ],
+            "promotion_allowed": False,
+        })
         write_json(root / "shadow_candidate_improvement_queue.json", {
             "schema_version": "shadow_candidate_improvement_queue.v3",
             "report_type": "shadow_candidate_improvement_queue",
@@ -4125,6 +4168,7 @@ def self_test():
         assert siblings["candidate_improvement_opportunities"]["opportunity_count"] == 2
         assert siblings["markov_effectiveness"]["status"] == "insufficient_or_uninformative"
         assert siblings["capture_cross_validity"]["valid_cross_count"] == 3
+        assert siblings["capture_cross_oos_freeze_registry"]["frozen_definition_count"] == 1
         assert siblings["shadow_decision_bridge_audit"]["status"] == "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE"
         assert siblings["hypothesis_validation_oos_probe_0p1h"]["overall"]["promotion_allowed"] is False
         assert siblings["matured_volume_cross_oos_probe_0p1h"]["overall"]["classification"] == "BLOCKED_MATURED_VOLUME_COVERAGE"
@@ -4143,6 +4187,11 @@ def self_test():
             "track_valid_capture_crosses_in_clean_non_overlapping_oos"
         )
         assert sibling_verdict["two_d_cross_validity_summary"]["promotion_allowed"] is False
+        assert sibling_verdict["capture_cross_oos_freeze_registry"]["classification"] == (
+            "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+        )
+        assert sibling_verdict["capture_cross_oos_freeze_registry"]["frozen_definition_count"] == 1
+        assert sibling_verdict["capture_cross_oos_freeze_registry"]["promotion_allowed"] is False
         shadow_queue = sibling_verdict["shadow_candidate_improvement_queue"]
         assert shadow_queue["classification"] == "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
         assert shadow_queue["evidence_level"] == "discovery_shadow_only"

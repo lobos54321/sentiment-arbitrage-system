@@ -73,6 +73,7 @@ V3_OUTPUT_FILES = {
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+    "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -3720,6 +3721,180 @@ def apply_capture_cross_verdict(capture_cross):
     return capture_cross
 
 
+def capture_cross_expected_stage(row):
+    stage_lifts = [
+        ("mode_disabled_adjusted_final_eligibility", row.get("mode_adjusted_final_eligibility_lift")),
+        ("final_eligibility", row.get("final_entry_lift")),
+        ("pending_capture", row.get("pending_lift")),
+        ("pass_allow_capture", row.get("pass_allow_lift")),
+        ("decision_capture", row.get("decision_lift")),
+    ]
+    positive = [
+        (stage, safe_float(value, 0.0))
+        for stage, value in stage_lifts
+        if safe_float(value, 0.0) > 0
+    ]
+    if positive:
+        return max(positive, key=lambda item: item[1])[0]
+    if safe_float(row.get("recall_lift_vs_candidate_baseline"), 0.0) > 0:
+        return "detector_capture"
+    return "capture_discovery"
+
+
+def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=None):
+    """Freeze clean same-window 2D cross hits for future non-overlapping OOS."""
+    previous_registry = previous_registry or {}
+    previous_items_by_id = {
+        row.get("freeze_id"): row
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("freeze_id")
+    }
+    previous_fingerprints = {
+        row.get("definition_fingerprint")
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("definition_fingerprint")
+    }
+    now = utc_now()
+    items = []
+    for row in capture_cross.get("valid_top_crosses") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("judgment") or "").upper() not in {
+            "DISCOVERY_HIT",
+            "HIT",
+            "CAPTURE_DISCOVERY_HIT",
+        }:
+            continue
+        if row.get("data_blockers") or row.get("invalid_reasons"):
+            continue
+        freeze_definition = {
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "dimension_eligibility_status": row.get("dimension_eligibility_status"),
+            "slice_value": row.get("slice_value"),
+            "judgment": row.get("judgment"),
+            "expected_capture_stage_improved": capture_cross_expected_stage(row),
+            "downstream_lift_scope": row.get("downstream_lift_scope"),
+            "evidence_source": row.get("evidence_source") or "capture_cross_validity_24h",
+        }
+        fingerprint = stable_fingerprint(freeze_definition)
+        freeze_id = f"capture_cross:{fingerprint}"
+        previous = previous_items_by_id.get(freeze_id) or {}
+        frozen_at = (
+            previous.get("frozen_at")
+            or previous_registry.get("definition_set_frozen_at")
+            or previous_registry.get("generated_at")
+            or now
+        )
+        current_window_evidence = {
+            key: row.get(key)
+            for key in (
+                "matched_gold_silver_events",
+                "match_recall_event",
+                "match_precision_event",
+                "recall_lift_vs_candidate_baseline",
+                "precision_lift_vs_candidate_baseline",
+                "decision_lift",
+                "pass_allow_lift",
+                "pending_lift",
+                "final_entry_lift",
+                "mode_adjusted_final_eligibility_lift",
+                "decision_capture_rate_after_match",
+                "pass_allow_capture_rate_after_match",
+                "pending_capture_rate_after_match",
+                "final_entry_rate_after_match",
+                "mode_adjusted_final_eligibility_rate_after_match",
+                "slice_downstream_signal_count",
+                "downstream_lift_scope",
+                "pnl_secondary_status",
+            )
+            if row.get(key) is not None
+        }
+        items.append({
+            "freeze_id": freeze_id,
+            "source": "capture_first_2d_cross",
+            "expected_capture_stage_improved": freeze_definition["expected_capture_stage_improved"],
+            "definition_fingerprint": fingerprint,
+            "frozen_at": frozen_at,
+            "freeze_definition": freeze_definition,
+            "current_window_evidence": current_window_evidence,
+            "status": "FROZEN_PENDING_CLEAN_NON_OVERLAPPING_OOS",
+            "oos_requirements": {
+                "definition_must_match_fingerprint": True,
+                "train_window_must_not_overlap_eval_window": True,
+                "overlap": False,
+                "context_clean_window_required": True,
+                "same_window_evidence_is_not_promotion_evidence": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    items = sorted(
+        items,
+        key=lambda row: (
+            str((row.get("freeze_definition") or {}).get("candidate_id") or ""),
+            str((row.get("freeze_definition") or {}).get("dimension") or ""),
+            str((row.get("freeze_definition") or {}).get("slice_value") or ""),
+        ),
+    )
+    if items:
+        classification = "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+        next_action = "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window"
+    elif safe_int(capture_cross.get("valid_cross_count"), 0) > 0:
+        classification = "CAPTURE_CROSS_OOS_FREEZE_NOT_READY_WATCH_ONLY"
+        next_action = "continue_tracking_capture_cross_watch_slices_until_discovery_hit"
+    elif safe_int(capture_cross.get("invalid_cross_count"), 0) > 0:
+        classification = "CAPTURE_CROSS_OOS_FREEZE_EMPTY_CONTEXT_BLOCKED"
+        next_action = "wait_for_context_clean_window_before_freezing_capture_cross_definitions"
+    else:
+        classification = "CAPTURE_CROSS_OOS_FREEZE_EMPTY"
+        next_action = "continue_capture_cross_discovery_until_hit"
+    fingerprints = {row.get("definition_fingerprint") for row in items if row.get("definition_fingerprint")}
+    previous_set_frozen_at = previous_registry.get("definition_set_frozen_at") or previous_registry.get("generated_at")
+    definition_set_unchanged = bool(fingerprints and fingerprints == previous_fingerprints)
+    definition_set_frozen_at = previous_set_frozen_at if definition_set_unchanged else now
+    return {
+        "schema_version": "capture_cross_oos_freeze_registry.v1",
+        "report_type": "capture_cross_oos_freeze_registry",
+        "generated_at": now,
+        "definition_set_frozen_at": definition_set_frozen_at,
+        "definition_set_unchanged_from_previous_registry": definition_set_unchanged,
+        "phase": "discovery_readiness",
+        "evidence_level": "same_window_capture_cross_definitions_frozen_for_future_oos",
+        "usage": "read_only_oos_definition_registry",
+        "classification": classification,
+        "next_action": next_action,
+        "source_capture_cross_classification": capture_cross.get("classification"),
+        "source_capture_cross_next_action": capture_cross.get("next_action"),
+        "frozen_definition_count": len(items),
+        "source_counts": dict(Counter(row.get("source") for row in items)),
+        "stage_counts": dict(Counter(row.get("expected_capture_stage_improved") for row in items)),
+        "top_items": items[:12],
+        "items": items,
+        "oos_requirements": {
+            "train_window_must_not_overlap_eval_window": True,
+            "overlap": False,
+            "definition_fingerprint_required": True,
+            "context_clean_window_required": True,
+            "promotion_allowed": False,
+            "human_approval_required_before_promotion": True,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Only clean same-window DISCOVERY_HIT 2D cross slices are frozen.",
+            "Frozen definitions are not promotion evidence until repeated in a clean non-overlapping OOS window.",
+        ],
+    }
+
+
 def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     candidate_improvement = reports.get("candidate_improvement") or {}
     strategy_memory_validation = reports.get("strategy_memory_validation") or {}
@@ -4066,6 +4241,9 @@ def build_oos_summary(run_dir, reports=None):
     pass_allow_freeze_registry = (
         (input_reports or {}).get("pass_allow_60_oos_freeze_registry") or {}
     )
+    capture_cross_freeze_registry = (
+        (input_reports or {}).get("capture_cross_oos_freeze_registry") or {}
+    )
     pass_allow_post_freeze_validation = (
         (input_reports or {}).get("pass_allow_60_post_freeze_oos_validation")
         or oos_reports.get("pass_allow_60_post_freeze_oos_validation")
@@ -4235,6 +4413,25 @@ def build_oos_summary(run_dir, reports=None):
             0,
         )
         summary["pass_allow_60_oos_readiness_monitor"] = pass_allow_oos_monitor
+    if capture_cross_freeze_registry:
+        summary["capture_cross_oos_freeze_registry"] = {
+            "available": True,
+            "classification": capture_cross_freeze_registry.get("classification"),
+            "next_action": capture_cross_freeze_registry.get("next_action"),
+            "frozen_definition_count": capture_cross_freeze_registry.get("frozen_definition_count"),
+            "source_counts": capture_cross_freeze_registry.get("source_counts") or {},
+            "stage_counts": capture_cross_freeze_registry.get("stage_counts") or {},
+            "oos_requirements": capture_cross_freeze_registry.get("oos_requirements") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["capture_cross_oos_frozen_definition_count"] = safe_int(
+            capture_cross_freeze_registry.get("frozen_definition_count"),
+            0,
+        )
+        summary["next_capture_cross_oos_action"] = capture_cross_freeze_registry.get("next_action")
     if pass_allow_post_freeze_validation:
         oos_data_availability = pass_allow_post_freeze_validation.get("oos_data_availability") or {}
         raw_gold_silver_event_rows = pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
@@ -4396,6 +4593,15 @@ def assemble_reports(run_dir, out_dir=None):
         previous_pass_allow_freeze_registry,
     )
     reports["pass_allow_60_oos_freeze_registry"] = pass_allow_freeze_registry
+    previous_capture_cross_freeze_registry = load_json(
+        run_dir / V3_OUTPUT_FILES["capture_cross_oos_freeze_registry"],
+        {},
+    )
+    capture_cross_freeze_registry = build_capture_cross_oos_freeze_registry(
+        reports["capture_cross"],
+        previous_capture_cross_freeze_registry,
+    )
+    reports["capture_cross_oos_freeze_registry"] = capture_cross_freeze_registry
     oos_summary = build_oos_summary(run_dir, reports)
     pass_allow_oos_monitor = (
         oos_summary.get("pass_allow_60_oos_readiness_monitor")
@@ -4412,6 +4618,7 @@ def assemble_reports(run_dir, out_dir=None):
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
         "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
         "pass_allow_60_oos_readiness_monitor": pass_allow_oos_monitor,
+        "capture_cross_oos_freeze_registry": capture_cross_freeze_registry,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
@@ -4443,6 +4650,12 @@ def assemble_reports(run_dir, out_dir=None):
             "pass_allow_60_oos_freeze_classification": pass_allow_freeze_registry.get("classification"),
             "pass_allow_60_oos_frozen_definition_count": (
                 pass_allow_freeze_registry.get("frozen_definition_count")
+            ),
+            "capture_cross_oos_freeze_classification": (
+                capture_cross_freeze_registry.get("classification")
+            ),
+            "capture_cross_oos_frozen_definition_count": (
+                capture_cross_freeze_registry.get("frozen_definition_count")
             ),
             "context_blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
             "strategy_memory_hypotheses_count": strategy_memory_capture.get("hypotheses_count"),
@@ -4832,7 +5045,7 @@ def create_self_test_run(root):
                 "dimension_group": "volume",
                 "dimension_eligibility_status": "CLEAN",
                 "slice_value": "mixed",
-                "judgment": "WATCH",
+                "judgment": "DISCOVERY_HIT",
                 "matched_gold_silver_events": 9,
                 "pass_allow_lift": 0.5,
                 "match_precision_event": 0.4,
@@ -5082,6 +5295,13 @@ def self_test():
         assert freeze_registry["items"][0]["priority_rank"] == 1
         assert freeze_registry["top_priority_items"][0]["priority_rank"] == 1
         assert freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
+        capture_cross_freeze = load_json(run_dir / "capture_cross_oos_freeze_registry.json")
+        assert capture_cross_freeze["promotion_allowed"] is False
+        assert capture_cross_freeze["classification"] == "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+        assert capture_cross_freeze["frozen_definition_count"] >= 1
+        assert capture_cross_freeze["items"][0]["definition_fingerprint"]
+        assert capture_cross_freeze["items"][0]["oos_requirements"]["overlap"] is False
+        assert capture_cross_freeze["items"][0]["freeze_definition"]["judgment"] == "DISCOVERY_HIT"
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["quote-sensitive"]["eligible_for_capture_cross"] is True
@@ -5318,6 +5538,8 @@ def self_test():
         assert oos["pass_allow_60_closure_oos_queue_count"] >= 1
         assert oos["pass_allow_60_oos_freeze_registry"]["available"] is True
         assert oos["pass_allow_60_oos_frozen_definition_count"] >= 1
+        assert oos["capture_cross_oos_freeze_registry"]["available"] is True
+        assert oos["capture_cross_oos_frozen_definition_count"] >= 1
         monitor = oos["pass_allow_60_oos_readiness_monitor"]
         assert monitor["promotion_allowed"] is False
         assert monitor["frozen_definition_count"] >= 1

@@ -668,6 +668,7 @@ def build_handoff(verdict):
         ])
     two_d_cross = verdict.get("two_d_cross_validity_summary") or {}
     if two_d_cross:
+        cross_freeze = verdict.get("capture_cross_oos_freeze_registry") or {}
         compact_two_d = {
             "classification": two_d_cross.get("classification"),
             "next_action": two_d_cross.get("next_action"),
@@ -680,6 +681,13 @@ def build_handoff(verdict):
             "valid_cross_judgment_counts": two_d_cross.get("valid_cross_judgment_counts") or {},
             "same_window_discovery_only": two_d_cross.get("same_window_discovery_only"),
             "oos_required_before_promotion": two_d_cross.get("oos_required_before_promotion"),
+            "oos_freeze_registry": {
+                "available": bool(cross_freeze),
+                "classification": cross_freeze.get("classification"),
+                "next_action": cross_freeze.get("next_action"),
+                "frozen_definition_count": cross_freeze.get("frozen_definition_count"),
+                "stage_counts": cross_freeze.get("stage_counts") or {},
+            },
             "promotion_allowed": False,
         }
         lines.extend([
@@ -1366,6 +1374,7 @@ def build_handoff(verdict):
                 "decision_no_pass_quality_timing_review": verdict.get("decision_no_pass_quality_timing_review") or {},
                 "pass_allow_60_closure_plan": verdict.get("pass_allow_60_closure_plan") or {},
                 "pass_allow_60_oos_freeze_registry": verdict.get("pass_allow_60_oos_freeze_registry") or {},
+                "capture_cross_oos_freeze_registry": verdict.get("capture_cross_oos_freeze_registry") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
                 "per_candidate_effectiveness_summary": verdict.get("per_candidate_effectiveness_summary") or {},
@@ -1556,6 +1565,13 @@ def self_test():
             "invalid_cross_count": 5,
             "shadow_matured_volume_cross_count": 1,
             "watch_count": 3,
+            "promotion_allowed": False,
+        },
+        "capture_cross_oos_freeze_registry": {
+            "classification": "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW",
+            "next_action": "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window",
+            "frozen_definition_count": 1,
+            "stage_counts": {"pass_allow_capture": 1},
             "promotion_allowed": False,
         },
         "quote_context_coverage": {
@@ -1956,6 +1972,8 @@ def self_test():
     assert "Capture-First 2D Cross" in text
     assert "CAPTURE_CROSS_DISCOVERY_WATCH" in text
     assert "track_valid_capture_crosses_in_clean_non_overlapping_oos" in text
+    assert "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW" in text
+    assert "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window" in text
     assert "handoff_needed: `true`" in text
     assert "raw_dog_rows_incomplete" in text
     assert "Quote Context Coverage" in text
