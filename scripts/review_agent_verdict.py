@@ -1730,6 +1730,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "next_pass_allow_60_closure_oos_action": (
                 oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
             ),
+            "matured_volume_oos_current_probe_count": (
+                oos_readiness_summary_v3.get("current_oos_probe_count")
+            ),
+            "next_matured_volume_oos_action": (
+                oos_readiness_summary_v3.get("next_action")
+            ),
+            "matured_volume_oos_readiness_delta": (
+                oos_readiness_summary_v3.get("readiness_delta") or {}
+            ),
             "decision_no_pass_quality_timing_oos_queue_count": (
                 oos_readiness_summary_v3.get("decision_no_pass_quality_timing_oos_queue_count")
             ),
@@ -1779,6 +1788,15 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "next_pass_allow_60_closure_oos_action": (
             oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
             or pass_allow_60_oos_queue.get("next_action")
+        ),
+        "matured_volume_oos_current_probe_count": (
+            oos_readiness_summary_v3.get("current_oos_probe_count")
+        ),
+        "next_matured_volume_oos_action": (
+            oos_readiness_summary_v3.get("next_action")
+        ),
+        "matured_volume_oos_readiness_delta": (
+            oos_readiness_summary_v3.get("readiness_delta") or {}
         ),
         "decision_no_pass_quality_timing_oos_queue_count": (
             oos_readiness_summary_v3.get("decision_no_pass_quality_timing_oos_queue_count")
@@ -3688,6 +3706,14 @@ def self_test():
         assert sibling_verdict["oos_readiness_summary_v3"]["available"] is True
         assert sibling_verdict["oos_readiness_summary_v3"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
         assert sibling_verdict["oos_readiness_summary_v3"]["available_probe_count"] == 2
+        assert sibling_verdict["matured_volume_oos_current_probe_count"] == 2
+        assert sibling_verdict["next_matured_volume_oos_action"] == (
+            "continue_collecting_post_freeze_window_before_judging_oos"
+        )
+        assert sibling_verdict["matured_volume_oos_readiness_delta"]["available"] is True
+        assert sibling_verdict["oos_readiness_summary_v3"]["next_matured_volume_oos_action"] == (
+            "continue_collecting_post_freeze_window_before_judging_oos"
+        )
         dnp_oos_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
             "oos_readiness_summary_v3": {
                 "classification": "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED",
