@@ -896,7 +896,41 @@ def build_handoff(verdict):
             json.dumps(
                 {
                     "available": quality_timing.get("available"),
+                    "classification": quality_timing.get("classification"),
                     "verdict": quality_timing.get("verdict"),
+                    "next_action": quality_timing.get("next_action"),
+                    "dominant_cluster": quality_timing.get("dominant_cluster"),
+                    "dominant_stage": quality_timing.get("dominant_stage"),
+                    "quality_timing_reject_event_rows": (
+                        quality_timing.get("quality_timing_reject_event_rows")
+                    ),
+                    "quality_timing_reject_share_of_raw_all": (
+                        quality_timing.get("quality_timing_reject_share_of_raw_all")
+                    ),
+                    "current_final_entry_contract_rate": (
+                        quality_timing.get("current_final_entry_contract_rate")
+                    ),
+                    "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
+                        quality_timing.get(
+                            "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"
+                        )
+                    ),
+                    "residual_gap_to_60pct_after_all_quality_timing_upper_bound": (
+                        quality_timing.get(
+                            "residual_gap_to_60pct_after_all_quality_timing_upper_bound"
+                        )
+                    ),
+                    "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
+                        quality_timing.get(
+                            "would_all_quality_timing_resolution_reach_60pct_upper_bound"
+                        )
+                    ),
+                    "top_quality_timing_clusters": (
+                        quality_timing.get("top_quality_timing_clusters") or []
+                    )[:8],
+                    "human_approval_required_if_fix_requires": (
+                        quality_timing.get("human_approval_required_if_fix_requires")
+                    ),
                     "promotion_allowed": False,
                     "strategy_change_allowed": False,
                     "automatic_runtime_change_allowed": False,
