@@ -691,6 +691,9 @@ def build_report(args):
             post_freeze_source_activity.get("latest_raw_gold_silver_lag_sec_before_eval_start")
         ),
         "min_raw_events_for_oos_judgment": int(args.min_raw_events),
+        "raw_gold_silver_event_rows_needed_for_min": (
+            oos_data_availability.get("raw_gold_silver_event_rows_needed_for_min")
+        ),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,
         "global_pass_allow_count": global_pass_allow_count,
@@ -880,6 +883,7 @@ def run_self_test():
         assert payload["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
         assert payload["all_raw_rows_since_eval_start"] == 2
         assert payload["oos_data_availability"]["classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
+        assert payload["raw_gold_silver_event_rows_needed_for_min"] == 0
         assert payload["post_freeze_source_activity"]["available"] is True
         assert payload["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
         assert payload["validated_definition_count"] == 2
