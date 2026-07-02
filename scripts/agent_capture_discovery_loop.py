@@ -2533,6 +2533,9 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
             status = "CLUSTER_REPEATED_CANDIDATE_NOT_TOP"
         rows.append({
             "hypothesis_id": probe.get("hypothesis_id"),
+            "quality_timing_cluster": cluster,
+            "candidate_id": candidate_id,
+            "candidate_family": definition.get("candidate_family"),
             "status": status,
             "scope": "shadow_only_quality_timing_candidate_probe",
             "evidence_level": "discovery_same_window_probe_validation",
@@ -2566,6 +2569,11 @@ def build_quality_timing_candidate_probe_validation(registry, quality_timing_rep
             },
             "next_validation": (
                 "continue_shadow_only_tracking_until_clean_window_then_oos_if_repeated"
+            ),
+            "next_action": (
+                "evaluate_probe_in_next_clean_non_overlapping_window"
+                if status == "REPEATED_SHADOW_PROBE"
+                else "continue_shadow_only_tracking_until_clean_window_then_oos_if_repeated"
             ),
         })
 
@@ -2747,6 +2755,8 @@ def build_decision_no_pass_quality_timing_watch_validation(registry, decision_no
             status = "CLUSTER_REPEATED_NOT_SELECTED"
         rows.append({
             "hypothesis_id": watch.get("hypothesis_id"),
+            "cluster": cluster,
+            "stage": definition.get("stage") or "decision_no_pass_or_allow",
             "status": status,
             "scope": "shadow_only_decision_no_pass_quality_timing_cluster",
             "evidence_level": "discovery_same_window_cluster_validation",
@@ -2783,6 +2793,11 @@ def build_decision_no_pass_quality_timing_watch_validation(registry, decision_no
             },
             "next_validation": (
                 "continue_shadow_only_cluster_tracking_until_clean_window_then_oos"
+            ),
+            "next_action": (
+                "evaluate_cluster_in_next_clean_non_overlapping_window"
+                if status == "REPEATED_SELECTED_CLUSTER"
+                else "continue_shadow_only_cluster_tracking_until_clean_window_then_oos_if_repeated"
             ),
         })
 
@@ -5280,6 +5295,18 @@ def self_test():
         assert quality_probe_validation["oos_readiness_queue"]["promotion_allowed"] is False
         assert quality_probe_validation["oos_readiness_queue"]["automatic_runtime_change_allowed"] is False
         assert "probe_validations" in quality_probe_validation
+        if quality_probe_validation["probe_validations"]:
+            first_probe = quality_probe_validation["probe_validations"][0]
+            assert first_probe.get("quality_timing_cluster")
+            assert first_probe.get("candidate_id")
+            assert first_probe.get("next_action")
+        if quality_probe_validation.get("top_repeated_probes"):
+            first_repeated_probe = quality_probe_validation["top_repeated_probes"][0]
+            assert first_repeated_probe.get("quality_timing_cluster")
+            assert first_repeated_probe.get("candidate_id")
+            assert first_repeated_probe.get("next_action") == (
+                "evaluate_probe_in_next_clean_non_overlapping_window"
+            )
         decision_watch_validation = load_json(
             latest_dir / "decision_no_pass_quality_timing_watch_validation_24h.json"
         )
@@ -5289,6 +5316,17 @@ def self_test():
         assert decision_watch_validation["paper_enablement_allowed"] is False
         assert "denominator" in decision_watch_validation
         assert "watch_validations" in decision_watch_validation
+        if decision_watch_validation["watch_validations"]:
+            first_watch = decision_watch_validation["watch_validations"][0]
+            assert first_watch.get("cluster")
+            assert first_watch.get("stage")
+            assert first_watch.get("next_action")
+        if decision_watch_validation.get("top_repeated_clusters"):
+            first_repeated_cluster = decision_watch_validation["top_repeated_clusters"][0]
+            assert first_repeated_cluster.get("cluster")
+            assert first_repeated_cluster.get("next_action") == (
+                "evaluate_cluster_in_next_clean_non_overlapping_window"
+            )
         assert "oos_readiness_queue" in decision_watch_validation
         assert decision_watch_validation["oos_readiness_queue"]["promotion_allowed"] is False
         pending_momentum_validation = load_json(latest_dir / "pending_momentum_decay_recheck_validation_24h.json")
