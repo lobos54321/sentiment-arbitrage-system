@@ -258,6 +258,31 @@ def first_stage_below_target(stage_counts):
     return "target_reached", 0
 
 
+def classify_capture_60_gap(stage_counts, biggest_gap_stage, current_target_gap):
+    raw_denominator = safe_int(stage_counts.get("raw_gold_silver_denominator"), 0)
+    if raw_denominator <= 0:
+        return "CAPTURE_DENOMINATOR_EMPTY"
+    paper_capture = stage_gap_to_target(stage_counts, "paper_capture") or {}
+    realized_capture = stage_gap_to_target(stage_counts, "realized_capture") or {}
+    if paper_capture.get("target_reached") and realized_capture.get("target_reached"):
+        return "TARGET_REACHED_PENDING_HUMAN_APPROVAL"
+    if paper_capture.get("target_reached"):
+        return "PAPER_CAPTURE_60_REACHED_REALIZED_PENDING"
+    if (current_target_gap or {}).get("target_reached"):
+        return "CAPTURE_READINESS_60_REACHED"
+    stage_labels = {
+        "detector_capture": "CAPTURE_DETECTOR_GAP_BELOW_60",
+        "decision_capture": "CAPTURE_DECISION_GAP_BELOW_60",
+        "pass_allow_capture": "CAPTURE_PASS_ALLOW_GAP_BELOW_60",
+        "pending_capture": "CAPTURE_PENDING_GAP_BELOW_60",
+        "final_eligibility": "CAPTURE_FINAL_ELIGIBILITY_GAP_BELOW_60",
+        "mode_disabled_adjusted_final_eligibility": "CAPTURE_FINAL_ELIGIBILITY_GAP_BELOW_60",
+        "paper_capture": "CAPTURE_PAPER_GAP_BELOW_60",
+        "realized_capture": "CAPTURE_REALIZED_GAP_BELOW_60",
+    }
+    return stage_labels.get(biggest_gap_stage) or "CAPTURE_GAP_UNCLASSIFIED"
+
+
 def stage_gap_to_target(stage_counts, stage_name):
     target = stage_counts.get("target_60_count")
     if target is None or not stage_name:
@@ -1477,10 +1502,12 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         current_target_stage=current_target_stage,
         current_target_gap=current_target_gap,
     )
+    classification = classify_capture_60_gap(stage_counts, biggest_gap_stage, current_target_gap)
     return {
         "schema_version": "capture_60_gap_report.v1",
         "report_type": "capture_60_gap_report",
         "generated_at": utc_now(),
+        "classification": classification,
         "phase": "discovery_readiness",
         "target_capture_rate": TARGET_RATE,
         "promotion_allowed": False,
@@ -1525,6 +1552,7 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         "human_approval_required_before_runtime_change": True,
         "notes": [
             "This is a target-gap report, not a promotion report.",
+            "classification is a read-only routing label for the current capture gap.",
             "current_target_* fields describe the active readiness target while A_CLASS/final_entry are not paper-ready.",
             "target_shortfall_stage is the first stage below 60%; largest_transition_dropoff is the biggest adjacent funnel loss. They can differ and should be audited separately.",
             "All suggested actions are constrained to evaluator, data, shadow-only, or human-approval handoff paths.",
@@ -4249,6 +4277,7 @@ def self_test():
         assert gap["promotion_allowed"] is False
         assert gap["raw_gold_silver_denominator"] == 5
         assert gap["target_60_count"] == 3
+        assert gap["classification"] == "CAPTURE_PENDING_GAP_BELOW_60"
         assert gap["biggest_gap_stage"] == "pending_capture"
         assert gap["target_shortfall_stage"] == "pending_capture"
         assert gap["current_target_stage"] == "mode_disabled_adjusted_final_eligibility"
