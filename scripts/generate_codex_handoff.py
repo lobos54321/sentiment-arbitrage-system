@@ -666,6 +666,30 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    two_d_cross = verdict.get("two_d_cross_validity_summary") or {}
+    if two_d_cross:
+        compact_two_d = {
+            "classification": two_d_cross.get("classification"),
+            "next_action": two_d_cross.get("next_action"),
+            "evidence_level": two_d_cross.get("evidence_level"),
+            "valid_cross_count": two_d_cross.get("valid_cross_count"),
+            "invalid_cross_count": two_d_cross.get("invalid_cross_count"),
+            "shadow_matured_volume_cross_count": two_d_cross.get("shadow_matured_volume_cross_count"),
+            "discovery_hit_count": two_d_cross.get("discovery_hit_count"),
+            "watch_count": two_d_cross.get("watch_count"),
+            "valid_cross_judgment_counts": two_d_cross.get("valid_cross_judgment_counts") or {},
+            "same_window_discovery_only": two_d_cross.get("same_window_discovery_only"),
+            "oos_required_before_promotion": two_d_cross.get("oos_required_before_promotion"),
+            "promotion_allowed": False,
+        }
+        lines.extend([
+            "## Capture-First 2D Cross",
+            "",
+            "```json",
+            json.dumps(compact_two_d, indent=2, sort_keys=True),
+            "```",
+            "",
+        ])
     reconciliation = verdict.get("signal_identity_reconciliation") or {}
     if reconciliation:
         lines.extend([
@@ -1524,7 +1548,16 @@ def self_test():
                 }
             },
         },
-        "two_d_cross_validity_summary": {"valid_cross_count": 0},
+        "two_d_cross_validity_summary": {
+            "classification": "CAPTURE_CROSS_DISCOVERY_WATCH",
+            "next_action": "track_valid_capture_crosses_in_clean_non_overlapping_oos",
+            "evidence_level": "discovery_same_window",
+            "valid_cross_count": 3,
+            "invalid_cross_count": 5,
+            "shadow_matured_volume_cross_count": 1,
+            "watch_count": 3,
+            "promotion_allowed": False,
+        },
         "quote_context_coverage": {
             "coverage_denominator_type": "signal_context_carrier_rows",
             "coverage_denominator_rows": 10,
@@ -1920,6 +1953,9 @@ def self_test():
         },
     }
     text = build_handoff(verdict)
+    assert "Capture-First 2D Cross" in text
+    assert "CAPTURE_CROSS_DISCOVERY_WATCH" in text
+    assert "track_valid_capture_crosses_in_clean_non_overlapping_oos" in text
     assert "handoff_needed: `true`" in text
     assert "raw_dog_rows_incomplete" in text
     assert "Quote Context Coverage" in text
