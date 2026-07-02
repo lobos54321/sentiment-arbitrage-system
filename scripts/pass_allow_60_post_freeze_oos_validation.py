@@ -140,62 +140,6 @@ def build_post_freeze_source_activity(raw_db, eval_start_ts, now_ts):
         """,
         (now_ts,),
     ).fetchone()
-    status_counts = {}
-    primary_tier_counts = {}
-    sustained_tier_counts = {}
-    post_summary = {}
-    if "observation_status" in cols:
-        status_counts = {
-            str(row["value"] if row["value"] is not None else "NULL"): int(row["count"] or 0)
-            for row in raw_db.execute(
-                """
-                SELECT observation_status AS value, COUNT(*) AS count
-                FROM raw_signal_outcomes
-                WHERE COALESCE(signal_ts, 0) >= ? AND COALESCE(signal_ts, 0) <= ?
-                GROUP BY observation_status
-                """,
-                (eval_start_ts, now_ts),
-            ).fetchall()
-        }
-    if "raw_primary_tier" in cols:
-        primary_tier_counts = {
-            str(row["value"] if row["value"] is not None else "NULL"): int(row["count"] or 0)
-            for row in raw_db.execute(
-                """
-                SELECT raw_primary_tier AS value, COUNT(*) AS count
-                FROM raw_signal_outcomes
-                WHERE COALESCE(signal_ts, 0) >= ? AND COALESCE(signal_ts, 0) <= ?
-                GROUP BY raw_primary_tier
-                """,
-                (eval_start_ts, now_ts),
-            ).fetchall()
-        }
-    if "raw_sustained_tier" in cols:
-        sustained_tier_counts = {
-            str(row["value"] if row["value"] is not None else "NULL"): int(row["count"] or 0)
-            for row in raw_db.execute(
-                """
-                SELECT raw_sustained_tier AS value, COUNT(*) AS count
-                FROM raw_signal_outcomes
-                WHERE COALESCE(signal_ts, 0) >= ? AND COALESCE(signal_ts, 0) <= ?
-                GROUP BY raw_sustained_tier
-                """,
-                (eval_start_ts, now_ts),
-            ).fetchall()
-        }
-    if "matured_at_ts" in cols:
-        post_summary = raw_db.execute(
-            """
-            SELECT
-              MIN(matured_at_ts) AS earliest_matured_at_ts,
-              MAX(matured_at_ts) AS latest_matured_at_ts,
-              MIN(CASE WHEN COALESCE(matured_at_ts, 0) > ? THEN matured_at_ts END)
-                AS next_pending_matured_at_ts
-            FROM raw_signal_outcomes
-            WHERE COALESCE(signal_ts, 0) >= ? AND COALESCE(signal_ts, 0) <= ?
-            """,
-            (now_ts, eval_start_ts, now_ts),
-        ).fetchone()
     tier_parts = []
     tier_params = []
     if "raw_sustained_tier" in cols:
@@ -252,49 +196,15 @@ def build_post_freeze_source_activity(raw_db, eval_start_ts, now_ts):
     latest_gs_ts = row_value(latest_gs, "latest_signal_ts")
     latest_post_gs_ts = row_value(post_gs, "latest_signal_ts")
     latest_gs_before_ts = row_value(latest_gs_before, "latest_signal_ts")
-    all_raw_since_freeze = int(row_value(post, "count") or 0)
-    raw_gs_since_freeze = None if row_value(post_gs, "count") is None else int(row_value(post_gs, "count") or 0)
-    pending_rows = int(status_counts.get("pending", 0) or 0)
-    matured_rows = int(status_counts.get("matured", 0) or 0)
-    not_evaluable_primary_rows = int(primary_tier_counts.get("not_evaluable", 0) or 0)
-    unknown_sustained_rows = int(sustained_tier_counts.get("unknown", 0) or 0)
-    next_pending_matured_at_ts = row_value(post_summary, "next_pending_matured_at_ts")
-    if all_raw_since_freeze == 0:
-        wait_reason = "no_post_freeze_raw_signal_rows"
-    elif raw_gs_since_freeze == 0 and pending_rows >= all_raw_since_freeze:
-        wait_reason = "post_freeze_raw_signals_not_matured_yet"
-    elif raw_gs_since_freeze == 0 and not_evaluable_primary_rows >= all_raw_since_freeze:
-        wait_reason = "post_freeze_raw_signals_not_yet_evaluable"
-    elif raw_gs_since_freeze == 0 and matured_rows > 0:
-        wait_reason = "post_freeze_matured_rows_not_gold_silver"
-    elif raw_gs_since_freeze == 0:
-        wait_reason = "post_freeze_no_gold_silver_tier_rows"
-    else:
-        wait_reason = "post_freeze_gold_silver_rows_available"
     return {
         "available": True,
-        "all_raw_rows_since_eval_start": all_raw_since_freeze,
+        "all_raw_rows_since_eval_start": int(row_value(post, "count") or 0),
         "latest_raw_signal_ts": latest_raw_ts,
         "latest_raw_signal_iso": iso_from_ts(latest_raw_ts),
         "latest_post_freeze_raw_signal_ts": latest_post_raw_ts,
         "latest_post_freeze_raw_signal_iso": iso_from_ts(latest_post_raw_ts),
-        "raw_gold_silver_rows_since_eval_start_unfiltered": raw_gs_since_freeze,
-        "post_freeze_wait_reason": wait_reason,
-        "post_freeze_observation_status_counts": status_counts,
-        "post_freeze_raw_primary_tier_counts": primary_tier_counts,
-        "post_freeze_raw_sustained_tier_counts": sustained_tier_counts,
-        "post_freeze_pending_raw_rows": pending_rows,
-        "post_freeze_matured_raw_rows": matured_rows,
-        "post_freeze_not_evaluable_primary_rows": not_evaluable_primary_rows,
-        "post_freeze_unknown_sustained_rows": unknown_sustained_rows,
-        "earliest_post_freeze_matured_at_ts": row_value(post_summary, "earliest_matured_at_ts"),
-        "earliest_post_freeze_matured_at_iso": iso_from_ts(row_value(post_summary, "earliest_matured_at_ts")),
-        "latest_post_freeze_matured_at_ts": row_value(post_summary, "latest_matured_at_ts"),
-        "latest_post_freeze_matured_at_iso": iso_from_ts(row_value(post_summary, "latest_matured_at_ts")),
-        "next_pending_matured_at_ts": next_pending_matured_at_ts,
-        "next_pending_matured_at_iso": iso_from_ts(next_pending_matured_at_ts),
-        "next_pending_maturity_in_sec": (
-            None if next_pending_matured_at_ts is None else max(0, int(next_pending_matured_at_ts) - int(now_ts))
+        "raw_gold_silver_rows_since_eval_start_unfiltered": (
+            None if row_value(post_gs, "count") is None else int(row_value(post_gs, "count") or 0)
         ),
         "latest_raw_gold_silver_signal_ts": latest_gs_ts,
         "latest_raw_gold_silver_signal_iso": iso_from_ts(latest_gs_ts),
@@ -605,14 +515,11 @@ def build_oos_data_availability(
     min_raw_events = int(args.min_raw_events)
     source_activity = post_freeze_source_activity or {}
     all_raw_since_freeze = source_activity.get("all_raw_rows_since_eval_start")
-    wait_reason = source_activity.get("post_freeze_wait_reason")
     root_causes = []
     if all_raw_since_freeze == 0:
         root_causes.append("no_post_freeze_raw_signal_rows")
     if raw_count == 0:
         root_causes.append("no_post_freeze_raw_gold_silver_events")
-        if wait_reason:
-            root_causes.append(wait_reason)
     elif raw_count < min_raw_events:
         root_causes.append("post_freeze_raw_gold_silver_event_rows_below_min")
     if raw_count > 0 and not (observation_meta or {}).get("available"):
@@ -656,7 +563,6 @@ def build_oos_data_availability(
         "raw_gold_silver_event_rows_needed_for_min": max(0, min_raw_events - int(raw_count or 0)),
         "raw_gold_silver_event_rows_needed_to_minimum": max(0, min_raw_events - int(raw_count or 0)),
         "all_raw_rows_since_eval_start": all_raw_since_freeze,
-        "post_freeze_wait_reason": wait_reason,
         "raw_signal_rows_seen_after_freeze": (
             None if all_raw_since_freeze is None else int(all_raw_since_freeze or 0)
         ),
@@ -806,7 +712,6 @@ def build_report(args):
             oos_data_availability.get("classification") == "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
         ),
         "post_freeze_oos_wait_reason": oos_data_availability.get("classification"),
-        "post_freeze_wait_reason": oos_data_availability.get("post_freeze_wait_reason"),
         "oos_data_next_action": oos_data_availability.get("next_action"),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,

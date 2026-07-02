@@ -2505,9 +2505,6 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_freeze_oos_wait_reason": (
                 pass_allow_60_post_freeze_oos_validation.get("post_freeze_oos_wait_reason")
             ),
-            "post_freeze_wait_reason": (
-                pass_allow_60_post_freeze_oos_validation.get("post_freeze_wait_reason")
-            ),
             "raw_signal_rows_seen_after_freeze": (
                 pass_allow_60_post_freeze_oos_validation.get(
                     "raw_signal_rows_seen_after_freeze"
@@ -2608,9 +2605,6 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_freeze_oos_wait_reason": (
                 capture_cross_post_freeze_oos_validation.get("post_freeze_oos_wait_reason")
             ),
-            "post_freeze_wait_reason": (
-                capture_cross_post_freeze_oos_validation.get("post_freeze_wait_reason")
-            ),
             "raw_signal_rows_seen_after_freeze": (
                 capture_cross_post_freeze_oos_validation.get("raw_signal_rows_seen_after_freeze")
             ),
@@ -2680,11 +2674,6 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "post_freeze_oos_wait_reason": (
                 final_eligibility_60_post_freeze_oos_validation.get(
                     "post_freeze_oos_wait_reason"
-                )
-            ),
-            "post_freeze_wait_reason": (
-                final_eligibility_60_post_freeze_oos_validation.get(
-                    "post_freeze_wait_reason"
                 )
             ),
             "raw_signal_rows_seen_after_freeze": (

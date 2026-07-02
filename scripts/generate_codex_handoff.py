@@ -1191,9 +1191,6 @@ def build_handoff(verdict):
                 "post_freeze_oos_wait_reason": pass_allow_post_freeze.get(
                     "post_freeze_oos_wait_reason"
                 ),
-                "post_freeze_wait_reason": pass_allow_post_freeze.get(
-                    "post_freeze_wait_reason"
-                ),
                 "raw_signal_rows_seen_after_freeze": pass_allow_post_freeze.get(
                     "raw_signal_rows_seen_after_freeze"
                 ),
@@ -1220,9 +1217,6 @@ def build_handoff(verdict):
                 ),
                 "post_freeze_signal_observation_coverage": (
                     capture_cross_post_freeze.get("post_freeze_signal_observation_coverage") or {}
-                ),
-                "post_freeze_wait_reason": capture_cross_post_freeze.get(
-                    "post_freeze_wait_reason"
                 ),
                 "oos_data_next_action": capture_cross_post_freeze.get("oos_data_next_action"),
                 "promotion_allowed": False,
@@ -1252,9 +1246,6 @@ def build_handoff(verdict):
                     final_eligibility_post_freeze.get(
                         "post_freeze_final_blocker_category_counts"
                     ) or {}
-                ),
-                "post_freeze_wait_reason": final_eligibility_post_freeze.get(
-                    "post_freeze_wait_reason"
                 ),
                 "oos_data_next_action": final_eligibility_post_freeze.get("oos_data_next_action"),
                 "promotion_allowed": False,
