@@ -645,6 +645,7 @@ def collect_paths(args, run_dir):
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
+        "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
         "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
         "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
         "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
@@ -873,7 +874,12 @@ def self_test():
         assert (latest / "capture_60_gap_report.json").exists()
         assert (latest / "latest_codex_handoff.md").exists()
         assert (root / "agent_handoffs" / "latest_codex_handoff.md").exists()
-        assert load_json(latest / "reviewer_verdict.json")["promotion_allowed"] is False
+        latest_verdict = load_json(latest / "reviewer_verdict.json")
+        assert latest_verdict["promotion_allowed"] is False
+        assert latest_verdict["decision_capture_60_gap_audit"]["available"] is True
+        assert latest_verdict["decision_capture_60_gap_classification"] == (
+            latest_verdict["decision_capture_60_gap_audit"]["classification"]
+        )
         assert load_json(root / "hypothesis_registry.json")["promotion_allowed"] is False
         (latest / "latest_codex_handoff.md").write_text("STALE_LATEST_ALIAS", encoding="utf-8")
         (root / "agent_handoffs" / "latest_codex_handoff.md").write_text("STALE_GLOBAL_ALIAS", encoding="utf-8")

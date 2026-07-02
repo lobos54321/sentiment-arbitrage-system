@@ -4385,6 +4385,7 @@ def write_materialized_artifacts(
             "capture_60_gap_report": "capture_60_gap_report.json",
             "capture_stage_metrics": "capture_stage_metrics.json",
             "context_dimension_eligibility": "context_dimension_eligibility.json",
+            "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
             "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
             "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
             "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
