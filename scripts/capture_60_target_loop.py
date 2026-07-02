@@ -3845,7 +3845,12 @@ def build_oos_summary(run_dir, reports=None):
         )
         summary["pass_allow_60_oos_readiness_monitor"] = pass_allow_oos_monitor
     if pass_allow_post_freeze_validation:
-        summary["pass_allow_60_post_freeze_oos_validation"] = {
+        oos_data_availability = pass_allow_post_freeze_validation.get("oos_data_availability") or {}
+        raw_gold_silver_event_rows = pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
+        raw_gold_silver_event_rows_needed = oos_data_availability.get(
+            "raw_gold_silver_event_rows_needed_for_min"
+        )
+        post_freeze_oos_summary = {
             "available": True,
             "schema_version": pass_allow_post_freeze_validation.get("schema_version"),
             "generated_at": pass_allow_post_freeze_validation.get("generated_at"),
@@ -3873,11 +3878,7 @@ def build_oos_summary(run_dir, reports=None):
             "min_raw_events_for_oos_judgment": (
                 pass_allow_post_freeze_validation.get("min_raw_events_for_oos_judgment")
             ),
-            "raw_gold_silver_event_rows_needed_for_min": (
-                (pass_allow_post_freeze_validation.get("oos_data_availability") or {}).get(
-                    "raw_gold_silver_event_rows_needed_for_min"
-                )
-            ),
+            "raw_gold_silver_event_rows_needed_for_min": raw_gold_silver_event_rows_needed,
             "global_pass_allow_count": pass_allow_post_freeze_validation.get("global_pass_allow_count"),
             "global_pass_allow_rate": pass_allow_post_freeze_validation.get("global_pass_allow_rate"),
             "frozen_definition_count": pass_allow_post_freeze_validation.get("frozen_definition_count"),
@@ -3890,7 +3891,7 @@ def build_oos_summary(run_dir, reports=None):
             "definition_set_frozen_at": pass_allow_post_freeze_validation.get("definition_set_frozen_at"),
             "freeze_generated_at": pass_allow_post_freeze_validation.get("freeze_generated_at"),
             "eval_start_iso": pass_allow_post_freeze_validation.get("eval_start_iso"),
-            "oos_data_availability": pass_allow_post_freeze_validation.get("oos_data_availability") or {},
+            "oos_data_availability": oos_data_availability,
             "status_counts": pass_allow_post_freeze_validation.get("status_counts") or {},
             "top_repeat_watch_items": (
                 pass_allow_post_freeze_validation.get("top_repeat_watch_items") or []
@@ -3900,6 +3901,42 @@ def build_oos_summary(run_dir, reports=None):
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         }
+        summary["pass_allow_60_post_freeze_oos_validation"] = post_freeze_oos_summary
+        summary["post_freeze_oos_data_availability"] = {
+            "available": True,
+            "classification": (
+                pass_allow_post_freeze_validation.get("oos_data_availability_classification")
+                or oos_data_availability.get("classification")
+            ),
+            "root_causes": (
+                pass_allow_post_freeze_validation.get("oos_data_root_causes")
+                or oos_data_availability.get("root_causes")
+                or []
+            ),
+            "raw_gold_silver_event_rows": raw_gold_silver_event_rows,
+            "raw_gold_silver_event_rows_needed_for_min": raw_gold_silver_event_rows_needed,
+            "all_raw_rows_since_eval_start": (
+                pass_allow_post_freeze_validation.get("all_raw_rows_since_eval_start")
+            ),
+            "latest_raw_signal_age_sec": pass_allow_post_freeze_validation.get(
+                "latest_raw_signal_age_sec"
+            ),
+            "latest_raw_gold_silver_age_sec": pass_allow_post_freeze_validation.get(
+                "latest_raw_gold_silver_age_sec"
+            ),
+            "next_action": pass_allow_post_freeze_validation.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["post_freeze_raw_gold_silver_event_rows"] = raw_gold_silver_event_rows
+        summary["post_freeze_raw_gold_silver_event_rows_needed_for_min"] = (
+            raw_gold_silver_event_rows_needed
+        )
+        summary["post_freeze_oos_data_availability_classification"] = (
+            summary["post_freeze_oos_data_availability"].get("classification")
+        )
         summary["pass_allow_60_post_freeze_oos_classification"] = (
             pass_allow_post_freeze_validation.get("classification")
         )
@@ -4785,6 +4822,14 @@ def self_test():
         assert post_freeze["legacy_classification"] == "PASS_ALLOW_60_POST_FREEZE_OOS_TOO_SMALL"
         assert post_freeze["oos_data_availability_classification"] == "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
         assert post_freeze["raw_gold_silver_event_rows_needed_for_min"] == 10
+        assert post_freeze_summary["post_freeze_oos_data_availability_classification"] == (
+            "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        )
+        assert post_freeze_summary["post_freeze_raw_gold_silver_event_rows"] == 0
+        assert post_freeze_summary["post_freeze_raw_gold_silver_event_rows_needed_for_min"] == 10
+        assert post_freeze_summary["post_freeze_oos_data_availability"]["root_causes"] == [
+            "no_post_freeze_raw_gold_silver_events"
+        ]
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
