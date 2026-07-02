@@ -1426,6 +1426,16 @@ def build_handoff(verdict):
                             "quality_timing_pending_without_final_event_count"
                         )
                     ),
+                    "pending_audit_source_reason_event_count": (
+                        pending_stale_before_final_review.get(
+                            "pending_audit_source_reason_event_count"
+                        )
+                    ),
+                    "merged_cluster_event_count_upper_bound": (
+                        pending_stale_before_final_review.get(
+                            "merged_cluster_event_count_upper_bound"
+                        )
+                    ),
                     "selected_upper_bound_event_count": pending_stale_before_final_review.get(
                         "selected_upper_bound_event_count"
                     ),

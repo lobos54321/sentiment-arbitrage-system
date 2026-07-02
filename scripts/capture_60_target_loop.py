@@ -1121,9 +1121,49 @@ def build_stale_before_final_review(pending_audit, reports, context_eligibility)
         cluster_counts[cluster] = cluster_counts.get(cluster, 0) + count
         cluster_reasons.setdefault(cluster, []).append(row)
 
+    source_reason_cluster_counts = {}
+    source_reason_rows_by_cluster = {}
+    for category_row in pending_audit.get("pending_no_final_entry_category_rows") or []:
+        if not isinstance(category_row, dict) or category_row.get("category") != "stale_before_final":
+            continue
+        for source in category_row.get("source_categories") or []:
+            if not isinstance(source, dict):
+                continue
+            for reason in source.get("top_reasons") or []:
+                if not isinstance(reason, dict):
+                    continue
+                normalized = {
+                    "stage": "pending_without_final_entry_contract",
+                    "component": reason.get("component") or "UNKNOWN",
+                    "event_type": reason.get("event_type") or "UNKNOWN",
+                    "decision": reason.get("decision") or "UNKNOWN",
+                    "reason": reason.get("reason") or "UNKNOWN",
+                    "count": safe_int(reason.get("count"), 0),
+                    "source_category": source.get("source_category"),
+                    "source": "pending_to_final_entry_audit.source_category_reason",
+                }
+                cluster = classify_quality_timing_reason_cluster(normalized)
+                count = safe_int(normalized.get("count"), 0)
+                if count <= 0:
+                    continue
+                source_reason_cluster_counts[cluster] = (
+                    source_reason_cluster_counts.get(cluster, 0) + count
+                )
+                source_reason_rows_by_cluster.setdefault(cluster, []).append(normalized)
+
+    merged_cluster_names = set(cluster_counts) | set(source_reason_cluster_counts)
+    merged_cluster_counts = {}
+    for cluster in merged_cluster_names:
+        # Source-category reasons and event-level QT rows can describe the same
+        # stale event. Use the larger upper bound instead of summing both.
+        merged_cluster_counts[cluster] = max(
+            safe_int(cluster_counts.get(cluster), 0),
+            safe_int(source_reason_cluster_counts.get(cluster), 0),
+        )
+
     clusters = []
     for cluster, count in sorted(
-        cluster_counts.items(),
+        merged_cluster_counts.items(),
         key=lambda item: (safe_int(item[1], 0), str(item[0])),
         reverse=True,
     ):
@@ -1131,16 +1171,26 @@ def build_stale_before_final_review(pending_audit, reports, context_eligibility)
             continue
         action = quality_timing_cluster_action(cluster)
         opportunity = opportunity_by_cluster.get(cluster) or {}
+        merged_reason_rows = (
+            (source_reason_rows_by_cluster.get(cluster) or [])
+            + (cluster_reasons.get(cluster) or [])
+        )
         clusters.append({
             "cluster": cluster,
             "event_count": count,
+            "quality_timing_event_count": safe_int(cluster_counts.get(cluster), 0),
+            "pending_audit_source_reason_count": safe_int(
+                source_reason_cluster_counts.get(cluster),
+                0,
+            ),
+            "attribution_method": "max_of_pending_source_reason_and_quality_timing_event_counts",
             "share_of_stale_before_final": rate(count, stale_count),
             "share_of_pending_without_final": rate(count, pending_without_final),
             "share_of_adjacent_transition_dropoff_upper_bound": rate(
                 min(count, adjacent_drop or stale_count),
                 adjacent_drop or stale_count,
             ),
-            "reason_counts": (cluster_reasons.get(cluster) or [])[:10],
+            "reason_counts": merged_reason_rows[:10],
             "top_candidates": (opportunity.get("top_candidates") or [])[:8],
             "top_lifecycle_source_contexts": (
                 opportunity.get("top_lifecycle_source_contexts") or []
@@ -1211,6 +1261,8 @@ def build_stale_before_final_review(pending_audit, reports, context_eligibility)
         "pending_without_final_entry_contract": pending_without_final,
         "adjacent_count_loss_pending_to_final": adjacent_drop,
         "quality_timing_pending_without_final_event_count": sum(cluster_counts.values()),
+        "pending_audit_source_reason_event_count": sum(source_reason_cluster_counts.values()),
+        "merged_cluster_event_count_upper_bound": sum(merged_cluster_counts.values()),
         "cluster_count": len(clusters),
         "clusters": clusters,
         "selected_clusters_to_cover_stale_before_final_upper_bound": selected,
@@ -6842,6 +6894,8 @@ def self_test():
         stale_review = pending["stale_before_final_review"]
         assert stale_review["promotion_allowed"] is False
         assert stale_review["stale_before_final_event_count"] == 1
+        assert stale_review["pending_audit_source_reason_event_count"] >= 1
+        assert stale_review["merged_cluster_event_count_upper_bound"] >= 1
         assert stale_review["selected_clusters_to_cover_stale_before_final_upper_bound"][0]["cluster"] == "momentum_fading_or_negative_trend"
         momentum_review = stale_review["momentum_decay_review"]
         assert momentum_review["promotion_allowed"] is False
