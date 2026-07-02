@@ -134,6 +134,7 @@ DERIVED_READINESS_SIBLINGS = {
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
+    "pending_stale_before_final_review": "pending_stale_before_final_review.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
@@ -1494,6 +1495,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
     final_eligibility_60_closure_plan = readiness_reports.get("final_eligibility_60_closure_plan") or {}
+    pending_stale_before_final_review = readiness_reports.get("pending_stale_before_final_review") or {}
     pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
     capture_cross_oos_freeze_registry = (
         readiness_reports.get("capture_cross_oos_freeze_registry")
@@ -1857,6 +1859,43 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "top_priority_items": final_eligibility_60_priority_queue[:8],
             "research_only_top_priority_items": final_eligibility_60_research_only_priority_queue[:5],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "pending_stale_before_final_review": {
+            "available": bool(pending_stale_before_final_review),
+            "classification": (
+                "PENDING_STALE_BEFORE_FINAL_ATTRIBUTION_PARTIAL"
+                if (as_int(pending_stale_before_final_review.get("selected_upper_bound_event_count"), 0) or 0)
+                < (as_int(pending_stale_before_final_review.get("stale_before_final_event_count"), 0) or 0)
+                else "PENDING_STALE_BEFORE_FINAL_ATTRIBUTION_COVERS_CURRENT_UPPER_BOUND"
+                if pending_stale_before_final_review
+                else None
+            ),
+            "next_action": pending_stale_before_final_review.get("next_action"),
+            "stale_before_final_event_count": pending_stale_before_final_review.get("stale_before_final_event_count"),
+            "quality_timing_pending_without_final_event_count": (
+                pending_stale_before_final_review.get("quality_timing_pending_without_final_event_count")
+            ),
+            "selected_upper_bound_event_count": pending_stale_before_final_review.get("selected_upper_bound_event_count"),
+            "unattributed_stale_before_final_event_count": max(
+                0,
+                (as_int(pending_stale_before_final_review.get("stale_before_final_event_count"), 0) or 0)
+                - (as_int(pending_stale_before_final_review.get("selected_upper_bound_event_count"), 0) or 0),
+            ),
+            "covers_stale_before_final_upper_bound": pending_stale_before_final_review.get(
+                "covers_stale_before_final_upper_bound"
+            ),
+            "cluster_count": pending_stale_before_final_review.get("cluster_count"),
+            "selected_clusters": (
+                pending_stale_before_final_review.get(
+                    "selected_clusters_to_cover_stale_before_final_upper_bound"
+                )
+                or []
+            )[:8],
+            "momentum_decay_review": pending_stale_before_final_review.get("momentum_decay_review") or {},
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,

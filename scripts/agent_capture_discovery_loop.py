@@ -3967,6 +3967,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
     source_activity = post_freeze.get("post_freeze_source_activity") or oos_data.get("post_freeze_source_activity") or {}
     pass_allow_priority = verdict.get("pass_allow_60_closure_priority_queue") or {}
     final_eligibility_priority = verdict.get("final_eligibility_60_closure_priority_queue") or {}
+    pending_stale_before_final = verdict.get("pending_stale_before_final_review") or {}
     pass_allow_freeze_priority = verdict.get("pass_allow_60_oos_freeze_priority_queue") or {}
     pass_allow_oos_queue = verdict.get("pass_allow_60_closure_oos_queue") or {}
     lines = [
@@ -4012,6 +4013,11 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- final_eligibility_60_closure_priority_queue_count: `{final_eligibility_priority.get('priority_queue_count')}`",
         f"- final_eligibility_60_closure_research_only_queue_count: `{final_eligibility_priority.get('research_only_priority_queue_count')}`",
         f"- final_eligibility_60_formal_tracks_can_cover_gap_upper_bound: `{final_eligibility_priority.get('formal_tracks_can_cover_current_gap_upper_bound')}`",
+        f"- pending_stale_before_final_review_classification: `{pending_stale_before_final.get('classification')}`",
+        f"- pending_stale_before_final_review_next_action: `{pending_stale_before_final.get('next_action')}`",
+        f"- pending_stale_before_final_event_count: `{pending_stale_before_final.get('stale_before_final_event_count')}`",
+        f"- pending_stale_before_final_selected_upper_bound_event_count: `{pending_stale_before_final.get('selected_upper_bound_event_count')}`",
+        f"- pending_stale_before_final_unattributed_event_count: `{pending_stale_before_final.get('unattributed_stale_before_final_event_count')}`",
         f"- decision_capture_60_gap_classification: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('classification')}`",
         f"- decision_capture_60_shadow_bridge_mirror_complete: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('shadow_bridge_mirror_complete')}`",
         f"- decision_capture_60_optimistic_rate_if_shadow_gap_logged: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('optimistic_decision_record_rate_if_shadow_gap_logged')}`",
@@ -4521,6 +4527,7 @@ def write_materialized_artifacts(
             "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
             "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
             "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
+            "pending_stale_before_final_review": "pending_stale_before_final_review.json",
             "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
             "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
             "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
@@ -5337,6 +5344,7 @@ def self_test():
             "pass_allow_capture_gap_audit.json",
             "decision_no_pass_quality_timing_review.json",
             "final_eligibility_60_closure_plan.json",
+            "pending_stale_before_final_review.json",
             "pending_to_final_entry_audit.json",
             "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation.json",

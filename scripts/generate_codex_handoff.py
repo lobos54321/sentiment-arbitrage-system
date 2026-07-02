@@ -326,6 +326,11 @@ def build_handoff(verdict):
         f"- final_eligibility_60_closure_priority_queue_count: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('priority_queue_count')}`",
         f"- final_eligibility_60_closure_research_only_queue_count: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('research_only_priority_queue_count')}`",
         f"- final_eligibility_60_formal_tracks_can_cover_gap_upper_bound: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('formal_tracks_can_cover_current_gap_upper_bound')}`",
+        f"- pending_stale_before_final_review_classification: `{(verdict.get('pending_stale_before_final_review') or {}).get('classification')}`",
+        f"- pending_stale_before_final_review_next_action: `{(verdict.get('pending_stale_before_final_review') or {}).get('next_action')}`",
+        f"- pending_stale_before_final_event_count: `{(verdict.get('pending_stale_before_final_review') or {}).get('stale_before_final_event_count')}`",
+        f"- pending_stale_before_final_selected_upper_bound_event_count: `{(verdict.get('pending_stale_before_final_review') or {}).get('selected_upper_bound_event_count')}`",
+        f"- pending_stale_before_final_unattributed_event_count: `{(verdict.get('pending_stale_before_final_review') or {}).get('unattributed_stale_before_final_event_count')}`",
         f"- decision_capture_60_gap_classification: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('classification')}`",
         f"- decision_capture_60_shadow_bridge_mirror_complete: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('shadow_bridge_mirror_complete')}`",
         f"- decision_capture_60_optimistic_rate_if_shadow_gap_logged: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('optimistic_decision_record_rate_if_shadow_gap_logged')}`",
@@ -1398,6 +1403,53 @@ def build_handoff(verdict):
     pending_stale_before_final_validation = (
         verdict.get("pending_stale_before_final_watch_validation") or {}
     )
+    pending_stale_before_final_review = verdict.get("pending_stale_before_final_review") or {}
+    if pending_stale_before_final_review:
+        lines.extend([
+            "## Pending Stale-Before-Final Review",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": pending_stale_before_final_review.get("available"),
+                    "classification": pending_stale_before_final_review.get("classification"),
+                    "next_action": pending_stale_before_final_review.get("next_action"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "stale_before_final_event_count": pending_stale_before_final_review.get(
+                        "stale_before_final_event_count"
+                    ),
+                    "quality_timing_pending_without_final_event_count": (
+                        pending_stale_before_final_review.get(
+                            "quality_timing_pending_without_final_event_count"
+                        )
+                    ),
+                    "selected_upper_bound_event_count": pending_stale_before_final_review.get(
+                        "selected_upper_bound_event_count"
+                    ),
+                    "unattributed_stale_before_final_event_count": (
+                        pending_stale_before_final_review.get(
+                            "unattributed_stale_before_final_event_count"
+                        )
+                    ),
+                    "covers_stale_before_final_upper_bound": pending_stale_before_final_review.get(
+                        "covers_stale_before_final_upper_bound"
+                    ),
+                    "selected_clusters": (
+                        pending_stale_before_final_review.get("selected_clusters") or []
+                    )[:8],
+                    "momentum_decay_review": (
+                        pending_stale_before_final_review.get("momentum_decay_review") or {}
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     if pending_stale_before_final_validation:
         lines.extend([
             "## Pending Stale-Before-Final Watch Validation",

@@ -76,6 +76,7 @@ V3_OUTPUT_FILES = {
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
+    "pending_stale_before_final_review": "pending_stale_before_final_review.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
@@ -5851,12 +5852,14 @@ def assemble_reports(run_dir, out_dir=None):
         stage_metrics,
     )
     pending_audit = build_pending_to_final_entry_audit(reports.get("a_class") or {})
-    pending_audit["stale_before_final_review"] = build_stale_before_final_review(
+    pending_stale_before_final_review = build_stale_before_final_review(
         pending_audit,
         reports,
         context_eligibility,
     )
+    pending_audit["stale_before_final_review"] = pending_stale_before_final_review
     reports["pending_to_final_entry_audit"] = pending_audit
+    reports["pending_stale_before_final_review"] = pending_stale_before_final_review
     gap_report = build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audit)
     decision_capture_gap_audit = build_decision_capture_60_gap_audit(
         stage_metrics,
@@ -5933,6 +5936,7 @@ def assemble_reports(run_dir, out_dir=None):
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
         "final_eligibility_60_closure_plan": final_eligibility_closure_plan,
+        "pending_stale_before_final_review": pending_stale_before_final_review,
         "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
         "pass_allow_60_oos_readiness_monitor": pass_allow_oos_monitor,
         "capture_cross_oos_freeze_registry": capture_cross_freeze_registry,
