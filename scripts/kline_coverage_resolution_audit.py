@@ -166,6 +166,33 @@ def build_report(args):
 
     low_den = (low_confidence_capture.get("denominator") or {}).get("low_confidence_research_gold_silver") or {}
     low_candidate_layer = low_confidence_capture.get("candidate_layer") or {}
+    primary_resolution_track = allowed_resolution_tracks[0] if allowed_resolution_tracks else None
+    formal_coverage_rate = rate(formal_covered, total)
+    resolution_summary = {
+        "classification": classification,
+        "next_action": next_action,
+        "raw_all_gold_silver_event_rows": total,
+        "formal_kline_coverage_rate": formal_coverage_rate,
+        "formal_covered_rows": formal_covered,
+        "formal_uncovered_rows": formal_uncovered,
+        "additional_formal_rows_needed_to_80pct": additional_needed,
+        "research_kline_recoverable": confidence_adjusted_reaches_80,
+        "time_legal_recoverable_rows": time_legal_recoverable_rows,
+        "formal_plus_time_legal_recoverable_rate": formal_plus_time_legal_rate,
+        "primary_resolution_track": primary_resolution_track,
+        "allowed_resolution_track_count": len(allowed_resolution_tracks),
+        "interpretation": (
+            "Read-only kline/volume context blocker resolution. Formal kline/volume "
+            "promotion evidence remains blocked until the formal denominator reaches "
+            "coverage requirements; low-confidence and matured-volume paths are "
+            "research/shadow-only and do not authorize strategy, gate, final_entry, "
+            "A_CLASS, executor, paper, canary, or risk changes."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
     return {
         "schema_version": SCHEMA_VERSION,
         "report_type": "kline_coverage_resolution_audit",
@@ -176,6 +203,13 @@ def build_report(args):
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
         "formal_denominator_changed": False,
+        "classification": classification,
+        "next_action": next_action,
+        "formal_kline_coverage_rate": formal_coverage_rate,
+        "additional_formal_rows_needed_to_80pct": additional_needed,
+        "research_kline_recoverable": confidence_adjusted_reaches_80,
+        "primary_resolution_track": primary_resolution_track,
+        "resolution_summary": resolution_summary,
         "inputs": {
             "volume_kline_audit": args.volume_kline_audit,
             "low_confidence_audit": args.low_confidence_audit,
@@ -313,6 +347,16 @@ def self_test():
             out=None,
         ))
         assert report["promotion_allowed"] is False
+        assert report["classification"] == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+        assert report["next_action"] == (
+            "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
+        )
+        assert report["formal_kline_coverage_rate"] == 0.4
+        assert report["additional_formal_rows_needed_to_80pct"] == 4
+        assert report["research_kline_recoverable"] is True
+        assert report["primary_resolution_track"]["track"] == "low_confidence_time_legal_research"
+        assert report["resolution_summary"]["primary_resolution_track"]["track"] == "low_confidence_time_legal_research"
+        assert report["resolution_summary"]["promotion_allowed"] is False
         assert report["overall"]["classification"] == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
         assert report["overall"]["next_action"] == (
             "hold_low_confidence_time_legal_kline_rows_research_only_and_continue_clean_oos_collection"
