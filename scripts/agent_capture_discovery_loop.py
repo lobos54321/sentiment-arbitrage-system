@@ -84,6 +84,22 @@ def write_text(path, text):
     tmp.replace(target)
 
 
+def attach_latest_readiness_artifacts(verdict, readiness_paths):
+    """Keep verdict, handoff, and summary aligned with post-finalize artifacts."""
+    if not isinstance(verdict, dict):
+        return verdict
+    oos_path = readiness_paths.get("oos_readiness_summary")
+    if oos_path and Path(oos_path).exists():
+        try:
+            oos_summary = load_json(oos_path)
+        except Exception:
+            oos_summary = None
+        if isinstance(oos_summary, dict):
+            verdict["oos_readiness_summary_v3"] = oos_summary
+            verdict["oos_readiness_summary"] = oos_summary
+    return verdict
+
+
 def log_event(event, **fields):
     payload = {
         "schema_version": "agent_capture_discovery_loop_event.v1",
@@ -4658,6 +4674,7 @@ def write_materialized_artifacts(
             readiness_paths["oos_readiness_probe_refresh"] = oos_refresh_path
         run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
+        verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
         write_json(verdict_path, verdict)
     elif state == "final":
         run_capture_60_target_artifacts()
