@@ -1687,6 +1687,16 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         current_target_gap=current_target_gap,
     )
     classification = classify_capture_60_gap(stage_counts, biggest_gap_stage, current_target_gap)
+    current_target_next_action = next_best_allowed_action(
+        current_target_stage,
+        context_eligibility,
+        pending_audit,
+    )
+    target_shortfall_next_action = next_best_allowed_action(
+        biggest_gap_stage,
+        context_eligibility,
+        pending_audit,
+    )
     return {
         "schema_version": "capture_60_gap_report.v1",
         "report_type": "capture_60_gap_report",
@@ -1722,20 +1732,25 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
             "additional_count_needed_to_60"
         ),
         "current_target_reached": current_target_gap.get("target_reached"),
-        "current_target_next_best_allowed_action": next_best_allowed_action(
-            current_target_stage,
-            context_eligibility,
-            pending_audit,
+        "current_target_next_best_allowed_action": current_target_next_action,
+        "primary_operating_target_stage": current_target_stage,
+        "primary_operating_target_count": current_target_gap.get("count"),
+        "primary_operating_target_rate": current_target_gap.get("rate"),
+        "primary_operating_additional_count_needed_to_60": current_target_gap.get(
+            "additional_count_needed_to_60"
         ),
+        "primary_operating_next_best_allowed_action": current_target_next_action,
         "context_blocker_resolution": {
             "volume": context_eligibility.get("volume_blocker_resolution") or {},
         },
         "biggest_gap_stage": biggest_gap_stage,
         "target_shortfall_stage": biggest_gap_stage,
+        "target_shortfall_additional_count_needed_to_60": additional_needed,
+        "target_shortfall_next_best_allowed_action": target_shortfall_next_action,
         "largest_stage_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
         "largest_transition_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
         "additional_count_needed_to_60": additional_needed,
-        "next_best_allowed_action": next_best_allowed_action(biggest_gap_stage, context_eligibility, pending_audit),
+        "next_best_allowed_action": target_shortfall_next_action,
         "gap_interpretation": interpretation,
         "recommended_parallel_tracks": interpretation.get("tracks") or [],
         "human_approval_required_before_runtime_change": True,
@@ -1743,6 +1758,7 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
             "This is a target-gap report, not a promotion report.",
             "classification is a read-only routing label for the current capture gap.",
             "current_target_* fields describe the active readiness target while A_CLASS/final_entry are not paper-ready.",
+            "primary_operating_* aliases current_target_* so dashboards can separate active readiness work from the first upstream stage below 60%.",
             "target_shortfall_stage is the first stage below 60%; largest_transition_dropoff is the biggest adjacent funnel loss. They can differ and should be audited separately.",
             "All suggested actions are constrained to evaluator, data, shadow-only, or human-approval handoff paths.",
         ],
@@ -6093,6 +6109,15 @@ def self_test():
         assert gap["current_target_reached"] is False
         assert gap["current_target_next_best_allowed_action"] == (
             "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
+        )
+        assert gap["primary_operating_target_stage"] == gap["current_target_stage"]
+        assert gap["primary_operating_additional_count_needed_to_60"] == 2
+        assert gap["primary_operating_next_best_allowed_action"] == (
+            gap["current_target_next_best_allowed_action"]
+        )
+        assert gap["target_shortfall_additional_count_needed_to_60"] == 1
+        assert gap["target_shortfall_next_best_allowed_action"] == (
+            gap["next_best_allowed_action"]
         )
         assert gap["context_blocker_resolution"]["volume"]["classification"] == (
             "FORMAL_VOLUME_BLOCKED_SHADOW_MATURED_VOLUME_AVAILABLE"

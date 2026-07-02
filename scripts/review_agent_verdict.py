@@ -1688,6 +1688,22 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "capture_60_current_target_next_best_allowed_action": (
             capture_60_gap_report.get("current_target_next_best_allowed_action")
         ),
+        "capture_60_primary_operating_target_stage": (
+            capture_60_gap_report.get("primary_operating_target_stage")
+            or capture_60_gap_report.get("current_target_stage")
+        ),
+        "capture_60_primary_operating_target_rate": (
+            capture_60_gap_report.get("primary_operating_target_rate")
+            or capture_60_gap_report.get("current_target_rate")
+        ),
+        "capture_60_primary_operating_additional_count_needed": (
+            capture_60_gap_report.get("primary_operating_additional_count_needed_to_60")
+            or capture_60_gap_report.get("current_target_additional_count_needed_to_60")
+        ),
+        "capture_60_primary_operating_next_best_allowed_action": (
+            capture_60_gap_report.get("primary_operating_next_best_allowed_action")
+            or capture_60_gap_report.get("current_target_next_best_allowed_action")
+        ),
         "capture_60_next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
         "decision_capture_60_gap_classification": decision_capture_60_gap_audit.get("classification"),
         "decision_capture_60_gap_next_action": decision_capture_60_gap_audit.get("next_action"),
@@ -1728,6 +1744,26 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "current_target_reached": capture_60_gap_report.get("current_target_reached"),
             "current_target_next_best_allowed_action": capture_60_gap_report.get(
                 "current_target_next_best_allowed_action"
+            ),
+            "primary_operating_target_stage": (
+                capture_60_gap_report.get("primary_operating_target_stage")
+                or capture_60_gap_report.get("current_target_stage")
+            ),
+            "primary_operating_target_count": (
+                capture_60_gap_report.get("primary_operating_target_count")
+                or capture_60_gap_report.get("current_target_count")
+            ),
+            "primary_operating_target_rate": (
+                capture_60_gap_report.get("primary_operating_target_rate")
+                or capture_60_gap_report.get("current_target_rate")
+            ),
+            "primary_operating_additional_count_needed_to_60": (
+                capture_60_gap_report.get("primary_operating_additional_count_needed_to_60")
+                or capture_60_gap_report.get("current_target_additional_count_needed_to_60")
+            ),
+            "primary_operating_next_best_allowed_action": (
+                capture_60_gap_report.get("primary_operating_next_best_allowed_action")
+                or capture_60_gap_report.get("current_target_next_best_allowed_action")
             ),
             "detector_capture_rate": capture_60_gap_report.get("detector_capture_rate"),
             "decision_capture_rate": capture_60_gap_report.get("decision_capture_rate"),
