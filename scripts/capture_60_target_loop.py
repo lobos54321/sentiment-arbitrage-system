@@ -3843,6 +3843,91 @@ def build_clean_dimension_freeze_items(report, *, source, previous_items_by_id, 
     return items
 
 
+def build_matured_volume_freeze_items(capture_cross, *, previous_items_by_id, now):
+    """Freeze shadow-only matured-volume WATCH slices for future OOS tracking.
+
+    These definitions are deliberately not promotion evidence: matured volume is
+    delayed context used to test whether the volume hypothesis repeats after the
+    definition is frozen.
+    """
+    items = []
+    for row in capture_cross.get("shadow_matured_volume_top_crosses") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("dimension_group") != "matured_volume":
+            continue
+        if row.get("data_blockers") or row.get("invalid_reasons"):
+            continue
+        if safe_int(row.get("matched_gold_silver_events"), 0) <= 0:
+            continue
+        if str(row.get("judgment") or "").upper() not in {"WATCH", "DISCOVERY_WATCH", "DISCOVERY_HIT"}:
+            continue
+        freeze_definition = {
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": row.get("dimension") or "matured_volume_profile",
+            "dimension_group": "matured_volume",
+            "dimension_eligibility_status": row.get("dimension_eligibility_status") or STATUS_CLEAN,
+            "slice_value": row.get("slice_value"),
+            "judgment": row.get("judgment"),
+            "expected_capture_stage_improved": capture_cross_expected_stage(row),
+            "downstream_lift_scope": row.get("downstream_lift_scope"),
+            "evidence_source": row.get("evidence_source") or "matured_volume_capture_cross_audit",
+            "allowed_use": "shadow_only_matured_volume_context",
+        }
+        fingerprint = stable_fingerprint(freeze_definition)
+        freeze_id = f"shadow_matured_volume_cross:{fingerprint}"
+        previous = previous_items_by_id.get(freeze_id) or {}
+        current_window_evidence = {
+            key: row.get(key)
+            for key in (
+                "matched_gold_silver_events",
+                "match_recall_event",
+                "match_precision_event",
+                "recall_lift_vs_candidate_baseline",
+                "precision_lift_vs_candidate_baseline",
+                "decision_lift",
+                "pass_allow_lift",
+                "pending_lift",
+                "final_entry_lift",
+                "mode_adjusted_final_eligibility_lift",
+                "decision_capture_rate_after_match",
+                "pass_allow_capture_rate_after_match",
+                "pending_capture_rate_after_match",
+                "final_entry_rate_after_match",
+                "mode_adjusted_final_eligibility_rate_after_match",
+                "slice_downstream_signal_count",
+                "downstream_lift_scope",
+                "pnl_secondary_status",
+            )
+            if row.get(key) is not None
+        }
+        items.append({
+            "freeze_id": freeze_id,
+            "source": "shadow_matured_volume_cross",
+            "expected_capture_stage_improved": freeze_definition["expected_capture_stage_improved"],
+            "definition_fingerprint": fingerprint,
+            "frozen_at": previous.get("frozen_at") or now,
+            "freeze_definition": freeze_definition,
+            "current_window_evidence": current_window_evidence,
+            "status": "FROZEN_PENDING_CLEAN_NON_OVERLAPPING_OOS",
+            "oos_requirements": {
+                "definition_must_match_fingerprint": True,
+                "train_window_must_not_overlap_eval_window": True,
+                "overlap": False,
+                "context_clean_window_required": True,
+                "same_window_evidence_is_not_promotion_evidence": True,
+                "matured_volume_is_shadow_only_delayed_context": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return items
+
+
 def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=None, additional_cross_reports=None):
     """Freeze clean same-window 2D cross hits for future non-overlapping OOS."""
     previous_registry = previous_registry or {}
@@ -3946,6 +4031,11 @@ def build_capture_cross_oos_freeze_registry(capture_cross, previous_registry=Non
     items.extend(build_clean_dimension_freeze_items(
         additional_cross_reports.get("quality_timing_reason_cross") or {},
         source="quality_timing_reason_cross",
+        previous_items_by_id=previous_items_by_id,
+        now=now,
+    ))
+    items.extend(build_matured_volume_freeze_items(
+        capture_cross,
         previous_items_by_id=previous_items_by_id,
         now=now,
     ))
@@ -5498,6 +5588,17 @@ def self_test():
         assert capture_cross_freeze["items"][0]["definition_fingerprint"]
         assert capture_cross_freeze["items"][0]["oos_requirements"]["overlap"] is False
         assert capture_cross_freeze["items"][0]["freeze_definition"]["judgment"] == "DISCOVERY_HIT"
+        assert capture_cross_freeze["source_counts"]["shadow_matured_volume_cross"] >= 1
+        matured_freeze_items = [
+            row for row in capture_cross_freeze["items"]
+            if row.get("source") == "shadow_matured_volume_cross"
+        ]
+        assert matured_freeze_items
+        assert matured_freeze_items[0]["promotion_allowed"] is False
+        assert matured_freeze_items[0]["freeze_definition"]["allowed_use"] == (
+            "shadow_only_matured_volume_context"
+        )
+        assert matured_freeze_items[0]["oos_requirements"]["matured_volume_is_shadow_only_delayed_context"] is True
         context = load_json(run_dir / "context_dimension_eligibility.json")
         assert context["dimensions"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["quote-sensitive"]["eligible_for_capture_cross"] is True

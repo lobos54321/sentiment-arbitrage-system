@@ -635,6 +635,7 @@ def stage_oos(args, run_dir):
                 "scripts/capture_cross_post_freeze_oos_validation.py",
                 "--db", args.paper_db,
                 "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
                 "--freeze-registry", str(capture_cross_freeze_registry),
                 "--expected-candidates", str(args.expected_candidates),
                 "--out", str(run_dir / "capture_cross_post_freeze_oos_validation.json"),

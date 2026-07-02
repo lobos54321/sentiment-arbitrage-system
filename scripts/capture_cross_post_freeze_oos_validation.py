@@ -62,6 +62,7 @@ CAPTURE_CROSS_FREEZE_SOURCES = {
     "capture_first_2d_cross",
     "clean_dimension_2d_capture_cross",
     "quality_timing_reason_cross",
+    "shadow_matured_volume_cross",
 }
 
 
@@ -289,6 +290,73 @@ def quality_timing_value(event, dimension):
     return None
 
 
+def matured_volume_profile(bars):
+    vols = [float(bar.get("volume") or 0) for bar in bars]
+    if len(vols) < 3:
+        return "unknown"
+    if vols[-1] > max(vols[:-1]) * 1.8:
+        return "climax"
+    if all(vols[i] <= vols[i + 1] for i in range(len(vols) - 1)):
+        return "building"
+    if all(vols[i] >= vols[i + 1] for i in range(len(vols) - 1)):
+        return "declining"
+    if max(vols) <= 0:
+        return "flat"
+    if (max(vols) - min(vols)) / max(vols) < 0.2:
+        return "flat"
+    return "mixed"
+
+
+def load_matured_volume_contexts(kline_db_path, raw_rows, limit=125):
+    path = Path(kline_db_path or "")
+    if not path.exists() or not raw_rows:
+        return {}, {
+            "available": False,
+            "reason": "kline_db_missing" if not path.exists() else "no_raw_rows",
+        }
+    db = sqlite3.connect(path)
+    db.row_factory = sqlite3.Row
+    contexts = {}
+    try:
+        if not table_exists(db, "kline_1m"):
+            return {}, {"available": False, "reason": "kline_1m_table_missing"}
+        for row in raw_rows:
+            signal_id = row.get("signal_id_key")
+            token = row.get("token_ca")
+            signal_ts = row.get("signal_ts_norm") or row.get("signal_ts")
+            if not signal_id or not token or signal_ts is None:
+                continue
+            try:
+                bars = db.execute(
+                    """
+                    SELECT timestamp, open, high, low, close, volume
+                    FROM kline_1m
+                    WHERE token_ca = ? AND timestamp >= ?
+                    ORDER BY timestamp ASC
+                    LIMIT ?
+                    """,
+                    (token, int(signal_ts), int(limit)),
+                ).fetchall()
+            except sqlite3.Error:
+                bars = []
+            first = [dict(item) for item in bars[:5]]
+            contexts[signal_id] = {
+                "matured_volume_profile": matured_volume_profile(first),
+                "matured_kline_bar_count": len(bars),
+                "matured_volume_available": len(first) >= 3,
+            }
+    finally:
+        db.close()
+    known = sum(1 for row in contexts.values() if row.get("matured_volume_profile") != "unknown")
+    return contexts, {
+        "available": True,
+        "raw_signal_count": len({row.get("signal_id_key") for row in raw_rows if row.get("signal_id_key")}),
+        "context_count": len(contexts),
+        "known_count": known,
+        "known_rate": rate(known, len(contexts)),
+    }
+
+
 def selected_status(selected_count, selected_stage_rate, global_stage_rate, min_selected_events):
     lift = (
         None
@@ -309,6 +377,7 @@ def validate_capture_cross_item(
     raw_rows,
     matched_candidates,
     context_by_signal,
+    matured_volume_by_signal,
     quality_timing_by_signal,
     stages,
     global_stage_rates,
@@ -334,6 +403,11 @@ def validate_capture_cross_item(
             if dimension in {"quality_timing_cluster", "quality_timing_reason"}:
                 observed_value = quality_timing_value(
                     (quality_timing_by_signal or {}).get(signal_id),
+                    dimension,
+                )
+            elif dimension == "matured_volume_profile":
+                observed_value = context_value(
+                    (matured_volume_by_signal or {}).get(signal_id) or {},
                     dimension,
                 )
             else:
@@ -484,6 +558,10 @@ def build_report(args):
 
     _obs_by_signal, matched_candidates, context_by_signal, candidate_sets, _full = build_observation_indexes(observations)
     quality_timing_by_signal = stage_quality_timing_events(raw_rows, decisions)
+    matured_volume_by_signal, matured_volume_meta = load_matured_volume_contexts(
+        getattr(args, "kline_db", None),
+        raw_rows,
+    )
     raw_signal_set = {row.get("signal_id_key") for row in raw_rows if row.get("signal_id_key")}
     observed_signal_set = set(candidate_sets)
     full_coverage_signal_count = sum(
@@ -499,6 +577,7 @@ def build_report(args):
             raw_rows,
             matched_candidates,
             context_by_signal,
+            matured_volume_by_signal,
             quality_timing_by_signal,
             stages,
             global_stage_rates,
@@ -571,6 +650,7 @@ def build_report(args):
         "oos_data_next_action": oos_data_availability.get("next_action"),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,
+        "post_freeze_matured_volume_context": matured_volume_meta,
         "post_freeze_global_stage_rates": global_stage_rates,
         "post_freeze_signal_observation_coverage": {
             "raw_signal_count": len(raw_signal_set),
@@ -646,11 +726,25 @@ def create_self_test_inputs(root):
                     "slice_value": "matrix_alignment_wait",
                     "expected_capture_stage_improved": "decision_capture",
                 },
+            },
+            {
+                "freeze_id": "matured-volume-cross-1",
+                "source": "shadow_matured_volume_cross",
+                "definition_fingerprint": "ghi",
+                "frozen_at": iso_from_ts(frozen_ts),
+                "expected_capture_stage_improved": "pending_capture",
+                "freeze_definition": {
+                    "candidate_id": "notath_quote_clean",
+                    "dimension": "matured_volume_profile",
+                    "slice_value": "building",
+                    "expected_capture_stage_improved": "pending_capture",
+                },
             }
         ],
     })
     raw_path = root / "raw.db"
     paper_path = root / "paper.db"
+    kline_path = root / "kline.db"
     raw = sqlite3.connect(raw_path)
     raw.execute(
         """
@@ -745,17 +839,37 @@ def create_self_test_inputs(root):
     )
     paper.commit()
     paper.close()
-    return raw_path, paper_path, registry_path
+    kline = sqlite3.connect(kline_path)
+    kline.execute(
+        """
+        CREATE TABLE kline_1m (
+          token_ca TEXT, timestamp INTEGER, open REAL, high REAL, low REAL,
+          close REAL, volume REAL
+        )
+        """
+    )
+    kline.executemany(
+        "INSERT INTO kline_1m VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("token-a", now - 200, 1.0, 1.1, 0.9, 1.0, 10.0),
+            ("token-a", now - 140, 1.0, 1.1, 0.9, 1.0, 20.0),
+            ("token-a", now - 80, 1.0, 1.1, 0.9, 1.0, 30.0),
+        ],
+    )
+    kline.commit()
+    kline.close()
+    return raw_path, paper_path, registry_path, kline_path
 
 
 def run_self_test():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        raw_path, paper_path, registry_path = create_self_test_inputs(root)
+        raw_path, paper_path, registry_path, kline_path = create_self_test_inputs(root)
         out = root / "out.json"
         args = argparse.Namespace(
             db=str(paper_path),
             raw_db=str(raw_path),
+            kline_db=str(kline_path),
             freeze_registry=str(registry_path),
             out=str(out),
             expected_candidates=2,
@@ -769,10 +883,12 @@ def run_self_test():
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
         assert payload["oos_data_availability_classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
-        assert payload["validated_definition_count"] == 2
-        assert payload["repeat_watch_count"] == 1
+        assert payload["validated_definition_count"] == 3
+        assert payload["repeat_watch_count"] == 2
         assert payload["source_counts"]["capture_first_2d_cross"] == 1
         assert payload["source_counts"]["quality_timing_reason_cross"] == 1
+        assert payload["source_counts"]["shadow_matured_volume_cross"] == 1
+        assert payload["post_freeze_matured_volume_context"]["known_count"] == 1
         assert payload["classification"] == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"
         assert payload["post_freeze_global_stage_rates"]["decision_capture_rate"] == 1.0
         assert payload["post_freeze_global_stage_rates"]["pending_capture_rate"] == 0.5
@@ -787,6 +903,14 @@ def run_self_test():
         ][0]
         assert quality_item["selected_raw_gold_silver_events"] == 1
         assert quality_item["dimension"] == "quality_timing_cluster"
+        matured_volume_item = [
+            row for row in payload["items"]
+            if row.get("source") == "shadow_matured_volume_cross"
+        ][0]
+        assert matured_volume_item["selected_raw_gold_silver_events"] == 1
+        assert matured_volume_item["dimension"] == "matured_volume_profile"
+        assert matured_volume_item["expected_stage_lift_vs_post_freeze_global"] == 0.5
+        assert matured_volume_item["verdict"] == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"
         assert out.exists()
         availability = build_oos_data_availability(
             0,
@@ -806,6 +930,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="/app/data/paper_trades.db")
     parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
+    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
     parser.add_argument(
         "--freeze-registry",
         default="/app/data/agent_runs/latest/capture_cross_oos_freeze_registry.json",
