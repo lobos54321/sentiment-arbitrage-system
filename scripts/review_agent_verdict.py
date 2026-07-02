@@ -2490,7 +2490,50 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         },
         "quality_timing_reject_research_audit": {
             "available": bool(quality_timing_audit),
+            "classification": (
+                quality_timing_audit.get("classification")
+                or quality_timing_audit.get("verdict")
+            ),
             "verdict": quality_timing_audit.get("verdict"),
+            "next_action": quality_timing_audit.get("next_action"),
+            "dominant_cluster": quality_timing_audit.get("dominant_cluster"),
+            "dominant_stage": quality_timing_audit.get("dominant_stage"),
+            "top_quality_timing_clusters": (
+                quality_timing_audit.get("top_quality_timing_clusters") or []
+            )[:8],
+            "reason_level_breakout": {
+                "classification": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get("classification")
+                ),
+                "next_action": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get("next_action")
+                ),
+                "dominant_cluster": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get("dominant_cluster")
+                ),
+                "dominant_cluster_top_reasons": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get(
+                        "dominant_cluster_top_reasons"
+                    )
+                    or []
+                )[:8],
+                "other_quality_timing_top_reasons": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get(
+                        "other_quality_timing_top_reasons"
+                    )
+                    or []
+                )[:8],
+                "cluster_reason_breakouts": (
+                    (quality_timing_audit.get("reason_level_breakout") or {}).get(
+                        "cluster_reason_breakouts"
+                    )
+                    or []
+                )[:8],
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            },
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -3582,7 +3625,11 @@ def self_test():
     assert matured_volume_verdict["matured_volume_watch_queue"]["queue_count"] == 1
     quality_timing_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "quality_timing_reject_research_audit": {
+            "classification": "QUALITY_TIMING_REJECT_RESEARCH_READY",
             "verdict": "QUALITY_TIMING_REJECT_RESEARCH_READY",
+            "next_action": "review_other_quality_timing_reason_breakout_shadow_only",
+            "dominant_cluster": "score_or_quality_too_low",
+            "dominant_stage": "decision_no_pass_or_allow",
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,
@@ -3611,6 +3658,44 @@ def self_test():
                         "count": 4,
                     }
                 ],
+            },
+            "top_quality_timing_clusters": [
+                {
+                    "cluster": "score_or_quality_too_low",
+                    "event_count": 4,
+                    "suggested_shadow_only_action": "track_score_quality_threshold_false_negative_shadow_probe",
+                    "promotion_allowed": False,
+                }
+            ],
+            "reason_level_breakout": {
+                "classification": "QUALITY_TIMING_REASON_LEVEL_READY",
+                "next_action": "review_other_quality_timing_reason_breakout_shadow_only",
+                "dominant_cluster": "score_or_quality_too_low",
+                "dominant_cluster_top_reasons": [
+                    {
+                        "stage": "decision_no_pass_or_allow",
+                        "component": "smart_entry",
+                        "event_type": "quality_gate",
+                        "decision": "REJECT",
+                        "reason": "quality_score_low",
+                        "count": 4,
+                        "suggested_shadow_only_action": "track_score_quality_reason_shadow_only",
+                        "promotion_allowed": False,
+                    }
+                ],
+                "other_quality_timing_top_reasons": [
+                    {
+                        "stage": "decision_no_pass_or_allow",
+                        "component": "smart_entry",
+                        "event_type": "quality_gate",
+                        "decision": "REJECT",
+                        "reason": "quality_score_low",
+                        "count": 4,
+                        "suggested_shadow_only_action": "track_score_quality_reason_shadow_only",
+                        "promotion_allowed": False,
+                    }
+                ],
+                "promotion_allowed": False,
             },
             "context_attribution": {
                 "lifecycle_source_counts": [
@@ -3656,7 +3741,12 @@ def self_test():
     })
     qt = quality_timing_verdict["quality_timing_reject_research_audit"]
     assert qt["available"] is True
+    assert qt["classification"] == "QUALITY_TIMING_REJECT_RESEARCH_READY"
+    assert qt["next_action"] == "review_other_quality_timing_reason_breakout_shadow_only"
     assert qt["promotion_allowed"] is False
+    assert qt["top_quality_timing_clusters"][0]["cluster"] == "score_or_quality_too_low"
+    assert qt["reason_level_breakout"]["classification"] == "QUALITY_TIMING_REASON_LEVEL_READY"
+    assert qt["reason_level_breakout"]["dominant_cluster_top_reasons"][0]["reason"] == "quality_score_low"
     assert qt["candidate_match_attribution"]["top_candidates"][0]["candidate_id"] == "kline:active_mom20_first3"
     assert qt["shadow_only_review"]["dominant_cluster"] == "score_or_quality_too_low"
     assert qt["shadow_only_review"]["top_research_opportunities"][0]["promotion_allowed"] is False
