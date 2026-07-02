@@ -359,9 +359,11 @@ def stage_derived(args, run_dir):
 
 def stage_context(args, run_dir):
     hours = int(args.hours)
+    selected_reports = parse_context_reports(getattr(args, "context_reports", "all"))
     rows = []
     commands = [
         (
+            "volume",
             "volume_kline_coverage_audit",
             [
                 "scripts/volume_kline_coverage_audit.py",
@@ -373,6 +375,7 @@ def stage_context(args, run_dir):
             run_dir / f"volume_kline_coverage_audit_{hours}h.json",
         ),
         (
+            "matured_recheck",
             "matured_kline_volume_recheck_audit",
             [
                 "scripts/matured_kline_volume_recheck_audit.py",
@@ -384,6 +387,7 @@ def stage_context(args, run_dir):
             run_dir / f"matured_kline_volume_recheck_audit_{hours}h.json",
         ),
         (
+            "matured_cross",
             "matured_volume_capture_cross_audit",
             [
                 "scripts/matured_volume_capture_cross_audit.py",
@@ -398,6 +402,7 @@ def stage_context(args, run_dir):
             run_dir / f"matured_volume_capture_cross_audit_{hours}h.json",
         ),
         (
+            "low_confidence",
             "low_confidence_research_capture_audit",
             [
                 "scripts/low_confidence_research_capture_audit.py",
@@ -410,6 +415,7 @@ def stage_context(args, run_dir):
             run_dir / f"low_confidence_research_capture_audit_{hours}h.json",
         ),
         (
+            "resolution",
             "kline_coverage_resolution_audit",
             [
                 "scripts/kline_coverage_resolution_audit.py",
@@ -422,22 +428,27 @@ def stage_context(args, run_dir):
             run_dir / f"kline_coverage_resolution_audit_{hours}h.json",
         ),
     ]
-    rows.extend(run_report(name, cmd, out, timeout=int(args.report_timeout_sec)) for name, cmd, out in commands)
-    hypothesis_path = run_dir / f"hypothesis_validation_audit_{hours}h.json"
-    rows.append(run_report(
-        "hypothesis_validation_audit",
-        [
-            "scripts/hypothesis_validation_audit.py",
-            "--registry", args.registry,
-            "--matured-volume-cross", str(run_dir / f"matured_volume_capture_cross_audit_{hours}h.json"),
-            "--out", str(hypothesis_path),
-        ],
-        hypothesis_path,
-        timeout=int(args.report_timeout_sec),
-    ))
+    rows.extend(
+        run_report(name, cmd, out, timeout=int(args.report_timeout_sec))
+        for report_key, name, cmd, out in commands
+        if report_key in selected_reports
+    )
+    if "hypothesis" in selected_reports:
+        hypothesis_path = run_dir / f"hypothesis_validation_audit_{hours}h.json"
+        rows.append(run_report(
+            "hypothesis_validation_audit",
+            [
+                "scripts/hypothesis_validation_audit.py",
+                "--registry", args.registry,
+                "--matured-volume-cross", str(run_dir / f"matured_volume_capture_cross_audit_{hours}h.json"),
+                "--out", str(hypothesis_path),
+            ],
+            hypothesis_path,
+            timeout=int(args.report_timeout_sec),
+        ))
     append_diagnostics(run_dir, rows)
-    update_stage_state(run_dir, "context")
-    return {"stage": "context", "diagnostics": rows}
+    update_stage_state(run_dir, "context", context_reports=sorted(selected_reports))
+    return {"stage": "context", "context_reports": sorted(selected_reports), "diagnostics": rows}
 
 
 def stage_decision(args, run_dir):
@@ -727,6 +738,14 @@ DEFAULT_SEQUENCE = (
     "oos",
     "finalize",
 )
+DEFAULT_CONTEXT_REPORTS = (
+    "volume",
+    "matured_recheck",
+    "matured_cross",
+    "low_confidence",
+    "resolution",
+    "hypothesis",
+)
 
 
 def parse_stages(value):
@@ -739,7 +758,37 @@ def parse_stages(value):
     return stages
 
 
+def parse_context_reports(value):
+    selected = [item.strip() for item in str(value or "").split(",") if item.strip()]
+    if not selected or "all" in selected:
+        return set(DEFAULT_CONTEXT_REPORTS)
+    aliases = {
+        "volume_kline": "volume",
+        "volume_kline_coverage": "volume",
+        "matured_kline_volume_recheck": "matured_recheck",
+        "matured_volume": "matured_cross",
+        "matured_volume_cross": "matured_cross",
+        "low_confidence_research": "low_confidence",
+        "kline_resolution": "resolution",
+        "hypothesis_validation": "hypothesis",
+    }
+    reports = set()
+    for item in selected:
+        reports.add(aliases.get(item, item))
+    unknown = sorted(reports - set(DEFAULT_CONTEXT_REPORTS))
+    if unknown:
+        raise SystemExit(f"Unknown context report(s): {','.join(unknown)}")
+    return reports
+
+
 def self_test():
+    assert parse_context_reports("") == set(DEFAULT_CONTEXT_REPORTS)
+    assert parse_context_reports("all") == set(DEFAULT_CONTEXT_REPORTS)
+    assert parse_context_reports("volume_kline,matured_volume,hypothesis_validation") == {
+        "volume",
+        "matured_cross",
+        "hypothesis",
+    }
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         create_self_test_dbs(root)
@@ -757,6 +806,7 @@ def self_test():
             handoff_dir=str(root / "agent_handoffs"),
             registry=str(root / "hypothesis_registry.json"),
             markov_profiles="runtime,kline",
+            context_reports="all",
             report_timeout_sec=60,
             test_timeout_sec=60,
             max_scan_rows=10000,
@@ -810,6 +860,15 @@ def main(argv=None):
     parser.add_argument("--handoff-dir", default=DEFAULT_HANDOFF_DIR)
     parser.add_argument("--registry", default=DEFAULT_REGISTRY)
     parser.add_argument("--markov-profiles", default=DEFAULT_MARKOV_PROFILES)
+    parser.add_argument(
+        "--context-reports",
+        default="all",
+        help=(
+            "Comma-separated context subreports for --stage context. "
+            "Use all, volume, matured_recheck, matured_cross, low_confidence, "
+            "resolution, hypothesis. This is read-only and helps avoid 524s."
+        ),
+    )
     parser.add_argument("--report-timeout-sec", type=int, default=600)
     parser.add_argument("--test-timeout-sec", type=int, default=120)
     parser.add_argument("--max-scan-rows", type=int, default=2_000_000)
