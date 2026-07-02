@@ -601,6 +601,21 @@ def build_handoff(verdict):
         lines.extend([
             "## Volume / Kline Root Cause",
             "",
+        ])
+        if volume_resolution:
+            lines.extend([
+                "Volume context resolution:",
+                "",
+                "```json",
+                json.dumps(
+                    compact_volume_kline["volume_context_resolution"],
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "```",
+                "",
+            ])
+        lines.extend([
             "```json",
             json.dumps(compact_volume_kline, indent=2, sort_keys=True)[:12000],
             "```",
