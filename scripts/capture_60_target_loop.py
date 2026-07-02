@@ -1379,6 +1379,31 @@ def build_context_dimension_eligibility(reports):
             },
         },
     }
+    if matured_volume_context:
+        matured_volume_known_rate = safe_float(matured_volume_context.get("known_rate"))
+        matured_volume_clean = matured_volume_known_rate is not None and matured_volume_known_rate >= 0.8
+        dimensions["matured_volume"] = {
+            "status": STATUS_CLEAN if matured_volume_clean else STATUS_PENDING,
+            "eligible_for_capture_cross": matured_volume_clean,
+            "coverage_rate": matured_volume_known_rate,
+            "blockers": [] if matured_volume_clean else ["matured_volume_known_rate_below_80pct"],
+            "evidence": {
+                "classification": (matured_volume_cross.get("overall") or {}).get("classification"),
+                "next_action": (matured_volume_cross.get("overall") or {}).get("next_action"),
+                "known_rate": matured_volume_known_rate,
+                "known_rows": matured_volume_context.get("known_rows"),
+                "unknown_rows": matured_volume_context.get("unknown_rows"),
+                "signals_with_matured_context": matured_volume_context.get("signals_with_matured_context"),
+                "profile_counts": matured_volume_context.get("profile_counts") or {},
+                "reason_counts": matured_volume_context.get("reason_counts") or {},
+                "usage": matured_volume_cross.get("usage") or "shadow_only_matured_volume_context",
+                "formal_volume_dimension_status": dimensions["volume"].get("status"),
+                "formal_volume_blockers": dimensions["volume"].get("blockers") or [],
+                "formal_denominator_changed": bool(matured_volume_cross.get("formal_denominator_changed")),
+            },
+            "research_only_recoverable": True,
+            "optional_shadow_dimension": True,
+        }
     research_only_dimensions = []
     if (
         dimensions["kline"]["status"] != STATUS_CLEAN
@@ -1409,6 +1434,8 @@ def build_context_dimension_eligibility(reports):
             row["allowed_use"] = (
                 "discovery_only_historical_prior"
                 if name == "Strategy Memory"
+                else "shadow_only_matured_volume_context"
+                if name == "matured_volume"
                 else "discovery_context_evidence"
             )
         elif row["status"] == STATUS_NA:
@@ -1483,7 +1510,7 @@ def build_context_dimension_eligibility(reports):
         "pending_dimensions": pending_dimensions,
         "writer_bug_dimensions": writer_bug_dimensions,
         "research_only_dimensions": research_only_dimensions,
-        "rule": "Only dimensions with status CLEAN may contribute capture-cross or OOS evidence.",
+        "rule": "Only dimensions with status CLEAN may contribute capture-cross or OOS evidence; shadow-only dimensions remain non-promotion evidence.",
     }
 
 
@@ -4662,6 +4689,16 @@ def self_test():
         assert context["dimensions"]["volume"]["evidence"]["matured_volume_known_rate"] == 0.9
         assert context["dimensions"]["volume"]["research_only_recoverable"] is True
         assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
+        assert context["dimensions"]["matured_volume"]["status"] == STATUS_CLEAN
+        assert context["dimensions"]["matured_volume"]["allowed_use"] == "shadow_only_matured_volume_context"
+        assert context["dimensions"]["matured_volume"]["eligible_for_capture_cross"] is True
+        assert context["dimensions"]["matured_volume"]["coverage_rate"] == 0.9
+        assert context["dimensions"]["matured_volume"]["promotion_allowed"] is False
+        assert context["dimensions"]["matured_volume"]["strategy_change_allowed"] is False
+        assert context["dimensions"]["matured_volume"]["evidence"]["formal_volume_dimension_status"] == STATUS_BLOCKED
+        assert "matured_volume" in context["clean_dimensions"]
+        assert "matured_volume" not in context["blocked_dimensions"]
+        assert context["dimension_eligibility"]["matured_volume"]["allowed_use"] == "shadow_only_matured_volume_context"
         assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
         assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
