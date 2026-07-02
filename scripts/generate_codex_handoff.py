@@ -669,6 +669,11 @@ def build_handoff(verdict):
     two_d_cross = verdict.get("two_d_cross_validity_summary") or {}
     if two_d_cross:
         cross_freeze = verdict.get("capture_cross_oos_freeze_registry") or {}
+        cross_post_freeze = (
+            verdict.get("capture_cross_post_freeze_oos_validation")
+            or ((verdict.get("oos_readiness_summary_v3") or {}).get("capture_cross_post_freeze_oos_validation"))
+            or {}
+        )
         compact_two_d = {
             "classification": two_d_cross.get("classification"),
             "next_action": two_d_cross.get("next_action"),
@@ -687,6 +692,20 @@ def build_handoff(verdict):
                 "next_action": cross_freeze.get("next_action"),
                 "frozen_definition_count": cross_freeze.get("frozen_definition_count"),
                 "stage_counts": cross_freeze.get("stage_counts") or {},
+            },
+            "post_freeze_oos_validation": {
+                "available": bool(cross_post_freeze),
+                "classification": cross_post_freeze.get("classification"),
+                "raw_gold_silver_event_rows": cross_post_freeze.get("raw_gold_silver_event_rows"),
+                "post_freeze_usable_hours": cross_post_freeze.get("post_freeze_usable_hours"),
+                "validated_definition_count": cross_post_freeze.get("validated_definition_count"),
+                "repeat_watch_count": cross_post_freeze.get("repeat_watch_count"),
+                "all_raw_rows_since_eval_start": cross_post_freeze.get("all_raw_rows_since_eval_start"),
+                "post_freeze_signal_observation_coverage": (
+                    cross_post_freeze.get("post_freeze_signal_observation_coverage") or {}
+                ),
+                "oos_data_next_action": cross_post_freeze.get("oos_data_next_action"),
+                "promotion_allowed": False,
             },
             "promotion_allowed": False,
         }
@@ -870,6 +889,12 @@ def build_handoff(verdict):
             or verdict.get("pass_allow_60_post_freeze_oos_validation")
             or {}
         )
+        capture_cross_post_freeze = (
+            oos_readiness.get("capture_cross_post_freeze_oos_validation")
+            or (verdict.get("oos_readiness_summary_v3") or {}).get("capture_cross_post_freeze_oos_validation")
+            or verdict.get("capture_cross_post_freeze_oos_validation")
+            or {}
+        )
         compact_oos = {
             "classification": oos_readiness.get("classification"),
             "available_probe_count": oos_readiness.get("available_probe_count"),
@@ -907,6 +932,27 @@ def build_handoff(verdict):
                 "oos_data_availability": pass_allow_post_freeze.get(
                     "oos_data_availability"
                 ) or {},
+                "promotion_allowed": False,
+            },
+            "capture_cross_post_freeze": {
+                "classification": capture_cross_post_freeze.get("classification"),
+                "raw_gold_silver_event_rows": capture_cross_post_freeze.get(
+                    "raw_gold_silver_event_rows"
+                ),
+                "post_freeze_usable_hours": capture_cross_post_freeze.get(
+                    "post_freeze_usable_hours"
+                ),
+                "validated_definition_count": capture_cross_post_freeze.get(
+                    "validated_definition_count"
+                ),
+                "repeat_watch_count": capture_cross_post_freeze.get("repeat_watch_count"),
+                "all_raw_rows_since_eval_start": capture_cross_post_freeze.get(
+                    "all_raw_rows_since_eval_start"
+                ),
+                "post_freeze_signal_observation_coverage": (
+                    capture_cross_post_freeze.get("post_freeze_signal_observation_coverage") or {}
+                ),
+                "oos_data_next_action": capture_cross_post_freeze.get("oos_data_next_action"),
                 "promotion_allowed": False,
             },
             "promotion_allowed": False,

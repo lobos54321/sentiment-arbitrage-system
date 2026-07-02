@@ -572,6 +572,13 @@ def stage_oos(args, run_dir):
         latest_registry = Path(args.out_root) / "latest" / "pass_allow_60_oos_freeze_registry.json"
         if latest_registry.exists():
             freeze_registry = latest_registry
+    capture_cross_freeze_registry = run_dir / "capture_cross_oos_freeze_registry.json"
+    if not capture_cross_freeze_registry.exists():
+        latest_capture_cross_registry = (
+            Path(args.out_root) / "latest" / "capture_cross_oos_freeze_registry.json"
+        )
+        if latest_capture_cross_registry.exists():
+            capture_cross_freeze_registry = latest_capture_cross_registry
     rows = [
         run_report(
             "oos_readiness_probe_refresh",
@@ -603,6 +610,19 @@ def stage_oos(args, run_dir):
                 "--out", str(run_dir / "pass_allow_60_post_freeze_oos_validation.json"),
             ],
             run_dir / "pass_allow_60_post_freeze_oos_validation.json",
+            timeout=max(60, int(args.report_timeout_sec) * 2),
+        ),
+        run_report(
+            "capture_cross_post_freeze_oos_validation",
+            [
+                "scripts/capture_cross_post_freeze_oos_validation.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--freeze-registry", str(capture_cross_freeze_registry),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(run_dir / "capture_cross_post_freeze_oos_validation.json"),
+            ],
+            run_dir / "capture_cross_post_freeze_oos_validation.json",
             timeout=max(60, int(args.report_timeout_sec) * 2),
         ),
     ]
@@ -647,6 +667,7 @@ def collect_paths(args, run_dir):
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
         "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
+        "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
         "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
         "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
         "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",

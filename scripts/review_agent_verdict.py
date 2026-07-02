@@ -121,6 +121,7 @@ DERIVED_READINESS_SIBLINGS = {
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
     "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
     "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
+    "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
     "capture_60_gap_report": "capture_60_gap_report.json",
     "capture_stage_metrics": "capture_stage_metrics.json",
     "context_dimension_eligibility": "context_dimension_eligibility.json",
@@ -1370,6 +1371,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         or oos_readiness_summary
         or {}
     )
+    capture_cross_post_freeze_oos_validation = (
+        readiness_reports.get("capture_cross_post_freeze_oos_validation")
+        or (oos_readiness_summary_v3.get("capture_cross_post_freeze_oos_validation") or {})
+        or {}
+    )
     final_entry_status = str(final_entry.get("final_entry_status") or "").upper()
     capture_counts = capture.get("judgment_counts") or {}
     v3_biggest_gap_stage = capture_60_gap_report.get("biggest_gap_stage")
@@ -1853,6 +1859,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 or pass_allow_60_post_freeze_oos_validation
                 or {}
             ),
+            "capture_cross_post_freeze_oos_validation": (
+                oos_readiness_summary_v3.get("capture_cross_post_freeze_oos_validation")
+                or capture_cross_post_freeze_oos_validation
+                or {}
+            ),
             "promotion_allowed": False,
         },
         "pass_allow_60_post_freeze_oos_validation": {
@@ -1945,6 +1956,55 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 or capture_cross_oos_freeze_registry.get("items")
                 or []
             )[:12],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "capture_cross_post_freeze_oos_validation": {
+            "available": bool(capture_cross_post_freeze_oos_validation),
+            "classification": capture_cross_post_freeze_oos_validation.get("classification"),
+            "all_raw_rows_since_eval_start": capture_cross_post_freeze_oos_validation.get(
+                "all_raw_rows_since_eval_start"
+            ),
+            "raw_gold_silver_event_rows": capture_cross_post_freeze_oos_validation.get(
+                "raw_gold_silver_event_rows"
+            ),
+            "post_freeze_global_stage_rates": (
+                capture_cross_post_freeze_oos_validation.get("post_freeze_global_stage_rates") or {}
+            ),
+            "post_freeze_signal_observation_coverage": (
+                capture_cross_post_freeze_oos_validation.get(
+                    "post_freeze_signal_observation_coverage"
+                ) or {}
+            ),
+            "candidate_observation_effective_status": (
+                capture_cross_post_freeze_oos_validation.get(
+                    "candidate_observation_effective_status"
+                )
+            ),
+            "candidate_observation_join_blocked": (
+                capture_cross_post_freeze_oos_validation.get(
+                    "candidate_observation_join_blocked"
+                )
+            ),
+            "post_freeze_oos_wait_reason": (
+                capture_cross_post_freeze_oos_validation.get("post_freeze_oos_wait_reason")
+            ),
+            "raw_signal_rows_seen_after_freeze": (
+                capture_cross_post_freeze_oos_validation.get("raw_signal_rows_seen_after_freeze")
+            ),
+            "oos_data_next_action": (
+                capture_cross_post_freeze_oos_validation.get("oos_data_next_action")
+            ),
+            "frozen_definition_count": capture_cross_post_freeze_oos_validation.get(
+                "frozen_definition_count"
+            ),
+            "validated_definition_count": capture_cross_post_freeze_oos_validation.get(
+                "validated_definition_count"
+            ),
+            "repeat_watch_count": capture_cross_post_freeze_oos_validation.get("repeat_watch_count"),
+            "eval_start_iso": capture_cross_post_freeze_oos_validation.get("eval_start_iso"),
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,

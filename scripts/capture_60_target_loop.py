@@ -4200,6 +4200,7 @@ def load_oos_reports(run_dir):
         "matured_volume_capture_cross_audit_oos_probe_1h.json",
         "oos_readiness_probe_refresh.json",
         "pass_allow_60_post_freeze_oos_validation.json",
+        "capture_cross_post_freeze_oos_validation.json",
     ):
         path = run_dir / name
         if path.exists():
@@ -4247,6 +4248,11 @@ def build_oos_summary(run_dir, reports=None):
     pass_allow_post_freeze_validation = (
         (input_reports or {}).get("pass_allow_60_post_freeze_oos_validation")
         or oos_reports.get("pass_allow_60_post_freeze_oos_validation")
+        or {}
+    )
+    capture_cross_post_freeze_validation = (
+        (input_reports or {}).get("capture_cross_post_freeze_oos_validation")
+        or oos_reports.get("capture_cross_post_freeze_oos_validation")
         or {}
     )
     qt_oos_queue = quality_timing_probe_validation.get("oos_readiness_queue") or {}
@@ -4432,6 +4438,76 @@ def build_oos_summary(run_dir, reports=None):
             0,
         )
         summary["next_capture_cross_oos_action"] = capture_cross_freeze_registry.get("next_action")
+    if capture_cross_post_freeze_validation:
+        oos_data_availability = capture_cross_post_freeze_validation.get("oos_data_availability") or {}
+        raw_gold_silver_event_rows = capture_cross_post_freeze_validation.get("raw_gold_silver_event_rows")
+        raw_gold_silver_event_rows_needed = oos_data_availability.get(
+            "raw_gold_silver_event_rows_needed_for_min"
+        )
+        post_freeze_cross_summary = {
+            "available": True,
+            "schema_version": capture_cross_post_freeze_validation.get("schema_version"),
+            "generated_at": capture_cross_post_freeze_validation.get("generated_at"),
+            "classification": capture_cross_post_freeze_validation.get("classification"),
+            "legacy_classification": capture_cross_post_freeze_validation.get("legacy_classification"),
+            "oos_data_availability_classification": (
+                capture_cross_post_freeze_validation.get("oos_data_availability_classification")
+            ),
+            "oos_data_root_causes": (
+                capture_cross_post_freeze_validation.get("oos_data_root_causes") or []
+            ),
+            "next_action": capture_cross_post_freeze_validation.get("next_action"),
+            "raw_gold_silver_event_rows": raw_gold_silver_event_rows,
+            "raw_gold_silver_rows_since_eval_start_unfiltered": (
+                capture_cross_post_freeze_validation.get("raw_gold_silver_rows_since_eval_start_unfiltered")
+            ),
+            "all_raw_rows_since_eval_start": (
+                capture_cross_post_freeze_validation.get("all_raw_rows_since_eval_start")
+            ),
+            "latest_raw_signal_age_sec": capture_cross_post_freeze_validation.get(
+                "latest_raw_signal_age_sec"
+            ),
+            "latest_raw_gold_silver_age_sec": capture_cross_post_freeze_validation.get(
+                "latest_raw_gold_silver_age_sec"
+            ),
+            "min_raw_events_for_oos_judgment": (
+                capture_cross_post_freeze_validation.get("min_raw_events_for_oos_judgment")
+            ),
+            "raw_gold_silver_event_rows_needed_for_min": raw_gold_silver_event_rows_needed,
+            "post_freeze_global_stage_rates": (
+                capture_cross_post_freeze_validation.get("post_freeze_global_stage_rates") or {}
+            ),
+            "post_freeze_signal_observation_coverage": (
+                capture_cross_post_freeze_validation.get("post_freeze_signal_observation_coverage") or {}
+            ),
+            "frozen_definition_count": capture_cross_post_freeze_validation.get("frozen_definition_count"),
+            "validated_definition_count": capture_cross_post_freeze_validation.get("validated_definition_count"),
+            "supported_definition_count": capture_cross_post_freeze_validation.get("supported_definition_count"),
+            "repeat_watch_count": capture_cross_post_freeze_validation.get("repeat_watch_count"),
+            "positive_lift_count": capture_cross_post_freeze_validation.get("positive_lift_count"),
+            "too_small_definition_count": capture_cross_post_freeze_validation.get("too_small_definition_count"),
+            "post_freeze_usable_hours": capture_cross_post_freeze_validation.get("post_freeze_usable_hours"),
+            "definition_set_frozen_at": capture_cross_post_freeze_validation.get("definition_set_frozen_at"),
+            "freeze_generated_at": capture_cross_post_freeze_validation.get("freeze_generated_at"),
+            "eval_start_iso": capture_cross_post_freeze_validation.get("eval_start_iso"),
+            "oos_data_availability": oos_data_availability,
+            "status_counts": capture_cross_post_freeze_validation.get("status_counts") or {},
+            "stage_counts": capture_cross_post_freeze_validation.get("stage_counts") or {},
+            "top_repeat_watch_items": (
+                capture_cross_post_freeze_validation.get("top_repeat_watch_items") or []
+            )[:12],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["capture_cross_post_freeze_oos_validation"] = post_freeze_cross_summary
+        summary["capture_cross_post_freeze_oos_classification"] = (
+            capture_cross_post_freeze_validation.get("classification")
+        )
+        summary["capture_cross_post_freeze_oos_repeat_watch_count"] = (
+            capture_cross_post_freeze_validation.get("repeat_watch_count")
+        )
     if pass_allow_post_freeze_validation:
         oos_data_availability = pass_allow_post_freeze_validation.get("oos_data_availability") or {}
         raw_gold_silver_event_rows = pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
