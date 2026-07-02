@@ -754,7 +754,10 @@ def build_handoff(verdict):
     oos_readiness = verdict.get("oos_readiness_summary") or {}
     if oos_readiness:
         pass_allow_post_freeze = (
-            oos_readiness.get("pass_allow_60_post_freeze_oos_validation") or {}
+            oos_readiness.get("pass_allow_60_post_freeze_oos_validation")
+            or (verdict.get("oos_readiness_summary_v3") or {}).get("pass_allow_60_post_freeze_oos_validation")
+            or verdict.get("pass_allow_60_post_freeze_oos_validation")
+            or {}
         )
         compact_oos = {
             "classification": oos_readiness.get("classification"),
@@ -772,6 +775,11 @@ def build_handoff(verdict):
                     "post_freeze_usable_hours"
                 ),
                 "repeat_watch_count": pass_allow_post_freeze.get("repeat_watch_count"),
+                "all_raw_rows_since_eval_start": pass_allow_post_freeze.get(
+                    "all_raw_rows_since_eval_start"
+                ),
+                "global_pass_allow_count": pass_allow_post_freeze.get("global_pass_allow_count"),
+                "candidate_observation_meta": pass_allow_post_freeze.get("candidate_observation_meta") or {},
                 "oos_data_availability": pass_allow_post_freeze.get(
                     "oos_data_availability"
                 ) or {},

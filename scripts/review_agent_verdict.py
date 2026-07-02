@@ -1295,6 +1295,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     strategy_memory_capture_validation = readiness_reports.get("strategy_memory_capture_validation") or {}
     shadow_candidate_improvement_queue = readiness_reports.get("shadow_candidate_improvement_queue") or {}
     kline_coverage_resolution = readiness_reports.get("kline_coverage_resolution_audit") or {}
+    pass_allow_60_post_freeze_oos_validation = (
+        readiness_reports.get("pass_allow_60_post_freeze_oos_validation") or {}
+    )
     oos_readiness_summary_v3 = (
         readiness_reports.get("oos_readiness_summary_v3")
         or readiness_reports.get("oos_readiness_summary")
@@ -1739,8 +1742,28 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 or {}
             ),
             "pass_allow_60_post_freeze_oos_validation": (
-                oos_readiness_summary_v3.get("pass_allow_60_post_freeze_oos_validation") or {}
+                oos_readiness_summary_v3.get("pass_allow_60_post_freeze_oos_validation")
+                or pass_allow_60_post_freeze_oos_validation
+                or {}
             ),
+            "promotion_allowed": False,
+        },
+        "pass_allow_60_post_freeze_oos_validation": {
+            "available": bool(pass_allow_60_post_freeze_oos_validation),
+            "classification": pass_allow_60_post_freeze_oos_validation.get("classification"),
+            "all_raw_rows_since_eval_start": pass_allow_60_post_freeze_oos_validation.get(
+                "all_raw_rows_since_eval_start"
+            ),
+            "global_pass_allow_count": pass_allow_60_post_freeze_oos_validation.get(
+                "global_pass_allow_count"
+            ),
+            "candidate_observation_meta": (
+                pass_allow_60_post_freeze_oos_validation.get("candidate_observation_meta") or {}
+            ),
+            "frozen_definition_count": pass_allow_60_post_freeze_oos_validation.get(
+                "frozen_definition_count"
+            ),
+            "eval_start_iso": pass_allow_60_post_freeze_oos_validation.get("eval_start_iso"),
             "promotion_allowed": False,
         },
         "pass_allow_60_closure_oos_queue_count": (
@@ -3684,6 +3707,30 @@ def self_test():
         assert waiting_oos["oos_probe_refresh_post_freeze_reason"] == "post_freeze_window_too_young"
         assert waiting_verdict["oos_probe_refresh_status"]["classification"] == "OOS_PROBES_WAITING_FOR_POST_FREEZE_WINDOW"
         assert waiting_verdict["oos_probe_refresh_status"]["executed_probe_count"] == 0
+        write_json(root / "pass_allow_60_post_freeze_oos_validation.json", {
+            "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+            "all_raw_rows_since_eval_start": 10,
+            "global_pass_allow_count": 0,
+            "frozen_definition_count": 35,
+            "eval_start_iso": "2026-06-30T00:05:00Z",
+            "candidate_observation_meta": {
+                "available": False,
+                "reason": "missing_signal_ids_or_table",
+            },
+            "promotion_allowed": False,
+        })
+        direct_post_freeze_siblings = load_sibling_readiness_reports(str(capture_path))
+        direct_post_freeze_verdict = build_verdict(
+            capture,
+            tests={"passed": True},
+            readiness_reports=direct_post_freeze_siblings,
+        )
+        assert direct_post_freeze_verdict["pass_allow_60_post_freeze_oos_validation"]["classification"] == (
+            "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER"
+        )
+        assert direct_post_freeze_verdict["oos_readiness_summary_v3"][
+            "pass_allow_60_post_freeze_oos_validation"
+        ]["all_raw_rows_since_eval_start"] == 10
     print("SELF_TEST_PASS review_agent_verdict")
 
 
