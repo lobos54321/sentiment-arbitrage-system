@@ -119,10 +119,14 @@ DERIVED_READINESS_SIBLINGS = {
     "hypothesis_validation_oos_probe_0p25h": "hypothesis_validation_audit_oos_probe_0p25h.json",
     "hypothesis_validation_oos_probe_0p5h": "hypothesis_validation_audit_oos_probe_0p5h.json",
     "hypothesis_validation_oos_probe_1h": "hypothesis_validation_audit_oos_probe_1h.json",
+    "hypothesis_validation_oos_probe_2h": "hypothesis_validation_audit_oos_probe_2h.json",
+    "hypothesis_validation_oos_probe_4h": "hypothesis_validation_audit_oos_probe_4h.json",
     "matured_volume_cross_oos_probe_0p1h": "matured_volume_capture_cross_audit_oos_probe_0p1h.json",
     "matured_volume_cross_oos_probe_0p25h": "matured_volume_capture_cross_audit_oos_probe_0p25h.json",
     "matured_volume_cross_oos_probe_0p5h": "matured_volume_capture_cross_audit_oos_probe_0p5h.json",
     "matured_volume_cross_oos_probe_1h": "matured_volume_capture_cross_audit_oos_probe_1h.json",
+    "matured_volume_cross_oos_probe_2h": "matured_volume_capture_cross_audit_oos_probe_2h.json",
+    "matured_volume_cross_oos_probe_4h": "matured_volume_capture_cross_audit_oos_probe_4h.json",
     "oos_readiness_probe_refresh": "oos_readiness_probe_refresh.json",
     "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
     "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
@@ -793,6 +797,16 @@ def build_oos_readiness_summary(readiness_reports):
             "hypothesis_validation_oos_probe_1h",
             "matured_volume_cross_oos_probe_1h",
         ),
+        (
+            "2h",
+            "hypothesis_validation_oos_probe_2h",
+            "matured_volume_cross_oos_probe_2h",
+        ),
+        (
+            "4h",
+            "hypothesis_validation_oos_probe_4h",
+            "matured_volume_cross_oos_probe_4h",
+        ),
     )
     fixed_labels = {label for label, _hypothesis_key, _cross_key in probe_specs}
     all_fixed_probes = [
@@ -806,8 +820,14 @@ def build_oos_readiness_summary(readiness_reports):
     if refresh_has_execution_accounting:
         if (refresh_executed_probe_count or 0) <= 0:
             current_fixed_labels = set()
-        else:
+        elif refresh_probe_labels:
             current_fixed_labels = refresh_probe_labels & fixed_labels
+        else:
+            current_fixed_labels = {
+                row.get("probe")
+                for row in all_fixed_probes
+                if row.get("available") and row.get("probe")
+            }
     else:
         current_fixed_labels = fixed_labels
     probes = [

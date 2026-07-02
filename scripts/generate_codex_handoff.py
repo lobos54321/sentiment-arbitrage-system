@@ -1225,7 +1225,7 @@ def build_handoff(verdict):
                 "promotion_allowed": False,
             },
             "promotion_allowed": False,
-            "probes": (oos_readiness.get("probes") or [])[:4],
+            "probes": (oos_readiness.get("probes") or [])[:8],
         }
         lines.extend([
             "## OOS Readiness",
