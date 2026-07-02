@@ -4521,6 +4521,7 @@ def write_materialized_artifacts(
                 "--expected-candidates", str(args.expected_candidates),
                 "--max-scan-rows", str(args.max_scan_rows),
                 "--timeout-sec", str(args.report_timeout_sec),
+                "--post-freeze-probe",
                 "--out", str(oos_refresh_path),
             ],
             timeout=oos_timeout,

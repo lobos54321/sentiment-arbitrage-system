@@ -585,6 +585,7 @@ def stage_oos(args, run_dir):
                 "--expected-candidates", str(args.expected_candidates),
                 "--max-scan-rows", str(args.max_scan_rows),
                 "--timeout-sec", str(args.report_timeout_sec),
+                "--post-freeze-probe",
                 "--out", str(run_dir / "oos_readiness_probe_refresh.json"),
             ],
             run_dir / "oos_readiness_probe_refresh.json",
