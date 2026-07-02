@@ -813,7 +813,7 @@ def context_dimension_formal_blockers(context_dimension_eligibility):
     blockers = []
     for name, row in dimensions.items():
         status = row.get("status")
-        if status in {"CLEAN", "NOT_APPLICABLE"}:
+        if status in {"CLEAN", "NOT_APPLICABLE", "CLEAN_WINDOW_PENDING"}:
             continue
         row_blockers = [blocker for blocker in (row.get("blockers") or []) if blocker]
         blockers.extend(row_blockers)
@@ -3004,6 +3004,34 @@ def self_test():
     assert volume_blocked_by_context_eligibility["formal_volume_sensitive_slices_blocked"] is True
     assert "volume_profile_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
     assert "kline_coverage_below_80pct" in volume_blocked_by_context_eligibility["blockers"]
+    kline_pending_by_context_eligibility = build_verdict({
+        **capture,
+        "report_health": {"promotion_blockers": []},
+    }, tests={"passed": True}, readiness_reports={
+        "context_dimension_eligibility": {
+            "dimensions": {
+                "volume": {
+                    "status": "BLOCKED_UNKNOWN",
+                    "coverage_rate": 0.3,
+                    "blockers": ["volume_profile_coverage_below_80pct"],
+                    "eligible_for_capture_cross": False,
+                },
+                "kline": {
+                    "status": "CLEAN_WINDOW_PENDING",
+                    "coverage_rate": 0.46,
+                    "blockers": ["kline_coverage_below_80pct"],
+                    "eligible_for_capture_cross": False,
+                    "research_only_recoverable": True,
+                    "promotion_allowed": False,
+                },
+            },
+            "blocked_dimensions": ["volume"],
+            "pending_dimensions": ["kline"],
+            "clean_dimensions": ["quote-sensitive", "source_component", "lifecycle"],
+        },
+    })
+    assert "volume_profile_coverage_below_80pct" in kline_pending_by_context_eligibility["blockers"]
+    assert "kline_coverage_below_80pct" not in kline_pending_by_context_eligibility["blockers"]
     kline_resolution_verdict = build_verdict({
         **capture,
         "report_health": {"promotion_blockers": ["kline_coverage_below_80pct"]},
