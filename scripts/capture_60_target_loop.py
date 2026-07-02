@@ -1567,6 +1567,87 @@ def build_context_dimension_eligibility(reports):
         }
         for name, row in dimensions.items()
     }
+    volume_resolution_source = volume_kline.get("volume_context_resolution") or {}
+    formal_volume_status = dimensions["volume"].get("status")
+    matured_volume_status = (dimensions.get("matured_volume") or {}).get("status")
+    matured_volume_available = bool(
+        formal_volume_status != STATUS_CLEAN
+        and matured_volume_status == STATUS_CLEAN
+        and (dimensions.get("matured_volume") or {}).get("eligible_for_capture_cross")
+    )
+    if formal_volume_status == STATUS_CLEAN:
+        volume_resolution_classification = "FORMAL_VOLUME_CONTEXT_READY"
+        volume_resolution_next_action = "run_capture_cross_on_formal_volume_if_other_contexts_clean"
+    elif matured_volume_available:
+        volume_resolution_classification = "FORMAL_VOLUME_BLOCKED_SHADOW_MATURED_VOLUME_AVAILABLE"
+        volume_resolution_next_action = (
+            "track_matured_volume_shadow_oos_without_formal_volume_promotion"
+        )
+    elif volume_resolution_source.get("matured_volume_shadow_recheck_recommended"):
+        volume_resolution_classification = "FORMAL_VOLUME_BLOCKED_MATURED_RECHECK_RECOMMENDED"
+        volume_resolution_next_action = "run_or_wait_for_matured_volume_shadow_recheck"
+    elif formal_volume_status == STATUS_BLOCKED:
+        volume_resolution_classification = "FORMAL_VOLUME_CONTEXT_BLOCKED"
+        volume_resolution_next_action = "continue_collecting_realtime_kline_context_or_fix_volume_attribution"
+    else:
+        volume_resolution_classification = "FORMAL_VOLUME_CONTEXT_PENDING"
+        volume_resolution_next_action = "wait_for_volume_context_clean_window"
+    volume_blocker_resolution = {
+        "classification": volume_resolution_classification,
+        "formal_volume_dimension_status": formal_volume_status,
+        "formal_volume_allowed_use": dimensions["volume"].get("allowed_use"),
+        "formal_volume_known_rate": dimensions["volume"].get("coverage_rate"),
+        "formal_volume_unknown_rate": volume_evidence.get("unknown_rate"),
+        "formal_volume_known_rows": volume_context.get("known_rows"),
+        "formal_volume_unknown_rows": volume_context.get("unknown_rows"),
+        "formal_volume_blockers": dimensions["volume"].get("blockers") or [],
+        "formal_volume_primary_unknown_reason": (
+            volume_resolution_source.get("primary_unknown_reason")
+            or next(iter((volume_context.get("unknown_diagnostics") or {}).get("volume_profile_reason_counts") or {}), None)
+        ),
+        "formal_volume_unknown_reason_counts": (
+            volume_resolution_source.get("unknown_volume_profile_reason_counts")
+            or (volume_context.get("unknown_diagnostics") or {}).get("volume_profile_reason_counts")
+            or {}
+        ),
+        "formal_volume_unknown_kline_missing_reason_counts": (
+            volume_resolution_source.get("unknown_kline_missing_reason_counts")
+            or (volume_context.get("unknown_diagnostics") or {}).get("kline_missing_reason_counts")
+            or {}
+        ),
+        "shadow_matured_volume_available": matured_volume_available,
+        "shadow_matured_volume_status": matured_volume_status,
+        "shadow_matured_volume_allowed_use": (
+            (dimensions.get("matured_volume") or {}).get("allowed_use")
+        ),
+        "shadow_matured_volume_known_rate": (
+            (dimensions.get("matured_volume") or {}).get("coverage_rate")
+        ),
+        "shadow_matured_volume_known_rows": matured_volume_context.get("known_rows"),
+        "shadow_matured_volume_unknown_rows": matured_volume_context.get("unknown_rows"),
+        "shadow_matured_volume_cross_classification": (
+            (matured_volume_cross.get("overall") or {}).get("classification")
+        ),
+        "shadow_matured_volume_cross_next_action": (
+            (matured_volume_cross.get("overall") or {}).get("next_action")
+        ),
+        "kline_dependency_status": dimensions["kline"].get("status"),
+        "formal_kline_coverage_rate": dimensions["kline"].get("coverage_rate"),
+        "formal_kline_blockers": dimensions["kline"].get("blockers") or [],
+        "next_allowed_action": volume_resolution_next_action,
+        "allowed_use": (
+            "shadow_only_matured_volume_context"
+            if matured_volume_available
+            else dimensions["volume"].get("allowed_use")
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "notes": [
+            "Formal realtime volume remains blocked until signal-time kline context is sufficiently known.",
+            "Matured volume is delayed-context discovery evidence only and cannot promote strategy without OOS and human approval.",
+        ],
+    }
     return {
         "schema_version": "context_dimension_eligibility.v1",
         "report_type": "context_dimension_eligibility",
@@ -1584,6 +1665,7 @@ def build_context_dimension_eligibility(reports):
         "pending_dimensions": pending_dimensions,
         "writer_bug_dimensions": writer_bug_dimensions,
         "research_only_dimensions": research_only_dimensions,
+        "volume_blocker_resolution": volume_blocker_resolution,
         "rule": "Only dimensions with status CLEAN may contribute capture-cross or OOS evidence; shadow-only dimensions remain non-promotion evidence.",
     }
 
@@ -1645,6 +1727,9 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
             context_eligibility,
             pending_audit,
         ),
+        "context_blocker_resolution": {
+            "volume": context_eligibility.get("volume_blocker_resolution") or {},
+        },
         "biggest_gap_stage": biggest_gap_stage,
         "target_shortfall_stage": biggest_gap_stage,
         "largest_stage_dropoff": stage_metrics.get("largest_stage_dropoff") or {},
@@ -5698,6 +5783,13 @@ def self_test():
         assert gap["current_target_next_best_allowed_action"] == (
             "audit_pending_to_final_entry_stale_before_final_shadow_only_with_blocked_context_dimensions_excluded"
         )
+        assert gap["context_blocker_resolution"]["volume"]["classification"] == (
+            "FORMAL_VOLUME_BLOCKED_SHADOW_MATURED_VOLUME_AVAILABLE"
+        )
+        assert gap["context_blocker_resolution"]["volume"]["promotion_allowed"] is False
+        assert gap["context_blocker_resolution"]["volume"]["allowed_use"] == (
+            "shadow_only_matured_volume_context"
+        )
         assert gap["largest_transition_dropoff"]["to_stage"] in {
             "detector_capture",
             "decision_capture",
@@ -5919,6 +6011,20 @@ def self_test():
         assert context["dimensions"]["volume"]["evidence"]["matured_volume_known_rate"] == 0.9
         assert context["dimensions"]["volume"]["research_only_recoverable"] is True
         assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
+        assert context["volume_blocker_resolution"]["classification"] == (
+            "FORMAL_VOLUME_BLOCKED_SHADOW_MATURED_VOLUME_AVAILABLE"
+        )
+        assert context["volume_blocker_resolution"]["formal_volume_dimension_status"] == STATUS_BLOCKED
+        assert context["volume_blocker_resolution"]["formal_volume_known_rate"] == 0.5
+        assert context["volume_blocker_resolution"]["formal_volume_primary_unknown_reason"] == (
+            "insufficient_kline_bars_lt_3"
+        )
+        assert context["volume_blocker_resolution"]["shadow_matured_volume_available"] is True
+        assert context["volume_blocker_resolution"]["shadow_matured_volume_status"] == STATUS_CLEAN
+        assert context["volume_blocker_resolution"]["shadow_matured_volume_known_rate"] == 0.9
+        assert context["volume_blocker_resolution"]["allowed_use"] == "shadow_only_matured_volume_context"
+        assert context["volume_blocker_resolution"]["promotion_allowed"] is False
+        assert context["volume_blocker_resolution"]["automatic_runtime_change_allowed"] is False
         assert context["dimensions"]["matured_volume"]["status"] == STATUS_CLEAN
         assert context["dimensions"]["matured_volume"]["allowed_use"] == "shadow_only_matured_volume_context"
         assert context["dimensions"]["matured_volume"]["eligible_for_capture_cross"] is True
