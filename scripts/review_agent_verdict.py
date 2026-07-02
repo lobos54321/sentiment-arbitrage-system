@@ -133,6 +133,7 @@ DERIVED_READINESS_SIBLINGS = {
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+    "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
@@ -1492,6 +1493,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     pass_allow_gap_audit = readiness_reports.get("pass_allow_capture_gap_audit") or {}
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
+    final_eligibility_60_closure_plan = readiness_reports.get("final_eligibility_60_closure_plan") or {}
     pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
     capture_cross_oos_freeze_registry = (
         readiness_reports.get("capture_cross_oos_freeze_registry")
@@ -1513,6 +1515,12 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     )
     pass_allow_60_research_only_priority_queue = (
         pass_allow_60_closure_plan.get("research_only_priority_queue") or []
+    )
+    final_eligibility_60_priority_queue = (
+        final_eligibility_60_closure_plan.get("prioritized_closure_queue") or []
+    )
+    final_eligibility_60_research_only_priority_queue = (
+        final_eligibility_60_closure_plan.get("research_only_priority_queue") or []
     )
     pass_allow_60_oos_queue = (
         oos_readiness_summary_v3.get("pass_allow_60_closure_oos_queue") or {}
@@ -1814,6 +1822,41 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 oos_readiness_summary_v3.get("next_pass_allow_60_closure_oos_action")
                 or pass_allow_60_oos_queue.get("next_action")
             ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        },
+        "final_eligibility_60_closure_priority_queue": {
+            "available": bool(final_eligibility_60_closure_plan),
+            "classification": final_eligibility_60_closure_plan.get("classification"),
+            "next_action": final_eligibility_60_closure_plan.get("next_action"),
+            "target_gap": final_eligibility_60_closure_plan.get("target_gap") or {},
+            "additional_count_needed_to_60": (
+                final_eligibility_60_closure_plan.get("additional_count_needed_to_60")
+                or (final_eligibility_60_closure_plan.get("target_gap") or {}).get(
+                    "additional_count_needed_to_60"
+                )
+                or capture_60_gap_report.get("current_target_additional_count_needed_to_60")
+            ),
+            "priority_queue_count": (
+                final_eligibility_60_closure_plan.get("priority_queue_count")
+                if final_eligibility_60_closure_plan.get("priority_queue_count") is not None
+                else len(final_eligibility_60_priority_queue)
+            ),
+            "research_only_priority_queue_count": (
+                final_eligibility_60_closure_plan.get("research_only_priority_queue_count")
+                if final_eligibility_60_closure_plan.get("research_only_priority_queue_count") is not None
+                else len(final_eligibility_60_research_only_priority_queue)
+            ),
+            "formal_non_dedup_upper_bound_event_count": (
+                final_eligibility_60_closure_plan.get("formal_non_dedup_upper_bound_event_count")
+            ),
+            "formal_tracks_can_cover_current_gap_upper_bound": (
+                final_eligibility_60_closure_plan.get("formal_tracks_can_cover_current_gap_upper_bound")
+            ),
+            "top_priority_items": final_eligibility_60_priority_queue[:8],
+            "research_only_top_priority_items": final_eligibility_60_research_only_priority_queue[:5],
             "promotion_allowed": False,
             "strategy_change_allowed": False,
             "automatic_runtime_change_allowed": False,

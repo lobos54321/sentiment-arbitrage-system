@@ -3966,6 +3966,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
     oos_data = post_freeze.get("oos_data_availability") or {}
     source_activity = post_freeze.get("post_freeze_source_activity") or oos_data.get("post_freeze_source_activity") or {}
     pass_allow_priority = verdict.get("pass_allow_60_closure_priority_queue") or {}
+    final_eligibility_priority = verdict.get("final_eligibility_60_closure_priority_queue") or {}
     pass_allow_freeze_priority = verdict.get("pass_allow_60_oos_freeze_priority_queue") or {}
     pass_allow_oos_queue = verdict.get("pass_allow_60_closure_oos_queue") or {}
     lines = [
@@ -4006,6 +4007,11 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- primary_operating_target_rate: `{(verdict.get('capture_60_target_loop') or {}).get('primary_operating_target_rate') or (verdict.get('capture_60_target_loop') or {}).get('current_target_rate')}`",
         f"- primary_operating_additional_count_needed_to_60: `{(verdict.get('capture_60_target_loop') or {}).get('primary_operating_additional_count_needed_to_60') or (verdict.get('capture_60_target_loop') or {}).get('current_target_additional_count_needed_to_60')}`",
         f"- primary_operating_next_best_allowed_action: `{(verdict.get('capture_60_target_loop') or {}).get('primary_operating_next_best_allowed_action') or (verdict.get('capture_60_target_loop') or {}).get('current_target_next_best_allowed_action')}`",
+        f"- final_eligibility_60_closure_classification: `{final_eligibility_priority.get('classification')}`",
+        f"- final_eligibility_60_closure_next_action: `{final_eligibility_priority.get('next_action')}`",
+        f"- final_eligibility_60_closure_priority_queue_count: `{final_eligibility_priority.get('priority_queue_count')}`",
+        f"- final_eligibility_60_closure_research_only_queue_count: `{final_eligibility_priority.get('research_only_priority_queue_count')}`",
+        f"- final_eligibility_60_formal_tracks_can_cover_gap_upper_bound: `{final_eligibility_priority.get('formal_tracks_can_cover_current_gap_upper_bound')}`",
         f"- decision_capture_60_gap_classification: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('classification')}`",
         f"- decision_capture_60_shadow_bridge_mirror_complete: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('shadow_bridge_mirror_complete')}`",
         f"- decision_capture_60_optimistic_rate_if_shadow_gap_logged: `{(verdict.get('decision_capture_60_gap_audit') or {}).get('optimistic_decision_record_rate_if_shadow_gap_logged')}`",
@@ -4514,6 +4520,7 @@ def write_materialized_artifacts(
             "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
             "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
             "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+            "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
             "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
             "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
             "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
@@ -5329,6 +5336,7 @@ def self_test():
             "context_dimension_eligibility.json",
             "pass_allow_capture_gap_audit.json",
             "decision_no_pass_quality_timing_review.json",
+            "final_eligibility_60_closure_plan.json",
             "pending_to_final_entry_audit.json",
             "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation.json",

@@ -75,6 +75,7 @@ V3_OUTPUT_FILES = {
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
+    "final_eligibility_60_closure_plan": "final_eligibility_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
@@ -3440,6 +3441,355 @@ def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     }
 
 
+def build_final_eligibility_60_closure_plan(
+    stage_metrics,
+    pending_audit,
+    shadow_queue,
+    capture_cross,
+    context_eligibility,
+):
+    stage_counts = stage_metrics.get("stage_counts") or {}
+    target_60 = safe_int(stage_counts.get("target_60_count"), 0)
+    current = safe_int(
+        (stage_counts.get("mode_disabled_adjusted_final_eligibility") or {}).get("count"),
+        0,
+    )
+    additional_needed = max(0, target_60 - current)
+    clean_dimension_groups = set(context_eligibility.get("clean_dimensions") or [])
+    blocked_dimension_groups = set(context_eligibility.get("blocked_dimensions") or [])
+    allowed_dimension_statuses = {"CLEAN", "CORE_METADATA_ALLOWED"}
+
+    pending_rows = []
+    for row in pending_audit.get("pending_no_final_entry_category_rows") or []:
+        if not isinstance(row, dict):
+            continue
+        category = row.get("category")
+        event_count = safe_int(row.get("event_count"), 0)
+        if event_count <= 0:
+            continue
+        pending_rows.append({
+            "plan_item_id": f"pending_to_final:{category}",
+            "evidence_source": "pending_to_final_entry_audit",
+            "priority_bucket": "P0_DIRECT_PENDING_TO_FINAL_CATEGORY",
+            "category": category,
+            "expected_capture_stage_improved": "final_eligibility",
+            "non_dedup_upper_bound_event_count": event_count,
+            "share_of_pending_without_final": row.get("share_of_pending_without_final"),
+            "share_of_adjacent_transition_dropoff_upper_bound": row.get(
+                "share_of_adjacent_transition_dropoff_upper_bound"
+            ),
+            "top_reasons": [
+                reason
+                for source in row.get("source_categories") or []
+                for reason in (source.get("top_reasons") or [])
+            ][:8],
+            "status": "PENDING_SHADOW_REVIEW_THEN_CLEAN_OOS",
+            "next_action": row.get("next_action"),
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    upstream_rows = []
+    dropoff_counts = pending_audit.get("dropoff_counts") or {}
+    upstream_specs = [
+        (
+            "no_decision",
+            "P3_UPSTREAM_NO_DECISION_BRIDGE",
+            "decision_capture",
+            "audit_shadow_entry_hypotheses_matched_no_decision_bridge",
+        ),
+        (
+            "decision_no_pass_allow",
+            "P2_UPSTREAM_PASS_ALLOW_GAP",
+            "pass_allow_capture",
+            "use_pass_allow_60_closure_plan_then_revalidate_final_eligibility",
+        ),
+        (
+            "pass_allow_no_pending",
+            "P2_UPSTREAM_PENDING_GAP",
+            "pending_capture",
+            "audit_pass_allow_to_pending_bridge_shadow_only",
+        ),
+        (
+            "pending_no_final_entry",
+            "P1_PENDING_TO_FINAL_GAP",
+            "final_eligibility",
+            "audit_pending_to_final_entry_stale_before_final_shadow_only",
+        ),
+    ]
+    for key, bucket, stage, action in upstream_specs:
+        count = safe_int(dropoff_counts.get(key), 0)
+        if count <= 0:
+            continue
+        upstream_rows.append({
+            "plan_item_id": f"upstream_transition:{key}",
+            "evidence_source": "pending_to_final_entry_audit.dropoff_counts",
+            "priority_bucket": bucket,
+            "transition": key,
+            "expected_capture_stage_improved": stage,
+            "non_dedup_upper_bound_event_count": count,
+            "requires_downstream_revalidation": True,
+            "status": "UPSTREAM_BRIDGE_REQUIRED_BEFORE_FINAL_ELIGIBILITY_CAN_BE_PROVEN",
+            "next_action": action,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    shadow_final_rows = []
+    for row in shadow_queue.get("items") or shadow_queue.get("queue") or shadow_queue.get("top_items") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("expected_capture_stage_improved") != "final_eligibility":
+            continue
+        evidence = row.get("evidence") or {}
+        impact = evidence.get("readiness_impact_upper_bound") or {}
+        contribution = safe_int(
+            impact.get("events_contributing_to_60pct_gap_upper_bound")
+            or evidence.get("event_count")
+            or evidence.get("cluster_event_count"),
+            0,
+        )
+        shadow_final_rows.append({
+            "plan_item_id": f"shadow_queue:{row.get('candidate_id')}",
+            "evidence_source": "shadow_candidate_improvement_queue",
+            "priority_bucket": "P1_SHADOW_FINAL_ELIGIBILITY_PROBE",
+            "candidate_id": row.get("candidate_id"),
+            "hypothesis_source": row.get("hypothesis_source"),
+            "expected_capture_stage_improved": "final_eligibility",
+            "non_dedup_upper_bound_event_count": contribution,
+            "event_count": evidence.get("event_count") or evidence.get("cluster_event_count"),
+            "context_blockers": row.get("context_blockers") or [],
+            "required_features": row.get("required_features") or [],
+            "time_legal_status": row.get("time_legal_status"),
+            "status": "SHADOW_ONLY_FINAL_ELIGIBILITY_PROBE",
+            "next_action": row.get("next_action"),
+            "human_approval_required_if_fix_requires": row.get(
+                "human_approval_required_if_fix_requires"
+            ),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+
+    clean_cross_rows = []
+    blocked_cross_rows = []
+
+    def canonical_dimension_group(dimension, dimension_group):
+        if dimension_group:
+            return dimension_group
+        if dimension == "volume_profile":
+            return "volume"
+        if dimension in {"candle_pattern", "fbr_time_legal", "kline_available", "kline_coverage"}:
+            return "kline"
+        return dimension
+
+    for row in capture_cross.get("valid_crosses") or capture_cross.get("valid_top_crosses") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("judgment") not in {"DISCOVERY_HIT", "WATCH"}:
+            continue
+        final_lift = safe_float(row.get("final_entry_lift"), 0.0)
+        mode_lift = safe_float(row.get("mode_adjusted_final_eligibility_lift"), 0.0)
+        if final_lift <= 0 and mode_lift <= 0:
+            continue
+        dimension = row.get("dimension")
+        dimension_group = canonical_dimension_group(dimension, row.get("dimension_group"))
+        dimension_status = row.get("dimension_eligibility_status")
+        candidate_blockers = [
+            f"{dim}_candidate_feature_blocked_by_context_dimension_eligibility"
+            for dim in blocked_candidate_dimensions(row.get("candidate_id"), row.get("family"))
+            if dim in blocked_dimension_groups
+        ]
+        dimension_allowed = (
+            dimension_group not in blocked_dimension_groups
+            and not candidate_blockers
+            and (
+                dimension_status in allowed_dimension_statuses
+                or dimension_group in clean_dimension_groups
+            )
+        )
+        context_blockers = list(row.get("data_blockers") or []) + list(row.get("invalid_reasons") or [])
+        context_blockers.extend(candidate_blockers)
+        if not dimension_allowed:
+            context_blockers.append(f"{dimension_group or dimension or 'dimension'}_not_clean_for_final_eligibility_cross")
+        item = {
+            "plan_item_id": f"final_2d:{row.get('candidate_id')}:{dimension}={row.get('slice_value')}",
+            "evidence_source": "capture_cross_validity_24h",
+            "candidate_id": row.get("candidate_id"),
+            "family": row.get("family"),
+            "dimension": dimension,
+            "dimension_group": dimension_group,
+            "dimension_eligibility_status": (
+                "BLOCKED_CONTEXT_COVERAGE" if context_blockers else dimension_status
+            ),
+            "source_dimension_eligibility_status": dimension_status,
+            "slice_value": row.get("slice_value"),
+            "expected_capture_stage_improved": "final_eligibility",
+            "matched_gold_silver_events": row.get("matched_gold_silver_events"),
+            "non_dedup_upper_bound_event_count": safe_int(row.get("matched_gold_silver_events"), 0),
+            "final_entry_lift": row.get("final_entry_lift"),
+            "mode_adjusted_final_eligibility_lift": row.get("mode_adjusted_final_eligibility_lift"),
+            "context_blockers": sorted(set(context_blockers)),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        if context_blockers:
+            item.update({
+                "priority_bucket": "R_BLOCKED_FINAL_2D_RESEARCH_ONLY",
+                "status": "RESEARCH_ONLY_CONTEXT_BLOCKED",
+                "next_action": "hold_until_context_dimension_clean_before_final_eligibility_oos",
+                "formal_closure_eligible": False,
+            })
+            blocked_cross_rows.append(item)
+        else:
+            item.update({
+                "priority_bucket": "P2_CLEAN_2D_FINAL_ELIGIBILITY_LIFT",
+                "status": "DISCOVERY_SAME_WINDOW_ONLY",
+                "next_action": "freeze_same_definition_for_final_eligibility_oos_if_repeated",
+                "formal_closure_eligible": True,
+            })
+            clean_cross_rows.append(item)
+
+    def priority_weight(bucket):
+        if str(bucket or "").startswith("P0_"):
+            return 5
+        if str(bucket or "").startswith("P1_"):
+            return 4
+        if str(bucket or "").startswith("P2_"):
+            return 3
+        if str(bucket or "").startswith("P3_"):
+            return 2
+        return 1
+
+    formal_rows = pending_rows + upstream_rows + shadow_final_rows + clean_cross_rows
+    formal_rows = sorted(
+        formal_rows,
+        key=lambda row: (
+            priority_weight(row.get("priority_bucket")),
+            safe_float(row.get("non_dedup_upper_bound_event_count"), 0.0),
+            max(0.0, safe_float(row.get("mode_adjusted_final_eligibility_lift"), 0.0)),
+            max(0.0, safe_float(row.get("final_entry_lift"), 0.0)),
+            str(row.get("plan_item_id") or ""),
+        ),
+        reverse=True,
+    )
+    for idx, row in enumerate(formal_rows, 1):
+        row["priority_rank"] = idx
+        row.setdefault("formal_closure_eligible", not bool(row.get("context_blockers")))
+
+    blocked_cross_rows = sorted(
+        blocked_cross_rows,
+        key=lambda row: (
+            safe_float(row.get("non_dedup_upper_bound_event_count"), 0.0),
+            max(0.0, safe_float(row.get("mode_adjusted_final_eligibility_lift"), 0.0)),
+            max(0.0, safe_float(row.get("final_entry_lift"), 0.0)),
+        ),
+        reverse=True,
+    )
+    for idx, row in enumerate(blocked_cross_rows, 1):
+        row["priority_rank"] = idx
+
+    formal_upper_bound = sum(safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in formal_rows)
+    direct_pending_upper_bound = sum(safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in pending_rows)
+    blocked_upper_bound = sum(safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in blocked_cross_rows)
+    if additional_needed <= 0:
+        classification = "FINAL_ELIGIBILITY_60_CLOSURE_NOT_NEEDED"
+        next_action = "final_eligibility_target_reached_continue_oos_and_paper_readiness"
+    elif formal_rows:
+        classification = "FINAL_ELIGIBILITY_60_CLOSURE_PLAN_READY_PENDING_SHADOW_AND_OOS"
+        next_action = "audit_pending_to_final_stale_before_final_and_track_final_eligibility_queue_shadow_only"
+    else:
+        classification = "FINAL_ELIGIBILITY_60_CLOSURE_PLAN_EMPTY"
+        next_action = "continue_final_eligibility_gap_decomposition"
+
+    return {
+        "schema_version": "final_eligibility_60_closure_plan.v1",
+        "report_type": "final_eligibility_60_closure_plan",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "evidence_level": "discovery_readiness_shadow_only",
+        "target_stage": "mode_disabled_adjusted_final_eligibility",
+        "target_gap": {
+            "target_60_count": target_60,
+            "current_count": current,
+            "additional_count_needed_to_60": additional_needed,
+            "current_rate": (stage_counts.get("mode_disabled_adjusted_final_eligibility") or {}).get("rate"),
+        },
+        "additional_count_needed_to_60": additional_needed,
+        "next_action": next_action,
+        "closure_tracks": {
+            "pending_to_final_categories": {
+                "count": len(pending_rows),
+                "non_dedup_upper_bound_event_count": direct_pending_upper_bound,
+                "top_items": pending_rows[:10],
+            },
+            "upstream_transition_gaps": {
+                "count": len(upstream_rows),
+                "non_dedup_upper_bound_event_count": sum(
+                    safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in upstream_rows
+                ),
+                "top_items": upstream_rows[:10],
+            },
+            "shadow_queue_final_eligibility_items": {
+                "count": len(shadow_final_rows),
+                "non_dedup_upper_bound_event_count": sum(
+                    safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in shadow_final_rows
+                ),
+                "top_items": shadow_final_rows[:10],
+            },
+            "clean_2d_final_eligibility_lift_slices": {
+                "count": len(clean_cross_rows),
+                "non_dedup_upper_bound_event_count": sum(
+                    safe_int(row.get("non_dedup_upper_bound_event_count"), 0) for row in clean_cross_rows
+                ),
+                "top_items": clean_cross_rows[:10],
+            },
+        },
+        "priority_queue_count": len(formal_rows),
+        "prioritized_closure_queue": formal_rows[:80],
+        "research_only_priority_queue_count": len(blocked_cross_rows),
+        "research_only_priority_queue": blocked_cross_rows[:50],
+        "formal_non_dedup_upper_bound_event_count": formal_upper_bound,
+        "research_only_non_dedup_upper_bound_event_count": blocked_upper_bound,
+        "formal_tracks_can_cover_current_gap_upper_bound": (
+            formal_upper_bound >= additional_needed if additional_needed else True
+        ),
+        "context_constraints": {
+            "clean_dimensions": sorted(clean_dimension_groups),
+            "blocked_dimensions": sorted(blocked_dimension_groups),
+            "blocked_context_slices_excluded_from_formal_closure": True,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "human_approval_required_if_fix_requires": [
+            "changing strategy thresholds",
+            "changing final_entry_contract",
+            "enabling A_CLASS",
+            "enabling paper/live executor",
+            "relaxing gates",
+            "changing canary or risk settings",
+        ],
+        "notes": [
+            "This is a non-deduped same-window readiness closure plan for the active final-eligibility target.",
+            "Rows are shadow-only/evaluator evidence and cannot justify production, final_entry_contract, A_CLASS, executor, paper/live, canary, or risk changes.",
+            "Blocked volume/kline/context rows are kept in research_only_priority_queue and excluded from formal closure evidence.",
+            "Upstream transition rows require downstream revalidation before they can count as final eligibility evidence.",
+        ],
+    }
+
+
 def build_strategy_memory_capture_validation(reports):
     validation = reports.get("strategy_memory_validation") or {}
     ingestion = reports.get("strategy_memory_ingestion") or {}
@@ -5538,6 +5888,14 @@ def assemble_reports(run_dir, out_dir=None):
         context_eligibility,
     )
     reports["pass_allow_60_closure_plan"] = pass_allow_closure_plan
+    final_eligibility_closure_plan = build_final_eligibility_60_closure_plan(
+        stage_metrics,
+        pending_audit,
+        shadow_queue,
+        reports["capture_cross"],
+        context_eligibility,
+    )
+    reports["final_eligibility_60_closure_plan"] = final_eligibility_closure_plan
     previous_pass_allow_freeze_registry = load_json(
         run_dir / V3_OUTPUT_FILES["pass_allow_60_oos_freeze_registry"],
         {},
@@ -5574,6 +5932,7 @@ def assemble_reports(run_dir, out_dir=None):
         "pass_allow_capture_gap_audit": pass_allow_gap_audit,
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
+        "final_eligibility_60_closure_plan": final_eligibility_closure_plan,
         "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
         "pass_allow_60_oos_readiness_monitor": pass_allow_oos_monitor,
         "capture_cross_oos_freeze_registry": capture_cross_freeze_registry,
@@ -5605,6 +5964,8 @@ def assemble_reports(run_dir, out_dir=None):
             "decision_no_pass_review_next_action": decision_no_pass_review.get("next_action"),
             "pass_allow_60_closure_classification": pass_allow_closure_plan.get("classification"),
             "pass_allow_60_closure_next_action": pass_allow_closure_plan.get("next_action"),
+            "final_eligibility_60_closure_classification": final_eligibility_closure_plan.get("classification"),
+            "final_eligibility_60_closure_next_action": final_eligibility_closure_plan.get("next_action"),
             "pass_allow_60_oos_freeze_classification": pass_allow_freeze_registry.get("classification"),
             "pass_allow_60_oos_frozen_definition_count": (
                 pass_allow_freeze_registry.get("frozen_definition_count")
@@ -6278,6 +6639,19 @@ def self_test():
             and row.get("promotion_allowed") is False
             for row in closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"]
         )
+        final_closure = load_json(run_dir / "final_eligibility_60_closure_plan.json")
+        assert final_closure["schema_version"] == "final_eligibility_60_closure_plan.v1"
+        assert final_closure["promotion_allowed"] is False
+        assert final_closure["target_stage"] == "mode_disabled_adjusted_final_eligibility"
+        assert final_closure["target_gap"]["additional_count_needed_to_60"] == 2
+        assert final_closure["priority_queue_count"] >= 1
+        assert final_closure["prioritized_closure_queue"]
+        assert final_closure["prioritized_closure_queue"][0]["priority_rank"] == 1
+        assert all(
+            item["promotion_allowed"] is False
+            for item in final_closure["prioritized_closure_queue"]
+        )
+        assert "pending_to_final_categories" in final_closure["closure_tracks"]
         freeze_registry = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
