@@ -4815,6 +4815,7 @@ def write_materialized_artifacts(
             "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
             "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
             "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",
+            "volume_blocker_closure_plan": "volume_blocker_closure_plan.json",
             "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
             "final_entry_readiness_audit": "final_entry_readiness_audit.json",
             "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
