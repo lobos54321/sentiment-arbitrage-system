@@ -27,13 +27,14 @@ except Exception:  # pragma: no cover - self-contained fallback for import edge 
     build_oos_readiness_summary = None
 
 
-SCHEMA_VERSION = "capture_60_target_loop.v1"
+SCHEMA_VERSION = "capture_60_target_loop.v2"
 TARGET_RATE = 0.60
 STATUS_CLEAN = "CLEAN"
 STATUS_PENDING = "CLEAN_WINDOW_PENDING"
 STATUS_WRITER_BUG = "WRITER_BUG_PERSISTS"
 STATUS_NA = "NOT_APPLICABLE"
 STATUS_BLOCKED = "BLOCKED_UNKNOWN"
+BLOCKED_CONTEXT_DIMENSIONS = ["kline", "volume"]
 
 REQUIRED_FILES = {
     "capture": "capture_discovery_24h.json",
@@ -2634,6 +2635,41 @@ def quality_timing_required_features(row):
     return required
 
 
+def blocked_candidate_dimensions(candidate_id, family):
+    candidate_text = str(candidate_id or "").lower()
+    family_text = str(family or "").lower()
+    dimensions = []
+    if family_text == "kline" or candidate_text.startswith("kline:"):
+        dimensions.append("kline")
+    if family_text == "volume" or any(
+        marker in candidate_text
+        for marker in ("volume", "lowvol", "low_vol", "vol_", "_vol")
+    ):
+        dimensions.append("volume")
+    return sorted(set(dimensions))
+
+
+def is_blocked_quality_timing_candidate(candidate):
+    if not isinstance(candidate, dict):
+        return True
+    if candidate.get("blocked_context_dimensions"):
+        return True
+    return bool(blocked_candidate_dimensions(candidate.get("candidate_id"), candidate.get("family")))
+
+
+def quality_timing_candidate_source_rows(row):
+    if not isinstance(row, dict):
+        return []
+    candidates = row.get("top_clean_candidates")
+    if candidates:
+        return [candidate for candidate in candidates if not is_blocked_quality_timing_candidate(candidate)]
+    return [
+        candidate
+        for candidate in (row.get("top_candidates") or [])
+        if not is_blocked_quality_timing_candidate(candidate)
+    ]
+
+
 def quality_timing_context_blockers(row, context_eligibility):
     blockers = []
     dimensions = context_eligibility.get("dimensions") or {}
@@ -2940,13 +2976,15 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
                 "candidate_matched_any_rate": row.get("candidate_matched_any_rate"),
                 "readiness_impact_upper_bound": row.get("readiness_impact_upper_bound") or {},
                 "top_candidates": (row.get("top_candidates") or [])[:5],
+                "top_clean_candidates": (row.get("top_clean_candidates") or [])[:5],
+                "top_blocked_candidates": (row.get("top_blocked_candidates") or [])[:5],
                 "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:5],
             },
             "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
             "next_action": row.get("suggested_shadow_only_action")
             or "track_quality_timing_false_negative_shadow_probe",
         })
-        for candidate in (row.get("top_candidates") or [])[:2]:
+        for candidate in quality_timing_candidate_source_rows(row)[:2]:
             candidate_id = candidate.get("candidate_id")
             if not candidate_id or candidate_id in {"current_all", "current_would_enter_all"}:
                 continue
@@ -2976,7 +3014,7 @@ def build_shadow_candidate_improvement_queue(reports, context_eligibility):
     status_counts = Counter(row.get("hypothesis_source") for row in items)
     top_items = items[:75]
     return {
-        "schema_version": "shadow_candidate_improvement_queue.v2",
+        "schema_version": "shadow_candidate_improvement_queue.v3",
         "report_type": "shadow_candidate_improvement_queue",
         "generated_at": utc_now(),
         "promotion_allowed": False,
@@ -3515,6 +3553,10 @@ def create_self_test_run(root):
                     "top_candidates": [
                         {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2}
                     ],
+                    "top_clean_candidates": [
+                        {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2}
+                    ],
+                    "top_blocked_candidates": [],
                     "top_lifecycle_source_contexts": [
                         {
                             "lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE",
@@ -3540,6 +3582,22 @@ def create_self_test_run(root):
                             "candidate_id": "entry_mode_registry:smart_entry_pullback_bounce",
                             "family": "entry_mode_registry",
                             "count": 1,
+                        },
+                    ],
+                    "top_clean_candidates": [
+                        {
+                            "candidate_id": "entry_mode_registry:smart_entry_pullback_bounce",
+                            "family": "entry_mode_registry",
+                            "count": 1,
+                            "blocked_context_dimensions": [],
+                        },
+                    ],
+                    "top_blocked_candidates": [
+                        {
+                            "candidate_id": "kline:first_bar_return_filters",
+                            "family": "kline",
+                            "count": 1,
+                            "blocked_context_dimensions": ["kline"],
                         },
                     ],
                     "top_lifecycle_source_contexts": [
@@ -3791,7 +3849,7 @@ def self_test():
         assert strategy["hypotheses_count"] == 1
         queue = load_json(run_dir / "shadow_candidate_improvement_queue.json")
         assert queue["promotion_allowed"] is False
-        assert queue["schema_version"] == "shadow_candidate_improvement_queue.v2"
+        assert queue["schema_version"] == "shadow_candidate_improvement_queue.v3"
         assert queue["queue_count"] >= 3
         assert queue["source_counts"]["quality_timing_reject_cluster"] == 2
         assert queue["source_counts"]["clean_2d_capture_cross_slice"] == 1
@@ -3799,6 +3857,19 @@ def self_test():
         assert queue["source_counts"]["pending_momentum_decay_shadow_probe"] == 3
         assert queue["source_counts"]["pending_to_final_transition_dropoff_category"] == 1
         assert queue["top_opportunities"] == queue["top_items"]
+        qt_probe_items = [
+            item for item in queue["top_items"]
+            if item.get("hypothesis_source") == "quality_timing_candidate_probe"
+        ]
+        assert qt_probe_items
+        assert all(
+            not str(item.get("candidate_id") or "").startswith("kline:")
+            for item in qt_probe_items
+        )
+        assert all(
+            str((item.get("evidence") or {}).get("candidate_family") or "").lower() != "kline"
+            for item in qt_probe_items
+        )
         assert any(
             item.get("candidate_id") == "quality_timing:matrix_alignment_wait"
             and item.get("expected_capture_stage_improved") == "pass_allow_capture"
