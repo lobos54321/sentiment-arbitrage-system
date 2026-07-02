@@ -214,8 +214,11 @@ def stage_selftests(args, run_dir):
 
 def stage_capture(args, run_dir):
     rows = []
-    for hours in parse_stage_capture_hours(args.capture_hours, int(args.hours), bool(args.capture_exact)):
+    capture_hours = parse_stage_capture_hours(args.capture_hours, int(args.hours), bool(args.capture_exact))
+    capture_paths = []
+    for hours in capture_hours:
         path = run_dir / f"capture_discovery_{hours}h.json"
+        capture_paths.append(path)
         rows.append(run_report(
             f"capture_discovery_{hours}h",
             [
@@ -230,10 +233,11 @@ def stage_capture(args, run_dir):
             path,
             timeout=int(args.report_timeout_sec),
         ))
-    primary = run_dir / f"capture_discovery_{int(args.hours)}h.json"
+    default_primary = run_dir / f"capture_discovery_{int(args.hours)}h.json"
+    primary = default_primary if default_primary.exists() else (capture_paths[0] if capture_paths else default_primary)
     legacy = run_dir / f"candidate_capture_discovery_{int(args.hours)}h.json"
-    if primary.exists() and legacy != primary:
-        shutil.copy2(primary, legacy)
+    if default_primary.exists() and legacy != default_primary:
+        shutil.copy2(default_primary, legacy)
     append_diagnostics(run_dir, rows)
     update_stage_state(
         run_dir,
