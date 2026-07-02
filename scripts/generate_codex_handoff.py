@@ -889,25 +889,63 @@ def build_handoff(verdict):
         ])
     quality_timing = verdict.get("quality_timing_reject_research_audit") or {}
     if quality_timing:
+        quality_timing_review = quality_timing.get("shadow_only_review") or {}
+        quality_timing_denominator = quality_timing.get("denominator") or {}
+        quality_timing_impact = quality_timing.get("readiness_impact_upper_bound") or {}
+        quality_timing_opportunities = quality_timing_review.get("top_research_opportunities") or []
+        quality_timing_top_clusters = quality_timing.get("top_quality_timing_clusters") or [
+            {
+                "cluster": row.get("cluster"),
+                "event_count": row.get("event_count"),
+                "share_of_quality_timing_rejects": row.get("share_of_quality_timing_rejects"),
+                "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
+                "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+                "next_validation": row.get("next_validation"),
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+                "paper_enablement_allowed": False,
+            }
+            for row in quality_timing_opportunities[:8]
+        ]
+        quality_timing_dominant = quality_timing_opportunities[0] if quality_timing_opportunities else {}
+        quality_timing_next_action = (
+            quality_timing.get("next_action")
+            or quality_timing_dominant.get("suggested_shadow_only_action")
+            or ((quality_timing.get("shadow_only_next_actions") or [None])[0])
+        )
         quality_timing_payload = {
             "summary": {
                 "available": quality_timing.get("available"),
-                "classification": quality_timing.get("classification"),
+                "classification": quality_timing.get("classification") or quality_timing.get("verdict"),
                 "verdict": quality_timing.get("verdict"),
-                "next_action": quality_timing.get("next_action"),
-                "dominant_cluster": quality_timing.get("dominant_cluster"),
-                "dominant_stage": quality_timing.get("dominant_stage"),
+                "next_action": quality_timing_next_action,
+                "dominant_cluster": (
+                    quality_timing.get("dominant_cluster")
+                    or quality_timing_review.get("dominant_cluster")
+                    or quality_timing_dominant.get("cluster")
+                ),
+                "dominant_stage": (
+                    quality_timing.get("dominant_stage")
+                    or quality_timing_review.get("dominant_stage")
+                ),
                 "quality_timing_reject_event_rows": (
                     quality_timing.get("quality_timing_reject_event_rows")
+                    or quality_timing_denominator.get("quality_timing_reject_event_rows")
                 ),
                 "quality_timing_reject_share_of_raw_all": (
                     quality_timing.get("quality_timing_reject_share_of_raw_all")
+                    or quality_timing_denominator.get("quality_timing_reject_share_of_raw_all")
                 ),
                 "current_final_entry_contract_rate": (
                     quality_timing.get("current_final_entry_contract_rate")
+                    or quality_timing_impact.get("current_final_entry_contract_rate")
                 ),
                 "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
                     quality_timing.get(
+                        "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"
+                    )
+                    or quality_timing_impact.get(
                         "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"
                     )
                 ),
@@ -915,24 +953,32 @@ def build_handoff(verdict):
                     quality_timing.get(
                         "residual_gap_to_60pct_after_all_quality_timing_upper_bound"
                     )
+                    or quality_timing_impact.get(
+                        "residual_gap_to_60pct_after_all_quality_timing_upper_bound"
+                    )
                 ),
                 "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
                     quality_timing.get(
                         "would_all_quality_timing_resolution_reach_60pct_upper_bound"
                     )
+                    if quality_timing.get(
+                        "would_all_quality_timing_resolution_reach_60pct_upper_bound"
+                    ) is not None
+                    else quality_timing_impact.get(
+                        "would_all_quality_timing_resolution_reach_60pct_upper_bound"
+                    )
                 ),
                 "human_approval_required_if_fix_requires": (
                     quality_timing.get("human_approval_required_if_fix_requires")
+                    or quality_timing_dominant.get("human_approval_required_if_fix_requires")
                 ),
                 "promotion_allowed": False,
                 "strategy_change_allowed": False,
                 "automatic_runtime_change_allowed": False,
                 "paper_enablement_allowed": False,
             },
-            "top_quality_timing_clusters": (
-                quality_timing.get("top_quality_timing_clusters") or []
-            )[:8],
-            "denominator": quality_timing.get("denominator") or {},
+            "top_quality_timing_clusters": quality_timing_top_clusters[:8],
+            "denominator": quality_timing_denominator,
             "candidate_match_attribution": quality_timing.get("candidate_match_attribution") or {},
             "blocked_context_dimensions_excluded_view": (
                 quality_timing.get("blocked_context_dimensions_excluded_view") or {}
