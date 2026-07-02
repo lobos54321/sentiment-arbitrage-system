@@ -633,6 +633,73 @@ def build_blocked_context_excluded_view(
     }
 
 
+def build_top_level_summary(*, verdict, blockers, denominator, readiness_impact, shadow_review):
+    opportunities = (shadow_review or {}).get("top_research_opportunities") or []
+    dominant = opportunities[0] if opportunities else {}
+    if blockers:
+        next_action = "fix_quality_timing_audit_data_blockers"
+    elif dominant:
+        next_action = dominant.get("suggested_shadow_only_action") or "review_shadow_candidates_for_quality_timing_rejects"
+    else:
+        next_action = "continue_collecting_quality_timing_reject_evidence"
+    top_clusters = []
+    for row in opportunities[:8]:
+        top_clusters.append({
+            "cluster": row.get("cluster"),
+            "event_count": row.get("event_count"),
+            "share_of_quality_timing_rejects": row.get("share_of_quality_timing_rejects"),
+            "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
+            "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
+            "next_validation": row.get("next_validation"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    return {
+        "classification": verdict,
+        "next_action": next_action,
+        "dominant_cluster": dominant.get("cluster"),
+        "dominant_stage": (shadow_review or {}).get("dominant_stage"),
+        "quality_timing_reject_event_rows": (denominator or {}).get("quality_timing_reject_event_rows"),
+        "quality_timing_reject_share_of_raw_all": (denominator or {}).get("quality_timing_reject_share_of_raw_all"),
+        "raw_all_gold_silver_event_rows": (denominator or {}).get("raw_all_gold_silver_event_rows"),
+        "current_final_entry_contract_rate": (readiness_impact or {}).get("current_final_entry_contract_rate"),
+        "current_final_entry_contract_signal_count": (
+            readiness_impact or {}
+        ).get("current_final_entry_contract_signal_count"),
+        "target_final_eligibility_event_count": (readiness_impact or {}).get("target_final_eligibility_event_count"),
+        "current_gap_to_60pct_event_count": (readiness_impact or {}).get("current_gap_to_60pct_event_count"),
+        "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
+            readiness_impact or {}
+        ).get("upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"),
+        "residual_gap_to_60pct_after_all_quality_timing_upper_bound": (
+            readiness_impact or {}
+        ).get("residual_gap_to_60pct_after_all_quality_timing_upper_bound"),
+        "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
+            readiness_impact or {}
+        ).get("would_all_quality_timing_resolution_reach_60pct_upper_bound"),
+        "top_quality_timing_clusters": top_clusters,
+        "allowed_scope": (shadow_review or {}).get("allowed_scope") or [
+            "read-only evaluator/report improvements",
+            "shadow-only candidate or context instrumentation",
+        ],
+        "human_approval_required_if_fix_requires": (
+            dominant.get("human_approval_required_if_fix_requires")
+            or "changing strategy, entry policy, gate, final_entry, runtime mode, executor, or risk"
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "interpretation": (
+            "Top-level read-only summary for the quality/timing reject audit. "
+            "It ranks shadow-only research targets and does not authorize runtime, strategy, gate, "
+            "final_entry_contract, paper, executor, canary, or risk changes."
+        ),
+    }
+
+
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
@@ -855,6 +922,25 @@ def build_report(args):
             readiness_impact_upper_bound=readiness_impact_upper_bound,
             limit=args.limit,
         )
+        denominator = {
+            "raw_all_gold_silver_event_rows": len(raw_rows),
+            "raw_all_gold_silver_unique_tokens": len({row.get("token_ca") for row in raw_rows if row.get("token_ca")}),
+            "quality_timing_reject_event_rows": qt_count,
+            "quality_timing_reject_unique_tokens": len({
+                (audits_by_signal.get(signal_id) or {}).get("token_ca")
+                for signal_id in qt_events
+                if (audits_by_signal.get(signal_id) or {}).get("token_ca")
+            }),
+            "quality_timing_reject_share_of_raw_all": rate(qt_count, len(raw_rows)),
+            "quality_timing_reject_share_of_raw_all_pct": pct(qt_count, len(raw_rows)),
+        }
+        summary = build_top_level_summary(
+            verdict=verdict,
+            blockers=blockers,
+            denominator=denominator,
+            readiness_impact=readiness_impact_upper_bound,
+            shadow_review=shadow_only_review,
+        )
 
         return {
             "schema_version": SCHEMA_VERSION,
@@ -870,20 +956,29 @@ def build_report(args):
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
             "final_entry_contract_change_allowed": False,
+            "classification": summary["classification"],
+            "next_action": summary["next_action"],
+            "dominant_cluster": summary["dominant_cluster"],
+            "dominant_stage": summary["dominant_stage"],
+            "quality_timing_reject_event_rows": summary["quality_timing_reject_event_rows"],
+            "quality_timing_reject_share_of_raw_all": summary["quality_timing_reject_share_of_raw_all"],
+            "current_final_entry_contract_rate": summary["current_final_entry_contract_rate"],
+            "upper_bound_final_eligibility_rate_if_all_quality_timing_resolved": (
+                summary["upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"]
+            ),
+            "would_all_quality_timing_resolution_reach_60pct_upper_bound": (
+                summary["would_all_quality_timing_resolution_reach_60pct_upper_bound"]
+            ),
+            "residual_gap_to_60pct_after_all_quality_timing_upper_bound": (
+                summary["residual_gap_to_60pct_after_all_quality_timing_upper_bound"]
+            ),
+            "top_quality_timing_clusters": summary["top_quality_timing_clusters"],
+            "allowed_scope": summary["allowed_scope"],
+            "human_approval_required_if_fix_requires": summary["human_approval_required_if_fix_requires"],
             "verdict": verdict,
             "blockers": blockers,
-            "denominator": {
-                "raw_all_gold_silver_event_rows": len(raw_rows),
-                "raw_all_gold_silver_unique_tokens": len({row.get("token_ca") for row in raw_rows if row.get("token_ca")}),
-                "quality_timing_reject_event_rows": qt_count,
-                "quality_timing_reject_unique_tokens": len({
-                    (audits_by_signal.get(signal_id) or {}).get("token_ca")
-                    for signal_id in qt_events
-                    if (audits_by_signal.get(signal_id) or {}).get("token_ca")
-                }),
-                "quality_timing_reject_share_of_raw_all": rate(qt_count, len(raw_rows)),
-                "quality_timing_reject_share_of_raw_all_pct": pct(qt_count, len(raw_rows)),
-            },
+            "summary": summary,
+            "denominator": denominator,
             "observation_load": obs_meta,
             "candidate_match_attribution": {
                 "expected_candidates": args.expected_candidates,
@@ -1062,7 +1157,22 @@ def self_test():
         report = build_report(args)
         assert report["promotion_allowed"] is False
         assert report["strategy_change_allowed"] is False
+        assert report["classification"] == "QUALITY_TIMING_REJECT_RESEARCH_READY"
         assert report["verdict"] == "QUALITY_TIMING_REJECT_RESEARCH_READY"
+        assert report["next_action"] in {
+            "track_score_quality_threshold_false_negative_shadow_probe",
+            "track_newborn_pullback_timing_false_negative_shadow_probe",
+            "continue_reason_level_shadow_review",
+        }
+        assert report["dominant_cluster"] is not None
+        assert report["quality_timing_reject_event_rows"] == 2
+        assert report["upper_bound_final_eligibility_rate_if_all_quality_timing_resolved"] == 1.0
+        assert report["would_all_quality_timing_resolution_reach_60pct_upper_bound"] is True
+        assert report["top_quality_timing_clusters"]
+        assert report["allowed_scope"]
+        assert report["summary"]["promotion_allowed"] is False
+        assert report["summary"]["automatic_runtime_change_allowed"] is False
+        assert report["summary"]["paper_enablement_allowed"] is False
         assert report["denominator"]["quality_timing_reject_event_rows"] == 2
         assert report["candidate_match_attribution"]["candidate_matched_any_events"] == 2
         assert report["candidate_match_attribution"]["full_candidate_coverage_rate"] == 1.0
