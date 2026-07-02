@@ -869,8 +869,9 @@ def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candid
     if not db_path or not Path(db_path).exists():
         result["reason"] = "paper_db_missing"
         return result
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     try:
+        conn.execute("PRAGMA busy_timeout=10000")
         _shadow_decision_bridge_schema(conn)
         now = safe_int(time.time())
         for event in events:
@@ -935,6 +936,14 @@ def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candid
         conn.commit()
         result["available"] = True
         result["reason"] = "persisted"
+        return result
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        result["available"] = False
+        result["reason"] = "database_locked" if "locked" in message.lower() else "sqlite_operational_error"
+        result["error"] = message[:500]
+        result["upserted_event_count"] = 0
+        result["persistence_required_for_promotion"] = False
         return result
     finally:
         conn.close()
