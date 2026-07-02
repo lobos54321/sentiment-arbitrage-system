@@ -68,6 +68,7 @@ V3_OUTPUT_FILES = {
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
+    "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -3347,6 +3348,10 @@ def assemble_reports(run_dir, out_dir=None):
     )
     reports["pass_allow_60_oos_freeze_registry"] = pass_allow_freeze_registry
     oos_summary = build_oos_summary(run_dir, reports)
+    pass_allow_oos_monitor = (
+        oos_summary.get("pass_allow_60_oos_readiness_monitor")
+        or build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, context_eligibility)
+    )
     payloads = {
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
@@ -3355,6 +3360,7 @@ def assemble_reports(run_dir, out_dir=None):
         "decision_no_pass_quality_timing_review": decision_no_pass_review,
         "pass_allow_60_closure_plan": pass_allow_closure_plan,
         "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
+        "pass_allow_60_oos_readiness_monitor": pass_allow_oos_monitor,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
@@ -3975,6 +3981,12 @@ def self_test():
         assert monitor["definition_context_blocked_count"] == 0
         assert "quote-sensitive" not in monitor["global_blocked_dimensions"]
         assert "volume" in monitor["global_blocked_dimensions_not_required_by_frozen_definitions"]
+        monitor_file = load_json(run_dir / "pass_allow_60_oos_readiness_monitor.json")
+        assert monitor_file["schema_version"] == "pass_allow_60_oos_readiness_monitor.v1"
+        assert monitor_file["promotion_allowed"] is False
+        assert monitor_file["frozen_definition_count"] == monitor["frozen_definition_count"]
+        assert monitor_file["definition_context_clean_count"] == monitor["definition_context_clean_count"]
+        assert monitor_file["definition_context_blocked_count"] == monitor["definition_context_blocked_count"]
         post_freeze_summary = build_oos_summary(run_dir, reports={
             "pass_allow_60_post_freeze_oos_validation": {
                 "schema_version": "pass_allow_60_post_freeze_oos_validation.v3",

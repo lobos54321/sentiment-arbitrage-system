@@ -125,6 +125,7 @@ DERIVED_READINESS_SIBLINGS = {
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
+    "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
@@ -1606,7 +1607,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
                 oos_readiness_summary_v3.get("pass_allow_60_oos_freeze_registry") or {}
             ),
             "pass_allow_60_oos_readiness_monitor": (
-                oos_readiness_summary_v3.get("pass_allow_60_oos_readiness_monitor") or {}
+                oos_readiness_summary_v3.get("pass_allow_60_oos_readiness_monitor")
+                or readiness_reports.get("pass_allow_60_oos_readiness_monitor")
+                or {}
             ),
             "pass_allow_60_post_freeze_oos_validation": (
                 oos_readiness_summary_v3.get("pass_allow_60_post_freeze_oos_validation") or {}
