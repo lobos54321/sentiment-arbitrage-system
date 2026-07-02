@@ -4621,6 +4621,139 @@ def build_oos_validation_freshness(registry, validation):
     }
 
 
+def build_oos_track_sample_progress(track_name, validation):
+    validation = validation or {}
+    availability = validation.get("oos_data_availability") or {}
+    raw_rows_value = validation.get("raw_gold_silver_event_rows")
+    min_rows_value = (
+        validation.get("minimum_raw_gold_silver_event_rows")
+        or validation.get("minimum_raw_gold_silver_event_rows_for_oos_judgment")
+        or validation.get("min_raw_events_for_oos_judgment")
+        or availability.get("minimum_raw_gold_silver_event_rows")
+        or availability.get("minimum_raw_gold_silver_event_rows_for_oos_judgment")
+        or availability.get("min_raw_events_for_oos_judgment")
+    )
+    rows_needed_value = (
+        validation.get("raw_gold_silver_event_rows_needed_to_minimum")
+        or validation.get("raw_gold_silver_event_rows_needed_for_min")
+        or availability.get("raw_gold_silver_event_rows_needed_to_minimum")
+        or availability.get("raw_gold_silver_event_rows_needed_for_min")
+    )
+    raw_rows = safe_int(raw_rows_value, 0)
+    minimum_rows = safe_int(min_rows_value, 0)
+    rows_needed = (
+        safe_int(rows_needed_value, 0)
+        if rows_needed_value is not None
+        else max(0, minimum_rows - raw_rows)
+    )
+    usable_hours = safe_float(validation.get("post_freeze_usable_hours"))
+    observed_rows_per_hour = None
+    estimated_hours_to_minimum = None
+    if usable_hours is not None and usable_hours > 0:
+        observed_rows_per_hour = round(float(raw_rows) / usable_hours, 6)
+        if rows_needed > 0 and observed_rows_per_hour > 0:
+            estimated_hours_to_minimum = round(float(rows_needed) / observed_rows_per_hour, 4)
+    if not validation:
+        classification = "OOS_TRACK_UNAVAILABLE"
+        next_action = "run_post_freeze_oos_validation"
+    elif rows_needed <= 0:
+        classification = "OOS_TRACK_MIN_SAMPLE_REACHED"
+        next_action = "judge_oos_if_context_clean"
+    elif raw_rows <= 0:
+        classification = "OOS_TRACK_WAITING_FOR_FIRST_RAW_GOLD_SILVER"
+        next_action = "continue_collecting_post_freeze_raw_gold_silver_events"
+    elif estimated_hours_to_minimum is not None:
+        classification = "OOS_TRACK_ACCUMULATING_TOWARD_MIN_SAMPLE"
+        next_action = "continue_collecting_until_estimated_min_sample_time"
+    else:
+        classification = "OOS_TRACK_BELOW_MIN_SAMPLE_RATE_UNKNOWN"
+        next_action = "continue_collecting_until_min_oos_raw_events"
+    return {
+        "track": track_name,
+        "available": bool(validation),
+        "classification": classification,
+        "validation_classification": validation.get("classification"),
+        "definition_set_frozen_at": validation.get("definition_set_frozen_at"),
+        "eval_start_iso": validation.get("eval_start_iso"),
+        "raw_gold_silver_event_rows": raw_rows,
+        "minimum_raw_gold_silver_event_rows": minimum_rows,
+        "raw_gold_silver_event_rows_needed_to_minimum": rows_needed,
+        "post_freeze_usable_hours": usable_hours,
+        "observed_raw_gold_silver_rows_per_hour": observed_rows_per_hour,
+        "estimated_hours_to_minimum": estimated_hours_to_minimum,
+        "next_action": next_action,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
+def build_oos_sample_progress_summary(pass_allow_validation, capture_cross_validation):
+    tracks = {
+        "pass_allow_60": build_oos_track_sample_progress(
+            "pass_allow_60",
+            pass_allow_validation,
+        ),
+        "capture_cross": build_oos_track_sample_progress(
+            "capture_cross",
+            capture_cross_validation,
+        ),
+    }
+    track_values = list(tracks.values())
+    tracks_at_minimum = [
+        row["track"] for row in track_values
+        if row.get("raw_gold_silver_event_rows_needed_to_minimum") == 0
+    ]
+    tracks_waiting_for_first = [
+        row["track"] for row in track_values
+        if row.get("classification") == "OOS_TRACK_WAITING_FOR_FIRST_RAW_GOLD_SILVER"
+    ]
+    accumulating = [
+        row for row in track_values
+        if row.get("estimated_hours_to_minimum") is not None
+        and row.get("raw_gold_silver_event_rows_needed_to_minimum", 0) > 0
+    ]
+    nearest = min(
+        accumulating,
+        key=lambda row: row.get("estimated_hours_to_minimum"),
+        default=None,
+    )
+    rows_needed_total = sum(
+        safe_int(row.get("raw_gold_silver_event_rows_needed_to_minimum"), 0)
+        for row in track_values
+    )
+    if len(tracks_at_minimum) == len(track_values):
+        classification = "OOS_MIN_SAMPLE_READY_FOR_ALL_TRACKS"
+        next_action = "judge_oos_if_context_clean_and_validation_fresh"
+    elif tracks_waiting_for_first:
+        classification = "OOS_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        next_action = "continue_collecting_post_freeze_raw_gold_silver_events"
+    elif nearest:
+        classification = "OOS_ACCUMULATING_TOWARD_MIN_SAMPLE"
+        next_action = f"continue_collecting_{nearest['track']}_until_min_sample"
+    else:
+        classification = "OOS_SAMPLE_PROGRESS_INSUFFICIENT"
+        next_action = "continue_collecting_post_freeze_window_before_judging_oos"
+    return {
+        "schema_version": "oos_sample_progress.v1",
+        "classification": classification,
+        "next_action": next_action,
+        "tracks": tracks,
+        "tracks_at_minimum": tracks_at_minimum,
+        "tracks_waiting_for_first_raw_gold_silver": tracks_waiting_for_first,
+        "nearest_track_to_minimum": nearest.get("track") if nearest else None,
+        "nearest_track_estimated_hours_to_minimum": (
+            nearest.get("estimated_hours_to_minimum") if nearest else None
+        ),
+        "total_raw_gold_silver_event_rows_needed_to_minimum": rows_needed_total,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def build_oos_summary(run_dir, reports=None):
     oos_reports = load_oos_reports(run_dir)
     input_reports = reports if reports is not None else {}
@@ -5158,6 +5291,20 @@ def build_oos_summary(run_dir, reports=None):
             "automatic_runtime_change_allowed": False,
             "paper_enablement_allowed": False,
         }
+        oos_sample_progress = build_oos_sample_progress_summary(
+            pass_allow_post_freeze_validation,
+            capture_cross_post_freeze_validation,
+        )
+        summary["oos_sample_progress"] = oos_sample_progress
+        summary["oos_sample_progress_classification"] = oos_sample_progress.get("classification")
+        summary["oos_sample_progress_next_action"] = oos_sample_progress.get("next_action")
+        summary["oos_nearest_track_to_minimum"] = oos_sample_progress.get("nearest_track_to_minimum")
+        summary["oos_nearest_track_estimated_hours_to_minimum"] = (
+            oos_sample_progress.get("nearest_track_estimated_hours_to_minimum")
+        )
+        summary["oos_total_raw_gold_silver_event_rows_needed_to_minimum"] = (
+            oos_sample_progress.get("total_raw_gold_silver_event_rows_needed_to_minimum")
+        )
     return summary
 
 
@@ -6337,6 +6484,41 @@ def self_test():
         assert post_freeze_summary["post_freeze_oos_data_availability"]["root_causes"] == [
             "no_post_freeze_raw_gold_silver_events"
         ]
+        assert post_freeze_summary["oos_sample_progress"]["classification"] == (
+            "OOS_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        )
+        assert post_freeze_summary["oos_sample_progress"]["tracks"]["pass_allow_60"][
+            "classification"
+        ] == "OOS_TRACK_WAITING_FOR_FIRST_RAW_GOLD_SILVER"
+        assert post_freeze_summary["oos_sample_progress"]["tracks"]["capture_cross"][
+            "classification"
+        ] == "OOS_TRACK_WAITING_FOR_FIRST_RAW_GOLD_SILVER"
+        assert post_freeze_summary["oos_total_raw_gold_silver_event_rows_needed_to_minimum"] == 20
+        accumulating_progress = build_oos_sample_progress_summary(
+            {
+                "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS",
+                "raw_gold_silver_event_rows": 6,
+                "minimum_raw_gold_silver_event_rows": 10,
+                "raw_gold_silver_event_rows_needed_to_minimum": 4,
+                "post_freeze_usable_hours": 4.0,
+                "promotion_allowed": False,
+            },
+            {
+                "classification": "CAPTURE_CROSS_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+                "raw_gold_silver_event_rows": 0,
+                "minimum_raw_gold_silver_event_rows": 10,
+                "raw_gold_silver_event_rows_needed_to_minimum": 10,
+                "post_freeze_usable_hours": 0.5,
+                "promotion_allowed": False,
+            },
+        )
+        assert accumulating_progress["classification"] == "OOS_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        assert accumulating_progress["nearest_track_to_minimum"] == "pass_allow_60"
+        assert accumulating_progress["nearest_track_estimated_hours_to_minimum"] == 2.6667
+        assert accumulating_progress["tracks"]["pass_allow_60"]["observed_raw_gold_silver_rows_per_hour"] == 1.5
+        assert accumulating_progress["tracks"]["capture_cross"]["estimated_hours_to_minimum"] is None
+        assert accumulating_progress["total_raw_gold_silver_event_rows_needed_to_minimum"] == 14
+        assert accumulating_progress["promotion_allowed"] is False
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
