@@ -796,6 +796,9 @@ def build_handoff(verdict):
     if matured_cross or matured_queue or matured_repeated_review:
         matured_context = matured_cross.get("matured_volume_context") or {}
         h1 = matured_cross.get("h1_matured_building_volume") or {}
+        second_window_confirmation = (
+            matured_repeated_review.get("second_window_confirmation") or {}
+        )
         matured_payload = {
             "summary": {
                 "classification": (matured_cross.get("overall") or {}).get("classification"),
@@ -811,6 +814,15 @@ def build_handoff(verdict):
                 "automatic_runtime_change_allowed": False,
                 "paper_enablement_allowed": False,
                 "allowed_use": "shadow_only_matured_volume_context",
+                "second_window_confirmation_classification": (
+                    second_window_confirmation.get("classification")
+                ),
+                "second_window_confirmation_next_action": (
+                    second_window_confirmation.get("next_action")
+                ),
+                "second_window_confirmation_required_window": (
+                    second_window_confirmation.get("required_second_window") or {}
+                ),
             },
             "matured_volume_profile_counts": matured_context.get("profile_counts") or {},
             "h1_matured_building_volume": h1,
@@ -824,9 +836,7 @@ def build_handoff(verdict):
                 "candidate_family_counts": matured_repeated_review.get("candidate_family_counts") or {},
                 "slice_value_counts": matured_repeated_review.get("slice_value_counts") or {},
                 "top_items": (matured_repeated_review.get("top_items") or [])[:8],
-                "second_window_confirmation": (
-                    matured_repeated_review.get("second_window_confirmation") or {}
-                ),
+                "second_window_confirmation": second_window_confirmation,
                 "allowed_use": matured_repeated_review.get("allowed_use") or "shadow_only_review",
                 "promotion_allowed": False,
             },
