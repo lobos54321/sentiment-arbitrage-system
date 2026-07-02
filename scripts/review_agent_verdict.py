@@ -139,6 +139,8 @@ DERIVED_READINESS_SIBLINGS = {
     "pending_stale_before_final_review": "pending_stale_before_final_review.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+    "final_eligibility_60_oos_freeze_registry": "final_eligibility_60_oos_freeze_registry.json",
+    "final_eligibility_60_oos_readiness_monitor": "final_eligibility_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
@@ -1636,6 +1638,16 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     final_eligibility_60_closure_plan = readiness_reports.get("final_eligibility_60_closure_plan") or {}
     pending_stale_before_final_review = readiness_reports.get("pending_stale_before_final_review") or {}
     pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
+    final_eligibility_60_oos_freeze_registry = (
+        readiness_reports.get("final_eligibility_60_oos_freeze_registry")
+        or (oos_readiness_summary_v3.get("final_eligibility_60_oos_freeze_registry") or {})
+        or {}
+    )
+    final_eligibility_60_oos_readiness_monitor = (
+        readiness_reports.get("final_eligibility_60_oos_readiness_monitor")
+        or (oos_readiness_summary_v3.get("final_eligibility_60_oos_readiness_monitor") or {})
+        or {}
+    )
     capture_cross_oos_freeze_registry = (
         readiness_reports.get("capture_cross_oos_freeze_registry")
         or (oos_readiness_summary_v3.get("capture_cross_oos_freeze_registry") or {})
@@ -1996,6 +2008,39 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "formal_tracks_can_cover_current_gap_upper_bound": (
                 final_eligibility_60_closure_plan.get("formal_tracks_can_cover_current_gap_upper_bound")
             ),
+            "oos_freeze_registry": {
+                "available": bool(final_eligibility_60_oos_freeze_registry),
+                "classification": final_eligibility_60_oos_freeze_registry.get("classification"),
+                "frozen_definition_count": (
+                    final_eligibility_60_oos_freeze_registry.get("frozen_definition_count")
+                ),
+                "source_counts": final_eligibility_60_oos_freeze_registry.get("source_counts") or {},
+                "top_priority_items": (
+                    final_eligibility_60_oos_freeze_registry.get("top_priority_items") or []
+                )[:8],
+                "promotion_allowed": False,
+            },
+            "oos_readiness_monitor": {
+                "available": bool(final_eligibility_60_oos_readiness_monitor),
+                "classification": final_eligibility_60_oos_readiness_monitor.get("classification"),
+                "next_action": final_eligibility_60_oos_readiness_monitor.get("next_action"),
+                "frozen_definition_count": (
+                    final_eligibility_60_oos_readiness_monitor.get("frozen_definition_count")
+                ),
+                "definition_context_clean_count": (
+                    final_eligibility_60_oos_readiness_monitor.get("definition_context_clean_count")
+                ),
+                "definition_context_blocked_count": (
+                    final_eligibility_60_oos_readiness_monitor.get("definition_context_blocked_count")
+                ),
+                "blocked_required_dimension_counts": (
+                    final_eligibility_60_oos_readiness_monitor.get("blocked_required_dimension_counts") or {}
+                ),
+                "usable_post_freeze_hours": (
+                    final_eligibility_60_oos_readiness_monitor.get("usable_post_freeze_hours")
+                ),
+                "promotion_allowed": False,
+            },
             "top_priority_items": final_eligibility_60_priority_queue[:8],
             "research_only_top_priority_items": final_eligibility_60_research_only_priority_queue[:5],
             "promotion_allowed": False,
@@ -4534,6 +4579,69 @@ def self_test():
             ],
             "promotion_allowed": False,
         })
+        write_json(root / "final_eligibility_60_closure_plan.json", {
+            "schema_version": "final_eligibility_60_closure_plan.v1",
+            "classification": "FINAL_ELIGIBILITY_60_CLOSURE_PLAN_READY_PENDING_SHADOW_AND_OOS",
+            "next_action": "freeze_final_eligibility_60_closure_definitions_for_oos",
+            "target_gap": {
+                "current_count": 1,
+                "target_60_count": 6,
+                "additional_count_needed_to_60": 5,
+            },
+            "priority_queue_count": 1,
+            "research_only_priority_queue_count": 0,
+            "formal_non_dedup_upper_bound_event_count": 7,
+            "formal_tracks_can_cover_current_gap_upper_bound": True,
+            "prioritized_closure_queue": [
+                {
+                    "plan_item_id": "pending_to_final:stale_before_final",
+                    "priority_rank": 1,
+                    "priority_bucket": "P0",
+                    "evidence_source": "pending_to_final_entry_audit",
+                    "category": "stale_before_final",
+                    "non_dedup_upper_bound_event_count": 5,
+                    "formal_closure_eligible": True,
+                    "promotion_allowed": False,
+                }
+            ],
+            "promotion_allowed": False,
+        })
+        write_json(root / "final_eligibility_60_oos_freeze_registry.json", {
+            "schema_version": "final_eligibility_60_oos_freeze_registry.v1",
+            "classification": "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW",
+            "frozen_definition_count": 1,
+            "priority_queue_count": 1,
+            "source_counts": {"pending_to_final_entry_audit": 1},
+            "top_priority_items": [
+                {
+                    "freeze_id": "final_eligibility_60:pending:test",
+                    "source": "pending_to_final_entry_audit",
+                    "source_plan_item_id": "pending_to_final:stale_before_final",
+                    "priority_rank": 1,
+                    "priority_bucket": "P0",
+                    "required_dimension_groups": [],
+                }
+            ],
+            "items": [
+                {
+                    "freeze_id": "final_eligibility_60:pending:test",
+                    "definition_fingerprint": "finalabc123",
+                    "promotion_allowed": False,
+                }
+            ],
+            "promotion_allowed": False,
+        })
+        write_json(root / "final_eligibility_60_oos_readiness_monitor.json", {
+            "schema_version": "final_eligibility_60_oos_readiness_monitor.v1",
+            "classification": "FINAL_ELIGIBILITY_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG",
+            "next_action": "continue_collecting_post_freeze_window_before_judging_final_eligibility_oos",
+            "frozen_definition_count": 1,
+            "definition_context_clean_count": 1,
+            "definition_context_blocked_count": 0,
+            "blocked_required_dimension_counts": {},
+            "usable_post_freeze_hours": 0.0,
+            "promotion_allowed": False,
+        })
         write_json(root / "shadow_candidate_improvement_queue.json", {
             "schema_version": "shadow_candidate_improvement_queue.v3",
             "report_type": "shadow_candidate_improvement_queue",
@@ -4713,6 +4821,20 @@ def self_test():
         )
         assert sibling_verdict["capture_cross_oos_freeze_registry"]["frozen_definition_count"] == 1
         assert sibling_verdict["capture_cross_oos_freeze_registry"]["promotion_allowed"] is False
+        final_queue = sibling_verdict["final_eligibility_60_closure_priority_queue"]
+        assert final_queue["classification"] == (
+            "FINAL_ELIGIBILITY_60_CLOSURE_PLAN_READY_PENDING_SHADOW_AND_OOS"
+        )
+        assert final_queue["priority_queue_count"] == 1
+        assert final_queue["oos_freeze_registry"]["classification"] == (
+            "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+        )
+        assert final_queue["oos_freeze_registry"]["frozen_definition_count"] == 1
+        assert final_queue["oos_readiness_monitor"]["classification"] == (
+            "FINAL_ELIGIBILITY_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG"
+        )
+        assert final_queue["oos_readiness_monitor"]["definition_context_clean_count"] == 1
+        assert final_queue["promotion_allowed"] is False
         shadow_queue = sibling_verdict["shadow_candidate_improvement_queue"]
         assert shadow_queue["classification"] == "SHADOW_CANDIDATE_IMPROVEMENT_QUEUE_READY"
         assert shadow_queue["evidence_level"] == "discovery_shadow_only"

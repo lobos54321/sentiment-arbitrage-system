@@ -326,6 +326,9 @@ def build_handoff(verdict):
         f"- final_eligibility_60_closure_priority_queue_count: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('priority_queue_count')}`",
         f"- final_eligibility_60_closure_research_only_queue_count: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('research_only_priority_queue_count')}`",
         f"- final_eligibility_60_formal_tracks_can_cover_gap_upper_bound: `{(verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('formal_tracks_can_cover_current_gap_upper_bound')}`",
+        f"- final_eligibility_60_oos_freeze_classification: `{((verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('oos_freeze_registry') or {}).get('classification')}`",
+        f"- final_eligibility_60_oos_frozen_definition_count: `{((verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('oos_freeze_registry') or {}).get('frozen_definition_count')}`",
+        f"- final_eligibility_60_oos_monitor_classification: `{((verdict.get('final_eligibility_60_closure_priority_queue') or {}).get('oos_readiness_monitor') or {}).get('classification')}`",
         f"- pending_stale_before_final_review_classification: `{(verdict.get('pending_stale_before_final_review') or {}).get('classification')}`",
         f"- pending_stale_before_final_review_next_action: `{(verdict.get('pending_stale_before_final_review') or {}).get('next_action')}`",
         f"- pending_stale_before_final_event_count: `{(verdict.get('pending_stale_before_final_review') or {}).get('stale_before_final_event_count')}`",
@@ -480,6 +483,77 @@ def build_handoff(verdict):
                         ),
                         "clean_2d_pass_allow_lift_slice_count": pass_allow_oos_queue.get(
                             "clean_2d_pass_allow_lift_slice_count"
+                        ),
+                        "promotion_allowed": False,
+                    },
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
+    final_eligibility_priority = verdict.get("final_eligibility_60_closure_priority_queue") or {}
+    if final_eligibility_priority:
+        final_freeze = final_eligibility_priority.get("oos_freeze_registry") or {}
+        final_monitor = final_eligibility_priority.get("oos_readiness_monitor") or {}
+        lines.extend([
+            "## Final Eligibility 60 Closure Priority Queue",
+            "",
+            "This queue is shadow-only. It freezes same-window final eligibility closure definitions for future non-overlapping validation; it does not authorize final_entry_contract, A_CLASS, executor, paper/live, canary, wallet, risk, or strategy changes.",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "closure_priority_queue": {
+                        "available": final_eligibility_priority.get("available"),
+                        "classification": final_eligibility_priority.get("classification"),
+                        "next_action": final_eligibility_priority.get("next_action"),
+                        "additional_count_needed_to_60": final_eligibility_priority.get(
+                            "additional_count_needed_to_60"
+                        ),
+                        "priority_queue_count": final_eligibility_priority.get(
+                            "priority_queue_count"
+                        ),
+                        "research_only_priority_queue_count": final_eligibility_priority.get(
+                            "research_only_priority_queue_count"
+                        ),
+                        "formal_tracks_can_cover_current_gap_upper_bound": (
+                            final_eligibility_priority.get(
+                                "formal_tracks_can_cover_current_gap_upper_bound"
+                            )
+                        ),
+                        "promotion_allowed": False,
+                    },
+                    "top_priority_items": (
+                        final_eligibility_priority.get("top_priority_items") or []
+                    )[:5],
+                    "oos_freeze_registry": {
+                        "available": final_freeze.get("available"),
+                        "classification": final_freeze.get("classification"),
+                        "frozen_definition_count": final_freeze.get("frozen_definition_count"),
+                        "source_counts": final_freeze.get("source_counts") or {},
+                        "top_priority_items": final_freeze.get("top_priority_items") or [],
+                        "promotion_allowed": False,
+                    },
+                    "oos_readiness_monitor": {
+                        "available": final_monitor.get("available"),
+                        "classification": final_monitor.get("classification"),
+                        "next_action": final_monitor.get("next_action"),
+                        "frozen_definition_count": final_monitor.get(
+                            "frozen_definition_count"
+                        ),
+                        "definition_context_clean_count": final_monitor.get(
+                            "definition_context_clean_count"
+                        ),
+                        "definition_context_blocked_count": final_monitor.get(
+                            "definition_context_blocked_count"
+                        ),
+                        "blocked_required_dimension_counts": (
+                            final_monitor.get("blocked_required_dimension_counts") or {}
+                        ),
+                        "usable_post_freeze_hours": final_monitor.get(
+                            "usable_post_freeze_hours"
                         ),
                         "promotion_allowed": False,
                     },
@@ -1662,6 +1736,9 @@ def build_handoff(verdict):
                 "decision_no_pass_quality_timing_review": verdict.get("decision_no_pass_quality_timing_review") or {},
                 "pass_allow_60_closure_plan": verdict.get("pass_allow_60_closure_plan") or {},
                 "pass_allow_60_oos_freeze_registry": verdict.get("pass_allow_60_oos_freeze_registry") or {},
+                "final_eligibility_60_closure_priority_queue": (
+                    verdict.get("final_eligibility_60_closure_priority_queue") or {}
+                ),
                 "capture_cross_oos_freeze_registry": verdict.get("capture_cross_oos_freeze_registry") or {},
                 "A_CLASS_mode_status": verdict.get("A_CLASS_mode_status") or {},
                 "final_entry_contract_blocker_breakdown": verdict.get("final_entry_contract_blocker_breakdown") or {},
@@ -1880,6 +1957,52 @@ def self_test():
             "next_action": "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window",
             "frozen_definition_count": 1,
             "stage_counts": {"pass_allow_capture": 1},
+            "promotion_allowed": False,
+        },
+        "final_eligibility_60_closure_priority_queue": {
+            "available": True,
+            "classification": "FINAL_ELIGIBILITY_60_CLOSURE_PLAN_READY_PENDING_SHADOW_AND_OOS",
+            "next_action": "freeze_final_eligibility_60_closure_definitions_for_oos",
+            "additional_count_needed_to_60": 5,
+            "priority_queue_count": 1,
+            "research_only_priority_queue_count": 0,
+            "formal_tracks_can_cover_current_gap_upper_bound": True,
+            "top_priority_items": [
+                {
+                    "plan_item_id": "pending_to_final:stale_before_final",
+                    "priority_rank": 1,
+                    "priority_bucket": "P0",
+                    "category": "stale_before_final",
+                    "non_dedup_upper_bound_event_count": 5,
+                    "promotion_allowed": False,
+                }
+            ],
+            "oos_freeze_registry": {
+                "available": True,
+                "classification": "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW",
+                "frozen_definition_count": 1,
+                "source_counts": {"pending_to_final_entry_audit": 1},
+                "top_priority_items": [
+                    {
+                        "freeze_id": "final_eligibility_60:pending:test",
+                        "source": "pending_to_final_entry_audit",
+                        "priority_rank": 1,
+                        "priority_bucket": "P0",
+                    }
+                ],
+                "promotion_allowed": False,
+            },
+            "oos_readiness_monitor": {
+                "available": True,
+                "classification": "FINAL_ELIGIBILITY_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG",
+                "next_action": "continue_collecting_post_freeze_window_before_judging_final_eligibility_oos",
+                "frozen_definition_count": 1,
+                "definition_context_clean_count": 1,
+                "definition_context_blocked_count": 0,
+                "blocked_required_dimension_counts": {},
+                "usable_post_freeze_hours": 0.0,
+                "promotion_allowed": False,
+            },
             "promotion_allowed": False,
         },
         "quote_context_coverage": {
@@ -2337,7 +2460,6 @@ def self_test():
     assert "NO_DECISION_RECORD" in text
     assert "candidate_shadow_observed_no_decision_event" in text
     assert "shadow_entry_hypotheses_matched_no_decision_bridge" in text
-    assert "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY" in text
     assert "notath_quote_clean" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
@@ -2358,9 +2480,6 @@ def self_test():
     assert "QUALITY_TIMING_REASON_LEVEL_READY" in text
     assert "track_matrix_alignment_reason_shadow_only" in text
     assert "review_shadow_candidates_for_quality_timing_rejects" in text
-    assert "quality_timing_shadow_review_queue" in text
-    assert "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY" in text
-    assert "matured_volume_watch_queue" in text
     assert "MATURED_VOLUME_WATCH_QUEUE_READY" in text
     assert "Volume Blocker Closure Plan" in text
     assert "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE" in text
@@ -2406,6 +2525,9 @@ def self_test():
     assert "OOS_REPEATED_WATCH_REVIEW_READY" in text
     assert "REPEATED_WATCH_SHADOW_REVIEW_ONLY" in text
     assert "matured_volume:entry_mode_registry:explosive_newborn_direct_scout:mixed" in text
+    assert "Final Eligibility 60 Closure Priority Queue" in text
+    assert "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW" in text
+    assert "FINAL_ELIGIBILITY_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG" in text
     assert "Runtime Health Snapshot" in text
     assert "runtime_paper_review_snapshot_stale" in text
     quote_pending_verdict = {

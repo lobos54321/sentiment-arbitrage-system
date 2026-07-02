@@ -4812,6 +4812,8 @@ def write_materialized_artifacts(
             "pending_stale_before_final_review": "pending_stale_before_final_review.json",
             "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
             "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+            "final_eligibility_60_oos_freeze_registry": "final_eligibility_60_oos_freeze_registry.json",
+            "final_eligibility_60_oos_readiness_monitor": "final_eligibility_60_oos_readiness_monitor.json",
             "pass_allow_60_post_freeze_oos_validation": "pass_allow_60_post_freeze_oos_validation.json",
             "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
             "capture_cross_post_freeze_oos_validation": "capture_cross_post_freeze_oos_validation.json",

@@ -79,6 +79,8 @@ V3_OUTPUT_FILES = {
     "pending_stale_before_final_review": "pending_stale_before_final_review.json",
     "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
     "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
+    "final_eligibility_60_oos_freeze_registry": "final_eligibility_60_oos_freeze_registry.json",
+    "final_eligibility_60_oos_readiness_monitor": "final_eligibility_60_oos_readiness_monitor.json",
     "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
     "pending_to_final_entry_audit": "pending_to_final_entry_audit.json",
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
@@ -3302,6 +3304,9 @@ def build_pass_allow_60_oos_freeze_registry(pass_allow_closure_plan, previous_re
 def freeze_item_required_dimension_groups(item):
     definition = (item or {}).get("freeze_definition") or {}
     groups = set()
+    for group in definition.get("required_dimension_groups") or []:
+        if group:
+            groups.add(str(group))
     dimension_group = definition.get("dimension_group")
     if dimension_group:
         groups.add(dimension_group)
@@ -4083,6 +4088,326 @@ def build_final_eligibility_60_closure_plan(
             "Rows are shadow-only/evaluator evidence and cannot justify production, final_entry_contract, A_CLASS, executor, paper/live, canary, or risk changes.",
             "Blocked volume/kline/context rows are kept in research_only_priority_queue and excluded from formal closure evidence.",
             "Upstream transition rows require downstream revalidation before they can count as final eligibility evidence.",
+        ],
+    }
+
+
+def infer_final_eligibility_required_dimension_groups(row):
+    groups = set()
+    for blocker in row.get("context_blockers") or []:
+        blocker_text = str(blocker)
+        if "quote" in blocker_text or "spread" in blocker_text or "route" in blocker_text:
+            groups.add("quote-sensitive")
+        if "source_component" in blocker_text:
+            groups.add("source_component")
+        if "lifecycle" in blocker_text:
+            groups.add("lifecycle")
+        if "volume" in blocker_text:
+            groups.add("volume")
+        if "kline" in blocker_text or "candle" in blocker_text:
+            groups.add("kline")
+        if "markov" in blocker_text:
+            groups.add("Markov")
+    category = str(row.get("category") or "")
+    if category in {"quote_missing", "spread_above_route_limit", "route_missing"}:
+        groups.add("quote-sensitive")
+    for reason in row.get("top_reasons") or []:
+        blob = json.dumps(reason, sort_keys=True, default=str).lower()
+        if "quote" in blob or "spread" in blob or "route" in blob:
+            groups.add("quote-sensitive")
+        if "source_component" in blob:
+            groups.add("source_component")
+        if "lifecycle" in blob:
+            groups.add("lifecycle")
+        if "volume" in blob:
+            groups.add("volume")
+        if "kline" in blob or "candle" in blob:
+            groups.add("kline")
+        if "markov" in blob:
+            groups.add("Markov")
+    dimension_group = row.get("dimension_group")
+    if dimension_group:
+        groups.add(str(dimension_group))
+    dimension = str(row.get("dimension") or "")
+    if "matured_volume" in dimension:
+        groups.add("matured_volume")
+    elif "volume" in dimension:
+        groups.add("volume")
+    elif "kline" in dimension or "candle" in dimension:
+        groups.add("kline")
+    elif "quote" in dimension:
+        groups.add("quote-sensitive")
+    elif "source" in dimension:
+        groups.add("source_component")
+    elif "lifecycle" in dimension:
+        groups.add("lifecycle")
+    elif "markov" in dimension.lower():
+        groups.add("Markov")
+    return sorted(groups)
+
+
+def build_final_eligibility_60_oos_freeze_registry(final_eligibility_closure_plan, previous_registry=None):
+    previous_registry = previous_registry or {}
+    previous_items_by_id = {
+        row.get("freeze_id"): row
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("freeze_id")
+    }
+    previous_fingerprints = {
+        row.get("definition_fingerprint")
+        for row in previous_registry.get("items") or []
+        if isinstance(row, dict) and row.get("definition_fingerprint")
+    }
+    now = utc_now()
+    target_gap = final_eligibility_closure_plan.get("target_gap") or {}
+    items = []
+    source_counts = Counter()
+    priority_rows = [
+        row for row in final_eligibility_closure_plan.get("prioritized_closure_queue") or []
+        if isinstance(row, dict)
+    ]
+    for row in priority_rows:
+        if row.get("formal_closure_eligible") is False:
+            continue
+        required_groups = infer_final_eligibility_required_dimension_groups(row)
+        freeze_definition = {
+            "plan_item_id": row.get("plan_item_id"),
+            "evidence_source": row.get("evidence_source"),
+            "priority_bucket": row.get("priority_bucket"),
+            "expected_capture_stage_improved": row.get("expected_capture_stage_improved")
+            or "final_eligibility",
+            "category": row.get("category"),
+            "transition": row.get("transition"),
+            "candidate_id": row.get("candidate_id"),
+            "hypothesis_source": row.get("hypothesis_source"),
+            "dimension": row.get("dimension"),
+            "dimension_group": row.get("dimension_group"),
+            "slice_value": row.get("slice_value"),
+            "required_features": row.get("required_features") or [],
+            "required_dimension_groups": required_groups,
+            "context_blockers": row.get("context_blockers") or [],
+            "top_reasons": row.get("top_reasons") or [],
+        }
+        fingerprint = stable_fingerprint(freeze_definition)
+        source = str(row.get("evidence_source") or "unknown")
+        freeze_id = f"final_eligibility_60:{source}:{fingerprint}"
+        previous = previous_items_by_id.get(freeze_id) or {}
+        frozen_at = (
+            previous.get("frozen_at")
+            or previous_registry.get("definition_set_frozen_at")
+            or previous_registry.get("generated_at")
+            or now
+        )
+        source_counts[source] += 1
+        items.append({
+            "freeze_id": freeze_id,
+            "source": source,
+            "source_plan_item_id": row.get("plan_item_id"),
+            "priority_rank": row.get("priority_rank"),
+            "priority_bucket": row.get("priority_bucket"),
+            "definition_fingerprint": fingerprint,
+            "frozen_at": frozen_at,
+            "freeze_definition": freeze_definition,
+            "current_window_evidence": {
+                key: row.get(key)
+                for key in (
+                    "non_dedup_upper_bound_event_count",
+                    "event_count",
+                    "share_of_pending_without_final",
+                    "share_of_adjacent_transition_dropoff_upper_bound",
+                    "final_entry_lift",
+                    "mode_adjusted_final_eligibility_lift",
+                    "matched_gold_silver_events",
+                )
+                if row.get(key) is not None
+            },
+            "status": "FROZEN_PENDING_CLEAN_NON_OVERLAPPING_OOS",
+            "oos_requirements": {
+                "definition_must_match_fingerprint": True,
+                "train_window_must_not_overlap_eval_window": True,
+                "overlap": False,
+                "context_clean_window_required": True,
+                "same_window_evidence_is_not_promotion_evidence": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+    items = sorted(
+        items,
+        key=lambda row: (
+            safe_int(row.get("priority_rank"), 10**9),
+            str(row.get("freeze_id") or ""),
+        ),
+    )
+    additional_needed = safe_int(target_gap.get("additional_count_needed_to_60"), 0)
+    if additional_needed <= 0:
+        classification = "FINAL_ELIGIBILITY_60_OOS_FREEZE_NOT_NEEDED"
+    elif items:
+        classification = "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+    else:
+        classification = "FINAL_ELIGIBILITY_60_OOS_FREEZE_EMPTY"
+    fingerprints = {row.get("definition_fingerprint") for row in items if row.get("definition_fingerprint")}
+    previous_set_frozen_at = previous_registry.get("definition_set_frozen_at") or previous_registry.get("generated_at")
+    definition_set_unchanged = bool(fingerprints and fingerprints == previous_fingerprints)
+    definition_set_frozen_at = previous_set_frozen_at if definition_set_unchanged else now
+    return {
+        "schema_version": "final_eligibility_60_oos_freeze_registry.v1",
+        "report_type": "final_eligibility_60_oos_freeze_registry",
+        "generated_at": now,
+        "definition_set_frozen_at": definition_set_frozen_at,
+        "definition_set_unchanged_from_previous_registry": definition_set_unchanged,
+        "phase": "discovery_readiness",
+        "evidence_level": "same_window_definitions_frozen_for_future_oos",
+        "usage": "read_only_oos_definition_registry",
+        "classification": classification,
+        "source_closure_plan_classification": final_eligibility_closure_plan.get("classification"),
+        "target_gap": target_gap,
+        "frozen_definition_count": len(items),
+        "priority_queue_count": sum(1 for row in items if row.get("priority_rank") is not None),
+        "source_counts": dict(source_counts),
+        "top_priority_items": [
+            {
+                "freeze_id": row.get("freeze_id"),
+                "source": row.get("source"),
+                "source_plan_item_id": row.get("source_plan_item_id"),
+                "priority_rank": row.get("priority_rank"),
+                "priority_bucket": row.get("priority_bucket"),
+                "current_window_evidence": row.get("current_window_evidence") or {},
+                "required_dimension_groups": (
+                    (row.get("freeze_definition") or {}).get("required_dimension_groups") or []
+                ),
+            }
+            for row in items[:10]
+        ],
+        "items": items,
+        "oos_requirements": {
+            "train_window_must_not_overlap_eval_window": True,
+            "overlap": False,
+            "definition_fingerprint_required": True,
+            "context_clean_window_required": True,
+            "promotion_allowed": False,
+            "human_approval_required_before_promotion": True,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Definitions are frozen for future final-eligibility validation only.",
+            "A matching fingerprint in a non-overlapping clean eval window is required before any OOS claim.",
+        ],
+    }
+
+
+def build_final_eligibility_60_oos_readiness_monitor(final_freeze_registry, context_eligibility):
+    items = final_freeze_registry.get("items") or []
+    blocked_dimensions = set(context_eligibility.get("blocked_dimensions") or [])
+    clean_dimensions = set(context_eligibility.get("clean_dimensions") or [])
+    now_ts = int(time.time())
+    freeze_at = (
+        final_freeze_registry.get("definition_set_frozen_at")
+        or final_freeze_registry.get("generated_at")
+    )
+    freeze_ts = parse_utc_ts(freeze_at)
+    post_freeze_age_sec = None if freeze_ts is None else max(0, now_ts - freeze_ts)
+    safety_sec = 120
+    min_post_freeze_hours = 0.05
+    usable_post_freeze_sec = None if post_freeze_age_sec is None else max(0, post_freeze_age_sec - safety_sec)
+    usable_post_freeze_hours = (
+        None if usable_post_freeze_sec is None else round(usable_post_freeze_sec / 3600.0, 4)
+    )
+    scoped_rows = []
+    clean_count = 0
+    blocked_count = 0
+    source_counts = Counter()
+    clean_source_counts = Counter()
+    blocked_source_counts = Counter()
+    blocker_counts = Counter()
+    for item in items:
+        source = item.get("source") or "unknown"
+        source_counts[source] += 1
+        required = freeze_item_required_dimension_groups(item)
+        blockers = sorted(group for group in required if group in blocked_dimensions)
+        clean = not blockers
+        if clean:
+            clean_count += 1
+            clean_source_counts[source] += 1
+        else:
+            blocked_count += 1
+            blocked_source_counts[source] += 1
+            blocker_counts.update(blockers)
+        scoped_rows.append({
+            "freeze_id": item.get("freeze_id"),
+            "source": source,
+            "source_plan_item_id": item.get("source_plan_item_id"),
+            "priority_rank": item.get("priority_rank"),
+            "priority_bucket": item.get("priority_bucket"),
+            "definition_fingerprint": item.get("definition_fingerprint"),
+            "required_dimension_groups": required,
+            "blocked_required_dimension_groups": blockers,
+            "definition_context_clean": clean,
+            "promotion_allowed": False,
+        })
+    global_blocked_not_required = sorted(
+        group for group in blocked_dimensions
+        if not any(group in row["required_dimension_groups"] for row in scoped_rows)
+    )
+    if not items:
+        classification = "FINAL_ELIGIBILITY_60_OOS_MONITOR_EMPTY"
+        next_action = "continue_final_eligibility_gap_decomposition"
+    elif clean_count <= 0:
+        classification = "FINAL_ELIGIBILITY_60_OOS_ALL_DEFINITIONS_CONTEXT_BLOCKED"
+        next_action = "fix_or_exclude_blocked_context_dimensions_before_final_eligibility_oos"
+    elif usable_post_freeze_hours is None:
+        classification = "FINAL_ELIGIBILITY_60_OOS_FREEZE_TS_MISSING"
+        next_action = "regenerate_final_eligibility_freeze_registry_with_generated_at"
+    elif usable_post_freeze_hours < min_post_freeze_hours:
+        classification = "FINAL_ELIGIBILITY_60_OOS_POST_FREEZE_WINDOW_TOO_YOUNG"
+        next_action = "continue_collecting_post_freeze_window_before_judging_final_eligibility_oos"
+    else:
+        classification = "FINAL_ELIGIBILITY_60_OOS_READY_FOR_POST_FREEZE_REVIEW"
+        next_action = "review_final_eligibility_60_frozen_definitions_in_next_non_overlapping_window"
+    return {
+        "schema_version": "final_eligibility_60_oos_readiness_monitor.v1",
+        "report_type": "final_eligibility_60_oos_readiness_monitor",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "freeze_generated_at": final_freeze_registry.get("generated_at"),
+        "definition_set_frozen_at": final_freeze_registry.get("definition_set_frozen_at"),
+        "freeze_age_reference_at": freeze_at,
+        "freeze_generated_ts": freeze_ts,
+        "now_ts": now_ts,
+        "post_freeze_age_sec": post_freeze_age_sec,
+        "post_freeze_safety_sec": safety_sec,
+        "usable_post_freeze_sec": usable_post_freeze_sec,
+        "usable_post_freeze_hours": usable_post_freeze_hours,
+        "min_post_freeze_hours_for_review": min_post_freeze_hours,
+        "post_freeze_hours_needed": (
+            None if usable_post_freeze_hours is None
+            else max(0.0, round(min_post_freeze_hours - usable_post_freeze_hours, 4))
+        ),
+        "frozen_definition_count": len(items),
+        "definition_context_clean_count": clean_count,
+        "definition_context_blocked_count": blocked_count,
+        "source_counts": dict(source_counts),
+        "clean_source_counts": dict(clean_source_counts),
+        "blocked_source_counts": dict(blocked_source_counts),
+        "blocked_required_dimension_counts": dict(blocker_counts),
+        "global_blocked_dimensions": sorted(blocked_dimensions),
+        "clean_dimensions": sorted(clean_dimensions),
+        "global_blocked_dimensions_not_required_by_frozen_definitions": global_blocked_not_required,
+        "items": scoped_rows[:75],
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "Definition-scoped context readiness only. Global dirty dimensions do not block a frozen definition unless that definition requires them.",
+            "A post-freeze final-eligibility review is still discovery/readiness evidence; promotion requires non-overlapping validation and human approval.",
         ],
     }
 
@@ -5652,6 +5977,9 @@ def build_oos_summary(run_dir, reports=None):
     pass_allow_freeze_registry = (
         (input_reports or {}).get("pass_allow_60_oos_freeze_registry") or {}
     )
+    final_eligibility_freeze_registry = (
+        (input_reports or {}).get("final_eligibility_60_oos_freeze_registry") or {}
+    )
     capture_cross_freeze_registry = (
         (input_reports or {}).get("capture_cross_oos_freeze_registry") or {}
     )
@@ -5868,6 +6196,27 @@ def build_oos_summary(run_dir, reports=None):
             0,
         )
         summary["pass_allow_60_oos_readiness_monitor"] = pass_allow_oos_monitor
+    if final_eligibility_freeze_registry:
+        final_oos_monitor = build_final_eligibility_60_oos_readiness_monitor(
+            final_eligibility_freeze_registry,
+            (input_reports or {}).get("context_dimension_eligibility") or {},
+        )
+        summary["final_eligibility_60_oos_freeze_registry"] = {
+            "available": True,
+            "classification": final_eligibility_freeze_registry.get("classification"),
+            "frozen_definition_count": final_eligibility_freeze_registry.get("frozen_definition_count"),
+            "source_counts": final_eligibility_freeze_registry.get("source_counts") or {},
+            "oos_requirements": final_eligibility_freeze_registry.get("oos_requirements") or {},
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        summary["final_eligibility_60_oos_frozen_definition_count"] = safe_int(
+            final_eligibility_freeze_registry.get("frozen_definition_count"),
+            0,
+        )
+        summary["final_eligibility_60_oos_readiness_monitor"] = final_oos_monitor
     if capture_cross_freeze_registry:
         summary["capture_cross_oos_freeze_registry"] = {
             "available": True,
@@ -6254,6 +6603,15 @@ def assemble_reports(run_dir, out_dir=None):
         context_eligibility,
     )
     reports["final_eligibility_60_closure_plan"] = final_eligibility_closure_plan
+    previous_final_eligibility_freeze_registry = load_json(
+        run_dir / V3_OUTPUT_FILES["final_eligibility_60_oos_freeze_registry"],
+        {},
+    )
+    final_eligibility_freeze_registry = build_final_eligibility_60_oos_freeze_registry(
+        final_eligibility_closure_plan,
+        previous_final_eligibility_freeze_registry,
+    )
+    reports["final_eligibility_60_oos_freeze_registry"] = final_eligibility_freeze_registry
     previous_pass_allow_freeze_registry = load_json(
         run_dir / V3_OUTPUT_FILES["pass_allow_60_oos_freeze_registry"],
         {},
@@ -6281,6 +6639,13 @@ def assemble_reports(run_dir, out_dir=None):
         oos_summary.get("pass_allow_60_oos_readiness_monitor")
         or build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, context_eligibility)
     )
+    final_eligibility_oos_monitor = (
+        oos_summary.get("final_eligibility_60_oos_readiness_monitor")
+        or build_final_eligibility_60_oos_readiness_monitor(
+            final_eligibility_freeze_registry,
+            context_eligibility,
+        )
+    )
     volume_blocker_closure_plan = build_volume_blocker_closure_plan(
         reports,
         context_eligibility,
@@ -6300,6 +6665,8 @@ def assemble_reports(run_dir, out_dir=None):
         "pending_stale_before_final_review": pending_stale_before_final_review,
         "pass_allow_60_oos_freeze_registry": pass_allow_freeze_registry,
         "pass_allow_60_oos_readiness_monitor": pass_allow_oos_monitor,
+        "final_eligibility_60_oos_freeze_registry": final_eligibility_freeze_registry,
+        "final_eligibility_60_oos_readiness_monitor": final_eligibility_oos_monitor,
         "capture_cross_oos_freeze_registry": capture_cross_freeze_registry,
         "pending_to_final_entry_audit": pending_audit,
         "final_entry_readiness_audit": final_entry_readiness,
@@ -6332,6 +6699,12 @@ def assemble_reports(run_dir, out_dir=None):
             "pass_allow_60_closure_next_action": pass_allow_closure_plan.get("next_action"),
             "final_eligibility_60_closure_classification": final_eligibility_closure_plan.get("classification"),
             "final_eligibility_60_closure_next_action": final_eligibility_closure_plan.get("next_action"),
+            "final_eligibility_60_oos_freeze_classification": (
+                final_eligibility_freeze_registry.get("classification")
+            ),
+            "final_eligibility_60_oos_frozen_definition_count": (
+                final_eligibility_freeze_registry.get("frozen_definition_count")
+            ),
             "pass_allow_60_oos_freeze_classification": pass_allow_freeze_registry.get("classification"),
             "pass_allow_60_oos_frozen_definition_count": (
                 pass_allow_freeze_registry.get("frozen_definition_count")
@@ -7020,6 +7393,21 @@ def self_test():
             for item in final_closure["prioritized_closure_queue"]
         )
         assert "pending_to_final_categories" in final_closure["closure_tracks"]
+        final_freeze_registry = load_json(run_dir / "final_eligibility_60_oos_freeze_registry.json")
+        assert final_freeze_registry["schema_version"] == "final_eligibility_60_oos_freeze_registry.v1"
+        assert final_freeze_registry["promotion_allowed"] is False
+        assert final_freeze_registry["classification"] == (
+            "FINAL_ELIGIBILITY_60_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW"
+        )
+        assert final_freeze_registry["frozen_definition_count"] >= 1
+        assert final_freeze_registry["priority_queue_count"] == (
+            final_freeze_registry["frozen_definition_count"]
+        )
+        assert final_freeze_registry["definition_set_frozen_at"]
+        assert final_freeze_registry["items"][0]["frozen_at"]
+        assert final_freeze_registry["items"][0]["definition_fingerprint"]
+        assert final_freeze_registry["items"][0]["oos_requirements"]["overlap"] is False
+        assert final_freeze_registry["top_priority_items"][0]["priority_rank"] == 1
         freeze_registry = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
         assert freeze_registry["promotion_allowed"] is False
         assert freeze_registry["classification"] == "PASS_ALLOW_60_OOS_FREEZE_NOT_NEEDED"
@@ -7348,6 +7736,20 @@ def self_test():
         assert oos["pass_allow_60_closure_oos_queue_count"] >= 1
         assert oos["pass_allow_60_oos_freeze_registry"]["available"] is True
         assert oos["pass_allow_60_oos_frozen_definition_count"] >= 1
+        assert oos["final_eligibility_60_oos_freeze_registry"]["available"] is True
+        assert oos["final_eligibility_60_oos_frozen_definition_count"] >= 1
+        final_monitor = oos["final_eligibility_60_oos_readiness_monitor"]
+        assert final_monitor["promotion_allowed"] is False
+        assert final_monitor["frozen_definition_count"] >= 1
+        assert final_monitor["definition_context_clean_count"] >= 1
+        assert final_monitor["definition_context_blocked_count"] == 0
+        final_monitor_file = load_json(run_dir / "final_eligibility_60_oos_readiness_monitor.json")
+        assert final_monitor_file["schema_version"] == "final_eligibility_60_oos_readiness_monitor.v1"
+        assert final_monitor_file["promotion_allowed"] is False
+        assert final_monitor_file["frozen_definition_count"] == final_monitor["frozen_definition_count"]
+        assert final_monitor_file["definition_context_clean_count"] == (
+            final_monitor["definition_context_clean_count"]
+        )
         assert oos["capture_cross_oos_freeze_registry"]["available"] is True
         assert oos["capture_cross_oos_frozen_definition_count"] >= 1
         monitor = oos["pass_allow_60_oos_readiness_monitor"]
@@ -7508,11 +7910,15 @@ def self_test():
         assert preliminary_signal["promotion_allowed"] is False
         assert result["summary"]["biggest_gap_stage"] == "pending_capture"
         first_frozen_at = freeze_registry["definition_set_frozen_at"]
+        first_final_frozen_at = final_freeze_registry["definition_set_frozen_at"]
         second_result = assemble_reports(run_dir)
         second_freeze = load_json(run_dir / "pass_allow_60_oos_freeze_registry.json")
+        second_final_freeze = load_json(run_dir / "final_eligibility_60_oos_freeze_registry.json")
         assert second_result["summary"]["biggest_gap_stage"] == "pending_capture"
         assert second_freeze["definition_set_frozen_at"] == first_frozen_at
         assert second_freeze["definition_set_unchanged_from_previous_registry"] is True
+        assert second_final_freeze["definition_set_frozen_at"] == first_final_frozen_at
+        assert second_final_freeze["definition_set_unchanged_from_previous_registry"] is True
     print("SELF_TEST_PASS capture_60_target_loop")
 
 
