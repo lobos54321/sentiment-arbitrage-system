@@ -859,6 +859,19 @@ def build_handoff(verdict):
                 ),
                 "global_pass_allow_count": pass_allow_post_freeze.get("global_pass_allow_count"),
                 "candidate_observation_meta": pass_allow_post_freeze.get("candidate_observation_meta") or {},
+                "candidate_observation_effective_status": pass_allow_post_freeze.get(
+                    "candidate_observation_effective_status"
+                ),
+                "candidate_observation_join_blocked": pass_allow_post_freeze.get(
+                    "candidate_observation_join_blocked"
+                ),
+                "post_freeze_oos_wait_reason": pass_allow_post_freeze.get(
+                    "post_freeze_oos_wait_reason"
+                ),
+                "raw_signal_rows_seen_after_freeze": pass_allow_post_freeze.get(
+                    "raw_signal_rows_seen_after_freeze"
+                ),
+                "oos_data_next_action": pass_allow_post_freeze.get("oos_data_next_action"),
                 "oos_data_availability": pass_allow_post_freeze.get(
                     "oos_data_availability"
                 ) or {},
@@ -1415,6 +1428,11 @@ def self_test():
                 "raw_gold_silver_event_rows": 0,
                 "post_freeze_usable_hours": 1.25,
                 "repeat_watch_count": 0,
+                "candidate_observation_effective_status": "not_applicable_no_raw_signal_ids",
+                "candidate_observation_join_blocked": False,
+                "post_freeze_oos_wait_reason": "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER",
+                "raw_signal_rows_seen_after_freeze": 49,
+                "oos_data_next_action": "continue_collecting_post_freeze_raw_gold_silver_events",
                 "oos_data_availability": {
                     "classification": "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER",
                     "root_causes": ["no_post_freeze_raw_gold_silver_events"],
@@ -1969,6 +1987,10 @@ def self_test():
     assert "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE" in text
     assert "low_confidence_time_legal_research" in text
     assert "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER" in text
+    assert "candidate_observation_effective_status" in text
+    assert "not_applicable_no_raw_signal_ids" in text
+    assert "candidate_observation_join_blocked" in text
+    assert "continue_collecting_post_freeze_raw_gold_silver_events" in text
     assert "Runtime Health Snapshot" in text
     assert "runtime_paper_review_snapshot_stale" in text
     quote_pending_verdict = {

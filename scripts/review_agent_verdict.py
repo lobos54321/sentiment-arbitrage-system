@@ -1858,6 +1858,27 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             "candidate_observation_meta": (
                 pass_allow_60_post_freeze_oos_validation.get("candidate_observation_meta") or {}
             ),
+            "candidate_observation_effective_status": (
+                pass_allow_60_post_freeze_oos_validation.get(
+                    "candidate_observation_effective_status"
+                )
+            ),
+            "candidate_observation_join_blocked": (
+                pass_allow_60_post_freeze_oos_validation.get(
+                    "candidate_observation_join_blocked"
+                )
+            ),
+            "post_freeze_oos_wait_reason": (
+                pass_allow_60_post_freeze_oos_validation.get("post_freeze_oos_wait_reason")
+            ),
+            "raw_signal_rows_seen_after_freeze": (
+                pass_allow_60_post_freeze_oos_validation.get(
+                    "raw_signal_rows_seen_after_freeze"
+                )
+            ),
+            "oos_data_next_action": (
+                pass_allow_60_post_freeze_oos_validation.get("oos_data_next_action")
+            ),
             "frozen_definition_count": pass_allow_60_post_freeze_oos_validation.get(
                 "frozen_definition_count"
             ),
@@ -4196,6 +4217,7 @@ def self_test():
         write_json(root / "pass_allow_60_post_freeze_oos_validation.json", {
             "classification": "PASS_ALLOW_60_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
             "all_raw_rows_since_eval_start": 10,
+            "raw_signal_rows_seen_after_freeze": 10,
             "global_pass_allow_count": 0,
             "frozen_definition_count": 35,
             "eval_start_iso": "2026-06-30T00:05:00Z",
@@ -4203,6 +4225,10 @@ def self_test():
                 "available": False,
                 "reason": "missing_signal_ids_or_table",
             },
+            "candidate_observation_effective_status": "not_applicable_no_raw_signal_ids",
+            "candidate_observation_join_blocked": False,
+            "post_freeze_oos_wait_reason": "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER",
+            "oos_data_next_action": "continue_collecting_post_freeze_raw_gold_silver_events",
             "promotion_allowed": False,
         })
         direct_post_freeze_siblings = load_sibling_readiness_reports(str(capture_path))
@@ -4217,6 +4243,17 @@ def self_test():
         assert direct_post_freeze_verdict["oos_readiness_summary_v3"][
             "pass_allow_60_post_freeze_oos_validation"
         ]["all_raw_rows_since_eval_start"] == 10
+        post_freeze_summary = direct_post_freeze_verdict["pass_allow_60_post_freeze_oos_validation"]
+        assert post_freeze_summary["candidate_observation_effective_status"] == (
+            "not_applicable_no_raw_signal_ids"
+        )
+        assert post_freeze_summary["candidate_observation_join_blocked"] is False
+        assert post_freeze_summary["post_freeze_oos_wait_reason"] == (
+            "OOS_DATA_WAITING_FOR_POST_FREEZE_RAW_GOLD_SILVER"
+        )
+        assert post_freeze_summary["oos_data_next_action"] == (
+            "continue_collecting_post_freeze_raw_gold_silver_events"
+        )
     print("SELF_TEST_PASS review_agent_verdict")
 
 

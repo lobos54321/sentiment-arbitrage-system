@@ -694,6 +694,17 @@ def build_report(args):
         "raw_gold_silver_event_rows_needed_for_min": (
             oos_data_availability.get("raw_gold_silver_event_rows_needed_for_min")
         ),
+        "raw_signal_rows_seen_after_freeze": (
+            oos_data_availability.get("raw_signal_rows_seen_after_freeze")
+        ),
+        "candidate_observation_effective_status": (
+            oos_data_availability.get("candidate_observation_effective_status")
+        ),
+        "candidate_observation_join_blocked": (
+            oos_data_availability.get("classification") == "OOS_DATA_OBSERVATION_JOIN_BLOCKED"
+        ),
+        "post_freeze_oos_wait_reason": oos_data_availability.get("classification"),
+        "oos_data_next_action": oos_data_availability.get("next_action"),
         "oos_data_availability": oos_data_availability,
         "post_freeze_source_activity": post_freeze_source_activity,
         "global_pass_allow_count": global_pass_allow_count,
@@ -883,6 +894,10 @@ def run_self_test():
         assert payload["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
         assert payload["all_raw_rows_since_eval_start"] == 2
         assert payload["oos_data_availability"]["classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
+        assert payload["candidate_observation_effective_status"] == "available"
+        assert payload["candidate_observation_join_blocked"] is False
+        assert payload["post_freeze_oos_wait_reason"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
+        assert payload["oos_data_next_action"] == "judge_post_freeze_oos_repeat_evidence"
         assert payload["raw_gold_silver_event_rows_needed_for_min"] == 0
         assert payload["post_freeze_source_activity"]["available"] is True
         assert payload["post_freeze_source_activity"]["raw_gold_silver_rows_since_eval_start_unfiltered"] == 2
@@ -944,6 +959,9 @@ def run_self_test():
             "no_post_freeze_raw_signal_rows",
             "no_post_freeze_raw_gold_silver_events",
         ]
+        assert no_raw_availability["candidate_observation_effective_status"] == (
+            "not_applicable_no_raw_signal_ids"
+        )
         assert no_raw_availability["raw_signal_rows_seen_after_freeze"] == 0
     print("self-test passed")
 
