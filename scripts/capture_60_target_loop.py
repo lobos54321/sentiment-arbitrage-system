@@ -2238,6 +2238,14 @@ def build_pass_allow_60_closure_plan(
     allowed_dimension_statuses = {"CLEAN", "CORE_METADATA_ALLOWED"}
     clean_cross_items = []
     blocked_cross_items = []
+
+    def effective_dimension_status(dimension_group, dimension_status, context_blockers):
+        if context_blockers:
+            return "BLOCKED_CONTEXT_COVERAGE"
+        if dimension_group in blocked_dimension_groups:
+            return "BLOCKED_CONTEXT_COVERAGE"
+        return dimension_status
+
     def canonical_dimension_group(dimension, dimension_group):
         if dimension_group:
             return dimension_group
@@ -2293,6 +2301,11 @@ def build_pass_allow_60_closure_plan(
                     context_blockers
                     + [f"{dimension_group}_blocked_by_context_dimension_eligibility"]
                 ))
+            effective_status = effective_dimension_status(
+                dimension_group,
+                dimension_status,
+                context_blockers,
+            )
             blocked_cross_items.append({
                 "plan_item_id": (
                     f"blocked_2d_research:{row.get('candidate_id')}:{dimension}={row.get('slice_value')}"
@@ -2302,7 +2315,8 @@ def build_pass_allow_60_closure_plan(
                 "family": row.get("family"),
                 "dimension": dimension,
                 "dimension_group": dimension_group,
-                "dimension_eligibility_status": dimension_status,
+                "dimension_eligibility_status": effective_status,
+                "source_dimension_eligibility_status": dimension_status,
                 "slice_value": row.get("slice_value"),
                 "judgment": row.get("judgment"),
                 "matched_gold_silver_events": row.get("matched_gold_silver_events"),
@@ -2459,6 +2473,7 @@ def build_pass_allow_60_closure_plan(
                 "dimension": row.get("dimension"),
                 "dimension_group": row.get("dimension_group"),
                 "dimension_eligibility_status": row.get("dimension_eligibility_status"),
+                "source_dimension_eligibility_status": row.get("source_dimension_eligibility_status"),
                 "slice_value": row.get("slice_value"),
                 "matched_gold_silver_events": row.get("matched_gold_silver_events"),
                 "pass_allow_lift": row.get("pass_allow_lift"),
@@ -4545,10 +4560,16 @@ def self_test():
         assert residual_tracks["blocked_2d_research_slice_count"] == 1
         assert residual_tracks["blocked_2d_research_non_dedup_upper_bound_event_count"] == 9
         assert residual_tracks["blocked_2d_research_upper_bound_excluded_from_residual"] is True
+        blocked_2d_top = residual_tracks["blocked_2d_research_top_items"][0]
+        assert blocked_2d_top["dimension_eligibility_status"] == "BLOCKED_CONTEXT_COVERAGE"
+        assert blocked_2d_top["source_dimension_eligibility_status"] == "CLEAN"
         assert residual_tracks["supplemental_tracks_can_cover_residual_upper_bound"] is True
         assert residual_tracks["promotion_allowed"] is False
         assert closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["count"] == 1
         assert closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["count"] == 1
+        blocked_track_item = closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["items"][0]
+        assert blocked_track_item["dimension_eligibility_status"] == "BLOCKED_CONTEXT_COVERAGE"
+        assert blocked_track_item["source_dimension_eligibility_status"] == "CLEAN"
         clean_2d_item = closure_plan["closure_tracks"]["clean_2d_pass_allow_lift_slices"]["items"][0]
         assert clean_2d_item["pass_allow_lift"] == 0.25
         assert clean_2d_item["downstream_lift_scope"] == "slice_level_matched_gold_silver_signal_id"
