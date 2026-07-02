@@ -592,8 +592,15 @@ def build_pending_to_final_entry_audit(a_class):
         pending_without_final=pending_without_final,
     )
     dominant_action = pending_to_final_category_action(dominant)
+    if pending_without_final > 0 or adjacent_drop_count > 0:
+        classification = "FUNNEL_DROPOFF_PENDING_TO_FINAL"
+    elif pending_count > 0:
+        classification = "PENDING_TO_FINAL_NO_DROPOFF"
+    else:
+        classification = "PENDING_TO_FINAL_NO_PENDING_ENTRIES"
     category_summary_rows = list(largest_transition_review.get("categories") or [])
     summary = {
+        "classification": classification,
         "pending_entry_count": pending_count,
         "final_entry_contract_count": final_count,
         "pending_without_final_entry_count": pending_without_final,
@@ -625,6 +632,7 @@ def build_pending_to_final_entry_audit(a_class):
         "schema_version": "pending_to_final_entry_audit.v1",
         "report_type": "pending_to_final_entry_audit",
         "generated_at": utc_now(),
+        "classification": classification,
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
@@ -638,6 +646,8 @@ def build_pending_to_final_entry_audit(a_class):
         },
         "summary": summary,
         "dominant_category": dominant,
+        "dominant_blocker": dominant,
+        "current_target_relevance": "mode_disabled_adjusted_final_eligibility_dropoff",
         "next_action": dominant_action["next_action"],
         "allowed_scope": dominant_action["allowed_scope"],
         "human_approval_required_if_fix_requires": (
@@ -3243,27 +3253,86 @@ def build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, contex
 
 
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
+    paper_readiness = (a_class or {}).get("paper_entry_proposal_readiness") or {}
+    final_entry_status = (a_class or {}).get("final_entry_status")
+    current_capture_stage = (a_class or {}).get("current_capture_stage")
+    reason = (a_class or {}).get("reason")
+    mode_status = (a_class or {}).get("A_CLASS_mode_status") or (a_class or {}).get("mode_status") or {}
+    mode_disabled_adjusted = stage_metrics["stage_counts"].get("mode_disabled_adjusted_final_eligibility") or {}
+    readiness_shortfall = (a_class or {}).get("readiness_shortfall_summary") or {}
+    pending_classification = pending_audit.get("classification")
+    pending_next_action = pending_audit.get("next_action")
+    pending_dominant = (
+        pending_audit.get("dominant_blocker")
+        or pending_audit.get("dominant_category")
+        or ((pending_audit.get("pending_no_final_entry_classification") or {}).get("dominant_category"))
+    )
+    ready_for_paper_proposal = boolish(
+        paper_readiness.get("ready")
+        or paper_readiness.get("ready_for_paper_proposal")
+        or paper_readiness.get("paper_entry_proposal_ready")
+    )
+    status_blob = json.dumps({
+        "final_entry_status": final_entry_status,
+        "current_capture_stage": current_capture_stage,
+        "reason": reason,
+        "mode_status": mode_status,
+    }, sort_keys=True, default=str).lower()
+    if ready_for_paper_proposal:
+        classification = "FUNNEL_READY_FOR_PAPER_PROPOSAL"
+        next_action = "request_human_review_before_any_paper_or_mode_change"
+        human_approval_required = True
+    elif "stuck" in status_blob:
+        classification = "A_CLASS_STUCK_REVIEW_REQUIRED"
+        next_action = "audit_a_class_mode_controller_stuck_state_read_only"
+        human_approval_required = boolish((a_class or {}).get("human_action_required"))
+    elif (
+        final_entry_status == "FUNNEL_BLOCKED_EXPECTED"
+        or "shadow" in status_blob
+        or "mode_disabled" in status_blob
+        or "clean_window" in status_blob
+    ):
+        classification = "A_CLASS_EXPECTED_SHADOW"
+        next_action = "continue_clean_window_and_shadow_readiness_collection"
+        human_approval_required = boolish((a_class or {}).get("human_action_required"))
+    elif pending_classification == "FUNNEL_DROPOFF_PENDING_TO_FINAL":
+        classification = "FUNNEL_DROPOFF_PENDING_TO_FINAL"
+        next_action = pending_next_action or "audit_pending_to_final_dropoff_shadow_only"
+        human_approval_required = boolish((a_class or {}).get("human_action_required"))
+    else:
+        classification = "FINAL_ENTRY_READINESS_NOT_READY"
+        next_action = "continue_final_entry_readiness_audit_shadow_only"
+        human_approval_required = boolish((a_class or {}).get("human_action_required"))
     return {
         "schema_version": "final_entry_readiness_audit.v1",
         "report_type": "final_entry_readiness_audit",
         "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "ready_for_paper_proposal": ready_for_paper_proposal,
+        "human_approval_required": human_approval_required,
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
-        "final_entry_status": (a_class or {}).get("final_entry_status"),
-        "current_capture_stage": (a_class or {}).get("current_capture_stage"),
-        "reason": (a_class or {}).get("reason"),
+        "final_entry_status": final_entry_status,
+        "current_capture_stage": current_capture_stage,
+        "current_target_stage": "mode_disabled_adjusted_final_eligibility",
+        "current_target_count": safe_int(mode_disabled_adjusted.get("count"), 0),
+        "current_target_rate": mode_disabled_adjusted.get("rate"),
+        "target_60_count": readiness_shortfall.get("target_count_60pct"),
+        "additional_count_needed_to_60": readiness_shortfall.get("shortfall_to_60_final_eligibility"),
+        "reason": reason,
         "human_action_required": boolish((a_class or {}).get("human_action_required")),
-        "mode_status": (a_class or {}).get("A_CLASS_mode_status") or (a_class or {}).get("mode_status") or {},
+        "mode_status": mode_status,
         "stage2_flat_summary": (a_class or {}).get("stage2_flat_summary") or {},
-        "readiness_shortfall_summary": (a_class or {}).get("readiness_shortfall_summary") or {},
-        "paper_entry_proposal_readiness": (a_class or {}).get("paper_entry_proposal_readiness") or {},
+        "readiness_shortfall_summary": readiness_shortfall,
+        "paper_entry_proposal_readiness": paper_readiness,
         "final_entry_contract_blocker_breakdown": (a_class or {}).get("final_entry_contract_blocker_breakdown") or {},
-        "mode_disabled_adjusted_final_eligibility": stage_metrics["stage_counts"].get("mode_disabled_adjusted_final_eligibility") or {},
-        "pending_to_final_entry_dominant_category": (
-            (pending_audit.get("pending_no_final_entry_classification") or {}).get("dominant_category")
-        ),
+        "mode_disabled_adjusted_final_eligibility": mode_disabled_adjusted,
+        "pending_to_final_entry_classification": pending_classification,
+        "pending_to_final_entry_next_action": pending_next_action,
+        "pending_to_final_entry_dominant_category": pending_dominant,
     }
 
 
@@ -5779,9 +5848,12 @@ def self_test():
         assert "Markov" not in partial_markov["blocked_dimensions"]
         assert partial_markov["dimensions"]["Markov"]["evidence"]["partial_profile_blockers"]["kline"]
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
+        assert pending["classification"] == "FUNNEL_DROPOFF_PENDING_TO_FINAL"
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
         assert pending["dominant_category"] == "stale_before_final"
+        assert pending["dominant_blocker"] == "stale_before_final"
         assert pending["next_action"] == "audit_quality_timing_staleness_before_final_shadow_only"
+        assert pending["summary"]["classification"] == "FUNNEL_DROPOFF_PENDING_TO_FINAL"
         assert pending["summary"]["dominant_category"] == "stale_before_final"
         assert pending["summary"]["dominant_category_count"] == 1
         assert pending["summary"]["pending_to_final_entry_contract_rate"] == 0.5
@@ -5806,6 +5878,18 @@ def self_test():
         assert momentum_review["promotion_allowed"] is False
         assert momentum_review["recheck_window_classification"] == "RECHECK_WINDOW_EXISTS_BEFORE_SUSTAINED_PEAK"
         assert len(momentum_review["selected_shadow_probes"]) == 3
+        final_readiness = load_json(run_dir / "final_entry_readiness_audit.json")
+        assert final_readiness["classification"] == "A_CLASS_EXPECTED_SHADOW"
+        assert final_readiness["next_action"] == "continue_clean_window_and_shadow_readiness_collection"
+        assert final_readiness["ready_for_paper_proposal"] is False
+        assert final_readiness["human_approval_required"] is False
+        assert final_readiness["current_target_stage"] == "mode_disabled_adjusted_final_eligibility"
+        assert final_readiness["current_target_count"] == 1
+        assert final_readiness["current_target_rate"] == 0.2
+        assert final_readiness["target_60_count"] == 3
+        assert final_readiness["additional_count_needed_to_60"] == 2
+        assert final_readiness["pending_to_final_entry_classification"] == "FUNNEL_DROPOFF_PENDING_TO_FINAL"
+        assert final_readiness["pending_to_final_entry_dominant_category"] == "stale_before_final"
         strategy = load_json(run_dir / "strategy_memory_capture_validation.json")
         assert strategy["promotion_allowed"] is False
         assert strategy["hypotheses_count"] == 1
