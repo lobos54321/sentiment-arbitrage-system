@@ -1625,6 +1625,8 @@ def build_capture_60_gap_report(stage_metrics, context_eligibility, pending_audi
         "pending_capture_rate": stage_counts["pending_capture"]["rate"],
         "final_eligibility_count": stage_counts["final_eligibility"]["count"],
         "final_eligibility_rate": stage_counts["final_eligibility"]["rate"],
+        "final_eligibility_capture_count": stage_counts["final_eligibility"]["count"],
+        "final_eligibility_capture_rate": stage_counts["final_eligibility"]["rate"],
         "mode_disabled_adjusted_final_eligibility_count": stage_counts["mode_disabled_adjusted_final_eligibility"]["count"],
         "mode_disabled_adjusted_final_eligibility_rate": stage_counts["mode_disabled_adjusted_final_eligibility"]["rate"],
         "paper_capture_count": stage_counts["paper_capture"]["count"],
@@ -5598,6 +5600,10 @@ def self_test():
         assert gap["classification"] == "CAPTURE_PENDING_GAP_BELOW_60"
         assert gap["biggest_gap_stage"] == "pending_capture"
         assert gap["target_shortfall_stage"] == "pending_capture"
+        assert gap["final_eligibility_count"] == 1
+        assert gap["final_eligibility_rate"] == 0.2
+        assert gap["final_eligibility_capture_count"] == 1
+        assert gap["final_eligibility_capture_rate"] == 0.2
         assert gap["current_target_stage"] == "mode_disabled_adjusted_final_eligibility"
         assert gap["current_target_count"] == 1
         assert gap["current_target_rate"] == 0.2
