@@ -2003,9 +2003,19 @@ def build_pass_allow_60_closure_plan(
         dimension_status = row.get("dimension_eligibility_status")
         data_blockers = row.get("data_blockers") or []
         invalid_reasons = row.get("invalid_reasons") or []
+        candidate_blocked_dimensions = [
+            dim
+            for dim in blocked_candidate_dimensions(row.get("candidate_id"), row.get("family"))
+            if dim in blocked_dimension_groups
+        ]
+        candidate_context_blockers = [
+            f"{dim}_candidate_feature_blocked_by_context_dimension_eligibility"
+            for dim in candidate_blocked_dimensions
+        ]
         globally_blocked = dimension_group in blocked_dimension_groups
         dimension_allowed = (
             not globally_blocked
+            and not candidate_context_blockers
             and (
                 dimension_status in allowed_dimension_statuses
                 or (dimension_group in clean_dimension_groups and not dimension_status)
@@ -2016,8 +2026,11 @@ def build_pass_allow_60_closure_plan(
             context_blockers = (
                 data_blockers
                 or invalid_reasons
+                or candidate_context_blockers
                 or [f"{dimension_group or dimension or 'dimension'}_not_clean_for_capture_cross"]
             )
+            if candidate_context_blockers:
+                context_blockers = sorted(set(context_blockers + candidate_context_blockers))
             if globally_blocked:
                 context_blockers = sorted(set(
                     context_blockers
@@ -4175,6 +4188,10 @@ def self_test():
         assert closure_plan["prioritized_closure_queue"]
         assert closure_plan["prioritized_closure_queue"][0]["priority_rank"] == 1
         assert closure_plan["prioritized_closure_queue"][0]["formal_closure_eligible"] is True
+        assert all(
+            not str(row.get("candidate_id") or "").startswith("kline:")
+            for row in closure_plan["prioritized_closure_queue"]
+        )
         assert closure_plan["research_only_priority_queue_count"] == (
             closure_plan["closure_tracks"]["blocked_2d_pass_allow_lift_research_slices"]["count"]
         )
