@@ -84,6 +84,7 @@ V3_OUTPUT_FILES = {
     "final_entry_readiness_audit": "final_entry_readiness_audit.json",
     "strategy_memory_capture_validation": "strategy_memory_capture_validation.json",
     "shadow_candidate_improvement_queue": "shadow_candidate_improvement_queue.json",
+    "volume_blocker_closure_plan": "volume_blocker_closure_plan.json",
     "capture_cross": "capture_cross_validity_24h.json",
     "oos_readiness_summary": "oos_readiness_summary.json",
 }
@@ -3448,6 +3449,211 @@ def build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, contex
     }
 
 
+def additional_known_rows_needed_to_rate(known_rows, denominator_rows, target_rate=0.8):
+    known = safe_int(known_rows, 0)
+    denominator = safe_int(denominator_rows, 0)
+    if denominator <= 0:
+        return None
+    return max(0, int(math.ceil(float(target_rate) * float(denominator))) - known)
+
+
+def count_matured_volume_repeated_oos_watch(oos_summary):
+    review = (oos_summary or {}).get("oos_repeated_watch_review") or {}
+    count = 0
+    examples = []
+    for probe in review.get("probes") or []:
+        for row in probe.get("top_repeated_hypotheses") or []:
+            hypothesis_id = str(row.get("hypothesis_id") or "")
+            if hypothesis_id.startswith("matured_volume:"):
+                count += 1
+                if len(examples) < 8:
+                    examples.append(row)
+    return count, examples
+
+
+def build_volume_blocker_closure_plan(
+    reports,
+    context_eligibility,
+    capture_cross_oos_freeze_registry,
+    oos_summary,
+):
+    """Explain the current volume blocker and the allowed shadow-only path.
+
+    Formal ``volume_profile`` is signal-time context and may remain blocked even
+    when delayed/matured volume is well populated. This plan keeps those two
+    tracks separate so the loop can keep collecting useful shadow evidence
+    without accidentally treating delayed context as promotion evidence.
+    """
+    context_eligibility = context_eligibility or {}
+    volume_kline = reports.get("volume_kline_coverage_audit") or {}
+    matured_volume_cross = reports.get("matured_volume_capture_cross_audit") or {}
+    kline_resolution = reports.get("kline_coverage_resolution_audit") or {}
+    dimensions = context_eligibility.get("dimensions") or {}
+    volume_dim = dimensions.get("volume") or {}
+    matured_dim = dimensions.get("matured_volume") or {}
+    resolution = context_eligibility.get("volume_blocker_resolution") or {}
+    volume_context = volume_kline.get("volume_context") or {}
+    raw_kline = volume_kline.get("raw_gold_silver_kline") or {}
+    matured_context = matured_volume_cross.get("matured_volume_context") or {}
+    capture_cross_oos_freeze_registry = capture_cross_oos_freeze_registry or {}
+    oos_summary = oos_summary or {}
+
+    formal_known_rate = safe_float(
+        resolution.get("formal_volume_known_rate"),
+        safe_float(volume_dim.get("coverage_rate"), safe_float(volume_context.get("known_rate"))),
+    )
+    formal_known_rows = safe_int(
+        resolution.get("formal_volume_known_rows"),
+        safe_int(volume_context.get("known_rows"), 0),
+    )
+    formal_unknown_rows = safe_int(
+        resolution.get("formal_volume_unknown_rows"),
+        safe_int(volume_context.get("unknown_rows"), 0),
+    )
+    formal_denominator = safe_int(volume_context.get("rows_scanned"), formal_known_rows + formal_unknown_rows)
+    formal_needed_to_80 = additional_known_rows_needed_to_rate(
+        formal_known_rows,
+        formal_denominator,
+        0.8,
+    )
+
+    matured_known_rate = safe_float(
+        resolution.get("shadow_matured_volume_known_rate"),
+        safe_float(matured_dim.get("coverage_rate"), safe_float(matured_context.get("known_rate"))),
+    )
+    matured_known_rows = safe_int(
+        resolution.get("shadow_matured_volume_known_rows"),
+        safe_int(matured_context.get("known_rows"), 0),
+    )
+    matured_unknown_rows = safe_int(
+        resolution.get("shadow_matured_volume_unknown_rows"),
+        safe_int(matured_context.get("unknown_rows"), 0),
+    )
+    matured_denominator = safe_int(
+        matured_context.get("signals_with_matured_context"),
+        matured_known_rows + matured_unknown_rows,
+    )
+    matured_needed_to_80 = additional_known_rows_needed_to_rate(
+        matured_known_rows,
+        matured_denominator,
+        0.8,
+    )
+
+    source_counts = capture_cross_oos_freeze_registry.get("source_counts") or {}
+    frozen_matured_count = safe_int(source_counts.get("shadow_matured_volume_cross"), 0)
+    repeated_matured_count, repeated_matured_examples = count_matured_volume_repeated_oos_watch(oos_summary)
+    formal_ready = formal_known_rate is not None and formal_known_rate >= 0.8
+    matured_ready = matured_known_rate is not None and matured_known_rate >= 0.8
+    matured_oos_active = bool(frozen_matured_count or repeated_matured_count)
+
+    if formal_ready:
+        classification = "FORMAL_VOLUME_CONTEXT_READY"
+        next_action = "run_formal_volume_capture_cross_if_other_context_dimensions_clean"
+    elif matured_ready and matured_oos_active:
+        classification = "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE"
+        next_action = "continue_shadow_matured_volume_oos_collection_without_formal_volume_promotion"
+    elif matured_ready:
+        classification = "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_READY"
+        next_action = "freeze_matured_volume_shadow_definitions_for_clean_non_overlapping_oos"
+    else:
+        classification = "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_NOT_READY"
+        next_action = "continue_collecting_signal_time_kline_and_matured_volume_context"
+
+    return {
+        "schema_version": "volume_blocker_closure_plan.v1",
+        "report_type": "volume_blocker_closure_plan",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "formal_volume": {
+            "status": volume_dim.get("status"),
+            "allowed_use": volume_dim.get("allowed_use"),
+            "eligible_for_capture_cross": bool(volume_dim.get("eligible_for_capture_cross")),
+            "known_rate": formal_known_rate,
+            "known_rows": formal_known_rows,
+            "unknown_rows": formal_unknown_rows,
+            "denominator_rows": formal_denominator,
+            "additional_known_rows_needed_to_80pct": formal_needed_to_80,
+            "blockers": resolution.get("formal_volume_blockers") or volume_dim.get("blockers") or [],
+            "primary_unknown_reason": resolution.get("formal_volume_primary_unknown_reason"),
+            "unknown_reason_counts": resolution.get("formal_volume_unknown_reason_counts") or {},
+            "unknown_kline_missing_reason_counts": (
+                resolution.get("formal_volume_unknown_kline_missing_reason_counts") or {}
+            ),
+            "formal_denominator_can_be_changed_by_this_loop": False,
+            "promotion_allowed": False,
+        },
+        "formal_kline_dependency": {
+            "status": resolution.get("kline_dependency_status"),
+            "coverage_rate": resolution.get("formal_kline_coverage_rate")
+            or raw_kline.get("kline_coverage_rate"),
+            "blockers": resolution.get("formal_kline_blockers") or [],
+            "raw_all_gold_silver_event_rows": raw_kline.get("raw_all_gold_silver_event_rows"),
+            "kline_covered_rows": raw_kline.get("kline_covered_rows"),
+            "kline_uncovered_rows": raw_kline.get("kline_uncovered_rows"),
+            "kline_resolution_classification": (kline_resolution.get("overall") or {}).get("classification"),
+            "research_kline_recoverable": bool((kline_resolution.get("overall") or {}).get("research_kline_recoverable")),
+            "promotion_allowed": False,
+        },
+        "matured_volume_shadow_track": {
+            "status": matured_dim.get("status"),
+            "allowed_use": matured_dim.get("allowed_use") or "shadow_only_matured_volume_context",
+            "eligible_for_capture_cross": bool(matured_dim.get("eligible_for_capture_cross")),
+            "known_rate": matured_known_rate,
+            "known_rows": matured_known_rows,
+            "unknown_rows": matured_unknown_rows,
+            "denominator_rows": matured_denominator,
+            "additional_known_rows_needed_to_80pct": matured_needed_to_80,
+            "classification": (matured_volume_cross.get("overall") or {}).get("classification"),
+            "next_action": (matured_volume_cross.get("overall") or {}).get("next_action"),
+            "profile_counts": matured_context.get("profile_counts") or {},
+            "reason_counts": matured_context.get("reason_counts") or {},
+            "formal_denominator_changed": bool(matured_volume_cross.get("formal_denominator_changed")),
+            "promotion_allowed": False,
+        },
+        "shadow_oos_readiness": {
+            "capture_cross_oos_freeze_classification": capture_cross_oos_freeze_registry.get("classification"),
+            "frozen_shadow_matured_volume_definition_count": frozen_matured_count,
+            "repeated_shadow_matured_volume_watch_count": repeated_matured_count,
+            "repeated_shadow_matured_volume_examples": repeated_matured_examples,
+            "oos_summary_classification": oos_summary.get("classification"),
+            "oos_next_action": oos_summary.get("next_action"),
+            "promotion_allowed": False,
+        },
+        "closure_gates": {
+            "formal_volume_requires_known_rate_gte_80pct": True,
+            "formal_volume_known_rate_gte_80pct": bool(formal_ready),
+            "formal_kline_requires_coverage_gte_80pct": True,
+            "matured_volume_shadow_known_rate_gte_80pct": bool(matured_ready),
+            "matured_volume_requires_non_overlapping_oos": True,
+            "human_approval_required_before_promotion": True,
+            "promotion_allowed": False,
+        },
+        "allowed_next_actions": [
+            "continue_shadow_matured_volume_oos_collection",
+            "keep_formal_volume_sensitive_slices_blocked_until_signal_time_context_is_clean",
+            "review_matured_volume_repeated_watch_without_promotion",
+        ],
+        "forbidden_runtime_actions": [
+            "do_not_use_matured_volume_as_immediate_entry_evidence",
+            "do_not_promote_formal_volume_slices_while_formal_volume_known_rate_below_80pct",
+            "do_not_change_strategy_or_gates",
+            "do_not_change_final_entry_contract_or_a_class",
+            "do_not_enable_paper_or_live_executor",
+            "do_not_change_risk_or_canary",
+        ],
+        "notes": [
+            "Formal signal-time volume and delayed matured volume are separate evidence tracks.",
+            "Matured volume can be used for shadow discovery/OOS review only while formal volume remains blocked.",
+            "This plan is read-only and cannot authorize production strategy changes.",
+        ],
+    }
+
+
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     paper_readiness = (a_class or {}).get("paper_entry_proposal_readiness") or {}
     final_entry_status = (a_class or {}).get("final_entry_status")
@@ -6075,6 +6281,12 @@ def assemble_reports(run_dir, out_dir=None):
         oos_summary.get("pass_allow_60_oos_readiness_monitor")
         or build_pass_allow_60_oos_readiness_monitor(pass_allow_freeze_registry, context_eligibility)
     )
+    volume_blocker_closure_plan = build_volume_blocker_closure_plan(
+        reports,
+        context_eligibility,
+        capture_cross_freeze_registry,
+        oos_summary,
+    )
     payloads = {
         "capture_60_gap_report": gap_report,
         "capture_stage_metrics": stage_metrics,
@@ -6093,6 +6305,7 @@ def assemble_reports(run_dir, out_dir=None):
         "final_entry_readiness_audit": final_entry_readiness,
         "strategy_memory_capture_validation": strategy_memory_capture,
         "shadow_candidate_improvement_queue": shadow_queue,
+        "volume_blocker_closure_plan": volume_blocker_closure_plan,
         "oos_readiness_summary": oos_summary,
     }
     paths = {}
@@ -6132,6 +6345,8 @@ def assemble_reports(run_dir, out_dir=None):
             "context_blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
             "strategy_memory_hypotheses_count": strategy_memory_capture.get("hypotheses_count"),
             "shadow_candidate_queue_count": shadow_queue.get("queue_count"),
+            "volume_blocker_closure_classification": volume_blocker_closure_plan.get("classification"),
+            "volume_blocker_closure_next_action": volume_blocker_closure_plan.get("next_action"),
             "oos_classification": oos_summary.get("classification"),
         },
     }

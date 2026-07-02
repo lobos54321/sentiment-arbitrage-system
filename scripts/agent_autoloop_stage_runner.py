@@ -73,6 +73,7 @@ REQUIRED_FINAL_ARTIFACTS = (
     "decision_no_pass_quality_timing_watch_validation_24h.json",
     "matrix_alignment_false_negative_shadow_probe_24h.json",
     "pending_stale_before_final_watch_validation_24h.json",
+    "volume_blocker_closure_plan.json",
     "oos_readiness_summary.json",
     "reviewer_verdict.json",
     "run_summary.md",
@@ -701,6 +702,7 @@ def collect_paths(args, run_dir):
         "pass_allow_60_oos_freeze_registry": "pass_allow_60_oos_freeze_registry.json",
         "pass_allow_60_oos_readiness_monitor": "pass_allow_60_oos_readiness_monitor.json",
         "capture_cross_oos_freeze_registry": "capture_cross_oos_freeze_registry.json",
+        "volume_blocker_closure_plan": "volume_blocker_closure_plan.json",
         "oos_readiness_summary": "oos_readiness_summary.json",
     }
     readiness = {}

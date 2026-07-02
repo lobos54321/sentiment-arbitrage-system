@@ -726,6 +726,31 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    volume_closure = verdict.get("volume_blocker_closure_plan") or {}
+    if volume_closure:
+        volume_closure_payload = {
+            "classification": volume_closure.get("classification"),
+            "next_action": volume_closure.get("next_action"),
+            "formal_volume": volume_closure.get("formal_volume") or {},
+            "formal_kline_dependency": volume_closure.get("formal_kline_dependency") or {},
+            "matured_volume_shadow_track": volume_closure.get("matured_volume_shadow_track") or {},
+            "shadow_oos_readiness": volume_closure.get("shadow_oos_readiness") or {},
+            "closure_gates": volume_closure.get("closure_gates") or {},
+            "allowed_next_actions": volume_closure.get("allowed_next_actions") or [],
+            "forbidden_runtime_actions": volume_closure.get("forbidden_runtime_actions") or [],
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
+        lines.extend([
+            "## Volume Blocker Closure Plan",
+            "",
+            "```json",
+            json.dumps(volume_closure_payload, indent=2, sort_keys=False)[:12000],
+            "```",
+            "",
+        ])
     two_d_cross = verdict.get("two_d_cross_validity_summary") or {}
     if two_d_cross:
         cross_freeze = verdict.get("capture_cross_oos_freeze_registry") or {}
@@ -1622,6 +1647,7 @@ def build_handoff(verdict):
                 "matured_kline_volume_recheck_audit": verdict.get("matured_kline_volume_recheck_audit") or {},
                 "matured_volume_capture_cross_audit": verdict.get("matured_volume_capture_cross_audit") or {},
                 "matured_volume_watch_queue": verdict.get("matured_volume_watch_queue") or {},
+                "volume_blocker_closure_plan": verdict.get("volume_blocker_closure_plan") or {},
                 "hypothesis_validation_audit": verdict.get("hypothesis_validation_audit") or {},
                 "low_confidence_research_capture_audit": verdict.get("low_confidence_research_capture_audit") or {},
                 "kline_coverage_resolution_audit": verdict.get("kline_coverage_resolution_audit") or {},
@@ -2202,6 +2228,42 @@ def self_test():
                 }
             ],
         },
+        "volume_blocker_closure_plan": {
+            "available": True,
+            "classification": "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE",
+            "next_action": "continue_shadow_matured_volume_oos_collection_without_formal_volume_promotion",
+            "formal_volume": {
+                "status": "BLOCKED_UNKNOWN",
+                "known_rate": 0.4,
+                "additional_known_rows_needed_to_80pct": 4,
+                "promotion_allowed": False,
+            },
+            "formal_kline_dependency": {
+                "coverage_rate": 0.46,
+                "blockers": ["kline_coverage_below_80pct"],
+                "promotion_allowed": False,
+            },
+            "matured_volume_shadow_track": {
+                "status": "CLEAN",
+                "known_rate": 0.92,
+                "allowed_use": "shadow_only_matured_volume_context",
+                "promotion_allowed": False,
+            },
+            "shadow_oos_readiness": {
+                "frozen_shadow_matured_volume_definition_count": 2,
+                "repeated_shadow_matured_volume_watch_count": 1,
+                "promotion_allowed": False,
+            },
+            "closure_gates": {
+                "formal_volume_known_rate_gte_80pct": False,
+                "matured_volume_shadow_known_rate_gte_80pct": True,
+                "human_approval_required_before_promotion": True,
+                "promotion_allowed": False,
+            },
+            "allowed_next_actions": ["continue_shadow_matured_volume_oos_collection"],
+            "forbidden_runtime_actions": ["do_not_change_strategy_or_gates"],
+            "promotion_allowed": False,
+        },
         "kline_coverage_resolution_audit": {
             "available": True,
             "overall": {
@@ -2300,6 +2362,9 @@ def self_test():
     assert "QUALITY_TIMING_SHADOW_REVIEW_QUEUE_READY" in text
     assert "matured_volume_watch_queue" in text
     assert "MATURED_VOLUME_WATCH_QUEUE_READY" in text
+    assert "Volume Blocker Closure Plan" in text
+    assert "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE" in text
+    assert "continue_shadow_matured_volume_oos_collection_without_formal_volume_promotion" in text
     assert "Quality / Timing Candidate Probe Validation" in text
     assert "QUALITY_TIMING_PROBES_REPEATED_SAME_WINDOW" in text
     assert "REPEATED_SHADOW_PROBE" in text

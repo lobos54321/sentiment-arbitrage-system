@@ -131,6 +131,7 @@ DERIVED_READINESS_SIBLINGS = {
     "context_dimension_eligibility": "context_dimension_eligibility.json",
     "decision_capture_60_gap_audit": "decision_capture_60_gap_audit.json",
     "kline_coverage_resolution_audit": "kline_coverage_resolution_audit_24h.json",
+    "volume_blocker_closure_plan": "volume_blocker_closure_plan.json",
     "pass_allow_capture_gap_audit": "pass_allow_capture_gap_audit.json",
     "decision_no_pass_quality_timing_review": "decision_no_pass_quality_timing_review.json",
     "pass_allow_60_closure_plan": "pass_allow_60_closure_plan.json",
@@ -1345,6 +1346,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     volume_kline_audit = readiness_reports.get("volume_kline_coverage_audit") or {}
     matured_kline_recheck = readiness_reports.get("matured_kline_volume_recheck_audit") or {}
     matured_volume_cross = readiness_reports.get("matured_volume_capture_cross_audit") or {}
+    volume_blocker_closure_plan = readiness_reports.get("volume_blocker_closure_plan") or {}
     volume_profile_state = volume_profile_blocker_state(
         blockers,
         matured_kline_recheck,
@@ -2871,6 +2873,28 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
         },
         "matured_volume_watch_queue": matured_volume_watch_queue,
+        "volume_blocker_closure_plan": {
+            "available": bool(volume_blocker_closure_plan),
+            "classification": volume_blocker_closure_plan.get("classification"),
+            "next_action": volume_blocker_closure_plan.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "formal_volume": volume_blocker_closure_plan.get("formal_volume") or {},
+            "formal_kline_dependency": (
+                volume_blocker_closure_plan.get("formal_kline_dependency") or {}
+            ),
+            "matured_volume_shadow_track": (
+                volume_blocker_closure_plan.get("matured_volume_shadow_track") or {}
+            ),
+            "shadow_oos_readiness": volume_blocker_closure_plan.get("shadow_oos_readiness") or {},
+            "closure_gates": volume_blocker_closure_plan.get("closure_gates") or {},
+            "allowed_next_actions": volume_blocker_closure_plan.get("allowed_next_actions") or [],
+            "forbidden_runtime_actions": (
+                volume_blocker_closure_plan.get("forbidden_runtime_actions") or []
+            ),
+        },
         "hypothesis_validation_audit": {
             "available": bool(hypothesis_validation),
             "overall": hypothesis_validation.get("overall") or {},
@@ -4170,6 +4194,35 @@ def self_test():
     assert matured_volume["review_queue"]["items"][0]["candidate_id"] == "entry_mode_registry:ath_flat_structure_tiny_scout"
     assert matured_volume["review_queue"]["items"][0]["automatic_runtime_change_allowed"] is False
     assert matured_volume_verdict["matured_volume_watch_queue"]["queue_count"] == 1
+    volume_closure_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
+        "volume_blocker_closure_plan": {
+            "classification": "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE",
+            "next_action": "continue_shadow_matured_volume_oos_collection_without_formal_volume_promotion",
+            "formal_volume": {"known_rate": 0.4, "promotion_allowed": False},
+            "matured_volume_shadow_track": {
+                "known_rate": 0.92,
+                "allowed_use": "shadow_only_matured_volume_context",
+                "promotion_allowed": False,
+            },
+            "shadow_oos_readiness": {
+                "frozen_shadow_matured_volume_definition_count": 2,
+                "repeated_shadow_matured_volume_watch_count": 1,
+                "promotion_allowed": False,
+            },
+            "closure_gates": {
+                "formal_volume_known_rate_gte_80pct": False,
+                "matured_volume_shadow_known_rate_gte_80pct": True,
+                "human_approval_required_before_promotion": True,
+                "promotion_allowed": False,
+            },
+            "forbidden_runtime_actions": ["do_not_change_strategy_or_gates"],
+        }
+    })
+    volume_closure = volume_closure_verdict["volume_blocker_closure_plan"]
+    assert volume_closure["available"] is True
+    assert volume_closure["classification"] == "FORMAL_VOLUME_BLOCKED_MATURED_VOLUME_SHADOW_OOS_ACTIVE"
+    assert volume_closure["promotion_allowed"] is False
+    assert volume_closure["matured_volume_shadow_track"]["known_rate"] == 0.92
     quality_timing_verdict = build_verdict(capture, tests={"passed": True}, readiness_reports={
         "quality_timing_reject_research_audit": {
             "classification": "QUALITY_TIMING_REJECT_RESEARCH_READY",
