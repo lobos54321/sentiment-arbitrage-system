@@ -1440,6 +1440,8 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
             "share_of_raw_all_gold_silver": row.get("share_of_raw_all_gold_silver"),
             "unique_tokens": row.get("unique_tokens"),
             "top_candidates": (row.get("top_candidates") or [])[:5],
+            "top_clean_candidates": quality_timing_clean_candidates(row, 5),
+            "top_blocked_candidates": quality_timing_blocked_candidates(row, 5),
             "top_lifecycle_source_contexts": (row.get("top_lifecycle_source_contexts") or [])[:5],
             "suggested_shadow_only_action": row.get("suggested_shadow_only_action"),
             "human_approval_required_if_fix_requires": row.get("human_approval_required_if_fix_requires"),
@@ -1522,7 +1524,7 @@ def build_pass_allow_capture_gap_audit(stage_metrics, pending_audit, reports, co
     blocked_dimensions = context_eligibility.get("blocked_dimensions") or []
     clean_dimensions = context_eligibility.get("clean_dimensions") or []
     return {
-        "schema_version": "pass_allow_capture_gap_audit.v1",
+        "schema_version": "pass_allow_capture_gap_audit.v2",
         "report_type": "pass_allow_capture_gap_audit",
         "generated_at": utc_now(),
         "classification": classification,
@@ -1667,6 +1669,8 @@ def build_decision_no_pass_quality_timing_review(stage_metrics, pass_allow_gap_a
             "time_to_sustained_peak_sec_median": opportunity.get("time_to_sustained_peak_sec_median"),
             "reason_counts": cluster_reason_rows.get(cluster) or [],
             "top_candidates": (opportunity.get("top_candidates") or [])[:8],
+            "top_clean_candidates": quality_timing_clean_candidates(opportunity, 8),
+            "top_blocked_candidates": quality_timing_blocked_candidates(opportunity, 8),
             "top_lifecycle_source_contexts": (opportunity.get("top_lifecycle_source_contexts") or [])[:8],
             "suggested_shadow_only_action": (
                 opportunity.get("suggested_shadow_only_action")
@@ -1722,7 +1726,7 @@ def build_decision_no_pass_quality_timing_review(stage_metrics, pass_allow_gap_a
     if rows and any(row.get("review_status") == "BLOCKED_CONTEXT_COVERAGE" for row in rows):
         classification = "DECISION_NO_PASS_QUALITY_TIMING_REVIEW_CONTEXT_BLOCKED"
     return {
-        "schema_version": "decision_no_pass_quality_timing_review.v1",
+        "schema_version": "decision_no_pass_quality_timing_review.v2",
         "report_type": "decision_no_pass_quality_timing_review",
         "generated_at": utc_now(),
         "phase": "discovery_readiness",
@@ -1748,7 +1752,10 @@ def build_decision_no_pass_quality_timing_review(stage_metrics, pass_allow_gap_a
         "context_constraints": {
             "clean_dimensions": context_eligibility.get("clean_dimensions") or [],
             "blocked_dimensions": context_eligibility.get("blocked_dimensions") or [],
-            "rule": "Blocked quote/kline/Markov dimensions are excluded from this review.",
+            "rule": (
+                "Use top_clean_candidates for shadow-only candidate suggestions. "
+                "Blocked candidates remain diagnostic only and must not drive candidate probes while their dimensions are blocked."
+            ),
         },
         "next_action": (
             "track_selected_decision_no_pass_quality_timing_clusters_shadow_only_then_clean_window_oos"
@@ -1832,6 +1839,8 @@ def build_pass_allow_60_closure_plan(
             "candidate_matched_any_rate": full.get("candidate_matched_any_rate"),
             "unique_tokens": full.get("unique_tokens"),
             "top_candidates": (full.get("top_candidates") or [])[:5],
+            "top_clean_candidates": (full.get("top_clean_candidates") or [])[:5],
+            "top_blocked_candidates": (full.get("top_blocked_candidates") or [])[:5],
             "top_lifecycle_source_contexts": (full.get("top_lifecycle_source_contexts") or [])[:5],
             "context_blockers": full.get("context_blockers") or [],
             "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
@@ -2668,6 +2677,23 @@ def quality_timing_candidate_source_rows(row):
         for candidate in (row.get("top_candidates") or [])
         if not is_blocked_quality_timing_candidate(candidate)
     ]
+
+
+def quality_timing_clean_candidates(row, limit=8):
+    return quality_timing_candidate_source_rows(row)[:limit]
+
+
+def quality_timing_blocked_candidates(row, limit=8):
+    if not isinstance(row, dict):
+        return []
+    candidates = row.get("top_blocked_candidates")
+    if candidates:
+        return candidates[:limit]
+    return [
+        candidate
+        for candidate in (row.get("top_candidates") or [])
+        if is_blocked_quality_timing_candidate(candidate)
+    ][:limit]
 
 
 def quality_timing_context_blockers(row, context_eligibility):
@@ -3551,12 +3577,20 @@ def create_self_test_run(root):
                     "candidate_matched_any_rate": 1.0,
                     "stage_counts": [{"stage": "decision_no_pass_or_allow", "count": 2}],
                     "top_candidates": [
-                        {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2}
+                        {"candidate_id": "kline:first_bar_return_filters", "family": "kline", "count": 2},
+                        {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2},
                     ],
                     "top_clean_candidates": [
                         {"candidate_id": "entry_mode_registry:stage1", "family": "entry_mode_registry", "count": 2}
                     ],
-                    "top_blocked_candidates": [],
+                    "top_blocked_candidates": [
+                        {
+                            "candidate_id": "kline:first_bar_return_filters",
+                            "family": "kline",
+                            "count": 2,
+                            "blocked_context_dimensions": ["kline"],
+                        }
+                    ],
                     "top_lifecycle_source_contexts": [
                         {
                             "lifecycle_profile": "ATH_SHALLOW_PULLBACK:OBSERVE",
@@ -3753,11 +3787,28 @@ def self_test():
         assert stage_metrics["paper_capture_count"] == 0
         assert stage_metrics["paper_capture_rate"] == 0.0
         pass_allow_gap = load_json(run_dir / "pass_allow_capture_gap_audit.json")
+        assert pass_allow_gap["schema_version"] == "pass_allow_capture_gap_audit.v2"
         assert pass_allow_gap["classification"] == "PASS_ALLOW_CAPTURE_60_REACHED_DISCOVERY_ONLY"
         assert pass_allow_gap["dominant_gap_stage"] is None
         assert pass_allow_gap["dominant_blocker"] is None
         assert pass_allow_gap["next_action"] == "pass_allow_capture_target_reached_continue_downstream_gap_audit"
         assert pass_allow_gap["promotion_allowed"] is False
+        dnp_review = load_json(run_dir / "decision_no_pass_quality_timing_review.json")
+        assert dnp_review["schema_version"] == "decision_no_pass_quality_timing_review.v2"
+        assert dnp_review["promotion_allowed"] is False
+        assert dnp_review["clusters"]
+        assert all("top_clean_candidates" in row for row in dnp_review["clusters"])
+        assert all("top_blocked_candidates" in row for row in dnp_review["clusters"])
+        assert all(
+            not str(candidate.get("candidate_id") or "").startswith("kline:")
+            for row in dnp_review["clusters"]
+            for candidate in (row.get("top_clean_candidates") or [])
+        )
+        assert any(
+            str(candidate.get("candidate_id") or "").startswith("kline:")
+            for row in dnp_review["clusters"]
+            for candidate in (row.get("top_blocked_candidates") or [])
+        )
         closure_plan = load_json(run_dir / "pass_allow_60_closure_plan.json")
         assert closure_plan["promotion_allowed"] is False
         assert closure_plan["schema_version"] == "pass_allow_60_closure_plan.v4"
