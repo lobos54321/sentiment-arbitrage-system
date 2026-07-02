@@ -4646,6 +4646,7 @@ def write_materialized_artifacts(
         pending_stale_before_final_validation_path
     )
     verdict = build_loop_verdict()
+    verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
     write_json(verdict_path, verdict)
     if refresh_oos_after_registry and state == "final":
         oos_refresh_path = run_dir / "oos_readiness_probe_refresh.json"
@@ -4679,6 +4680,7 @@ def write_materialized_artifacts(
     elif state == "final":
         run_capture_60_target_artifacts()
         verdict = build_loop_verdict()
+        verdict = attach_latest_readiness_artifacts(verdict, readiness_paths)
         write_json(verdict_path, verdict)
 
     if state == "final":
