@@ -955,6 +955,37 @@ def build_matured_volume_repeated_watch_review(oos_readiness_summary):
         reverse=True,
     )
     repeated_watch_total = as_int(repeated_review.get("repeated_watch_total"), len(items)) or 0
+    first_probe = items[0].get("probe") if items else None
+    second_window_confirmation = {
+        "classification": (
+            "MATURED_VOLUME_SECOND_OOS_WINDOW_PENDING"
+            if repeated_watch_total > 0
+            else "MATURED_VOLUME_SECOND_OOS_WINDOW_NOT_READY"
+        ),
+        "next_action": (
+            "collect_second_non_overlapping_window_before_any_promotion_review"
+            if repeated_watch_total > 0
+            else "continue_shadow_matured_volume_oos_collection"
+        ),
+        "first_repeated_watch_probe": first_probe,
+        "current_repeated_watch_total": repeated_watch_total,
+        "required_second_window": {
+            "window_relation": "non_overlapping",
+            "min_signals": 50,
+            "min_raw_gs_events": 10,
+            "min_matured_volume_known_rate": 0.8,
+            "requires_same_definition_repeat": True,
+            "requires_human_review_before_promotion": True,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "notes": [
+            "One repeated matured-volume WATCH window is not enough for promotion review.",
+            "A second non-overlapping window must repeat the same frozen definitions first.",
+        ],
+    }
     if repeated_watch_total > 0:
         classification = "MATURED_VOLUME_REPEATED_WATCH_REVIEW_READY"
         next_action = "continue_shadow_oos_review_and_collect_additional_non_overlapping_window"
@@ -972,6 +1003,7 @@ def build_matured_volume_repeated_watch_review(oos_readiness_summary):
         "candidate_family_counts": dict(sorted(candidate_family_counts.items())),
         "slice_value_counts": dict(sorted(slice_value_counts.items())),
         "top_items": items[:12],
+        "second_window_confirmation": second_window_confirmation,
         "allowed_use": "shadow_only_review",
         "evidence_level": "post_freeze_oos_repeated_watch",
         "promotion_allowed": False,

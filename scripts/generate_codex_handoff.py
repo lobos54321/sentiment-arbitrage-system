@@ -824,6 +824,9 @@ def build_handoff(verdict):
                 "candidate_family_counts": matured_repeated_review.get("candidate_family_counts") or {},
                 "slice_value_counts": matured_repeated_review.get("slice_value_counts") or {},
                 "top_items": (matured_repeated_review.get("top_items") or [])[:8],
+                "second_window_confirmation": (
+                    matured_repeated_review.get("second_window_confirmation") or {}
+                ),
                 "allowed_use": matured_repeated_review.get("allowed_use") or "shadow_only_review",
                 "promotion_allowed": False,
             },
