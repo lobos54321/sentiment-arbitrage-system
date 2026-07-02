@@ -2343,6 +2343,25 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             } | {
                 "recent_windows": volume_kline_audit.get("volume_context_recent_windows") or {},
             },
+            "volume_context_resolution": {
+                key: (volume_kline_audit.get("volume_context_resolution") or {}).get(key)
+                for key in (
+                    "classification",
+                    "next_action",
+                    "formal_volume_profile_known_rate",
+                    "formal_volume_profile_known_rows",
+                    "formal_volume_profile_unknown_rate",
+                    "formal_volume_profile_unknown_rows",
+                    "field_present_rate",
+                    "missing_rate",
+                    "writer_field_present",
+                    "primary_unknown_reason",
+                    "matured_volume_shadow_recheck_recommended",
+                    "formal_volume_slices_blocked",
+                    "allowed_use",
+                    "promotion_allowed",
+                )
+            },
             "raw_gold_silver_kline": {
                 key: (volume_kline_audit.get("raw_gold_silver_kline") or {}).get(key)
                 for key in (
@@ -3922,6 +3941,46 @@ def self_test():
             "schema_version": "capture_cross_validity_report.v1",
             "valid_cross_count": 3,
         })
+        write_json(root / "volume_kline_coverage_audit_24h.json", {
+            "schema_version": "volume_kline_coverage_audit.v1",
+            "overall": {
+                "classification": "DATA_BLOCKED_VOLUME_KLINE",
+                "next_action": "review_matured_volume_shadow_recheck_and_kline_resolution_before_formal_volume_promotion",
+                "promotion_allowed": False,
+            },
+            "volume_context": {
+                "rows_scanned": 10,
+                "field_present_rate": 1.0,
+                "known_rate": 0.4,
+                "missing_rate": 0.0,
+                "unknown_rate": 0.6,
+                "blocker": "volume_profile_coverage_below_80pct",
+                "root_causes": ["formal_volume_unknown_but_shadow_matured_recheck_available"],
+            },
+            "volume_context_resolution": {
+                "classification": "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE",
+                "next_action": "review_matured_volume_shadow_recheck_and_kline_resolution_before_formal_volume_promotion",
+                "formal_volume_profile_known_rate": 0.4,
+                "formal_volume_profile_known_rows": 4,
+                "formal_volume_profile_unknown_rate": 0.6,
+                "formal_volume_profile_unknown_rows": 6,
+                "field_present_rate": 1.0,
+                "missing_rate": 0.0,
+                "writer_field_present": True,
+                "primary_unknown_reason": "insufficient_kline_bars_lt_3",
+                "matured_volume_shadow_recheck_recommended": True,
+                "formal_volume_slices_blocked": True,
+                "allowed_use": "shadow_only_matured_volume_recheck",
+                "promotion_allowed": False,
+            },
+            "raw_gold_silver_kline": {
+                "raw_all_gold_silver_event_rows": 8,
+                "kline_coverage_rate": 0.5,
+                "kline_covered_rows": 4,
+                "kline_uncovered_rows": 4,
+                "blocker": "kline_coverage_below_80pct",
+            },
+        })
         write_json(root / "shadow_decision_bridge_audit_24h.json", {
             "schema_version": "shadow_decision_bridge_audit.v1",
             "status": "SHADOW_DECISION_BRIDGE_MIRROR_COMPLETE",
@@ -4032,6 +4091,14 @@ def self_test():
         assert sibling_verdict["candidate_improvement_opportunities_summary"]["opportunity_count"] == 2
         assert sibling_verdict["Markov_effectiveness_summary"]["status"] == "insufficient_or_uninformative"
         assert sibling_verdict["two_d_cross_validity_summary"]["valid_cross_count"] == 3
+        volume_resolution = sibling_verdict["volume_kline_root_cause_audit"]["volume_context_resolution"]
+        assert volume_resolution["classification"] == (
+            "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE"
+        )
+        assert volume_resolution["matured_volume_shadow_recheck_recommended"] is True
+        assert volume_resolution["writer_field_present"] is True
+        assert volume_resolution["allowed_use"] == "shadow_only_matured_volume_recheck"
+        assert volume_resolution["promotion_allowed"] is False
         assert sibling_verdict["shadow_decision_bridge_audit_summary"]["review_queue"]["classification"] == "SHADOW_DECISION_BRIDGE_REVIEW_QUEUE_READY"
         assert sibling_verdict["oos_readiness_summary"]["classification"] == "OOS_WINDOW_TOO_SMALL_OR_CONTEXT_BLOCKED"
         assert sibling_verdict["oos_readiness_summary"]["available_probe_count"] == 2

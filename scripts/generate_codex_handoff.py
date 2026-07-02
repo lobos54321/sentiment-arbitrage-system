@@ -538,6 +538,7 @@ def build_handoff(verdict):
         matured_recheck = verdict.get("matured_kline_volume_recheck_audit") or {}
         matured_cross = verdict.get("matured_volume_capture_cross_audit") or {}
         volume_context = volume_kline.get("volume_context") or {}
+        volume_resolution = volume_kline.get("volume_context_resolution") or {}
         raw_kline = volume_kline.get("raw_gold_silver_kline") or {}
         compact_volume_kline = {
             "overall": volume_kline.get("overall") or {},
@@ -552,6 +553,20 @@ def build_handoff(verdict):
                     "blocker",
                     "root_causes",
                     "recent_windows",
+                )
+            },
+            "volume_context_resolution": {
+                key: volume_resolution.get(key)
+                for key in (
+                    "classification",
+                    "next_action",
+                    "formal_volume_profile_known_rate",
+                    "formal_volume_profile_unknown_rate",
+                    "writer_field_present",
+                    "primary_unknown_reason",
+                    "matured_volume_shadow_recheck_recommended",
+                    "allowed_use",
+                    "promotion_allowed",
                 )
             },
             "raw_gold_silver_kline": {
@@ -1972,6 +1987,17 @@ def self_test():
                     "1h": {"rows_scanned": 5, "field_present_rate": 1.0, "known_rate": 0.4, "unknown_rate": 0.6}
                 },
             },
+            "volume_context_resolution": {
+                "classification": "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE",
+                "next_action": "review_matured_volume_shadow_recheck_and_kline_resolution_before_formal_volume_promotion",
+                "formal_volume_profile_known_rate": 0.4,
+                "formal_volume_profile_unknown_rate": 0.6,
+                "writer_field_present": True,
+                "primary_unknown_reason": "insufficient_kline_bars_lt_3",
+                "matured_volume_shadow_recheck_recommended": True,
+                "allowed_use": "shadow_only_matured_volume_recheck",
+                "promotion_allowed": False,
+            },
             "raw_gold_silver_kline": {
                 "raw_all_gold_silver_event_rows": 8,
                 "kline_coverage_rate": 0.5,
@@ -2019,6 +2045,10 @@ def self_test():
     assert "next_highest_priority_blocker: `volume_profile_coverage_below_80pct`" in text
     assert "Required Fixes" in text
     assert "Volume / Kline Root Cause" in text
+    assert "volume_context_resolution" in text
+    assert "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE" in text
+    assert "matured_volume_shadow_recheck_recommended" in text
+    assert "shadow_only_matured_volume_recheck" in text
     assert "volume_profile_unknown_from_insufficient_or_unclassified_kline" in text
     assert "shadow_delayed_volume_recheck_likely_useful" in text
     assert "missing_context_carrier_observation" in text

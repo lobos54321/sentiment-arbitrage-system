@@ -277,6 +277,75 @@ def volume_context_recent_windows(rows, now_ts, windows_hours=(1, 2, 4, 6, 12, 2
     return out
 
 
+def first_counter_key(counter):
+    if not counter:
+        return None
+    return next(iter(counter.keys()))
+
+
+def volume_context_resolution(volume):
+    diagnostics = volume.get("unknown_diagnostics") or {}
+    reason_counts = diagnostics.get("volume_profile_reason_counts") or {}
+    missing_reason_counts = diagnostics.get("kline_missing_reason_counts") or {}
+    bar_count_buckets = diagnostics.get("kline_bar_count_bucket_counts") or {}
+    field_present_rate = volume.get("field_present_rate")
+    known_rate = volume.get("known_rate")
+    missing_rate = volume.get("missing_rate")
+    unknown_rate = volume.get("unknown_rate")
+    writer_field_present = (
+        field_present_rate is not None
+        and float(field_present_rate) >= 0.99
+        and float(missing_rate or 0) == 0.0
+    )
+    formal_clean = known_rate is not None and float(known_rate) >= 0.8
+    unknown_from_kline_maturity = bool(
+        reason_counts.get("insufficient_kline_bars_lt_3")
+        or reason_counts.get("kline_bars_unavailable")
+    )
+    if formal_clean:
+        classification = "VOLUME_FORMAL_CONTEXT_CLEAN"
+        next_action = "allow_discovery_only_volume_profile_slices"
+    elif not writer_field_present:
+        classification = "VOLUME_CONTEXT_WRITER_OR_CARRIER_INCOMPLETE"
+        next_action = "inspect_volume_context_writer_or_carrier_payload"
+    elif unknown_from_kline_maturity:
+        classification = "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE"
+        next_action = "review_matured_volume_shadow_recheck_and_kline_resolution_before_formal_volume_promotion"
+    else:
+        classification = "VOLUME_FORMAL_CONTEXT_BLOCKED_UNKNOWN_CLASSIFICATION"
+        next_action = "decompose_volume_profile_unknown_classification_before_using_volume_slices"
+    return {
+        "classification": classification,
+        "next_action": next_action,
+        "formal_volume_profile_known_rate": known_rate,
+        "formal_volume_profile_known_rows": volume.get("known_rows"),
+        "formal_volume_profile_unknown_rate": unknown_rate,
+        "formal_volume_profile_unknown_rows": volume.get("unknown_rows"),
+        "field_present_rate": field_present_rate,
+        "missing_rate": missing_rate,
+        "writer_field_present": writer_field_present,
+        "primary_unknown_reason": first_counter_key(reason_counts),
+        "unknown_volume_profile_reason_counts": reason_counts,
+        "unknown_kline_missing_reason_counts": missing_reason_counts,
+        "unknown_kline_bar_count_bucket_counts": bar_count_buckets,
+        "matured_volume_shadow_recheck_recommended": bool(
+            not formal_clean and writer_field_present and unknown_from_kline_maturity
+        ),
+        "formal_volume_slices_blocked": not formal_clean,
+        "allowed_use": (
+            "formal_discovery_context_evidence"
+            if formal_clean
+            else "shadow_only_matured_volume_recheck"
+            if writer_field_present and unknown_from_kline_maturity
+            else "data_quality_audit_only"
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
 def bucket_lag(value):
     if value is None:
         return "missing"
@@ -552,11 +621,21 @@ def build_report(args):
         volume = volume_context_audit(context_rows)
         recent_volume = volume_context_recent_windows(context_rows, now_ts)
         kline = raw_kline_audit(raw, since_ts)
+        volume_resolution = volume_context_resolution(volume)
         h1_blocked = bool(volume.get("blocker") or kline.get("blocker"))
         root_causes = []
         root_causes.extend(volume.get("root_causes") or [])
         if kline.get("blocker"):
             root_causes.append("raw_gold_silver_kline_coverage_below_80pct")
+        if volume_resolution.get("matured_volume_shadow_recheck_recommended"):
+            root_causes.append("formal_volume_unknown_but_shadow_matured_recheck_available")
+        overall_next_action = (
+            volume_resolution.get("next_action")
+            if h1_blocked and volume.get("blocker")
+            else "investigate_raw_kline_source_coverage"
+            if h1_blocked
+            else "allow_discovery_only_volume_kline_slices"
+        )
         return {
             "schema_version": SCHEMA_VERSION,
             "report_type": "volume_kline_coverage_audit",
@@ -573,6 +652,7 @@ def build_report(args):
             "strategy_change_allowed": False,
             "canonical_backfill_performed": False,
             "volume_context": volume,
+            "volume_context_resolution": volume_resolution,
             "volume_context_recent_windows": recent_volume,
             "raw_gold_silver_kline": kline,
             "overall": {
@@ -580,7 +660,7 @@ def build_report(args):
                 "h1_status": "DATA_BLOCKED_VOLUME_KLINE" if h1_blocked else "H1_DATA_AVAILABLE_FOR_DISCOVERY_ONLY",
                 "h1_remains_blocked": h1_blocked,
                 "root_causes": sorted(set(root_causes)),
-                "next_action": "investigate_volume_writer_or_kline_source_coverage" if h1_blocked else "allow_discovery_only_volume_kline_slices",
+                "next_action": overall_next_action,
                 "promotion_allowed": False,
             },
         }
@@ -616,6 +696,7 @@ def compact_summary(report):
             "unknown_diagnostics": volume.get("unknown_diagnostics"),
             "recent_windows": report.get("volume_context_recent_windows") or {},
         },
+        "volume_context_resolution": report.get("volume_context_resolution") or {},
         "raw_gold_silver_kline": {
             "raw_all_gold_silver_event_rows": kline.get("raw_all_gold_silver_event_rows"),
             "raw_all_gold_silver_unique_tokens": kline.get("raw_all_gold_silver_unique_tokens"),
@@ -697,6 +778,15 @@ def self_test():
         assert report["volume_context"]["unknown_rows"] == 1
         assert report["volume_context_recent_windows"]["1h"]["rows_scanned"] == 3
         assert report["volume_context_recent_windows"]["1h"]["field_present_rate"] == report["volume_context"]["field_present_rate"]
+        resolution = volume_context_resolution(volume_context_audit([
+            ({}, {"volume_profile": "building", "volume_profile_reason": "classified_from_first_5_bars"}),
+            ({}, {"volume_profile": "unknown", "volume_profile_reason": "insufficient_kline_bars_lt_3", "kline_bar_count": 2}),
+            ({}, {"volume_profile": "unknown", "volume_profile_reason": "kline_bars_unavailable", "kline_bar_count": 0, "kline_missing_reason": "no_signal_time_kline_bars"}),
+        ]))
+        assert resolution["classification"] == "VOLUME_FORMAL_CONTEXT_BLOCKED_SHADOW_MATURED_RECHECK_AVAILABLE"
+        assert resolution["matured_volume_shadow_recheck_recommended"] is True
+        assert resolution["writer_field_present"] is True
+        assert resolution["allowed_use"] == "shadow_only_matured_volume_recheck"
         assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_rows"] == 1
         assert report["raw_gold_silver_kline"]["kline_uncovered_root_cause_counts"]["not_same_source_path"] == 1
@@ -705,6 +795,7 @@ def self_test():
         compact = compact_summary(report)
         assert compact["overall"]["promotion_allowed"] is False
         assert "recent_windows" in compact["volume_context"]
+        assert "volume_context_resolution" in compact
     print("SELF_TEST_PASS volume_kline_coverage_audit")
 
 
