@@ -67,6 +67,7 @@ REQUIRED_FINAL_ARTIFACTS = (
     "markov_effectiveness_24h.json",
     "quality_timing_candidate_probe_validation_24h.json",
     "decision_no_pass_quality_timing_watch_validation_24h.json",
+    "pending_stale_before_final_watch_validation_24h.json",
     "oos_readiness_summary.json",
     "reviewer_verdict.json",
     "run_summary.md",

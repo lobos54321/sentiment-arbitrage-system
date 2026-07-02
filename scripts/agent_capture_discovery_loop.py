@@ -3141,6 +3141,235 @@ def build_pending_momentum_decay_probe_validation(registry, pending_to_final_aud
     }
 
 
+def compact_pending_stale_before_final_cluster(row):
+    cluster = row.get("cluster")
+    return {
+        "hypothesis_id": f"pending_stale_before_final:{hypothesis_id_part(cluster)}",
+        "evidence_level": "discovery_same_window",
+        "scope": "shadow_only_pending_stale_before_final_cluster",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "definition": {
+            "cluster": cluster,
+            "expected_capture_stage_improved": "final_eligibility",
+            "required_features": [
+                "pending_entry_ts",
+                "quality_timing_cluster",
+                "decision_reason",
+                "final_entry_contract_record",
+            ],
+        },
+        "latest_metrics": {
+            "event_count": row.get("event_count"),
+            "events_contributing_to_stale_before_final_upper_bound": row.get(
+                "events_contributing_to_stale_before_final_upper_bound"
+            ),
+            "cumulative_events_contributing_to_stale_before_final_upper_bound": row.get(
+                "cumulative_events_contributing_to_stale_before_final_upper_bound"
+            ),
+            "context_blockers": row.get("context_blockers") or [],
+        },
+        "human_approval_required_if_fix_requires": row.get(
+            "human_approval_required_if_fix_requires"
+        ),
+        "next_validation": row.get("next_action")
+        or "continue_shadow_only_pending_stale_cluster_tracking_until_clean_window_then_oos",
+    }
+
+
+def build_pending_stale_before_final_watch_validation(registry, pending_to_final_audit):
+    """Validate all registered stale-before-final clusters against the current audit.
+
+    This is broader than the momentum-decay probe validation: it keeps
+    chasing-top, signal-stale, momentum-decay, and other stale timing clusters
+    visible for OOS readiness without authorizing any runtime or policy change.
+    """
+    registry = registry or {}
+    pending_to_final_audit = pending_to_final_audit or {}
+    watches = list(registry.get("shadow_only_pending_stale_before_final_watch") or [])
+    stale_review = pending_to_final_audit.get("stale_before_final_review") or {}
+    current_by_cluster = {
+        row.get("cluster"): row
+        for row in (stale_review.get("selected_clusters_to_cover_stale_before_final_upper_bound") or [])
+        if isinstance(row, dict) and row.get("cluster")
+    }
+    stale_event_count = safe_int(stale_review.get("stale_before_final_event_count"), 0)
+
+    rows = []
+    for watch in watches:
+        definition = watch.get("definition") or {}
+        cluster = definition.get("cluster")
+        current = current_by_cluster.get(cluster) or {}
+        if current:
+            status = "REPEATED_SELECTED_STALE_CLUSTER"
+        elif stale_event_count > 0:
+            status = "STALE_EVENT_PRESENT_CLUSTER_NOT_SELECTED"
+        else:
+            status = "NOT_OBSERVED_CURRENT_WINDOW"
+        rows.append({
+            "hypothesis_id": watch.get("hypothesis_id"),
+            "status": status,
+            "scope": "shadow_only_pending_stale_before_final_cluster",
+            "evidence_level": "discovery_same_window_cluster_validation",
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "definition": {
+                "cluster": cluster,
+                "expected_capture_stage_improved": definition.get(
+                    "expected_capture_stage_improved"
+                ),
+                "required_features": definition.get("required_features") or [],
+            },
+            "current_window": {
+                "cluster_repeated": bool(current),
+                "stale_before_final_event_count": stale_event_count,
+                "pending_without_final_entry_contract": stale_review.get(
+                    "pending_without_final_entry_contract"
+                ),
+                "adjacent_count_loss_pending_to_final": stale_review.get(
+                    "adjacent_count_loss_pending_to_final"
+                ),
+                "event_count": current.get("event_count"),
+                "events_contributing_to_stale_before_final_upper_bound": current.get(
+                    "events_contributing_to_stale_before_final_upper_bound"
+                ),
+                "cumulative_events_contributing_to_stale_before_final_upper_bound": current.get(
+                    "cumulative_events_contributing_to_stale_before_final_upper_bound"
+                ),
+                "context_blockers": current.get("context_blockers") or [],
+            },
+            "next_validation": (
+                "continue_shadow_only_pending_stale_cluster_tracking_until_clean_window_then_oos"
+            ),
+        })
+
+    status_counts = Counter(row.get("status") for row in rows)
+    repeated_rows = [
+        row for row in rows
+        if row.get("status") == "REPEATED_SELECTED_STALE_CLUSTER"
+    ]
+    if not watches:
+        classification = "NO_REGISTERED_PENDING_STALE_BEFORE_FINAL_WATCH"
+        next_action = "register_pending_stale_before_final_clusters_from_current_audit"
+    elif repeated_rows:
+        classification = "PENDING_STALE_BEFORE_FINAL_WATCH_REPEATED_SAME_WINDOW"
+        next_action = "continue_stale_cluster_tracking_until_clean_window_then_oos"
+    elif stale_event_count > 0:
+        classification = "PENDING_STALE_BEFORE_FINAL_EVENTS_REPEATED_WATCH_SHIFTED"
+        next_action = "refresh_pending_stale_before_final_watch_from_current_audit"
+    else:
+        classification = "PENDING_STALE_BEFORE_FINAL_WATCH_NOT_REPEATED_CURRENT_WINDOW"
+        next_action = "continue_monitoring_pending_stale_before_final_watch"
+
+    denominator = {
+        "registered_watch_count": len(watches),
+        "current_stale_before_final_event_count": stale_event_count,
+        "current_selected_cluster_count": len(current_by_cluster),
+        "validated_watch_count": len(rows),
+        "repeated_selected_cluster_count": status_counts.get(
+            "REPEATED_SELECTED_STALE_CLUSTER",
+            0,
+        ),
+        "stale_event_present_cluster_not_selected_count": status_counts.get(
+            "STALE_EVENT_PRESENT_CLUSTER_NOT_SELECTED",
+            0,
+        ),
+        "not_observed_current_window_count": status_counts.get(
+            "NOT_OBSERVED_CURRENT_WINDOW",
+            0,
+        ),
+        "repeated_selected_cluster_rate": safe_rate(
+            status_counts.get("REPEATED_SELECTED_STALE_CLUSTER", 0),
+            len(watches),
+        ),
+    }
+
+    oos_items = []
+    for row in repeated_rows:
+        current_window = row.get("current_window") or {}
+        definition = row.get("definition") or {}
+        oos_items.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "status": "PENDING_CLEAN_WINDOW_THEN_OOS",
+            "scope": "shadow_only_pending_stale_before_final_cluster",
+            "cluster": definition.get("cluster"),
+            "current_window": {
+                "event_count": current_window.get("event_count"),
+                "stale_before_final_event_count": current_window.get(
+                    "stale_before_final_event_count"
+                ),
+                "events_contributing_to_stale_before_final_upper_bound": current_window.get(
+                    "events_contributing_to_stale_before_final_upper_bound"
+                ),
+                "context_blockers": current_window.get("context_blockers") or [],
+            },
+            "readiness_gates": {
+                "same_window_repeated": True,
+                "context_clean_window_required": True,
+                "non_overlapping_oos_required": True,
+                "human_approval_required_before_promotion": True,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "next_action": "evaluate_stale_cluster_in_next_clean_non_overlapping_window",
+        })
+
+    return {
+        "schema_version": "pending_stale_before_final_watch_validation.v1",
+        "report_type": "pending_stale_before_final_watch_validation_24h",
+        "generated_at": utc_now(),
+        "classification": classification,
+        "next_action": next_action,
+        "evidence_level": "discovery_same_window_cluster_validation",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "registered_watch_count": denominator["registered_watch_count"],
+        "current_stale_before_final_event_count": denominator[
+            "current_stale_before_final_event_count"
+        ],
+        "current_selected_cluster_count": denominator["current_selected_cluster_count"],
+        "validated_watch_count": denominator["validated_watch_count"],
+        "repeated_selected_cluster_count": denominator["repeated_selected_cluster_count"],
+        "repeated_selected_cluster_rate": denominator["repeated_selected_cluster_rate"],
+        "denominator": denominator,
+        "status_counts": dict(status_counts),
+        "oos_readiness_queue": {
+            "classification": (
+                "PENDING_STALE_BEFORE_FINAL_OOS_QUEUE_PENDING_CLEAN_WINDOW"
+                if oos_items
+                else "PENDING_STALE_BEFORE_FINAL_OOS_QUEUE_EMPTY"
+            ),
+            "queue_count": len(oos_items),
+            "pending_clean_window_count": len(oos_items),
+            "ready_for_runtime_change_count": 0,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "items": oos_items[:12],
+            "notes": [
+                "Queue is read-only and shadow-only.",
+                "Repeated stale-before-final clusters are final-eligibility gap evidence, not promotion evidence.",
+                "This queue does not authorize timing threshold, gate, final_entry_contract, A_CLASS, executor, paper, or risk changes.",
+            ],
+        },
+        "top_repeated_clusters": repeated_rows[:12],
+        "watch_validations": rows,
+        "notes": [
+            "Read-only validation of stale-before-final timing clusters.",
+            "Same-window repeat must wait for clean-window and non-overlapping OOS validation.",
+        ],
+    }
+
+
 def stable_hypothesis_signature(
     *,
     watchlist_hypotheses,
@@ -3149,6 +3378,7 @@ def stable_hypothesis_signature(
     quality_timing_candidate_probes=None,
     decision_no_pass_quality_timing_watch=None,
     pending_momentum_decay_probes=None,
+    pending_stale_before_final_watch=None,
 ):
     watchlist_keys = []
     for row in watchlist_hypotheses or []:
@@ -3214,6 +3444,18 @@ def stable_hypothesis_signature(
         pending_momentum_keys,
         key=lambda item: item.get("hypothesis_id") or "",
     )
+    pending_stale_keys = []
+    for row in pending_stale_before_final_watch or []:
+        if not isinstance(row, dict):
+            continue
+        pending_stale_keys.append({
+            "hypothesis_id": row.get("hypothesis_id"),
+            "definition": row.get("definition") or {},
+        })
+    pending_stale_keys = sorted(
+        pending_stale_keys,
+        key=lambda item: item.get("hypothesis_id") or "",
+    )
     return {
         "watchlist_hypothesis_keys": sorted(str(item) for item in watchlist_keys),
         "shadow_only_matured_volume_watch": matured_keys,
@@ -3221,6 +3463,7 @@ def stable_hypothesis_signature(
         "shadow_only_quality_timing_candidate_probes": quality_timing_probe_keys,
         "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_keys,
         "shadow_only_pending_momentum_decay_probes": pending_momentum_keys,
+        "shadow_only_pending_stale_before_final_watch": pending_stale_keys,
     }
 
 
@@ -3509,6 +3752,35 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         and momentum_review_empty_or_missing
     ):
         pending_momentum_decay_probes = previous_pending_momentum_decay_probes
+    stale_before_final_review = pending_audit.get("stale_before_final_review") or {}
+    pending_stale_before_final_watch = [
+        compact_pending_stale_before_final_cluster(row)
+        for row in (
+            stale_before_final_review.get(
+                "selected_clusters_to_cover_stale_before_final_upper_bound"
+            )
+            or []
+        )
+        if isinstance(row, dict) and row.get("cluster")
+    ]
+    previous_pending_stale_before_final_watch = [
+        row
+        for row in (registry.get("shadow_only_pending_stale_before_final_watch") or [])
+        if isinstance(row, dict) and row.get("hypothesis_id")
+    ]
+    stale_review_empty_or_missing = (
+        not pending_stale_before_final_watch
+        and (
+            not pending_audit
+            or verdict.get("autoloop_execution_status") == "AUTOLOOP_EXEC_TIMEOUT_PARTIAL_SYNC"
+        )
+    )
+    if (
+        not pending_stale_before_final_watch
+        and previous_pending_stale_before_final_watch
+        and stale_review_empty_or_missing
+    ):
+        pending_stale_before_final_watch = previous_pending_stale_before_final_watch
     watchlist_hypotheses = capture.get("watchlist_hypotheses", [])[:25]
     new_signature = stable_hypothesis_signature(
         watchlist_hypotheses=watchlist_hypotheses,
@@ -3517,6 +3789,7 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         quality_timing_candidate_probes=quality_timing_candidate_probes,
         decision_no_pass_quality_timing_watch=decision_no_pass_quality_timing_watch,
         pending_momentum_decay_probes=pending_momentum_decay_probes,
+        pending_stale_before_final_watch=pending_stale_before_final_watch,
     )
     previous_signature = registry.get("hypothesis_set_signature")
     previous_frozen_at = registry.get("hypothesis_frozen_at") or registry.get("updated_at")
@@ -3554,6 +3827,7 @@ def update_hypothesis_registry(path, verdict, capture, strategy_memory_summary=N
         "shadow_only_quality_timing_candidate_probes": quality_timing_candidate_probes,
         "shadow_only_decision_no_pass_quality_timing_watch": decision_no_pass_quality_timing_watch,
         "shadow_only_pending_momentum_decay_probes": pending_momentum_decay_probes,
+        "shadow_only_pending_stale_before_final_watch": pending_stale_before_final_watch,
         "strategy_memory": compact_strategy_memory_registry(strategy_memory_summary),
         "recent_runs": recent[-20:],
     }
@@ -4163,6 +4437,9 @@ def write_materialized_artifacts(
     pending_momentum_decay_validation_path = (
         run_dir / f"pending_momentum_decay_recheck_validation_{int(args.hours)}h.json"
     )
+    pending_stale_before_final_validation_path = (
+        run_dir / f"pending_stale_before_final_watch_validation_{int(args.hours)}h.json"
+    )
 
     def load_pending_to_final_report():
         pending_path = readiness_paths.get("pending_to_final_entry_audit")
@@ -4202,6 +4479,16 @@ def write_materialized_artifacts(
         build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
     )
     readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
+    write_json(
+        pending_stale_before_final_validation_path,
+        build_pending_stale_before_final_watch_validation(
+            registry,
+            load_pending_to_final_report(),
+        ),
+    )
+    readiness_paths["pending_stale_before_final_watch_validation"] = (
+        pending_stale_before_final_validation_path
+    )
     verdict = build_loop_verdict()
     write_json(verdict_path, verdict)
     if refresh_oos_after_registry and state == "final":
@@ -4262,6 +4549,16 @@ def write_materialized_artifacts(
             build_pending_momentum_decay_probe_validation(registry, load_pending_to_final_report()),
         )
         readiness_paths["pending_momentum_decay_recheck_validation"] = pending_momentum_decay_validation_path
+        write_json(
+            pending_stale_before_final_validation_path,
+            build_pending_stale_before_final_watch_validation(
+                registry,
+                load_pending_to_final_report(),
+            ),
+        )
+        readiness_paths["pending_stale_before_final_watch_validation"] = (
+            pending_stale_before_final_validation_path
+        )
         run_capture_60_target_artifacts()
         run_pass_allow_60_post_freeze_validation()
         # Rebuild v3 target/OOS artifacts so oos_readiness_summary consumes the
@@ -4886,6 +5183,7 @@ def self_test():
             "quality_timing_candidate_probe_validation_24h.json",
             "decision_no_pass_quality_timing_watch_validation_24h.json",
             "pending_momentum_decay_recheck_validation_24h.json",
+            "pending_stale_before_final_watch_validation_24h.json",
             "strategy_memory_ingestion_summary.json",
             "strategy_memory_validation_24h.json",
             "strategy_memory_filtered_winner_bridge.json",

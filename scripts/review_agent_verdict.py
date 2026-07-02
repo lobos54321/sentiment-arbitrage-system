@@ -98,6 +98,7 @@ DERIVED_READINESS_SIBLINGS = {
     "quality_timing_candidate_probe_validation": "quality_timing_candidate_probe_validation_24h.json",
     "decision_no_pass_quality_timing_watch_validation": "decision_no_pass_quality_timing_watch_validation_24h.json",
     "pending_momentum_decay_recheck_validation": "pending_momentum_decay_recheck_validation_24h.json",
+    "pending_stale_before_final_watch_validation": "pending_stale_before_final_watch_validation_24h.json",
     "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
     "strategy_memory_validation": "strategy_memory_validation_24h.json",
     "strategy_memory_filtered_winner_bridge": "strategy_memory_filtered_winner_bridge.json",
@@ -1275,6 +1276,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         readiness_reports.get("decision_no_pass_quality_timing_watch_validation") or {}
     )
     pending_momentum_decay_validation = readiness_reports.get("pending_momentum_decay_recheck_validation") or {}
+    pending_stale_before_final_validation = (
+        readiness_reports.get("pending_stale_before_final_watch_validation") or {}
+    )
     strategy_memory_ingestion = readiness_reports.get("strategy_memory_ingestion_summary") or {}
     strategy_memory_validation = readiness_reports.get("strategy_memory_validation") or {}
     strategy_memory_filtered_bridge = readiness_reports.get("strategy_memory_filtered_winner_bridge") or {}
@@ -2432,6 +2436,35 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
             ),
             "top_repeated_probes": (
                 pending_momentum_decay_validation.get("top_repeated_probes") or []
+            )[:10],
+        },
+        "pending_stale_before_final_watch_validation": {
+            "available": bool(pending_stale_before_final_validation),
+            "classification": pending_stale_before_final_validation.get("classification"),
+            "next_action": pending_stale_before_final_validation.get("next_action"),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+            "registered_watch_count": pending_stale_before_final_validation.get(
+                "registered_watch_count"
+            ),
+            "current_stale_before_final_event_count": pending_stale_before_final_validation.get(
+                "current_stale_before_final_event_count"
+            ),
+            "repeated_selected_cluster_count": pending_stale_before_final_validation.get(
+                "repeated_selected_cluster_count"
+            ),
+            "repeated_selected_cluster_rate": pending_stale_before_final_validation.get(
+                "repeated_selected_cluster_rate"
+            ),
+            "denominator": pending_stale_before_final_validation.get("denominator") or {},
+            "status_counts": pending_stale_before_final_validation.get("status_counts") or {},
+            "oos_readiness_queue": (
+                pending_stale_before_final_validation.get("oos_readiness_queue") or {}
+            ),
+            "top_repeated_clusters": (
+                pending_stale_before_final_validation.get("top_repeated_clusters") or []
             )[:10],
         },
         "strategy_memory_ingestion_summary": {

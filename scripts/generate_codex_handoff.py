@@ -997,6 +997,47 @@ def build_handoff(verdict):
             "```",
             "",
         ])
+    pending_stale_before_final_validation = (
+        verdict.get("pending_stale_before_final_watch_validation") or {}
+    )
+    if pending_stale_before_final_validation:
+        lines.extend([
+            "## Pending Stale-Before-Final Watch Validation",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "available": pending_stale_before_final_validation.get("available"),
+                    "classification": pending_stale_before_final_validation.get("classification"),
+                    "next_action": pending_stale_before_final_validation.get("next_action"),
+                    "promotion_allowed": False,
+                    "strategy_change_allowed": False,
+                    "automatic_runtime_change_allowed": False,
+                    "paper_enablement_allowed": False,
+                    "registered_watch_count": pending_stale_before_final_validation.get(
+                        "registered_watch_count"
+                    ),
+                    "current_stale_before_final_event_count": pending_stale_before_final_validation.get(
+                        "current_stale_before_final_event_count"
+                    ),
+                    "repeated_selected_cluster_count": pending_stale_before_final_validation.get(
+                        "repeated_selected_cluster_count"
+                    ),
+                    "denominator": pending_stale_before_final_validation.get("denominator") or {},
+                    "status_counts": pending_stale_before_final_validation.get("status_counts") or {},
+                    "oos_readiness_queue": (
+                        pending_stale_before_final_validation.get("oos_readiness_queue") or {}
+                    ),
+                    "top_repeated_clusters": (
+                        pending_stale_before_final_validation.get("top_repeated_clusters") or []
+                    )[:8],
+                },
+                indent=2,
+                sort_keys=True,
+            )[:12000],
+            "```",
+            "",
+        ])
     strategy_memory = verdict.get("strategy_memory") or {}
     strategy_memory_ingestion = verdict.get("strategy_memory_ingestion_summary") or {}
     strategy_memory_validation = verdict.get("strategy_memory_validation") or {}
@@ -1071,6 +1112,7 @@ def build_handoff(verdict):
                 "quality_timing_candidate_probe_validation": verdict.get("quality_timing_candidate_probe_validation") or {},
                 "decision_no_pass_quality_timing_watch_validation": verdict.get("decision_no_pass_quality_timing_watch_validation") or {},
                 "pending_momentum_decay_recheck_validation": verdict.get("pending_momentum_decay_recheck_validation") or {},
+                "pending_stale_before_final_watch_validation": verdict.get("pending_stale_before_final_watch_validation") or {},
                 "quality_timing_shadow_review_queue": verdict.get("quality_timing_shadow_review_queue") or {},
                 "shadow_decision_bridge_audit_summary": verdict.get("shadow_decision_bridge_audit_summary") or {},
                 "pass_allow_capture_gap_audit": verdict.get("pass_allow_capture_gap_audit") or {},
