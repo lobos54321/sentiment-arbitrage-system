@@ -1434,7 +1434,11 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     decision_no_pass_review = readiness_reports.get("decision_no_pass_quality_timing_review") or {}
     pass_allow_60_closure_plan = readiness_reports.get("pass_allow_60_closure_plan") or {}
     pass_allow_60_oos_freeze_registry = readiness_reports.get("pass_allow_60_oos_freeze_registry") or {}
-    capture_cross_oos_freeze_registry = readiness_reports.get("capture_cross_oos_freeze_registry") or {}
+    capture_cross_oos_freeze_registry = (
+        readiness_reports.get("capture_cross_oos_freeze_registry")
+        or (oos_readiness_summary_v3.get("capture_cross_oos_freeze_registry") or {})
+        or {}
+    )
     pass_allow_60_closure_tracks = pass_allow_60_closure_plan.get("closure_tracks") or {}
     pass_allow_60_dnp_clusters = (
         pass_allow_60_closure_tracks.get("decision_no_pass_quality_timing_clusters") or {}
