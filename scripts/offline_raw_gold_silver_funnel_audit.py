@@ -14,6 +14,7 @@ import datetime as _dt
 import json
 import math
 import sqlite3
+import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -23,6 +24,7 @@ SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v4"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT = 200
+SHADOW_DECISION_BRIDGE_TABLE = "shadow_decision_bridge_events"
 
 
 def jloads(raw):
@@ -379,6 +381,34 @@ def load_paper_decisions(paper_db, tokens, since_ts, until_ts):
             [since_ts - 60, until_ts + 900],
         ).fetchall()
         out.extend(dict(row) for row in rows if str(row["token_ca"] or "") in token_set)
+    if table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE):
+        cols = columns(paper_db, SHADOW_DECISION_BRIDGE_TABLE)
+        rows = paper_db.execute(
+            f"""
+            SELECT rowid AS id, 'shadow_decision_bridge_events' AS source_kind,
+                   {expr(cols, 'event_ts', 'created_at')} AS event_ts,
+                   {optional(cols, 'signal_id')}, {optional(cols, 'token_ca')},
+                   NULL AS symbol, {optional(cols, 'lifecycle_id')},
+                   {expr(cols, 'source_component', "'shadow_decision_bridge_mirror'")} AS source_component,
+                   {expr(cols, 'root_cause', "'shadow_decision_bridge_mirror'")} AS reason,
+                   {expr(cols, 'event_type', "'shadow_decision_bridge_evidence'")} AS event_type,
+                   {expr(cols, 'decision', "'EVIDENCE'")} AS decision,
+                   NULL AS route,
+                   {expr(cols, 'source_artifact', "'shadow_decision_bridge_audit'")} AS data_source,
+                   NULL AS lifecycle_state,
+                   {optional(cols, 'payload_json', "'{}'")},
+                   NULL AS action, NULL AS would_action,
+                   0 AS would_enter_a_class, 0 AS did_enter,
+                   NULL AS quote_clean, NULL AS quote_executable, NULL AS route_available,
+                   {expr(cols, 'root_cause', "'shadow_decision_bridge_mirror'")} AS block_cause,
+                   '[]' AS hard_blockers_json,
+                   NULL AS quote_failure_reason, NULL AS route_failure_reason
+            FROM {SHADOW_DECISION_BRIDGE_TABLE}
+            WHERE event_ts >= ? AND event_ts <= ?
+            """,
+            [since_ts - 60, until_ts + 900],
+        ).fetchall()
+        out.extend(dict(row) for row in rows if str(row["token_ca"] or "") in token_set)
     normalized = []
     for row in out:
         row = dict(row)
@@ -711,6 +741,8 @@ def _attribute_no_decision_records(
     shadow_no_decision_reason_counts = Counter()
     shadow_no_decision_signal_examples = []
     shadow_no_decision_signal_count = 0
+    token_time_mismatch_signal_examples = []
+    token_time_mismatch_signal_count = 0
 
     for signal_id in sorted(missing_signal_ids or []):
         raw_row = raw_by_signal.get(signal_id) or {}
@@ -809,6 +841,7 @@ def _attribute_no_decision_records(
                     {
                         "signal_id": signal_id,
                         "token_ca": token or raw_row.get("token_ca"),
+                        "signal_ts": raw_row.get("signal_ts"),
                         "matched_entry_hypothesis_count": len(entry_matches),
                         "matched_entry_hypothesis_sample": [
                             {
@@ -817,6 +850,20 @@ def _attribute_no_decision_records(
                                 "reason": row.get("reason"),
                             }
                             for row in entry_matches[:12]
+                        ],
+                    }
+                )
+        if subroot == "token_time_decision_nearby_signal_id_mismatch":
+            token_time_mismatch_signal_count += 1
+            if len(token_time_mismatch_signal_examples) < SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT:
+                token_time_mismatch_signal_examples.append(
+                    {
+                        "signal_id": signal_id,
+                        "token_ca": token or raw_row.get("token_ca"),
+                        "signal_ts": raw_row.get("signal_ts"),
+                        "token_time_decision_count": len(token_time_decisions),
+                        "token_time_decision_sample": [
+                            _decision_summary(row) for row in token_time_decisions[:3]
                         ],
                     }
                 )
@@ -844,6 +891,12 @@ def _attribute_no_decision_records(
             shadow_no_decision_signal_count > len(shadow_no_decision_signal_examples)
         ),
         "shadow_no_decision_entry_hypothesis_signal_examples": shadow_no_decision_signal_examples,
+        "token_time_signal_id_mismatch_signal_count": token_time_mismatch_signal_count,
+        "token_time_signal_id_mismatch_signal_example_limit": SHADOW_NO_DECISION_SIGNAL_EXAMPLE_LIMIT,
+        "token_time_signal_id_mismatch_signal_examples_truncated": (
+            token_time_mismatch_signal_count > len(token_time_mismatch_signal_examples)
+        ),
+        "token_time_signal_id_mismatch_signal_examples": token_time_mismatch_signal_examples,
         "no_decision_token_time_decision_without_exact_signal_id": token_time_joined,
         "no_decision_candidate_shadow_observed_no_decision_event": candidate_shadow_observed,
         "no_decision_partial_candidate_observation_no_decision_event": partial_candidate_observed,
@@ -944,8 +997,10 @@ def load_raw_signal_decision_bridge(
         "pending_without_final_entry_examples": [],
         "raw_scoped_final_entry_hard_blockers": {},
         "component_decision_reason_counts": [],
+        "shadow_decision_bridge_events_available": table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE),
+        "shadow_decision_bridge_records_by_signal_id": 0,
     }
-    if not raw_signal_ids or not table_exists(paper_db, "paper_decision_events"):
+    if not raw_signal_ids:
         return result
 
     raw_id_set = set(raw_signal_ids or [])
@@ -962,16 +1017,39 @@ def load_raw_signal_decision_bridge(
     for row in token_time_decisions or []:
         if row.get("token_ca"):
             decisions_by_token[str(row["token_ca"])].append(row)
-    window_rows = paper_db.execute(
-        """
-        SELECT event_ts, signal_id, component, event_type, decision, reason, payload_json
-        FROM paper_decision_events
-        WHERE event_ts >= ? AND event_ts <= ?
-          AND signal_id IS NOT NULL
-        """,
-        [since_ts - 60, until_ts + 900],
-    ).fetchall()
-    rows = [row for row in window_rows if signal_id_key(row["signal_id"]) in raw_id_set]
+    rows = []
+    shadow_decision_bridge_rows = []
+    if table_exists(paper_db, "paper_decision_events"):
+        window_rows = paper_db.execute(
+            """
+            SELECT event_ts, signal_id, component, event_type, decision, reason, payload_json
+            FROM paper_decision_events
+            WHERE event_ts >= ? AND event_ts <= ?
+              AND signal_id IS NOT NULL
+            """,
+            [since_ts - 60, until_ts + 900],
+        ).fetchall()
+        rows.extend([row for row in window_rows if signal_id_key(row["signal_id"]) in raw_id_set])
+    if table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE):
+        cols = columns(paper_db, SHADOW_DECISION_BRIDGE_TABLE)
+        shadow_window_rows = paper_db.execute(
+            f"""
+            SELECT event_ts, signal_id,
+                   {expr(cols, 'source_component', "'shadow_decision_bridge_mirror'")} AS component,
+                   {expr(cols, 'event_type', "'shadow_decision_bridge_evidence'")} AS event_type,
+                   {expr(cols, 'decision', "'EVIDENCE'")} AS decision,
+                   {expr(cols, 'root_cause', "'shadow_decision_bridge_mirror'")} AS reason,
+                   {optional(cols, 'payload_json', "'{}'")}
+            FROM {SHADOW_DECISION_BRIDGE_TABLE}
+            WHERE event_ts >= ? AND event_ts <= ?
+              AND signal_id IS NOT NULL
+            """,
+            [since_ts - 60, until_ts + 900],
+        ).fetchall()
+        shadow_decision_bridge_rows = [
+            row for row in shadow_window_rows if signal_id_key(row["signal_id"]) in raw_id_set
+        ]
+        rows.extend(shadow_decision_bridge_rows)
 
     by_signal = defaultdict(list)
     grouped = Counter()
@@ -1121,6 +1199,7 @@ def load_raw_signal_decision_bridge(
     result.update(
         {
             "decision_records_by_signal_id": len(rows),
+            "shadow_decision_bridge_records_by_signal_id": len(shadow_decision_bridge_rows),
             "raw_signals_with_decision_record": len(with_decision & raw_id_set),
             "raw_signals_without_decision_record": len(missing_decision_ids),
             **no_decision_attribution,
@@ -1782,6 +1861,129 @@ def compact_stdout_summary(report, out_path=None):
     }
 
 
+def _create_self_test_dbs(root):
+    now = int(time.time())
+    paper = root / "paper.db"
+    raw = root / "raw.db"
+    paper_db = sqlite3.connect(paper)
+    paper_db.executescript(
+        """
+        CREATE TABLE candidate_shadow_observations(
+          signal_id TEXT, token_ca TEXT, signal_ts INTEGER, candidate_id TEXT, family TEXT,
+          matched INTEGER, reason TEXT, observed_at INTEGER, payload_json TEXT
+        );
+        CREATE TABLE shadow_decision_bridge_events(
+          event_ts INTEGER NOT NULL,
+          signal_id TEXT NOT NULL,
+          token_ca TEXT,
+          lifecycle_id TEXT,
+          source_component TEXT NOT NULL DEFAULT 'shadow_decision_bridge_mirror',
+          event_type TEXT NOT NULL DEFAULT 'shadow_decision_bridge_evidence',
+          decision TEXT NOT NULL DEFAULT 'EVIDENCE',
+          root_cause TEXT NOT NULL,
+          matched_entry_hypothesis_count INTEGER DEFAULT 0,
+          matched_entry_hypothesis_sample TEXT,
+          candidate_count_expected INTEGER,
+          source_artifact TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          promotion_allowed INTEGER NOT NULL DEFAULT 0,
+          creates_pending_entry INTEGER NOT NULL DEFAULT 0,
+          creates_paper_trade INTEGER NOT NULL DEFAULT 0,
+          changes_runtime_mode INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          UNIQUE(signal_id, root_cause, source_artifact)
+        );
+        """
+    )
+    context_payload = {
+        "context_schema_version": "candidate-shadow-context-v2.no_signal_price_quote_inference",
+        "quote_clean_definition": "source_or_executable_quote_only_no_signal_price",
+        "lifecycle_profile": "SELF_TEST",
+        "source_component": "self_test",
+    }
+    rows = [
+        ("1", "DOG", now - 120, "current_all", "baseline", 1, "self_test", now, json.dumps(context_payload)),
+        ("1", "DOG", now - 120, "kline:active_mom20_first3", "kline", 1, "self_test", now, "{}"),
+    ]
+    paper_db.executemany("INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?,?,?,?)", rows)
+    paper_db.commit()
+    paper_db.close()
+    raw_db = sqlite3.connect(raw)
+    raw_db.executescript(
+        """
+        CREATE TABLE raw_signal_outcomes(
+          signal_id TEXT, token_ca TEXT, symbol TEXT, signal_ts INTEGER,
+          observation_status TEXT, kline_covered INTEGER, baseline_confidence TEXT,
+          same_source_path INTEGER, outlier_flag INTEGER, sustained_evaluable INTEGER,
+          raw_primary_tier TEXT, raw_sustained_tier TEXT,
+          max_sustained_peak_pct REAL, time_to_sustained_peak_sec INTEGER,
+          raw_dog_entered INTEGER, raw_dog_realized INTEGER, did_enter INTEGER,
+          held_to_silver INTEGER, held_to_gold INTEGER, exit_reason TEXT
+        );
+        """
+    )
+    raw_db.execute(
+        "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("1", "DOG", "DOG", now - 120, "matured", 1, "high", 1, 0, 1, "silver", "silver", 80.0, 600, 0, 0, 0, 0, 0, None),
+    )
+    raw_db.commit()
+    raw_db.close()
+    return paper, raw, now
+
+
+def self_test():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        paper, raw, now = _create_self_test_dbs(root)
+        args = argparse.Namespace(
+            db=str(paper),
+            raw_db=str(raw),
+            hours=1,
+            expected_candidates=2,
+            limit=10,
+            skip_decisions=False,
+            skip_trades=False,
+        )
+        before = build_report(args)
+        before_bridge = before["summary"]["entry_bridge_layer"]["raw_signal_decision_bridge"]
+        assert before_bridge["raw_signals_with_decision_record"] == 0
+        assert before_bridge["raw_signals_without_decision_record"] == 1
+        assert before_bridge["no_decision_record_subroot_cause_counts"][0]["root_cause"] == (
+            "shadow_entry_hypotheses_matched_no_decision_bridge"
+        )
+        paper_db = sqlite3.connect(paper)
+        paper_db.execute(
+            f"""
+            INSERT INTO {SHADOW_DECISION_BRIDGE_TABLE} (
+              event_ts, signal_id, token_ca, source_component, event_type, decision,
+              root_cause, matched_entry_hypothesis_count, matched_entry_hypothesis_sample,
+              candidate_count_expected, source_artifact, payload_json,
+              promotion_allowed, creates_pending_entry, creates_paper_trade,
+              changes_runtime_mode, created_at
+            ) VALUES (?, ?, ?, 'shadow_decision_bridge_mirror',
+              'shadow_decision_bridge_evidence', 'EVIDENCE',
+              'shadow_entry_hypotheses_matched_no_decision_bridge', 1, '[]',
+              2, 'raw_gold_silver_funnel_audit', '{{}}', 0, 0, 0, 0, ?)
+            """,
+            (now - 120, "1", "DOG", now),
+        )
+        paper_db.commit()
+        paper_db.close()
+        after = build_report(args)
+        after_bridge = after["summary"]["entry_bridge_layer"]["raw_signal_decision_bridge"]
+        assert after_bridge["raw_signals_with_decision_record"] == 1
+        assert after_bridge["raw_signals_without_decision_record"] == 0
+        assert after_bridge["shadow_decision_bridge_records_by_signal_id"] == 1
+        assert after_bridge["raw_signals_with_pass_or_allow"] == 0
+        assert after_bridge["raw_signals_with_pending_entry"] == 0
+        decision_layer = after["summary"]["decision_layer"]
+        assert decision_layer["events_with_decision_record"] == 1
+        assert decision_layer["would_enter_events"] == 0
+        assert decision_layer["entered_events"] == 0
+        assert after["can_promote_live"] is False
+    print("offline_raw_gold_silver_funnel_audit self-test passed")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default="/app/data/paper_trades.db")
@@ -1791,8 +1993,12 @@ def main():
     ap.add_argument("--limit", type=int, default=80, help="number of top missed examples to include")
     ap.add_argument("--skip-decisions", action="store_true", help="skip decision table loading")
     ap.add_argument("--skip-trades", action="store_true", help="skip paper trade table loading")
+    ap.add_argument("--self-test", action="store_true")
     ap.add_argument("--out")
     args = ap.parse_args()
+    if args.self_test:
+        self_test()
+        return
     report = build_report(args)
     text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
     if args.out:

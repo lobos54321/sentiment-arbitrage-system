@@ -58,3 +58,8 @@ discrepancy is explained by a recorded window pin.
 - **2026-07-02 pitfall**: row-level `decision_record_count>0` (43) ≠ strict signal_id bridge
   definition (41); the 2 extras are `token_time_decision_nearby_signal_id_mismatch`. State which
   definition you are using.
+- **2026-07-03 local verification**: P0 bridge fix adds evaluator-only
+  `shadow_decision_bridge_events` as a mirror table, not `paper_decision_events`. Local self-test
+  before/after: one raw g/s event moved from no-decision to decision evidence after inserting a
+  mirror row, while `pass_or_allow`, `pending_entry`, `entered`, and promotion remained zero/false.
+  Production acceptance still requires a fresh deployed 24h AutoLoop window.

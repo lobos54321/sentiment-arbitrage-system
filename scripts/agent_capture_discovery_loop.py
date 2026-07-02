@@ -32,10 +32,13 @@ SCHEMA_VERSION = "agent_capture_discovery_loop.v2"
 DEFAULT_OUT_ROOT = "/app/data/agent_runs"
 DEFAULT_HANDOFF_DIR = "/app/data/agent_handoffs"
 DEFAULT_REGISTRY = "/app/data/hypothesis_registry.json"
+DEFAULT_EXPECTED_CANDIDATES = 84
 SHADOW_DECISION_MIRROR_EVENT_LIMIT = 200
 SHADOW_DECISION_MIRROR_EXAMPLE_LIMIT = 20
+SHADOW_DECISION_BRIDGE_TABLE = "shadow_decision_bridge_events"
 REPORT_TEST_COMMANDS = (
     ("capture_self_test", ["scripts/offline_candidate_capture_discovery.py", "--self-test"]),
+    ("raw_gold_silver_funnel_self_test", ["scripts/offline_raw_gold_silver_funnel_audit.py", "--self-test"]),
     ("pnl_cross_self_test", ["scripts/offline_candidate_cross_eval.py", "--self-test"]),
     ("virtual_markov_self_test", ["scripts/build_candidate_virtual_markov.py", "--self-test"]),
     ("volume_kline_audit_self_test", ["scripts/volume_kline_coverage_audit.py", "--self-test"]),
@@ -739,14 +742,30 @@ def count_for_root(rows, root_cause):
     return 0
 
 
-def build_shadow_decision_mirror_events(signal_examples, *, limit=SHADOW_DECISION_MIRROR_EVENT_LIMIT):
+def _mirror_event_ts(row):
+    for key in ("signal_ts", "event_ts"):
+        value = safe_int(row.get(key))
+        if value:
+            return value
+    return safe_int(time.time())
+
+
+def build_shadow_decision_mirror_events(
+    signal_examples,
+    *,
+    evidence_type="shadow_entry_hypothesis_matched_no_decision_bridge",
+    root_cause="shadow_entry_hypotheses_matched_no_decision_bridge",
+    limit=SHADOW_DECISION_MIRROR_EVENT_LIMIT,
+):
     examples = []
     for row in (signal_examples or [])[:limit]:
         matched_sample = list(row.get("matched_entry_hypothesis_sample") or [])
         examples.append(
             {
                 "schema_version": "shadow_decision_evidence_mirror.event.v1",
-                "evidence_type": "shadow_entry_hypothesis_matched_no_decision_bridge",
+                "evidence_type": evidence_type,
+                "root_cause": root_cause,
+                "event_ts": _mirror_event_ts(row),
                 "signal_id": row.get("signal_id"),
                 "token_ca": row.get("token_ca"),
                 "matched_entry_hypothesis_count": row.get("matched_entry_hypothesis_count"),
@@ -756,6 +775,7 @@ def build_shadow_decision_mirror_events(signal_examples, *, limit=SHADOW_DECISIO
                     for item in matched_sample[:12]
                     if item.get("candidate_id")
                 ],
+                "token_time_decision_sample": list(row.get("token_time_decision_sample") or [])[:3],
                 "source_artifact": "raw_gold_silver_funnel_audit",
                 "recommended_write_target": "shadow_decision_evidence_mirror_only",
                 "forbidden_write_targets": [
@@ -772,6 +792,152 @@ def build_shadow_decision_mirror_events(signal_examples, *, limit=SHADOW_DECISIO
             }
         )
     return examples
+
+
+def _shadow_decision_bridge_schema(conn):
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SHADOW_DECISION_BRIDGE_TABLE} (
+          event_ts INTEGER NOT NULL,
+          signal_id TEXT NOT NULL,
+          token_ca TEXT,
+          lifecycle_id TEXT,
+          source_component TEXT NOT NULL DEFAULT 'shadow_decision_bridge_mirror',
+          event_type TEXT NOT NULL DEFAULT 'shadow_decision_bridge_evidence',
+          decision TEXT NOT NULL DEFAULT 'EVIDENCE',
+          root_cause TEXT NOT NULL,
+          matched_entry_hypothesis_count INTEGER DEFAULT 0,
+          matched_entry_hypothesis_sample TEXT,
+          candidate_count_expected INTEGER,
+          source_artifact TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{{}}',
+          promotion_allowed INTEGER NOT NULL DEFAULT 0,
+          creates_pending_entry INTEGER NOT NULL DEFAULT 0,
+          creates_paper_trade INTEGER NOT NULL DEFAULT 0,
+          changes_runtime_mode INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          UNIQUE(signal_id, root_cause, source_artifact)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shadow_decision_bridge_signal
+        ON {SHADOW_DECISION_BRIDGE_TABLE}(signal_id, event_ts)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_shadow_decision_bridge_token_time
+        ON {SHADOW_DECISION_BRIDGE_TABLE}(token_ca, event_ts)
+        """
+    )
+
+
+def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candidates=DEFAULT_EXPECTED_CANDIDATES):
+    """Persist bridge mirror events to an evaluator-only SQLite table.
+
+    The table is explicitly separate from paper_decision_events/final_entry_contract
+    and carries only EVIDENCE rows. It must never create pending entries, paper
+    trades, runtime mode changes, or promotion evidence.
+    """
+    events = list((bridge_audit or {}).get("mirror_events") or [])
+    result = {
+        "schema_version": "shadow_decision_bridge_persistence.v1",
+        "table": SHADOW_DECISION_BRIDGE_TABLE,
+        "attempted": bool(events),
+        "db_path": str(db_path),
+        "input_event_count": len(events),
+        "upserted_event_count": 0,
+        "skipped_event_count": 0,
+        "available": False,
+        "promotion_allowed": False,
+        "creates_pending_entry": False,
+        "creates_paper_trade": False,
+        "changes_runtime_mode": False,
+        "forbidden_write_targets": [
+            "paper_decision_events",
+            "a_class_decision_events",
+            "pending_entries",
+            "paper_trades",
+            "final_entry_contract",
+        ],
+    }
+    if not events:
+        result["reason"] = "no_mirror_events"
+        return result
+    if not db_path or not Path(db_path).exists():
+        result["reason"] = "paper_db_missing"
+        return result
+    conn = sqlite3.connect(db_path)
+    try:
+        _shadow_decision_bridge_schema(conn)
+        now = safe_int(time.time())
+        for event in events:
+            signal_id = event.get("signal_id")
+            if signal_id is None or str(signal_id).strip() == "":
+                result["skipped_event_count"] += 1
+                continue
+            root_cause = event.get("root_cause") or event.get("evidence_type")
+            payload = {
+                "schema_version": event.get("schema_version"),
+                "evidence_type": event.get("evidence_type"),
+                "matched_candidate_ids_sample": event.get("matched_candidate_ids_sample") or [],
+                "token_time_decision_sample": event.get("token_time_decision_sample") or [],
+                "recommended_write_target": event.get("recommended_write_target"),
+                "forbidden_write_targets": event.get("forbidden_write_targets") or [],
+                "promotion_allowed": False,
+                "creates_pending_entry": False,
+                "creates_paper_trade": False,
+                "changes_runtime_mode": False,
+            }
+            conn.execute(
+                f"""
+                INSERT INTO {SHADOW_DECISION_BRIDGE_TABLE} (
+                  event_ts, signal_id, token_ca, lifecycle_id, source_component,
+                  event_type, decision, root_cause,
+                  matched_entry_hypothesis_count, matched_entry_hypothesis_sample,
+                  candidate_count_expected, source_artifact, payload_json,
+                  promotion_allowed, creates_pending_entry, creates_paper_trade,
+                  changes_runtime_mode, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?)
+                ON CONFLICT(signal_id, root_cause, source_artifact) DO UPDATE SET
+                  event_ts=excluded.event_ts,
+                  token_ca=excluded.token_ca,
+                  matched_entry_hypothesis_count=excluded.matched_entry_hypothesis_count,
+                  matched_entry_hypothesis_sample=excluded.matched_entry_hypothesis_sample,
+                  candidate_count_expected=excluded.candidate_count_expected,
+                  payload_json=excluded.payload_json,
+                  promotion_allowed=0,
+                  creates_pending_entry=0,
+                  creates_paper_trade=0,
+                  changes_runtime_mode=0,
+                  created_at=excluded.created_at
+                """,
+                (
+                    safe_int(event.get("event_ts")) or now,
+                    str(signal_id),
+                    event.get("token_ca"),
+                    event.get("lifecycle_id"),
+                    "shadow_decision_bridge_mirror",
+                    "shadow_decision_bridge_evidence",
+                    "EVIDENCE",
+                    str(root_cause or "shadow_decision_bridge_mirror"),
+                    safe_int(event.get("matched_entry_hypothesis_count"), 0),
+                    json.dumps(event.get("matched_entry_hypothesis_sample") or [], ensure_ascii=False),
+                    safe_int(expected_candidates, DEFAULT_EXPECTED_CANDIDATES),
+                    event.get("source_artifact") or "raw_gold_silver_funnel_audit",
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            result["upserted_event_count"] += 1
+        conn.commit()
+        result["available"] = True
+        result["reason"] = "persisted"
+        return result
+    finally:
+        conn.close()
 
 
 def build_shadow_decision_bridge_audit(raw_funnel):
@@ -799,14 +965,28 @@ def build_shadow_decision_bridge_audit(raw_funnel):
     source_examples_truncated = bool(
         raw_bridge.get("shadow_no_decision_entry_hypothesis_signal_examples_truncated")
     )
-    mirror_events = build_shadow_decision_mirror_events(signal_examples)
+    mismatch_count = count_for_root(
+        no_decision_subroots,
+        "token_time_decision_nearby_signal_id_mismatch",
+    )
+    mismatch_examples = raw_bridge.get("token_time_signal_id_mismatch_signal_examples") or []
+    shadow_mirror_events = build_shadow_decision_mirror_events(signal_examples)
+    mismatch_mirror_events = build_shadow_decision_mirror_events(
+        mismatch_examples,
+        evidence_type="token_time_decision_nearby_signal_id_mismatch",
+        root_cause="token_time_decision_nearby_signal_id_mismatch",
+    )
+    mirror_events = shadow_mirror_events + mismatch_mirror_events
     mirror_examples = mirror_events[:SHADOW_DECISION_MIRROR_EXAMPLE_LIMIT]
+    required_mirror_count = shadow_count + mismatch_count
     mirror_truncated = bool(
         source_examples_truncated
-        or len(mirror_events) < source_signal_count
-        or len(mirror_events) < shadow_count
+        or bool(raw_bridge.get("token_time_signal_id_mismatch_signal_examples_truncated"))
+        or len(shadow_mirror_events) < source_signal_count
+        or len(shadow_mirror_events) < shadow_count
+        or len(mismatch_mirror_events) < mismatch_count
     )
-    mirror_complete = bool(shadow_count > 0 and not mirror_truncated and len(mirror_events) >= shadow_count)
+    mirror_complete = bool(required_mirror_count > 0 and not mirror_truncated and len(mirror_events) >= required_mirror_count)
     status = "NO_SHADOW_DECISION_BRIDGE_GAP"
     next_action = "continue_capture_discovery"
     mirror_status = "NO_MIRROR_NEEDED"
@@ -843,6 +1023,8 @@ def build_shadow_decision_bridge_audit(raw_funnel):
             "current_decision_record_rate": safe_rate(current_decision_count, raw_signal_ids),
             "raw_signals_without_decision_record": no_decision_count,
             "shadow_entry_hypotheses_matched_no_decision_bridge": shadow_count,
+            "token_time_decision_nearby_signal_id_mismatch": mismatch_count,
+            "required_mirror_event_count": required_mirror_count,
             "shadow_bridge_gap_rate_vs_raw_signal_ids": safe_rate(shadow_count, raw_signal_ids),
             "shadow_bridge_gap_share_of_no_decision": safe_rate(shadow_count, no_decision_count),
             "optimistic_decision_record_count_if_shadow_gap_logged": optimistic_decision_count,
@@ -858,9 +1040,12 @@ def build_shadow_decision_bridge_audit(raw_funnel):
             ),
             "source_signal_examples_truncated": source_examples_truncated,
             "mirror_event_count": len(mirror_events),
+            "shadow_mirror_event_count": len(shadow_mirror_events),
+            "token_time_mismatch_mirror_event_count": len(mismatch_mirror_events),
             "mirror_event_example_count": len(mirror_examples),
             "mirror_event_limit": SHADOW_DECISION_MIRROR_EVENT_LIMIT,
-            "mirror_event_coverage_vs_shadow_bridge_gap": safe_rate(len(mirror_events), shadow_count),
+            "mirror_event_coverage_vs_required_bridge_gap": safe_rate(len(mirror_events), required_mirror_count),
+            "mirror_event_coverage_vs_shadow_bridge_gap": safe_rate(len(shadow_mirror_events), shadow_count),
             "mirror_event_truncated": mirror_truncated,
         },
         "read_only_evidence_mirror": {
@@ -897,8 +1082,10 @@ def build_shadow_decision_bridge_audit(raw_funnel):
                 "changes_runtime_mode=false",
             ],
             "event_count": len(mirror_events),
+            "required_event_count": required_mirror_count,
             "event_limit": SHADOW_DECISION_MIRROR_EVENT_LIMIT,
-            "event_coverage_vs_shadow_bridge_gap": safe_rate(len(mirror_events), shadow_count),
+            "event_coverage_vs_required_bridge_gap": safe_rate(len(mirror_events), required_mirror_count),
+            "event_coverage_vs_shadow_bridge_gap": safe_rate(len(shadow_mirror_events), shadow_count),
             "event_truncated": mirror_truncated,
             "runtime_effect": "none",
             "promotion_allowed": False,
@@ -913,10 +1100,7 @@ def build_shadow_decision_bridge_audit(raw_funnel):
         "candidate_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_candidate_counts") or [],
         "reason_counts": raw_bridge.get("shadow_no_decision_entry_hypothesis_reason_counts") or [],
         "signal_examples": signal_examples,
-        "nearby_signal_id_mismatch_count": count_for_root(
-            no_decision_subroots,
-            "token_time_decision_nearby_signal_id_mismatch",
-        ),
+        "nearby_signal_id_mismatch_count": mismatch_count,
         "missing_signal_id_decision_count": count_for_root(
             no_decision_subroots,
             "token_time_decision_missing_signal_id",
@@ -2152,9 +2336,36 @@ def run_reports(run_dir, args):
             raw_funnel = load_json(raw_funnel_path)
         else:
             raw_funnel = {}
+        shadow_bridge_audit = build_shadow_decision_bridge_audit(raw_funnel)
+        bridge_persistence = persist_shadow_decision_bridge_events(
+            args.paper_db,
+            shadow_bridge_audit,
+            expected_candidates=args.expected_candidates,
+        )
+        shadow_bridge_audit["read_only_evidence_mirror"]["persistence"] = bridge_persistence
+        if bridge_persistence.get("upserted_event_count", 0) > 0:
+            rerun = run_report(
+                "raw_gold_silver_funnel_audit_after_shadow_bridge_mirror",
+                [
+                    "scripts/offline_raw_gold_silver_funnel_audit.py",
+                    "--db", args.paper_db,
+                    "--raw-db", args.raw_db,
+                    "--hours", str(primary_hours),
+                    "--expected-candidates", str(args.expected_candidates),
+                    "--out", str(raw_funnel_path),
+                ],
+                raw_funnel_path,
+                timeout=args.report_timeout_sec,
+            )
+            diagnostics.append(rerun)
+            if raw_funnel_path.exists():
+                try:
+                    raw_funnel = load_json(raw_funnel_path)
+                except Exception:
+                    pass
         write_derived_report(
             shadow_decision_bridge_path,
-            build_shadow_decision_bridge_audit(raw_funnel),
+            shadow_bridge_audit,
         )
         readiness_paths["shadow_decision_bridge_audit"] = shadow_decision_bridge_path
         write_derived_report(a_class_fastlane_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
@@ -5208,9 +5419,9 @@ def create_self_test_dbs(root):
         );
         """
     )
-    candidates = ["kline:active_mom20_first3", "entry_mode_registry:smart_entry_pullback_bounce"]
+    candidates = [("current_all", "baseline"), ("kline:active_mom20_first3", "kline")]
     for signal_id, token, is_dog in [("1", "DOG", True), ("2", "NORM", False)]:
-        for candidate in candidates:
+        for candidate, family in candidates:
             payload = {
                 "context_schema_version": "candidate-shadow-context-v2.no_signal_price_quote_inference",
                 "quote_clean_definition": "source_or_executable_quote_only_no_signal_price",
@@ -5224,11 +5435,11 @@ def create_self_test_dbs(root):
             matched = 1 if is_dog else 0
             db.execute(
                 "INSERT INTO candidate_shadow_observations VALUES (?,?,?,?,?,?,?,?,?)",
-                (signal_id, token, now - 120, candidate, "test", matched, "self_test", now, json.dumps(payload)),
+                (signal_id, token, now - 120, candidate, family, matched, "self_test", now, json.dumps(payload)),
             )
             db.execute(
                 "INSERT INTO candidate_shadow_virtual_trades VALUES (?,?,?,?,?,?,?)",
-                (signal_id, token, candidate, "test", "VIRTUAL_CLOSED", 5.0 if is_dog else -1.0, now),
+                (signal_id, token, candidate, family, "VIRTUAL_CLOSED", 5.0 if is_dog else -1.0, now),
             )
     db.commit()
     db.close()
@@ -5785,6 +5996,23 @@ def self_test():
         assert "mirror_event_coverage_vs_shadow_bridge_gap" in shadow_bridge["denominator"]
         assert shadow_bridge["read_only_evidence_mirror"]["promotion_allowed"] is False
         assert shadow_bridge["read_only_evidence_mirror"]["automatic_runtime_change_allowed"] is False
+        persistence = shadow_bridge["read_only_evidence_mirror"].get("persistence") or {}
+        assert persistence.get("table") == SHADOW_DECISION_BRIDGE_TABLE
+        assert persistence.get("promotion_allowed") is False
+        assert persistence.get("creates_pending_entry") is False
+        assert persistence.get("creates_paper_trade") is False
+        assert persistence.get("changes_runtime_mode") is False
+        assert persistence.get("upserted_event_count", 0) >= 1
+        raw_funnel_after_bridge = load_json(latest_dir / "raw_gold_silver_funnel_audit_24h.json")
+        raw_bridge_after = (
+            raw_funnel_after_bridge.get("summary", {})
+            .get("entry_bridge_layer", {})
+            .get("raw_signal_decision_bridge", {})
+        )
+        assert raw_bridge_after.get("raw_signals_with_decision_record") == 1
+        assert raw_bridge_after.get("raw_signals_with_pass_or_allow") == 0
+        assert raw_bridge_after.get("raw_signals_with_pending_entry") == 0
+        assert raw_bridge_after.get("shadow_decision_bridge_records_by_signal_id") == 1
         for event in shadow_bridge.get("mirror_events") or []:
             assert event["recommended_write_target"] == "shadow_decision_evidence_mirror_only"
             assert event["creates_pending_entry"] is False

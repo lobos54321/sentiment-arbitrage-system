@@ -39,6 +39,7 @@ from agent_capture_discovery_loop import (
     create_self_test_dbs,
     load_json,
     parse_capture_hours,
+    persist_shadow_decision_bridge_events,
     run_report,
     run_self_tests,
     sync_latest,
@@ -341,7 +342,8 @@ def stage_derived(args, run_dir):
     hours = int(args.hours)
     capture = load_json(run_dir / f"capture_discovery_{hours}h.json")
     downstream = load_json_default(run_dir / f"candidate_downstream_readiness_{hours}h.json", {})
-    raw_funnel = load_json_default(run_dir / f"raw_gold_silver_funnel_audit_{hours}h.json", {})
+    raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{hours}h.json"
+    raw_funnel = load_json_default(raw_funnel_path, {})
     markov_reports = {}
     for profile in [item.strip() for item in str(args.markov_profiles or "").split(",") if item.strip()]:
         path = run_dir / f"candidate_virtual_markov_{profile}_{hours}h.json"
@@ -364,10 +366,36 @@ def stage_derived(args, run_dir):
         build_candidate_improvement_opportunities_report(capture, candidate_effectiveness, capture_cross),
     )
     shadow_bridge_path = run_dir / f"shadow_decision_bridge_audit_{hours}h.json"
-    write_derived_report(shadow_bridge_path, build_shadow_decision_bridge_audit(raw_funnel))
+    shadow_bridge = build_shadow_decision_bridge_audit(raw_funnel)
+    shadow_bridge["read_only_evidence_mirror"]["persistence"] = persist_shadow_decision_bridge_events(
+        args.paper_db,
+        shadow_bridge,
+        expected_candidates=args.expected_candidates,
+    )
+    derived_diagnostics = []
+    if shadow_bridge["read_only_evidence_mirror"]["persistence"].get("upserted_event_count", 0) > 0:
+        rerun = run_report(
+            "raw_gold_silver_funnel_audit_after_shadow_bridge_mirror",
+            [
+                "scripts/offline_raw_gold_silver_funnel_audit.py",
+                "--db", args.paper_db,
+                "--raw-db", args.raw_db,
+                "--hours", str(hours),
+                "--expected-candidates", str(args.expected_candidates),
+                "--out", str(raw_funnel_path),
+            ],
+            raw_funnel_path,
+            timeout=int(args.report_timeout_sec),
+        )
+        derived_diagnostics.append(rerun)
+        if rerun.get("ok") and raw_funnel_path.exists():
+            raw_funnel = load_json(raw_funnel_path)
+    write_derived_report(shadow_bridge_path, shadow_bridge)
     a_class_light_path = run_dir / f"a_class_fastlane_mode_audit_{hours}h_derived.json"
     write_derived_report(a_class_light_path, build_a_class_fastlane_mode_audit(raw_funnel, context_report))
     update_stage_state(run_dir, "derived")
+    if derived_diagnostics:
+        append_diagnostics(run_dir, derived_diagnostics)
     return {
         "stage": "derived",
         "artifacts": [
