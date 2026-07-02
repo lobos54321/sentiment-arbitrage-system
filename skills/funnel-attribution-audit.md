@@ -63,3 +63,9 @@ discrepancy is explained by a recorded window pin.
   before/after: one raw g/s event moved from no-decision to decision evidence after inserting a
   mirror row, while `pass_or_allow`, `pending_entry`, `entered`, and promotion remained zero/false.
   Production acceptance still requires a fresh deployed 24h AutoLoop window.
+- **2026-07-03 production acceptance**: deployed commit `bb5fa86` and staged run
+  `codex_p0_20260702T202008Z` verified P0. `raw_gold_silver_denominator=64`,
+  detector capture `64/64=1.0`, decision capture `64/64=1.0`, and
+  `shadow_decision_bridge_events` upserted 33 mirror rows. The largest gap moved from
+  detector→decision to decision→pass_allow (`47` events lost); `promotion_allowed=false`,
+  no pending entry/paper trade/runtime mode change occurred.

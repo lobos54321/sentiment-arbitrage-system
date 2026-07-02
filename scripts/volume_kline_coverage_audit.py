@@ -18,10 +18,12 @@ from collections import Counter
 from pathlib import Path
 
 
-SCHEMA_VERSION = "volume_kline_coverage_audit.v1"
+SCHEMA_VERSION = "volume_kline_coverage_audit.v2.p1_matured_confidence_adjusted"
 DEFAULT_CONTEXT_CARRIER = "current_all"
 UNKNOWN_VALUES = {"", "unknown", "unk", "null", "none"}
 NOT_APPLICABLE_VALUES = {"not_applicable", "not-applicable", "n/a", "na", "not applicable"}
+P1_VOLUME_METHOD_VERSION = "p1_matured_recompute_v2"
+P1_KLINE_METHOD_VERSION = "p1_confidence_time_legal_v2"
 
 
 def utc_now():
@@ -176,7 +178,111 @@ def bucket_signal_age(row, payload):
     return "gte_900s"
 
 
-def volume_context_audit(rows):
+def volume_profile_from_bars(bars):
+    vols = [float(bar.get("volume") or 0) for bar in bars]
+    if len(vols) < 3:
+        return "unknown"
+    if vols[-1] > max(vols[:-1]) * 1.8:
+        return "climax"
+    if all(vols[i] <= vols[i + 1] for i in range(len(vols) - 1)):
+        return "building"
+    if all(vols[i] >= vols[i + 1] for i in range(len(vols) - 1)):
+        return "declining"
+    if max(vols) <= 0:
+        return "flat"
+    if (max(vols) - min(vols)) / max(vols) < 0.2:
+        return "flat"
+    return "mixed"
+
+
+def volume_profile_reason_from_bars(bars):
+    if not bars:
+        return "kline_bars_unavailable"
+    if len(bars[:5]) < 3:
+        return "insufficient_kline_bars_lt_3"
+    return "classified_from_first_5_bars"
+
+
+def load_kline_bars(kline_db, token_ca, signal_ts, limit):
+    if kline_db is None or not token_ca or signal_ts is None or not table_exists(kline_db, "kline_1m"):
+        return []
+    floor_ts = int(float(signal_ts) // 60 * 60)
+    try:
+        rows = kline_db.execute(
+            """
+            SELECT timestamp, open, high, low, close, volume
+            FROM kline_1m
+            WHERE token_ca = ? AND timestamp >= ?
+            ORDER BY timestamp ASC
+            LIMIT ?
+            """,
+            (token_ca, floor_ts, int(limit)),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [dict(row) for row in rows]
+
+
+def matured_volume_recompute(rows, kline_db, kline_limit):
+    status_counts = Counter(value_status(payload, "volume_profile") for _row, payload in rows)
+    strict_known = status_counts.get("known", 0)
+    target_rows = [
+        (row, payload)
+        for row, payload in rows
+        if value_status(payload, "volume_profile") in {"missing", "unknown"}
+    ]
+    profile_counts = Counter()
+    reason_counts = Counter()
+    recovered = 0
+    still_unknown = 0
+    kline_available = bool(kline_db is not None and table_exists(kline_db, "kline_1m"))
+    samples = []
+    if kline_available:
+        for row, payload in target_rows:
+            signal_ts = number(row.get("signal_ts"))
+            if signal_ts is None:
+                signal_ts = number(payload.get("signal_ts"))
+            bars = load_kline_bars(kline_db, row.get("token_ca"), signal_ts, kline_limit)
+            first = bars[:5]
+            profile = volume_profile_from_bars(first)
+            reason = volume_profile_reason_from_bars(first)
+            profile_counts[profile] += 1
+            reason_counts[reason] += 1
+            if profile == "unknown":
+                still_unknown += 1
+            else:
+                recovered += 1
+                if len(samples) < 20:
+                    samples.append({
+                        "signal_id": row.get("signal_id"),
+                        "token_ca": row.get("token_ca"),
+                        "original_volume_profile": payload.get("volume_profile"),
+                        "original_volume_profile_reason": payload.get("volume_profile_reason"),
+                        "matured_volume_profile": profile,
+                        "matured_volume_profile_reason": reason,
+                        "matured_kline_bar_count": len(bars),
+                    })
+    canonical_known = strict_known + recovered
+    return {
+        "available": kline_available,
+        "method_version": P1_VOLUME_METHOD_VERSION,
+        "method_change": "matured_volume_recompute_canonical_known_rate_raw_first_look_secondary",
+        "target_rows": len(target_rows),
+        "strict_first_look_known_rows": strict_known,
+        "strict_first_look_known_rate": rate(strict_known, len(rows)),
+        "matured_recomputed_known_rows": recovered,
+        "matured_recomputed_unknown_rows": still_unknown,
+        "matured_recomputed_profile_counts": dict(profile_counts.most_common()),
+        "matured_recomputed_reason_counts": dict(reason_counts.most_common()),
+        "canonical_known_rows": canonical_known,
+        "canonical_known_rate": rate(canonical_known, len(rows)),
+        "strict_first_look_preserved": True,
+        "canonical_backfill_performed": False,
+        "samples": samples,
+    }
+
+
+def volume_context_audit(rows, matured_recompute=None):
     den = len(rows)
     status_counts = Counter(value_status(payload, "volume_profile") for _row, payload in rows)
     value_counts = Counter()
@@ -188,25 +294,48 @@ def volume_context_audit(rows):
     unknown = status_counts.get("unknown", 0)
     not_applicable = status_counts.get("not_applicable", 0)
     field_present = den - missing
+    strict_known = known
+    strict_unknown = unknown
+    strict_missing = missing
+    strict_blocker = known < den * 0.8
+    if matured_recompute and matured_recompute.get("available"):
+        known = int(matured_recompute.get("canonical_known_rows") or known)
+        unknown = max(0, den - known - not_applicable)
     blocker = known < den * 0.8
     missing_or_unknown = lambda _row, payload: value_status(payload, "volume_profile") in {"missing", "unknown"}
     root_causes = []
     missing_writer = breakdown(rows, lambda _row, payload: value_status(payload, "volume_profile") == "missing")["by_writer_path"]
     if missing_writer.get("MISSING", 0) or missing_writer.get("candidate_shadow_observer:inferred", 0):
         root_causes.append("volume_profile_missing_in_context_carrier_payload")
-    if unknown:
+    if strict_unknown:
         root_causes.append("volume_profile_unknown_from_insufficient_or_unclassified_kline")
     if not root_causes and blocker:
         root_causes.append("volume_profile_coverage_below_threshold")
+    if not blocker and strict_blocker and matured_recompute:
+        root_causes.append("p1_matured_volume_recompute_cleared_strict_first_look_blocker")
     unknown_rows = [(row, payload) for row, payload in rows if value_status(payload, "volume_profile") == "unknown"]
     return {
         "coverage_denominator_type": "signal_context_carrier_rows",
+        "coverage_method_version": P1_VOLUME_METHOD_VERSION if matured_recompute else "strict_first_look_v1",
+        "coverage_method_change": (
+            "matured_volume_recompute_canonical_known_rate_raw_first_look_secondary"
+            if matured_recompute
+            else "none"
+        ),
+        "strict_first_look_preserved": bool(matured_recompute),
         "context_carrier_candidate_id": DEFAULT_CONTEXT_CARRIER,
         "rows_scanned": den,
         "field_present_rows": field_present,
         "field_present_rate": rate(field_present, den),
         "known_rows": known,
         "known_rate": rate(known, den),
+        "strict_first_look_known_rows": strict_known,
+        "strict_first_look_known_rate": rate(strict_known, den),
+        "strict_first_look_unknown_rows": strict_unknown,
+        "strict_first_look_unknown_rate": rate(strict_unknown, den),
+        "strict_first_look_missing_rows": strict_missing,
+        "strict_first_look_missing_rate": rate(strict_missing, den),
+        "strict_first_look_blocker": "volume_profile_coverage_below_80pct" if strict_blocker else None,
         "missing_rows": missing,
         "missing_rate": rate(missing, den),
         "unknown_rows": unknown,
@@ -215,6 +344,7 @@ def volume_context_audit(rows):
         "not_applicable_rate": rate(not_applicable, den),
         "value_counts": dict(value_counts.most_common()),
         "blocker": "volume_profile_coverage_below_80pct" if blocker else None,
+        "matured_recompute": matured_recompute or {},
         "root_causes": root_causes,
         "missing_or_unknown_breakdown": breakdown(rows, missing_or_unknown),
         "missing_breakdown": breakdown(rows, lambda _row, payload: value_status(payload, "volume_profile") == "missing"),
@@ -533,16 +663,34 @@ def raw_kline_audit(raw_db, since_ts):
         else:
             low_after_or_unknown_peak += 1
     confidence_adjusted_research_rows = len(covered_rows) + len(low_confidence_uncovered_rows)
+    confidence_time_legal_rows = len(covered_rows) + low_before_peak
+    strict_coverage_rate = coverage_rate
+    canonical_coverage_rate = rate(confidence_time_legal_rows, len(rows))
+    canonical_uncovered_rows = max(0, len(rows) - confidence_time_legal_rows)
+    strict_blocker = (strict_coverage_rate or 0) < 0.8
+    canonical_blocker = (canonical_coverage_rate or 0) < 0.8
     return {
         "available": True,
         "source": "raw_signal_outcomes",
+        "coverage_method_version": P1_KLINE_METHOD_VERSION,
+        "coverage_method_change": "confidence_time_legal_kline_coverage_canonical_strict_secondary",
+        "strict_first_look_preserved": True,
         "raw_all_gold_silver_event_rows": len(rows),
         "raw_all_gold_silver_unique_tokens": unique_tokens,
-        "kline_covered_rows": len(covered_rows),
-        "kline_uncovered_rows": len(uncovered_rows),
-        "kline_coverage_rate": coverage_rate,
-        "kline_coverage_pct": pct(len(covered_rows), len(rows)),
-        "blocker": "kline_coverage_below_80pct" if (coverage_rate or 0) < 0.8 else None,
+        "kline_covered_rows": confidence_time_legal_rows,
+        "kline_uncovered_rows": canonical_uncovered_rows,
+        "kline_coverage_rate": canonical_coverage_rate,
+        "kline_coverage_pct": pct(confidence_time_legal_rows, len(rows)),
+        "strict_kline_covered_rows": len(covered_rows),
+        "strict_kline_uncovered_rows": len(uncovered_rows),
+        "strict_kline_coverage_rate": strict_coverage_rate,
+        "strict_kline_coverage_pct": pct(len(covered_rows), len(rows)),
+        "strict_kline_blocker": "kline_coverage_below_80pct" if strict_blocker else None,
+        "confidence_time_legal_kline_covered_rows": confidence_time_legal_rows,
+        "confidence_time_legal_kline_coverage_rate": canonical_coverage_rate,
+        "confidence_time_legal_low_confidence_before_peak_rows": low_before_peak,
+        "confidence_time_legal_low_confidence_after_or_unknown_peak_rows": low_after_or_unknown_peak,
+        "blocker": "kline_coverage_below_80pct" if canonical_blocker else None,
         "coverage_reason_counts": count("coverage_reason"),
         "coverage_reason_counts_uncovered": count("coverage_reason", uncovered_rows),
         "kline_uncovered_root_cause_counts": dict(uncovered_root_cause_counts.most_common()),
@@ -582,7 +730,9 @@ def raw_kline_audit(raw_db, since_ts):
             "low_confidence_baseline_after_or_unknown_peak_rows": low_after_or_unknown_peak,
             "confidence_adjusted_research_kline_covered_rows": confidence_adjusted_research_rows,
             "confidence_adjusted_research_kline_coverage_rate": rate(confidence_adjusted_research_rows, len(rows)),
-            "note": "Research-only diagnostic. This does not change the formal high/medium evaluable denominator.",
+            "confidence_time_legal_kline_covered_rows": confidence_time_legal_rows,
+            "confidence_time_legal_kline_coverage_rate": canonical_coverage_rate,
+            "note": "P1 canonical coverage counts low-confidence rows only when baseline evidence arrived before sustained peak; strict high/medium coverage is preserved in strict_kline_* fields.",
         },
         "primary_denominator_drop_reason_counts": dict(primary_drop.most_common()),
         "raw_uncovered_samples": [
@@ -616,9 +766,14 @@ def build_report(args):
     if args.raw_db and Path(args.raw_db).exists():
         raw = sqlite3.connect(args.raw_db)
         raw.row_factory = sqlite3.Row
+    kline_db = None
+    if getattr(args, "kline_db", None) and Path(args.kline_db).exists():
+        kline_db = sqlite3.connect(args.kline_db)
+        kline_db.row_factory = sqlite3.Row
     try:
         context_rows = load_context_rows(paper, since_ts, args.context_carrier)
-        volume = volume_context_audit(context_rows)
+        matured_recompute = matured_volume_recompute(context_rows, kline_db, args.kline_limit)
+        volume = volume_context_audit(context_rows, matured_recompute=matured_recompute)
         recent_volume = volume_context_recent_windows(context_rows, now_ts)
         kline = raw_kline_audit(raw, since_ts)
         volume_resolution = volume_context_resolution(volume)
@@ -644,9 +799,11 @@ def build_report(args):
             "inputs": {
                 "paper_db": args.db,
                 "raw_db": args.raw_db,
+                "kline_db": args.kline_db,
                 "context_carrier": args.context_carrier,
                 "now_ts": now_ts,
                 "since_ts": since_ts,
+                "kline_limit": args.kline_limit,
             },
             "promotion_allowed": False,
             "strategy_change_allowed": False,
@@ -668,6 +825,8 @@ def build_report(args):
         paper.close()
         if raw is not None:
             raw.close()
+        if kline_db is not None:
+            kline_db.close()
 
 
 def write_json(path, payload):
@@ -687,9 +846,14 @@ def compact_summary(report):
         "volume_context": {
             "rows_scanned": volume.get("rows_scanned"),
             "known_rate": volume.get("known_rate"),
+            "coverage_method_version": volume.get("coverage_method_version"),
+            "coverage_method_change": volume.get("coverage_method_change"),
             "field_present_rate": volume.get("field_present_rate"),
+            "strict_first_look_known_rate": volume.get("strict_first_look_known_rate"),
+            "strict_first_look_blocker": volume.get("strict_first_look_blocker"),
             "missing_rate": volume.get("missing_rate"),
             "unknown_rate": volume.get("unknown_rate"),
+            "matured_recompute": volume.get("matured_recompute"),
             "value_counts": volume.get("value_counts"),
             "blocker": volume.get("blocker"),
             "root_causes": volume.get("root_causes"),
@@ -700,8 +864,13 @@ def compact_summary(report):
         "raw_gold_silver_kline": {
             "raw_all_gold_silver_event_rows": kline.get("raw_all_gold_silver_event_rows"),
             "raw_all_gold_silver_unique_tokens": kline.get("raw_all_gold_silver_unique_tokens"),
+            "coverage_method_version": kline.get("coverage_method_version"),
+            "coverage_method_change": kline.get("coverage_method_change"),
             "kline_coverage_rate": kline.get("kline_coverage_rate"),
+            "strict_kline_coverage_rate": kline.get("strict_kline_coverage_rate"),
+            "strict_kline_blocker": kline.get("strict_kline_blocker"),
             "kline_uncovered_rows": kline.get("kline_uncovered_rows"),
+            "confidence_time_legal_kline_coverage_rate": kline.get("confidence_time_legal_kline_coverage_rate"),
             "coverage_reason_counts_uncovered": kline.get("coverage_reason_counts_uncovered"),
             "kline_uncovered_root_cause_counts": kline.get("kline_uncovered_root_cause_counts"),
             "first_bar_lag_bucket_counts_uncovered": kline.get("first_bar_lag_bucket_counts_uncovered"),
@@ -718,6 +887,7 @@ def self_test():
         root = Path(td)
         paper_path = root / "paper.db"
         raw_path = root / "raw.db"
+        kline_path = root / "kline.db"
         paper = sqlite3.connect(paper_path)
         paper.execute(
             """
@@ -745,27 +915,45 @@ def self_test():
             CREATE TABLE raw_signal_outcomes(
               id INTEGER, signal_id TEXT, token_ca TEXT, signal_ts INTEGER, signal_type TEXT,
               raw_primary_tier TEXT, raw_sustained_tier TEXT, kline_covered INTEGER,
-              coverage_reason TEXT, pool_found INTEGER, provider TEXT, baseline_confidence TEXT,
+              coverage_reason TEXT, pool_found INTEGER, provider TEXT, baseline_lag_sec INTEGER, baseline_confidence TEXT,
               same_source_path INTEGER, source_kind TEXT, source_family TEXT, path_source_kind TEXT,
               path_source_family TEXT, first_bar_lag_sec INTEGER, early_15m_bar_count INTEGER,
               early_15m_expected_minutes INTEGER, early_15m_bar_coverage_pct REAL,
               early_15m_complete INTEGER, outlier_flag INTEGER, sustained_evaluable INTEGER,
-              observation_status TEXT
+              observation_status TEXT, time_to_sustained_peak_sec INTEGER
             )
             """
         )
         raw.executemany(
-            "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
-                (1, "1", "T1", now - 60, "ATH", "gold", "gold", 1, "same_source_path", 1, "gmgn", "high", 1, "dex", "native", "dex", "native", 30, 15, 15, 100, 1, 0, 1, "matured"),
-                (2, "2", "T2", now - 60, "ATH", "silver", "silver", 0, "no_kline_for_token", 0, None, "not_evaluable", 0, None, None, None, None, None, 0, 15, None, 0, 0, 1, "matured"),
+                (1, "1", "T1", now - 60, "ATH", "gold", "gold", 1, "same_source_path", 1, "gmgn", 5, "high", 1, "dex", "native", "dex", "native", 30, 15, 15, 100, 1, 0, 1, "matured", 120),
+                (2, "2", "T2", now - 60, "ATH", "silver", "silver", 0, "low_confidence", 1, "gmgn", 80, "low", 1, "dex", "native", "dex", "native", 80, 15, 15, 80, 1, 0, 1, "matured", 120),
+                (3, "3", "T3", now - 60, "ATH", "silver", "silver", 0, "low_confidence", 1, "gmgn", 90, "low", 1, "dex", "native", "dex", "native", 90, 15, 15, 80, 1, 0, 1, "matured", 120),
             ],
         )
         raw.commit()
         raw.close()
+        kline = sqlite3.connect(kline_path)
+        kline.execute(
+            """
+            CREATE TABLE kline_1m(
+              token_ca TEXT, timestamp INTEGER, open REAL, high REAL, low REAL, close REAL, volume REAL
+            )
+            """
+        )
+        kline_rows = []
+        for token, vols in {"T1": [10, 20, 30, 40, 50], "T2": [5, 10, 15, 20, 25], "T3": [8, 9, 10, 11, 12]}.items():
+            for idx, vol in enumerate(vols):
+                kline_rows.append((token, now - 60 + idx * 60, 1, 1.1, 0.9, 1.05, vol))
+        kline.executemany("INSERT INTO kline_1m VALUES (?,?,?,?,?,?,?)", kline_rows)
+        kline.commit()
+        kline.close()
         args = argparse.Namespace(
             db=str(paper_path),
             raw_db=str(raw_path),
+            kline_db=str(kline_path),
+            kline_limit=125,
             hours=1,
             context_carrier="current_all",
             now_ts=now,
@@ -773,9 +961,10 @@ def self_test():
         )
         report = build_report(args)
         assert report["promotion_allowed"] is False
-        assert report["volume_context"]["known_rows"] == 1
-        assert report["volume_context"]["missing_rows"] == 1
-        assert report["volume_context"]["unknown_rows"] == 1
+        assert report["volume_context"]["strict_first_look_known_rows"] == 1
+        assert report["volume_context"]["known_rows"] == 3
+        assert report["volume_context"]["strict_first_look_blocker"] == "volume_profile_coverage_below_80pct"
+        assert report["volume_context"]["blocker"] is None
         assert report["volume_context_recent_windows"]["1h"]["rows_scanned"] == 3
         assert report["volume_context_recent_windows"]["1h"]["field_present_rate"] == report["volume_context"]["field_present_rate"]
         resolution = volume_context_resolution(volume_context_audit([
@@ -787,11 +976,12 @@ def self_test():
         assert resolution["matured_volume_shadow_recheck_recommended"] is True
         assert resolution["writer_field_present"] is True
         assert resolution["allowed_use"] == "shadow_only_matured_volume_recheck"
-        assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 1
-        assert report["raw_gold_silver_kline"]["kline_uncovered_rows"] == 1
-        assert report["raw_gold_silver_kline"]["kline_uncovered_root_cause_counts"]["not_same_source_path"] == 1
-        assert report["raw_gold_silver_kline"]["low_confidence_research_audit"]["confidence_adjusted_research_kline_covered_rows"] == 1
-        assert report["overall"]["classification"] == "DATA_BLOCKED_VOLUME_KLINE"
+        assert report["raw_gold_silver_kline"]["strict_kline_covered_rows"] == 1
+        assert report["raw_gold_silver_kline"]["strict_kline_blocker"] == "kline_coverage_below_80pct"
+        assert report["raw_gold_silver_kline"]["kline_covered_rows"] == 3
+        assert report["raw_gold_silver_kline"]["blocker"] is None
+        assert report["raw_gold_silver_kline"]["low_confidence_research_audit"]["confidence_time_legal_kline_covered_rows"] == 3
+        assert report["overall"]["classification"] == "VOLUME_KLINE_HEALTHY_FOR_DISCOVERY"
         compact = compact_summary(report)
         assert compact["overall"]["promotion_allowed"] is False
         assert "recent_windows" in compact["volume_context"]
@@ -803,6 +993,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="/app/data/paper_trades.db")
     parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
+    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
+    parser.add_argument("--kline-limit", type=int, default=125)
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--context-carrier", default=DEFAULT_CONTEXT_CARRIER)
     parser.add_argument("--now-ts", type=int, default=None)

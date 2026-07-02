@@ -2390,6 +2390,7 @@ def run_reports(run_dir, args):
             "scripts/volume_kline_coverage_audit.py",
             "--db", args.paper_db,
             "--raw-db", args.raw_db,
+            "--kline-db", args.kline_db,
             "--hours", str(primary_hours),
             "--out", str(volume_kline_audit_path),
         ],

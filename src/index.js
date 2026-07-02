@@ -1056,7 +1056,11 @@ function startCandidateShadowObserver(config) {
   const dataDir = runtimeDataDir();
   const paperDb = runtimePaperDbPath();
   const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
-  const klineDb = process.env.CANDIDATE_SHADOW_KLINE_DB || join(dataDir, 'candidate_shadow_kline_cache.db');
+  const klineDb = process.env.KLINE_DB
+    || process.env.KLINE_CACHE_DB
+    || process.env.KLINE_CACHE_DB_PATH
+    || process.env.CANDIDATE_SHADOW_KLINE_DB
+    || join(dataDir, 'kline_cache.db');
 
   return [
     startPythonSidecar({
@@ -1071,6 +1075,9 @@ function startCandidateShadowObserver(config) {
         '--kline-fallback-enabled',
         '--kline-fallback-max-fetches', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES || '2',
         '--kline-fallback-cooldown-sec', process.env.CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC || '900',
+        '--maturing-kline-recheck-limit', process.env.CANDIDATE_SHADOW_MATURING_KLINE_RECHECK_LIMIT || '100',
+        '--kline-refetch-target-bars', process.env.CANDIDATE_SHADOW_KLINE_REFETCH_TARGET_BARS || '5',
+        '--kline-refetch-max-signal-age-sec', process.env.CANDIDATE_SHADOW_KLINE_REFETCH_MAX_SIGNAL_AGE_SEC || '3600',
       ],
       env: {
         PAPER_DB: paperDb,

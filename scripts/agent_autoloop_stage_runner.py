@@ -417,6 +417,7 @@ def stage_context(args, run_dir):
                 "scripts/volume_kline_coverage_audit.py",
                 "--db", args.paper_db,
                 "--raw-db", args.raw_db,
+                "--kline-db", args.kline_db,
                 "--hours", str(hours),
                 "--out", str(run_dir / f"volume_kline_coverage_audit_{hours}h.json"),
             ],

@@ -35,6 +35,8 @@ DEFAULT_VIRTUAL_STOP_LOSS_PCT = -3.0
 DEFAULT_VIRTUAL_TRAIL_START_PCT = 3.0
 DEFAULT_VIRTUAL_TRAIL_FACTOR = 0.95
 DEFAULT_VIRTUAL_TIMEOUT_BARS = 120
+CANDIDATE_SHADOW_CONTEXT_TARGET_KLINE_BARS = 5
+CANDIDATE_SHADOW_CONTEXT_RECHECK_MAX_SIGNAL_AGE_SEC = 3600
 _PAPER_TRADE_MONITOR = None
 _PAPER_TRADE_MONITOR_IMPORT_ERROR = None
 
@@ -416,6 +418,110 @@ def load_signals(conn, limit, since_id=None):
         sql = f"{sql_base} ORDER BY id DESC LIMIT ?"
         rows = list(reversed(conn.execute(sql, (int(limit),)).fetchall()))
     return rows
+
+
+def load_signals_by_ids(conn, signal_ids):
+    ids = []
+    for signal_id in signal_ids:
+        try:
+            ids.append(int(signal_id))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return []
+    wanted = [
+        "id",
+        "token_ca",
+        "symbol",
+        "timestamp",
+        "source_message_ts",
+        "receive_ts",
+        "signal_type",
+        "is_ath",
+        "market_cap",
+        "holders",
+        "volume_24h",
+        "top10_pct",
+        "ai_confidence",
+        "ai_narrative_tier",
+        "narrative_score",
+        "description",
+        "raw_message",
+        "hard_gate_status",
+        "signal_source",
+    ]
+    columns = get_columns(conn, "premium_signals")
+    select_parts = [col if col in columns else f"NULL AS {col}" for col in wanted]
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT {', '.join(select_parts)}
+        FROM premium_signals
+        WHERE id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        ids,
+    ).fetchall()
+    return rows
+
+
+def needs_kline_refetch(bars, signal_ts_sec, now_sec, target_bars=5, max_signal_age_sec=3600):
+    if signal_ts_sec is None:
+        return False
+    try:
+        age = int(now_sec) - int(signal_ts_sec)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age < int(max_signal_age_sec) and len(bars or []) < int(target_bars)
+
+
+def load_maturing_kline_recheck_signal_ids(
+    out_conn,
+    now_sec,
+    exclude_ids,
+    target_bars=5,
+    max_signal_age_sec=3600,
+    limit=100,
+):
+    if not out_conn or int(limit or 0) <= 0:
+        return []
+    min_signal_ts = int(now_sec) - int(max_signal_age_sec)
+    excluded = {str(value) for value in (exclude_ids or set())}
+    rows = out_conn.execute(
+        """
+        SELECT signal_id, signal_ts, payload_json, observed_at
+        FROM candidate_shadow_observations
+        WHERE candidate_id = 'current_all'
+          AND COALESCE(signal_ts, 0) >= ?
+        ORDER BY observed_at ASC
+        LIMIT ?
+        """,
+        (min_signal_ts, max(int(limit) * 8, int(limit))),
+    ).fetchall()
+    ids = []
+    seen = set()
+    for row in rows:
+        signal_id = row["signal_id"]
+        key = str(signal_id)
+        if key in excluded or key in seen:
+            continue
+        payload = {}
+        try:
+            parsed = json.loads(row["payload_json"] or "{}")
+            payload = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            payload = {}
+        try:
+            bar_count = int(float(payload.get("kline_bar_count") or 0))
+        except (TypeError, ValueError):
+            bar_count = 0
+        if bar_count >= int(target_bars):
+            continue
+        ids.append(signal_id)
+        seen.add(key)
+        if len(ids) >= int(limit):
+            break
+    return ids
 
 
 def load_kline_bars(conn, token_ca, signal_ts_sec, limit=125):
@@ -1854,11 +1960,36 @@ def run_once(args):
                 pass
             kline_conn = None
 
+    observed_at = int(time.time())
     try:
         signals = load_signals(signal_conn, args.limit, args.since_id)
     except sqlite3.Error as exc:
         raise RuntimeError(f"signal_db_load_error path={args.signal_db}: {exc}") from exc
-    observed_at = int(time.time())
+    maturing_recheck_signal_ids = []
+    if args.maturing_kline_recheck_limit and args.since_id is None:
+        try:
+            current_ids = {row["id"] for row in signals}
+            maturing_recheck_signal_ids = load_maturing_kline_recheck_signal_ids(
+                out_conn,
+                observed_at,
+                current_ids,
+                target_bars=args.kline_refetch_target_bars,
+                max_signal_age_sec=args.kline_refetch_max_signal_age_sec,
+                limit=args.maturing_kline_recheck_limit,
+            )
+            extra_signals = load_signals_by_ids(signal_conn, maturing_recheck_signal_ids)
+            if extra_signals:
+                merged = {str(row["id"]): row for row in signals}
+                for row in extra_signals:
+                    merged[str(row["id"])] = row
+                signals = sorted(merged.values(), key=lambda row: int(row["id"] or 0))
+        except sqlite3.Error as exc:
+            warn_json(
+                warning="maturing_kline_recheck_disabled",
+                path=args.out_db,
+                reason=str(exc),
+                script="candidate_shadow_observer",
+            )
     total_rows = 0
     total_matched = 0
     virtual_rows = 0
@@ -1891,7 +2022,13 @@ def run_once(args):
         if (
             args.kline_fallback_enabled
             and kline_conn
-            and not bars
+            and needs_kline_refetch(
+                bars,
+                signal_ts,
+                observed_at,
+                target_bars=args.kline_refetch_target_bars,
+                max_signal_age_sec=args.kline_refetch_max_signal_age_sec,
+            )
             and kline_fallback_fetches < args.kline_fallback_max_fetches
             and should_fetch_kline(out_conn, row["token_ca"], observed_at, args.kline_fallback_cooldown_sec)
         ):
@@ -1961,6 +2098,8 @@ def run_once(args):
         "candidate_version": CANDIDATE_VERSION,
         "candidate_count": len(catalog),
         "signals_processed": len(signals),
+        "maturing_kline_recheck_signal_ids": len(maturing_recheck_signal_ids),
+        "maturing_kline_recheck_limit": int(args.maturing_kline_recheck_limit),
         "rows_written": total_rows,
         "matched_rows": total_matched,
         "virtual_rows": virtual_rows,
@@ -1972,6 +2111,8 @@ def run_once(args):
         "kline_fallback_bars": kline_fallback_bars,
         "kline_db": args.kline_db,
         "kline_fallback_enabled": bool(args.kline_fallback_enabled),
+        "kline_refetch_target_bars": int(args.kline_refetch_target_bars),
+        "kline_refetch_max_signal_age_sec": int(args.kline_refetch_max_signal_age_sec),
         "observed_at": observed_at,
         "top_matched_candidates": by_candidate,
         "paper_only": True,
@@ -2288,6 +2429,9 @@ def self_test():
             kline_fallback_enabled=False,
             kline_fallback_max_fetches=0,
             kline_fallback_cooldown_sec=900,
+            maturing_kline_recheck_limit=0,
+            kline_refetch_target_bars=CANDIDATE_SHADOW_CONTEXT_TARGET_KLINE_BARS,
+            kline_refetch_max_signal_age_sec=CANDIDATE_SHADOW_CONTEXT_RECHECK_MAX_SIGNAL_AGE_SEC,
             since_id=None,
         )
         summary = run_once(args)
@@ -2326,6 +2470,10 @@ def self_test():
         )
         out.close()
         assert summary["candidate_count"] == EXPECTED_CANDIDATE_COUNT
+        assert summary["kline_refetch_target_bars"] == CANDIDATE_SHADOW_CONTEXT_TARGET_KLINE_BARS
+        assert needs_kline_refetch([{"timestamp": signal_ts}], signal_ts, signal_ts + 300, target_bars=5, max_signal_age_sec=3600) is True
+        assert needs_kline_refetch([{"timestamp": signal_ts}] * 5, signal_ts, signal_ts + 300, target_bars=5, max_signal_age_sec=3600) is False
+        assert needs_kline_refetch([{"timestamp": signal_ts}], signal_ts, signal_ts + 4000, target_bars=5, max_signal_age_sec=3600) is False
         assert total == EXPECTED_CANDIDATE_COUNT
         assert virtual_total > 0
         assert closed_total > 0
@@ -2360,6 +2508,9 @@ def parse_args(argv):
     parser.add_argument("--kline-fallback-enabled", action=argparse.BooleanOptionalAction, default=os.getenv("CANDIDATE_SHADOW_KLINE_FALLBACK_ENABLED", "true").lower() != "false")
     parser.add_argument("--kline-fallback-max-fetches", type=int, default=int(os.getenv("CANDIDATE_SHADOW_KLINE_FALLBACK_MAX_FETCHES", "20")))
     parser.add_argument("--kline-fallback-cooldown-sec", type=int, default=int(os.getenv("CANDIDATE_SHADOW_KLINE_FALLBACK_COOLDOWN_SEC", "900")))
+    parser.add_argument("--maturing-kline-recheck-limit", type=int, default=int(os.getenv("CANDIDATE_SHADOW_MATURING_KLINE_RECHECK_LIMIT", "100")))
+    parser.add_argument("--kline-refetch-target-bars", type=int, default=int(os.getenv("CANDIDATE_SHADOW_KLINE_REFETCH_TARGET_BARS", str(CANDIDATE_SHADOW_CONTEXT_TARGET_KLINE_BARS))))
+    parser.add_argument("--kline-refetch-max-signal-age-sec", type=int, default=int(os.getenv("CANDIDATE_SHADOW_KLINE_REFETCH_MAX_SIGNAL_AGE_SEC", str(CANDIDATE_SHADOW_CONTEXT_RECHECK_MAX_SIGNAL_AGE_SEC))))
     parser.add_argument("--since-id", type=int, default=None)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=int, default=int(os.getenv("CANDIDATE_SHADOW_OBSERVER_INTERVAL_SEC", "60")))
