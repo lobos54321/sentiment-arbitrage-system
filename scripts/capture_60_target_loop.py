@@ -586,6 +586,36 @@ def build_pending_to_final_entry_audit(a_class):
         adjacent_drop_count=adjacent_drop_count,
         pending_without_final=pending_without_final,
     )
+    dominant_action = pending_to_final_category_action(dominant)
+    category_summary_rows = list(largest_transition_review.get("categories") or [])
+    summary = {
+        "pending_entry_count": pending_count,
+        "final_entry_contract_count": final_count,
+        "pending_without_final_entry_count": pending_without_final,
+        "adjacent_count_loss_pending_to_final": adjacent_drop_count,
+        "pending_to_final_entry_contract_rate": rate(final_count, pending_count),
+        "dominant_category": dominant,
+        "dominant_category_count": safe_int(required_categories.get(dominant), 0),
+        "dominant_category_share_of_pending_without_final": rate(
+            safe_int(required_categories.get(dominant), 0),
+            pending_without_final,
+        ),
+        "next_action": dominant_action["next_action"],
+        "allowed_scope": dominant_action["allowed_scope"],
+        "human_approval_required_if_fix_requires": (
+            dominant_action["human_approval_required_if_fix_requires"]
+        ),
+        "interpretation": (
+            "Read-only attribution of gold/silver pending entries that did not reach "
+            "final_entry_contract. This identifies the next evaluator/shadow research "
+            "action and does not authorize strategy, gate, final_entry_contract, A_CLASS, "
+            "executor, paper, canary, or risk changes."
+        ),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
     return {
         "schema_version": "pending_to_final_entry_audit.v1",
         "report_type": "pending_to_final_entry_audit",
@@ -601,9 +631,24 @@ def build_pending_to_final_entry_audit(a_class):
             "pending_no_final_entry": pending_without_final,
             "final_entry_no_paper": max(0, final_count - paper_count),
         },
+        "summary": summary,
+        "dominant_category": dominant,
+        "next_action": dominant_action["next_action"],
+        "allowed_scope": dominant_action["allowed_scope"],
+        "human_approval_required_if_fix_requires": (
+            dominant_action["human_approval_required_if_fix_requires"]
+        ),
+        "pending_no_final_entry_category_counts": required_categories,
+        "pending_no_final_entry_category_rows": category_summary_rows,
         "pending_no_final_entry_classification": {
             "dominant_category": dominant,
             "categories": required_categories,
+            "category_rows": category_summary_rows,
+            "next_action": dominant_action["next_action"],
+            "allowed_scope": dominant_action["allowed_scope"],
+            "human_approval_required_if_fix_requires": (
+                dominant_action["human_approval_required_if_fix_requires"]
+            ),
             "source_category_counts": category_rows,
             "top_reasons": top_reason_rows[:20],
         },
@@ -4993,7 +5038,19 @@ def self_test():
         assert partial_markov["dimensions"]["Markov"]["evidence"]["partial_profile_blockers"]["kline"]
         pending = load_json(run_dir / "pending_to_final_entry_audit.json")
         assert pending["dropoff_counts"]["pending_no_final_entry"] == 1
+        assert pending["dominant_category"] == "stale_before_final"
+        assert pending["next_action"] == "audit_quality_timing_staleness_before_final_shadow_only"
+        assert pending["summary"]["dominant_category"] == "stale_before_final"
+        assert pending["summary"]["dominant_category_count"] == 1
+        assert pending["summary"]["pending_to_final_entry_contract_rate"] == 0.5
+        assert pending["pending_no_final_entry_category_counts"]["stale_before_final"] == 1
+        assert pending["pending_no_final_entry_category_rows"][0]["category"] == "stale_before_final"
+        assert pending["pending_no_final_entry_category_rows"][0]["promotion_allowed"] is False
         assert pending["pending_no_final_entry_classification"]["categories"]["stale_before_final"] == 1
+        assert pending["pending_no_final_entry_classification"]["category_rows"][0]["category"] == "stale_before_final"
+        assert pending["pending_no_final_entry_classification"]["next_action"] == (
+            "audit_quality_timing_staleness_before_final_shadow_only"
+        )
         transition_review = pending["largest_transition_dropoff_review"]
         assert transition_review["promotion_allowed"] is False
         assert transition_review["adjacent_count_loss_pending_to_final"] == 1
