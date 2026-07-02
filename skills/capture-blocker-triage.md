@@ -73,3 +73,16 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   detector 71/71, decision 69/71, pass_allow 18/71, pending 11/71, final eligibility 2/71,
   paper 0/71. Largest actual gap is decision→pass_allow; next stage is P2
   A_CLASS/final_entry_contract human review, not strategy tuning or risk changes.
+- **2026-07-02** (P2 deployed/verified, run `codex_p2_20260702T213240Z`, commit `41dcc08`):
+  implemented the A_CLASS clean-window counter and human-operated re-enable contract. The audit now
+  persists `clean_window_counter` into `a_class_mode_runtime_state.detail_json` without changing
+  runtime mode or circuit state. First post-deploy clean window recorded `streak=1/4`,
+  `sufficient=false`, `failed_condition_codes=[]`, so the verdict correctly moved to
+  `A_CLASS_EXPECTED_SHADOW` with `current_capture_stage=mode_disabled_clean_window_pending`.
+  `paper_trade_intent_zero` and `paper_trade_committed_zero` are no longer proposal blockers while
+  A_CLASS is SHADOW; proposal readiness is blocked only by `clean_window_streak_below_required`.
+  Current 24h funnel: denominator 74, detector 74/74, decision 70/74, pass_allow 18/74, pending
+  11/74, mode-disabled-adjusted final eligibility 2/74, paper 0/74. `promotion_allowed=false`.
+  Next action is to collect the remaining clean hourly windows; only after `streak>=4` can the
+  read-only audit emit a human approval handoff. The operator script is dry-run by default and must
+  not be executed by AutoLoop.
