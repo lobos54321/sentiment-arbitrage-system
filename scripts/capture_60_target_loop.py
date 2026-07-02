@@ -829,6 +829,18 @@ def quality_timing_cluster_action(cluster):
                 "changing momentum, trend, timing, entry policy, or final_entry_contract"
             ),
         },
+        "dead_cat_bounce_timing_reject": {
+            "next_action": "audit_pending_dead_cat_below_high_timing_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing dead-cat, below-high, pullback timing policy, or final_entry_contract"
+            ),
+        },
+        "entry_signal_stale_before_final": {
+            "next_action": "audit_pending_entry_signal_stale_before_final_shadow_only",
+            "human_approval_required_if_fix_requires": (
+                "changing freshness, stale-entry, final_entry_contract, or execution timing policy"
+            ),
+        },
         "chasing_top_timing_reject": {
             "next_action": "audit_pending_chasing_top_timing_window_shadow_only",
             "human_approval_required_if_fix_requires": (
@@ -1789,8 +1801,12 @@ def classify_quality_timing_reason_cluster(row):
         return "chasing_top_timing_reject"
     if "score_too_low" in reason or "quality_score" in reason:
         return "score_or_quality_too_low"
-    if "negative_trend" in reason or "momentum_fading" in reason:
+    if "negative_trend" in reason or "momentum_fading" in reason or "negative_m5" in reason:
         return "momentum_fading_or_negative_trend"
+    if "dead_cat" in reason or "below_high" in reason:
+        return "dead_cat_bounce_timing_reject"
+    if "stale" in reason or "too_late" in reason or "late" in reason:
+        return "entry_signal_stale_before_final"
     if "entry_node_timeout" in reason or "retry_watch_scheduled" in reason:
         return "entry_timing_timeout_or_retry"
     if "final_entry" in component or "final_entry" in reason:
@@ -5064,6 +5080,21 @@ def self_test():
         assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
         assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
+        assert classify_quality_timing_reason_cluster({
+            "reason": "lotto_timing_negative_m5",
+        }) == "momentum_fading_or_negative_trend"
+        assert classify_quality_timing_reason_cluster({
+            "reason": "dead_cat_below_high_15.7pct_gt_10.0pct",
+        }) == "dead_cat_bounce_timing_reject"
+        assert classify_quality_timing_reason_cluster({
+            "reason": "entry_execution_signal_stale",
+        }) == "entry_signal_stale_before_final"
+        assert quality_timing_cluster_action("dead_cat_bounce_timing_reject")["next_action"] == (
+            "audit_pending_dead_cat_below_high_timing_shadow_only"
+        )
+        assert quality_timing_cluster_action("entry_signal_stale_before_final")["next_action"] == (
+            "audit_pending_entry_signal_stale_before_final_shadow_only"
+        )
         partial_markov = build_context_dimension_eligibility({
             "markov_effectiveness": {
                 "profile_diagnostics": {
