@@ -4987,6 +4987,92 @@ def build_oos_summary(run_dir, reports=None):
         summary["pass_allow_60_post_freeze_oos_repeat_watch_count"] = (
             pass_allow_post_freeze_validation.get("repeat_watch_count")
         )
+    if pass_allow_post_freeze_validation or capture_cross_post_freeze_validation:
+        pass_allow_raw_rows = (
+            pass_allow_post_freeze_validation.get("raw_gold_silver_event_rows")
+            if pass_allow_post_freeze_validation
+            else None
+        )
+        capture_cross_raw_rows = (
+            capture_cross_post_freeze_validation.get("raw_gold_silver_event_rows")
+            if capture_cross_post_freeze_validation
+            else None
+        )
+        pass_allow_eval_start = (
+            pass_allow_post_freeze_validation.get("eval_start_iso")
+            if pass_allow_post_freeze_validation
+            else None
+        )
+        capture_cross_eval_start = (
+            capture_cross_post_freeze_validation.get("eval_start_iso")
+            if capture_cross_post_freeze_validation
+            else None
+        )
+        raw_counts_match = (
+            pass_allow_raw_rows is not None
+            and capture_cross_raw_rows is not None
+            and pass_allow_raw_rows == capture_cross_raw_rows
+        )
+        eval_starts_match = (
+            pass_allow_eval_start is not None
+            and capture_cross_eval_start is not None
+            and pass_allow_eval_start == capture_cross_eval_start
+        )
+        summary["pass_allow_60_post_freeze_raw_gold_silver_event_rows"] = pass_allow_raw_rows
+        summary["capture_cross_post_freeze_raw_gold_silver_event_rows"] = capture_cross_raw_rows
+        summary["post_freeze_raw_gold_silver_event_rows_source"] = (
+            "pass_allow_60_post_freeze_oos_validation"
+            if pass_allow_post_freeze_validation
+            else "capture_cross_post_freeze_oos_validation"
+        )
+        summary["oos_validation_scope_reconciliation"] = {
+            "schema_version": "oos_validation_scope_reconciliation.v1",
+            "available": True,
+            "classification": (
+                "OOS_VALIDATION_SCOPES_ALIGNED"
+                if raw_counts_match and eval_starts_match
+                else "OOS_VALIDATION_SCOPES_DIFFERENT_FREEZE_WINDOWS"
+                if pass_allow_eval_start and capture_cross_eval_start and not eval_starts_match
+                else "OOS_VALIDATION_SCOPES_PARTIAL"
+            ),
+            "interpretation": (
+                "Post-freeze raw gold/silver counts are scoped to each freeze registry. "
+                "Different definition_set_frozen_at/eval_start values can produce different "
+                "raw-event counts without implying data loss."
+            ),
+            "pass_allow_60": {
+                "available": bool(pass_allow_post_freeze_validation),
+                "definition_set_frozen_at": pass_allow_post_freeze_validation.get("definition_set_frozen_at"),
+                "eval_start_iso": pass_allow_eval_start,
+                "raw_gold_silver_event_rows": pass_allow_raw_rows,
+                "raw_gold_silver_event_rows_needed_for_min": (
+                    (pass_allow_post_freeze_validation.get("oos_data_availability") or {}).get(
+                        "raw_gold_silver_event_rows_needed_for_min"
+                    )
+                ),
+                "classification": pass_allow_post_freeze_validation.get("classification"),
+                "generated_at": pass_allow_post_freeze_validation.get("generated_at"),
+            },
+            "capture_cross": {
+                "available": bool(capture_cross_post_freeze_validation),
+                "definition_set_frozen_at": capture_cross_post_freeze_validation.get("definition_set_frozen_at"),
+                "eval_start_iso": capture_cross_eval_start,
+                "raw_gold_silver_event_rows": capture_cross_raw_rows,
+                "raw_gold_silver_event_rows_needed_for_min": (
+                    (capture_cross_post_freeze_validation.get("oos_data_availability") or {}).get(
+                        "raw_gold_silver_event_rows_needed_for_min"
+                    )
+                ),
+                "classification": capture_cross_post_freeze_validation.get("classification"),
+                "generated_at": capture_cross_post_freeze_validation.get("generated_at"),
+            },
+            "raw_gold_silver_event_rows_match": raw_counts_match,
+            "eval_start_iso_match": eval_starts_match,
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        }
     return summary
 
 
@@ -6089,12 +6175,31 @@ def self_test():
                 "latest_raw_gold_silver_age_sec": 900,
                 "latest_raw_gold_silver_lag_sec_before_eval_start": 600,
                 "min_raw_events_for_oos_judgment": 10,
+                "definition_set_frozen_at": "2026-07-02T10:30:30Z",
+                "eval_start_iso": "2026-07-02T10:32:30Z",
+                "generated_at": "2026-07-02T13:29:36Z",
                 "oos_data_availability": {
                     "raw_gold_silver_event_rows_needed_for_min": 10,
                 },
                 "post_freeze_usable_hours": 0.3,
                 "validated_definition_count": 45,
                 "repeat_watch_count": 0,
+                "promotion_allowed": False,
+            },
+            "capture_cross_post_freeze_oos_validation": {
+                "schema_version": "capture_cross_post_freeze_oos_validation.v1",
+                "classification": "CAPTURE_CROSS_POST_FREEZE_OOS_WAITING_FOR_RAW_GOLD_SILVER",
+                "next_action": "continue_collecting_post_freeze_raw_gold_silver_events",
+                "raw_gold_silver_event_rows": 0,
+                "raw_gold_silver_rows_since_eval_start_unfiltered": 0,
+                "all_raw_rows_since_eval_start": 2,
+                "min_raw_events_for_oos_judgment": 10,
+                "definition_set_frozen_at": "2026-07-02T12:28:35Z",
+                "eval_start_iso": "2026-07-02T12:30:35Z",
+                "generated_at": "2026-07-02T13:30:16Z",
+                "oos_data_availability": {
+                    "raw_gold_silver_event_rows_needed_for_min": 10,
+                },
                 "promotion_allowed": False,
             }
         })
@@ -6111,6 +6216,18 @@ def self_test():
         )
         assert post_freeze_summary["post_freeze_raw_gold_silver_event_rows"] == 0
         assert post_freeze_summary["post_freeze_raw_gold_silver_event_rows_needed_for_min"] == 10
+        assert post_freeze_summary["pass_allow_60_post_freeze_raw_gold_silver_event_rows"] == 0
+        assert post_freeze_summary["capture_cross_post_freeze_raw_gold_silver_event_rows"] == 0
+        assert post_freeze_summary["post_freeze_raw_gold_silver_event_rows_source"] == (
+            "pass_allow_60_post_freeze_oos_validation"
+        )
+        reconciliation = post_freeze_summary["oos_validation_scope_reconciliation"]
+        assert reconciliation["classification"] == "OOS_VALIDATION_SCOPES_DIFFERENT_FREEZE_WINDOWS"
+        assert reconciliation["pass_allow_60"]["eval_start_iso"] == "2026-07-02T10:32:30Z"
+        assert reconciliation["capture_cross"]["eval_start_iso"] == "2026-07-02T12:30:35Z"
+        assert reconciliation["raw_gold_silver_event_rows_match"] is True
+        assert reconciliation["eval_start_iso_match"] is False
+        assert reconciliation["promotion_allowed"] is False
         assert post_freeze_summary["post_freeze_oos_data_availability"]["root_causes"] == [
             "no_post_freeze_raw_gold_silver_events"
         ]
