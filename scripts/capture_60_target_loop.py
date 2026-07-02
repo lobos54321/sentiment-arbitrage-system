@@ -1255,6 +1255,23 @@ def build_context_dimension_eligibility(reports):
             "research_recoverability": kline_resolution.get("research_recoverability") or {},
             "allowed_resolution_tracks": kline_resolution.get("allowed_resolution_tracks") or [],
         })
+    kline_resolution_overall = kline_resolution.get("overall") or {}
+    kline_resolution_recoverability = kline_resolution.get("research_recoverability") or {}
+    kline_research_recoverable = bool(
+        kline_resolution_overall.get("research_kline_recoverable")
+        or kline_resolution_overall.get("classification") == "KLINE_FORMAL_BLOCKED_RESEARCH_RECOVERABLE"
+        or kline_resolution_recoverability.get("confidence_adjusted_reaches_80pct")
+        or kline_resolution_recoverability.get("time_legal_recoverable_reaches_80pct")
+    )
+    kline_status = (
+        STATUS_CLEAN
+        if kline_rate is not None and kline_rate >= 0.8
+        else (
+            STATUS_PENDING
+            if kline_research_recoverable
+            else dimension_status_from_rate(kline_rate)
+        )
+    )
     dimensions = {
         "quote-sensitive": {
             "status": quote_status,
@@ -1285,7 +1302,7 @@ def build_context_dimension_eligibility(reports):
             "evidence": volume_evidence,
         },
         "kline": {
-            "status": dimension_status_from_rate(kline_rate),
+            "status": kline_status,
             "eligible_for_capture_cross": kline_rate is not None and kline_rate >= 0.8,
             "coverage_rate": kline_rate,
             "blockers": sorted(kline_blockers),
@@ -1325,7 +1342,7 @@ def build_context_dimension_eligibility(reports):
     research_only_dimensions = []
     if (
         dimensions["kline"]["status"] != STATUS_CLEAN
-        and (kline_resolution.get("overall") or {}).get("research_kline_recoverable")
+        and kline_research_recoverable
     ):
         research_only_dimensions.append("kline")
         dimensions["kline"]["research_only_recoverable"] = True
@@ -1365,7 +1382,7 @@ def build_context_dimension_eligibility(reports):
     clean_dimensions = [name for name, row in dimensions.items() if row["status"] == STATUS_CLEAN]
     blocked_dimensions = [
         name for name, row in dimensions.items()
-        if row["status"] not in {STATUS_CLEAN, STATUS_NA}
+        if row["status"] == STATUS_BLOCKED
     ]
     pending_dimensions = [
         name for name, row in dimensions.items()
@@ -1383,7 +1400,10 @@ def build_context_dimension_eligibility(reports):
         classification = "CONTEXT_CLEAN_WINDOW_PENDING"
     else:
         classification = "CONTEXT_DIMENSIONS_READY"
-    if "kline" in blocked_dimensions and (kline_resolution.get("overall") or {}).get("next_action"):
+    if (
+        ("kline" in blocked_dimensions or "kline" in pending_dimensions)
+        and (kline_resolution.get("overall") or {}).get("next_action")
+    ):
         next_action = (kline_resolution.get("overall") or {}).get("next_action")
     elif "volume" in blocked_dimensions:
         next_action = "continue_matured_volume_shadow_recheck_and_collect_formal_volume_context"
@@ -4323,10 +4343,14 @@ def self_test():
         assert context["dimension_eligibility"]["quote-sensitive"]["status"] == STATUS_CLEAN
         assert context["dimension_eligibility"]["volume"]["status"] == STATUS_BLOCKED
         assert context["dimension_eligibility"]["volume"]["allowed_use"] == "blocked_no_promotion_evidence"
-        assert context["dimension_eligibility"]["kline"]["status"] == STATUS_BLOCKED
+        assert context["dimension_eligibility"]["kline"]["status"] == STATUS_PENDING
         assert context["dimension_eligibility"]["kline"]["allowed_use"] == "research_only_no_promotion_evidence"
         assert context["dimension_eligibility"]["kline"]["research_only_recoverable"] is True
         assert context["dimension_eligibility"]["kline"]["promotion_allowed"] is False
+        assert context["pending_dimensions"] == ["kline"]
+        assert "kline" not in context["blocked_dimensions"]
+        assert "volume" in context["blocked_dimensions"]
+        assert "Markov" in context["blocked_dimensions"]
         assert context["research_only_dimensions"] == ["kline"]
         assert (
             context["dimensions"]["kline"]["evidence"]["kline_resolution_classification"]
@@ -4344,6 +4368,7 @@ def self_test():
         assert context["dimensions"]["volume"]["evidence"]["field_present_rate"] == 1.0
         assert context["dimensions"]["volume"]["evidence"]["known_rate"] == 0.5
         assert "volume_profile_coverage_below_80pct" in context["dimensions"]["volume"]["blockers"]
+        assert context["dimensions"]["kline"]["status"] == STATUS_PENDING
         assert context["dimensions"]["kline"]["coverage_rate"] == 0.4
         assert "kline_coverage_below_80pct" in context["dimensions"]["kline"]["blockers"]
         partial_markov = build_context_dimension_eligibility({
