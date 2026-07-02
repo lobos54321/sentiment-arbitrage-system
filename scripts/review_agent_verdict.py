@@ -1540,6 +1540,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "next_action": next_action,
         "parallel_next_action": parallel_next_action,
         "parallel_next_action_reason": parallel_next_action_reason,
+        "capture_60_gap_classification": capture_60_gap_report.get("classification"),
         "capture_60_biggest_gap_stage": capture_60_gap_report.get("biggest_gap_stage"),
         "capture_60_target_shortfall_stage": (
             capture_60_gap_report.get("target_shortfall_stage")
@@ -1560,6 +1561,7 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "capture_60_next_best_allowed_action": capture_60_gap_report.get("next_best_allowed_action"),
         "capture_60_target_loop": {
             "available": bool(capture_60_gap_report),
+            "classification": capture_60_gap_report.get("classification"),
             "target_capture_rate": capture_60_gap_report.get("target_capture_rate"),
             "raw_gold_silver_denominator": capture_60_gap_report.get("raw_gold_silver_denominator"),
             "target_60_count": capture_60_gap_report.get("target_60_count"),
@@ -2922,6 +2924,7 @@ def self_test():
             },
         },
         "capture_60_gap_report": {
+            "classification": "CAPTURE_PASS_ALLOW_GAP_BELOW_60",
             "target_capture_rate": 0.6,
             "raw_gold_silver_denominator": 10,
             "target_60_count": 6,
@@ -2987,6 +2990,8 @@ def self_test():
     assert stage_verdict["final_eligibility_capture_rate"] == 0.01
     assert stage_verdict["paper_trade_intent_rate"] == 0.0
     assert stage_verdict["paper_capture_rate"] == 0.0
+    assert stage_verdict["capture_60_gap_classification"] == "CAPTURE_PASS_ALLOW_GAP_BELOW_60"
+    assert stage_verdict["capture_60_target_loop"]["classification"] == "CAPTURE_PASS_ALLOW_GAP_BELOW_60"
     assert stage_verdict["capture_60_biggest_gap_stage"] == "pass_allow_capture"
     assert stage_verdict["capture_60_target_shortfall_stage"] == "pass_allow_capture"
     assert stage_verdict["capture_60_additional_count_needed"] == 1

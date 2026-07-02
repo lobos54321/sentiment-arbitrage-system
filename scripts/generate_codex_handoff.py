@@ -260,6 +260,7 @@ def build_handoff(verdict):
         f"- final_eligibility_capture_rate: `{verdict.get('final_eligibility_capture_rate')}`",
         f"- paper_trade_intent_rate: `{verdict.get('paper_trade_intent_rate')}`",
         f"- paper_capture_rate: `{verdict.get('paper_capture_rate')}`",
+        f"- capture_60_gap_classification: `{(verdict.get('capture_60_target_loop') or {}).get('classification') or verdict.get('capture_60_gap_classification')}`",
         f"- capture_60_biggest_gap_stage: `{(verdict.get('capture_60_target_loop') or {}).get('biggest_gap_stage')}`",
         f"- capture_60_target_shortfall_stage: `{(verdict.get('capture_60_target_loop') or {}).get('target_shortfall_stage')}`",
         f"- capture_60_largest_transition_dropoff: `{json.dumps((verdict.get('capture_60_target_loop') or {}).get('largest_transition_dropoff') or {}, sort_keys=True)}`",
@@ -1188,6 +1189,7 @@ def self_test():
         "human_action_required": False,
         "next_highest_priority_blocker": "source_quote_clean_coverage_below_80pct",
         "capture_60_target_loop": {
+            "classification": "CAPTURE_PASS_ALLOW_GAP_BELOW_60",
             "raw_gold_silver_denominator": 10,
             "target_60_count": 6,
             "biggest_gap_stage": "pass_allow_capture",
@@ -1640,6 +1642,7 @@ def self_test():
     assert "notath_quote_clean" in text
     assert "readiness_gap_priority" in text
     assert "upstream_gap_priority" in text
+    assert "capture_60_gap_classification: `CAPTURE_PASS_ALLOW_GAP_BELOW_60`" in text
     assert "SAME_WINDOW_ONLY_PENDING_NEXT_WINDOW" in text
     assert "Quality / Timing Reject Research" in text
     assert "QUALITY_TIMING_REJECT_RESEARCH_READY" in text
