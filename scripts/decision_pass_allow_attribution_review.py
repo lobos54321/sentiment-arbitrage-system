@@ -205,7 +205,10 @@ def compute_full_decision_no_pass(args, metrics: dict, raw_funnel: dict) -> tupl
     paper_db = sqlite3.connect(str(paper_path))
     paper_db.row_factory = sqlite3.Row
     try:
-        raw_rows = load_raw_dogs(raw_db, since_ts)
+        raw_rows = [
+            row for row in load_raw_dogs(raw_db, since_ts)
+            if (safe_float(row.get("signal_ts_norm") or row.get("signal_ts")) or 0) <= until_ts
+        ]
         raw_by_signal = {
             signal_id_key(row.get("signal_id")): dict(row)
             for row in raw_rows
@@ -292,7 +295,7 @@ def build_report(args) -> dict:
         class_counts[row["blocker_class"]] += int(row.get("count") or 0)
 
     full_rows, full_meta = compute_full_decision_no_pass(args, metrics, raw_funnel) if args.db and args.raw_db else ([], {"available": False, "reason": "db_not_configured"})
-    if full_rows:
+    if full_rows and len(full_rows) == loss:
         class_counts = Counter(row["blocker_class"] for row in full_rows)
     examples = (
         ((entry_bridge.get("raw_signal_decision_bridge") or {}).get("decision_no_pass_or_allow_examples"))
