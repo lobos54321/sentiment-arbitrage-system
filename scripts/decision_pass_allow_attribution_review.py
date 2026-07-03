@@ -372,9 +372,10 @@ def build_report(args) -> dict:
             "expected_lost_event_count": loss,
             "source": "db_recomputed" if per_event_detail_complete else "artifact_examples_truncated",
             "db_recompute": full_meta,
+            "db_recompute_matches_pinned_window": bool(full_meta.get("available") and full_meta.get("decision_no_pass_rows") == loss),
             "instrumentation_gap": None
             if per_event_detail_complete
-            else "raw_funnel artifact retained only the first 20 decision_no_pass_or_allow examples; run with paper/raw DB access to emit all 67 rows",
+            else "The pinned raw_funnel artifact retained only the first 20 decision_no_pass_or_allow examples. A later DB recompute may not match the pinned 67-loss window because raw dog outcomes backfill into the same signal_ts range. Future raw_funnel artifacts should persist full decision_no_pass_or_allow rows to make every loss individually auditable.",
         },
         "sixty_pct_math": {
             "raw_gold_silver_event_denominator": raw,
