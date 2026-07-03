@@ -53,6 +53,7 @@ REPORT_TEST_COMMANDS = (
     ("runtime_health_snapshot_self_test", ["scripts/runtime_health_snapshot_audit.py", "--self-test"]),
     ("strategy_memory_audit_self_test", ["scripts/offline_strategy_memory_audit.py", "--self-test"]),
     ("strategy_memory_validation_self_test", ["scripts/strategy_memory_validation.py", "--self-test"]),
+    ("exit_policy_shadow_lab_self_test", ["scripts/exit_policy_shadow_lab.py", "--self-test"]),
     ("capture_60_target_loop_self_test", ["scripts/capture_60_target_loop.py", "--self-test"]),
     ("autoloop_lightweight_reconciliation_self_test", ["scripts/autoloop_lightweight_reconciliation.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
@@ -2182,6 +2183,7 @@ def run_reports(run_dir, args):
     strategy_memory_filtered_winner_bridge_path = run_dir / "strategy_memory_filtered_winner_bridge.json"
     strategy_memory_exit_shadow_summary_path = run_dir / "strategy_memory_exit_shadow_summary.json"
     strategy_memory_delay_replay_summary_path = run_dir / "strategy_memory_delay_replay_summary.json"
+    exit_policy_shadow_lab_path = run_dir / f"exit_policy_shadow_lab_{primary_hours}h.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -2611,6 +2613,20 @@ def run_reports(run_dir, args):
         readiness_paths["strategy_memory_exit_shadow_summary"] = strategy_memory_exit_shadow_summary_path
     if strategy_memory_delay_replay_summary_path.exists():
         readiness_paths["strategy_memory_delay_replay_summary"] = strategy_memory_delay_replay_summary_path
+    diagnostics.append(run_report(
+        "exit_policy_shadow_lab",
+        [
+            "scripts/exit_policy_shadow_lab.py",
+            "--raw-db", args.raw_db,
+            "--paper-db", args.paper_db,
+            "--hours", str(primary_hours),
+            "--out", str(exit_policy_shadow_lab_path),
+        ],
+        exit_policy_shadow_lab_path,
+        timeout=max(60, int(args.report_timeout_sec) * 2),
+    ))
+    if exit_policy_shadow_lab_path.exists():
+        readiness_paths["exit_policy_shadow_lab"] = exit_policy_shadow_lab_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,
