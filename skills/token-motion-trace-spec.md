@@ -89,3 +89,14 @@ consistent ms timestamps, and reproduces the published funnel counts.
   4,528/11,250=40.25%; early_15m complete 45.3%; avg first-bar lag 384.7s. Historical (April)
   snapshot: median 21 bars, 100% <30 — the "29-candle thin window" era. Fixing collection forward
   beats backfilling history.
+- **2026-07-03**: P5 motion trace v1 deployed read-only in commits `f57924d` and follow-up
+  `8f563fa`. `premium_signals` now persists `indices_json`, `ath_stage`, `token_supply`, and
+  `token_decimals`; `tokens` stores supply/decimals; append-only `token_motion_events` records
+  `perceive/signal_received` and `decide/gate_evaluation`; `/api/agent/latest-status` exposes
+  compact coverage. Remote smoke at `8f563fa`: latest post-deploy signal wrote `indices_json` and
+  `ath_stage=NOT_ATH`, `token_motion_events=2`, and guardrails remained false. Supply/decimals are
+  still forward-pending because current upstream signal rows do not provide those values.
+- **2026-07-03**: secondary `sync-remote-premium-logs.js` writer path now preserves P5 carrier
+  fields and creates `token_motion_events` for synced DBs. Remote tests passed:
+  `sync-remote-premium-logs.test.mjs` 3/3, `dashboard-heavy-api-utils.test.mjs` 56/56, and
+  `premium-signal-engine-dedup.test.mjs` 5/5 under `--test-force-exit`.
