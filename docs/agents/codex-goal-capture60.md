@@ -30,8 +30,10 @@ file:line citations in the report.
   re-enable script with audit row (operator + reason); `paper_entry_proposal_readiness`
   de-circularized. **The LIVE switch itself is pressed by the human, never by you.**
 - **P3** reject counterfactual instrumentation: reject events carry `reject_ts`,
-  `price_at_reject`, `quote_age_at_reject`; dud-inclusive per-reason denominators; shadow
-  quote-fresh re-anchor variant for `entry_execution_signal_stale` (watch-only).
+  `price_at_reject`, `quote_age_at_reject` when available from the reject row or same-signal
+  context; remaining price/quote gaps are explicit and deterministically attributed, never inferred
+  from unrelated token-time rows; dud-inclusive per-reason denominators; shadow quote-fresh
+  re-anchor variant for `entry_execution_signal_stale` (watch-only).
 - **P4** OOS statistics: batch-pinned eval clocks, event-set family dedupe, self-cross exclusion,
   unique-token N≥10, BH-FDR q=0.1, two-window repeat rule, negative-control panel
   (reuse `holdout_negative_controls`). Artifact publishes per-family q-values + null repeat rate.

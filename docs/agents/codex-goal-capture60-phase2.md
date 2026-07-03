@@ -43,7 +43,10 @@ untouched (mode/evaluator layer only).
 `reject_ts`, `price_at_reject`, `quote_age_at_reject` on every reject event; dud-inclusive
 per-reason denominators; shadow quote-fresh re-anchor variant for `entry_execution_signal_stale`
 (watch-only). Acceptance: next window computes P(gold/silver | rejected by reason) vs base rate
-and peak-vs-reject ordering for 100% of QT kills.
+and peak-vs-reject ordering for 100% of QT kills. Price/quote context must be 100% covered where
+present in the reject row or same-signal context; otherwise the remaining gaps must be explicitly
+attributed as deterministic missing context with no blockers. Do not infer price or quote age from
+unrelated token-time rows to manufacture 100% coverage.
 
 ### P4 — OOS statistics upgrade (unchanged; do before frozen definitions start "repeating" by luck)
 

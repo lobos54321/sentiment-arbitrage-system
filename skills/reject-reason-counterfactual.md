@@ -11,8 +11,11 @@ Reason mechanics: `entry_readiness_policy.py` (stale), `paper_trade_monitor.py:1
 
 ## The four requirements for a valid protective-vs-harmful verdict
 
-A reason is only judgeable when ALL four exist. As of 2026-07-02 **none** of them exist — every
-verdict issued without them is a lean, not a conclusion.
+A reason is only judgeable when ALL four exist. As of 2026-07-03, P3 instrumentation now provides
+reject timestamps and peak-vs-reject ordering for the QT kill set, plus price/quote context where
+available. Remaining price/quote gaps must stay explicit and deterministically attributed; do not
+infer them from unrelated token-time rows. Verdicts are still shadow-only unless they also pass the
+dud-inclusive denominator and OOS checks.
 
 1. **Dud-inclusive denominator**: same-window count of ALL signals killed by the reason, not just
    gold/silver. Filter precision = 1 − P(g/s | killed). Without it "kills mostly duds" is
@@ -76,3 +79,23 @@ missing field (feeds the instrumentation queue).
   sequentially; single-reason attribution is lossy.
 - **2026-07-02**: window instability — the same 24h period read n=53 (10:29Z) then n=70 (13:11Z)
   via backfill (+32%); reason counts differ across artifacts generated hours apart. Pin windows.
+- **2026-07-03** (P3 accepted, shadow-only): reject counterfactual instrumentation landed through
+  commits `1a4bcf252317dfabee720ede23934296897bea81`,
+  `135910a6b919a3a06d61f74ce65151d7788d4383`, and
+  `cf4eae530f2afc52988cd2ac6d65fc798e174654`. Fresh AutoLoop run
+  `api_20260703T064449Z_503abecc` produced
+  `/app/data/agent_runs/20260703T064449Z/quality_timing_reject_research_audit_24h.json` with
+  `schema_version=quality_timing_reject_research_audit.v3`,
+  `classification=QUALITY_TIMING_REJECT_RESEARCH_READY`, `promotion_allowed=false`, and
+  `blockers=[]`.
+- **2026-07-03**: final P3 coverage on that run: `reject_ts_coverage_rate=1.0`,
+  `peak_vs_reject_ordering_coverage_rate=1.0`, `price_at_reject_coverage_rate=0.942857`,
+  `quote_age_at_reject_coverage_rate=0.742857`,
+  `coverage_acceptance_status=ACCEPTED_WITH_DETERMINISTIC_CONTEXT_MISSING`. Accepted missing gaps:
+  `price_at_reject_missing_count=2`, `quote_age_at_reject_missing_count=9`, both attributed to no
+  reject-row or same-signal context payload. This is intentionally not filled from unrelated
+  token-time rows.
+- **2026-07-03**: direct P3 check before the full run completed also passed on
+  `/app/data/agent_runs/20260703T064449Z/quality_timing_reject_research_audit_p3_direct_check.json`
+  with `blockers=[]`, `price_at_reject_coverage_rate=0.969697`,
+  `quote_age_at_reject_coverage_rate=0.787879`, and deterministic missing-context warnings only.
