@@ -314,11 +314,11 @@ def load_paper_decisions(paper_db, tokens, since_ts, until_ts):
     if table_exists(paper_db, "paper_decision_events"):
         cols = columns(paper_db, "paper_decision_events")
         rows = paper_db.execute(
-            """
+            f"""
             SELECT id, 'paper_decision_events' AS source_kind, event_ts, signal_id, token_ca,
                    symbol, lifecycle_id, component AS source_component, reason,
                    event_type, decision, route, data_source, lifecycle_state,
-                   NULL AS payload_json, NULL AS action, NULL AS would_action,
+                   {optional(cols, 'payload_json', "'{}'")}, NULL AS action, NULL AS would_action,
                    NULL AS would_enter_a_class, NULL AS did_enter,
                    NULL AS quote_clean, NULL AS quote_executable, NULL AS route_available,
                    NULL AS block_cause, NULL AS hard_blockers_json,

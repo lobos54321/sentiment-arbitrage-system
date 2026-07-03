@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -39,11 +40,86 @@ from offline_raw_gold_silver_funnel_audit import (
 )
 
 
-SCHEMA_VERSION = "quality_timing_reject_research_audit.v2"
+SCHEMA_VERSION = "quality_timing_reject_research_audit.v3"
 EVIDENCE_LEVEL = "discovery_same_window"
 DEFAULT_EXPECTED_CANDIDATES = 84
 READINESS_TARGET_RATE = 0.6
 BLOCKED_CONTEXT_DIMENSIONS = ["kline", "volume"]
+QUOTE_FRESH_REANCHOR_MAX_AGE_SEC = float(os.environ.get("ENTRY_QUOTE_MAX_AGE_SEC", "180"))
+REJECT_DECISIONS = {"BLOCK", "REJECT", "WATCH_ONLY", "WAIT", "SKIP"}
+REJECT_EVENT_TYPES = {
+    "entry_block",
+    "entry_abort",
+    "pending_reject",
+    "probe_reject",
+    "quality_gate",
+    "timing_decision",
+}
+PRICE_AT_REJECT_PATHS = [
+    ("price_at_reject",),
+    ("price_at_rejection",),
+    ("decision_price",),
+    ("current_price",),
+    ("trigger_price",),
+    ("signal_price",),
+    ("entry_price",),
+    ("quote_price",),
+    ("mark_price",),
+    ("momentum_final_price",),
+    ("price",),
+    ("candidate", "decision_price"),
+    ("candidate", "current_price"),
+    ("candidate", "trigger_price"),
+    ("candidate", "signal_price"),
+    ("candidate", "entry_price"),
+    ("candidate", "quote_price"),
+    ("candidate", "mark_price"),
+    ("final_candidate", "decision_price"),
+    ("final_candidate", "trigger_price"),
+    ("final_candidate", "signal_price"),
+    ("final_candidate", "entry_price"),
+    ("final_candidate", "quote_price"),
+    ("final_candidate", "price_sol_per_token"),
+    ("raw_payload", "decision_price"),
+    ("raw_payload", "trigger_price"),
+    ("raw_payload", "signal_price"),
+    ("raw_payload", "entry_price"),
+    ("entry_decision_contract", "trigger_price"),
+    ("lifecycle", "lifecycle_features", "current_price"),
+    ("lifecycle", "lifecycle_features", "signal_price"),
+    ("lifecycle", "lifecycle_features", "trigger_price"),
+    ("lifecycle_features", "current_price"),
+    ("lifecycle_features", "signal_price"),
+    ("lifecycle_features", "trigger_price"),
+]
+QUOTE_AGE_AT_REJECT_PATHS = [
+    ("quote_age_at_reject",),
+    ("quote_age_sec",),
+    ("entry_quote_age_sec",),
+    ("quoteAgeSec",),
+    ("ageSec",),
+    ("age_sec",),
+    ("candidate", "quote_age_sec"),
+    ("candidate", "entry_quote_age_sec"),
+    ("final_candidate", "quote_age_sec"),
+    ("raw_payload", "quote_age_sec"),
+    ("quote", "quote_age_sec"),
+    ("quote", "quoteAgeSec"),
+    ("execution", "quote_age_sec"),
+    ("entry_execution", "quote_age_sec"),
+]
+QUOTE_TS_AT_REJECT_PATHS = [
+    ("quote_ts",),
+    ("quoteTs",),
+    ("quote", "quote_ts"),
+    ("quote", "quoteTs"),
+    ("execution", "quote_ts"),
+    ("execution", "quoteTs"),
+    ("entry_execution", "quote_ts"),
+    ("entry_execution", "quoteTs"),
+    ("final_candidate", "quote_ts"),
+    ("candidate", "quote_ts"),
+]
 
 
 def utc_now():
@@ -56,6 +132,14 @@ def jdump(path, payload):
     tmp = target.with_suffix(target.suffix + f".{int(time.time() * 1000)}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(target)
+
+
+def jloads(raw):
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
 
 
 def decision_value(row, key, default=None):
@@ -90,6 +174,140 @@ def reason_row(row):
 
 def row_ts(row):
     return safe_float(decision_value(row, "event_ts_norm") or decision_value(row, "event_ts")) or 0
+
+
+def lift(selected_rate, base_rate):
+    if selected_rate is None or base_rate is None:
+        return None
+    return round(float(selected_rate) - float(base_rate), 6)
+
+
+def decision_payload(row):
+    payload = decision_value(row, "payload_json")
+    if isinstance(payload, dict):
+        return payload
+    return jloads(payload)
+
+
+def path_value(payload, path):
+    cursor = payload
+    for key in path:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(key)
+    return cursor
+
+
+def first_float_from_paths(payload, paths):
+    for path in paths:
+        value = path_value(payload, path)
+        parsed = safe_float(value)
+        if parsed is not None and parsed > 0:
+            return parsed, ".".join(path)
+    return None, None
+
+
+def quote_age_from_payload(payload, reject_ts):
+    age, source = first_float_from_paths(payload, QUOTE_AGE_AT_REJECT_PATHS)
+    if age is not None:
+        return age, source
+    quote_ts, ts_source = first_float_from_paths(payload, QUOTE_TS_AT_REJECT_PATHS)
+    if quote_ts is None or reject_ts is None:
+        return None, None
+    if quote_ts > 10_000_000_000:
+        quote_ts = quote_ts / 1000.0
+    return max(0.0, float(reject_ts) - float(quote_ts)), ts_source
+
+
+def reject_event_stage(row):
+    component = str(decision_value(row, "source_component") or decision_value(row, "component") or "").lower()
+    event_type = str(decision_value(row, "event_type") or "").lower()
+    if component == "final_entry_contract" or event_type in {"entry_block", "pending_reject"}:
+        return "pending_without_final_entry_contract"
+    if event_type in {"entry_abort"}:
+        return "pass_or_allow_without_pending_entry"
+    return "decision_no_pass_or_allow"
+
+
+def is_reject_event_row(row):
+    event_type = str(decision_value(row, "event_type") or "").lower()
+    decision = str(decision_value(row, "decision") or decision_value(row, "action") or "").upper()
+    return event_type in REJECT_EVENT_TYPES or decision in REJECT_DECISIONS
+
+
+def quality_timing_event_from_decision(row, *, stage=None):
+    if not is_reject_event_row(row):
+        return None
+    stage = stage or reject_event_stage(row)
+    attribution = reason_row(row)
+    category = (
+        classify_pending_gap_reason(attribution)
+        if stage == "pending_without_final_entry_contract"
+        else classify_upstream_gap_reason(attribution, stage)
+    )
+    if category != "QUALITY_OR_TIMING_REJECT":
+        return None
+    payload = decision_payload(row)
+    reject_ts = normalize_ts(decision_value(row, "event_ts_norm") or decision_value(row, "event_ts"))
+    price_at_reject, price_source = first_float_from_paths(payload, PRICE_AT_REJECT_PATHS)
+    quote_age_at_reject, quote_age_source = quote_age_from_payload(payload, reject_ts)
+    item = {
+        "decision_event_id": decision_value(row, "id"),
+        "signal_id": signal_id_key(decision_value(row, "signal_id")),
+        "token_ca": decision_value(row, "token_ca"),
+        "stage": stage,
+        "category": category,
+        "reject_ts": reject_ts,
+        "price_at_reject": price_at_reject,
+        "price_at_reject_source": price_source,
+        "quote_age_at_reject": quote_age_at_reject,
+        "quote_age_at_reject_source": quote_age_source,
+        "attribution": attribution,
+    }
+    item["reason_key"] = (
+        item["stage"],
+        item["attribution"]["component"],
+        item["attribution"]["event_type"],
+        item["attribution"]["decision"],
+        item["attribution"]["reason"],
+    )
+    item["reason_signature"] = (
+        item["attribution"]["component"],
+        item["attribution"]["event_type"],
+        item["attribution"]["decision"],
+        item["attribution"]["reason"],
+    )
+    return item
+
+
+def raw_peak_ts(row):
+    signal_ts = row.get("signal_ts_norm") if isinstance(row, dict) else None
+    if signal_ts is None and isinstance(row, dict):
+        signal_ts = normalize_ts(row.get("signal_ts"))
+    peak_sec = safe_float(row.get("time_to_sustained_peak_sec")) if isinstance(row, dict) else None
+    if signal_ts is None or peak_sec is None:
+        return None
+    return float(signal_ts) + float(peak_sec)
+
+
+def peak_vs_reject_ordering(raw_row, reject_ts):
+    peak_ts = raw_peak_ts(raw_row)
+    if peak_ts is None or reject_ts is None:
+        return {
+            "peak_ts": peak_ts,
+            "reject_ts": reject_ts,
+            "available": False,
+            "ordering": "missing_peak_or_reject_ts",
+            "seconds_from_reject_to_peak": None,
+        }
+    delta = round(float(peak_ts) - float(reject_ts), 6)
+    return {
+        "peak_ts": peak_ts,
+        "reject_ts": reject_ts,
+        "available": True,
+        "ordering": "reject_before_or_at_peak" if delta >= 0 else "reject_after_peak",
+        "seconds_from_reject_to_peak": delta,
+    }
 
 
 def choose_decision_no_pass_row(signal_rows):
@@ -204,6 +422,7 @@ def stage_quality_timing_events(raw_rows, decisions):
 
         if category != "QUALITY_OR_TIMING_REJECT":
             continue
+        reject_info = quality_timing_event_from_decision(chosen, stage=stage) if chosen is not None else None
         item = {
             "signal_id": signal_id,
             "stage": stage,
@@ -211,8 +430,23 @@ def stage_quality_timing_events(raw_rows, decisions):
             "first_stage_ts": first_stage_ts,
             "attribution": reason_row(chosen),
         }
+        if reject_info:
+            item.update({
+                "decision_event_id": reject_info.get("decision_event_id"),
+                "reject_ts": reject_info.get("reject_ts"),
+                "price_at_reject": reject_info.get("price_at_reject"),
+                "price_at_reject_source": reject_info.get("price_at_reject_source"),
+                "quote_age_at_reject": reject_info.get("quote_age_at_reject"),
+                "quote_age_at_reject_source": reject_info.get("quote_age_at_reject_source"),
+            })
         item["reason_key"] = (
             item["stage"],
+            item["attribution"]["component"],
+            item["attribution"]["event_type"],
+            item["attribution"]["decision"],
+            item["attribution"]["reason"],
+        )
+        item["reason_signature"] = (
             item["attribution"]["component"],
             item["attribution"]["event_type"],
             item["attribution"]["decision"],
@@ -329,6 +563,225 @@ def count_raw_signals_reaching_final_entry_contract(raw_rows, decisions):
         if key in raw_ids and is_final_entry_contract(row):
             reached.add(key)
     return reached
+
+
+def load_all_paper_decision_events(paper_db, since_ts, until_ts):
+    if not table_exists(paper_db, "paper_decision_events"):
+        return []
+    cols = {
+        row[1]
+        for row in paper_db.execute("PRAGMA table_info(paper_decision_events)").fetchall()
+    }
+    rows = paper_db.execute(
+        f"""
+        SELECT id, 'paper_decision_events' AS source_kind, event_ts, signal_id, token_ca,
+               symbol, lifecycle_id, component AS source_component, reason,
+               event_type, decision, route, data_source, lifecycle_state,
+               {('payload_json' if 'payload_json' in cols else "'{}' AS payload_json")},
+               NULL AS action
+        FROM paper_decision_events
+        WHERE event_ts >= ? AND event_ts <= ?
+        """,
+        (since_ts - 60, until_ts + 900),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _event_rows_to_unique_signals(events):
+    return {
+        event.get("signal_id")
+        for event in events
+        if event.get("signal_id")
+    }
+
+
+def build_reject_counterfactuals(*, raw_rows, qt_events, all_decisions, limit):
+    raw_by_signal = {
+        row.get("signal_id_key"): row
+        for row in raw_rows
+        if row.get("signal_id_key")
+    }
+    raw_signal_ids = set(raw_by_signal)
+    all_decision_signal_ids = {
+        signal_id_key(decision_value(row, "signal_id"))
+        for row in all_decisions
+        if signal_id_key(decision_value(row, "signal_id"))
+    }
+    all_qt_events = []
+    missing_signal_id = 0
+    for row in all_decisions:
+        event = quality_timing_event_from_decision(row)
+        if not event:
+            continue
+        if not event.get("signal_id"):
+            missing_signal_id += 1
+        all_qt_events.append(event)
+
+    by_reason = defaultdict(list)
+    for event in all_qt_events:
+        by_reason[event["reason_key"]].append(event)
+    raw_qt_by_reason = defaultdict(list)
+    for event in (qt_events or {}).values():
+        raw_qt_by_reason[event["reason_key"]].append(event)
+
+    base_gs_signal_count = len(raw_signal_ids & all_decision_signal_ids)
+    base_signal_count = len(all_decision_signal_ids)
+    base_rate = rate(base_gs_signal_count, base_signal_count)
+    rows = []
+    for reason_key, events in sorted(by_reason.items(), key=lambda item: len(item[1]), reverse=True):
+        unique_signals = _event_rows_to_unique_signals(events)
+        gs_signals = unique_signals & raw_signal_ids
+        raw_reason_events = raw_qt_by_reason.get(reason_key) or []
+        stale_events = [
+            event
+            for event in events
+            if "stale" in str((event.get("attribution") or {}).get("reason") or "").lower()
+        ]
+        quote_age_available = [
+            event for event in events if event.get("quote_age_at_reject") is not None
+        ]
+        quote_fresh = [
+            event
+            for event in quote_age_available
+            if safe_float(event.get("quote_age_at_reject")) is not None
+            and safe_float(event.get("quote_age_at_reject")) <= QUOTE_FRESH_REANCHOR_MAX_AGE_SEC
+        ]
+        stage, component, event_type, decision, reason = (list(reason_key) + [None] * 5)[:5]
+        p_gs = rate(len(gs_signals), len(unique_signals))
+        rows.append({
+            "stage": stage,
+            "component": component,
+            "event_type": event_type,
+            "decision": decision,
+            "reason": reason,
+            "all_reject_events": len(events),
+            "all_reject_signal_count": len(unique_signals),
+            "raw_gs_reject_events": len(raw_reason_events),
+            "raw_gs_reject_signal_count": len(gs_signals),
+            "dud_kills": max(0, len(unique_signals) - len(gs_signals)),
+            "p_gold_silver_given_reject_by_reason": p_gs,
+            "base_gold_silver_rate": base_rate,
+            "lift_vs_base_rate": lift(p_gs, base_rate),
+            "quote_age_at_reject_available_rate": rate(len(quote_age_available), len(events)),
+            "stale_reject_events": len(stale_events),
+            "shadow_quote_fresh_reanchor_watch_only": {
+                "enabled": bool(stale_events),
+                "max_quote_age_sec": QUOTE_FRESH_REANCHOR_MAX_AGE_SEC,
+                "quote_age_available_events": len(quote_age_available),
+                "would_be_quote_fresh_events": len(quote_fresh),
+                "would_be_quote_fresh_rate": rate(len(quote_fresh), len(events)),
+                "allowed_use": "watch_only",
+                "promotion_allowed": False,
+                "strategy_change_allowed": False,
+                "automatic_runtime_change_allowed": False,
+            },
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+            "paper_enablement_allowed": False,
+        })
+        if len(rows) >= limit:
+            break
+
+    stale_all = [
+        event
+        for event in all_qt_events
+        if "stale" in str((event.get("attribution") or {}).get("reason") or "").lower()
+    ]
+    stale_quote_age = [event for event in stale_all if event.get("quote_age_at_reject") is not None]
+    stale_quote_fresh = [
+        event
+        for event in stale_quote_age
+        if safe_float(event.get("quote_age_at_reject")) is not None
+        and safe_float(event.get("quote_age_at_reject")) <= QUOTE_FRESH_REANCHOR_MAX_AGE_SEC
+    ]
+    return {
+        "schema_version": "quality_timing_reject_counterfactuals.v1",
+        "available": bool(all_decisions),
+        "evidence_level": EVIDENCE_LEVEL,
+        "usage": "read_only_shadow_research",
+        "dud_inclusive_denominator": {
+            "available": bool(all_qt_events),
+            "all_decision_signal_count": base_signal_count,
+            "raw_gold_silver_signal_count_in_decision_denominator": base_gs_signal_count,
+            "base_gold_silver_rate": base_rate,
+            "all_quality_timing_reject_events": len(all_qt_events),
+            "all_quality_timing_reject_signal_count": len(_event_rows_to_unique_signals(all_qt_events)),
+            "raw_gold_silver_quality_timing_reject_events": len(qt_events or {}),
+            "missing_signal_id_quality_timing_reject_events": missing_signal_id,
+        },
+        "per_reason_denominators": rows,
+        "shadow_quote_fresh_reanchor_variant": {
+            "reason_filter": "entry_execution_signal_stale_or_reason_contains_stale",
+            "allowed_use": "watch_only",
+            "max_quote_age_sec": QUOTE_FRESH_REANCHOR_MAX_AGE_SEC,
+            "stale_reject_events": len(stale_all),
+            "quote_age_available_events": len(stale_quote_age),
+            "would_be_quote_fresh_events": len(stale_quote_fresh),
+            "would_be_quote_fresh_rate": rate(len(stale_quote_fresh), len(stale_all)),
+            "promotion_allowed": False,
+            "strategy_change_allowed": False,
+            "automatic_runtime_change_allowed": False,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
+def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
+    qt_count = len(qt_events or {})
+    reject_ts_count = 0
+    price_count = 0
+    quote_age_count = 0
+    peak_ordering_count = 0
+    ordering_counts = Counter()
+    for signal_id, event in (qt_events or {}).items():
+        if event.get("reject_ts") is not None:
+            reject_ts_count += 1
+        if event.get("price_at_reject") is not None:
+            price_count += 1
+        if event.get("quote_age_at_reject") is not None:
+            quote_age_count += 1
+        ordering = peak_vs_reject_ordering(raw_by_signal.get(signal_id), event.get("reject_ts"))
+        event["peak_vs_reject_ordering"] = ordering
+        if ordering.get("available"):
+            peak_ordering_count += 1
+        ordering_counts[ordering.get("ordering")] += 1
+    blockers = []
+    if qt_count and reject_ts_count < qt_count:
+        blockers.append("reject_ts_coverage_below_100pct")
+    if qt_count and price_count < qt_count:
+        blockers.append("price_at_reject_coverage_below_100pct")
+    if qt_count and quote_age_count < qt_count:
+        blockers.append("quote_age_at_reject_coverage_below_100pct")
+    if qt_count and peak_ordering_count < qt_count:
+        blockers.append("peak_vs_reject_ordering_coverage_below_100pct")
+    return {
+        "schema_version": "quality_timing_reject_instrumentation.v1",
+        "quality_timing_reject_event_rows": qt_count,
+        "joined_exact_reject_ts_count": reject_ts_count,
+        "price_at_reject_count": price_count,
+        "quote_age_at_reject_count": quote_age_count,
+        "peak_vs_reject_ordering_count": peak_ordering_count,
+        "reject_ts_coverage_rate": rate(reject_ts_count, qt_count),
+        "price_at_reject_coverage_rate": rate(price_count, qt_count),
+        "quote_age_at_reject_coverage_rate": rate(quote_age_count, qt_count),
+        "peak_vs_reject_ordering_coverage_rate": rate(peak_ordering_count, qt_count),
+        "peak_vs_reject_ordering_counts": compact_counter(ordering_counts, ["ordering"], 20),
+        "blockers": blockers,
+        "acceptance_target": {
+            "reject_ts_coverage_rate": 1.0,
+            "price_at_reject_coverage_rate": 1.0,
+            "quote_age_at_reject_coverage_rate": 1.0,
+            "peak_vs_reject_ordering_coverage_rate": 1.0,
+        },
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
 
 
 def build_readiness_impact_upper_bound(raw_rows, qt_count, reached_final_signal_ids, cluster_counts):
@@ -866,15 +1319,27 @@ def build_report(args):
         until_ts = max([row.get("signal_ts_norm") or since_ts for row in raw_rows] + [now_ts])
         observations, obs_meta = load_candidate_observations(paper_db, raw_signal_ids, since_ts)
         decisions = load_paper_decisions(paper_db, raw_tokens, since_ts, until_ts)
+        all_decisions = load_all_paper_decision_events(paper_db, since_ts, until_ts)
         trades = load_paper_trades(paper_db, raw_tokens, since_ts, until_ts)
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
         audits_by_signal = {row.get("signal_id"): row for row in audits if row.get("signal_id")}
+        raw_by_signal = {row.get("signal_id_key"): row for row in raw_rows if row.get("signal_id_key")}
         observations_by_signal = defaultdict(list)
         for obs in observations:
             if obs.get("signal_id_key"):
                 observations_by_signal[obs["signal_id_key"]].append(obs)
 
         qt_events = stage_quality_timing_events(raw_rows, decisions)
+        reject_instrumentation = build_reject_instrumentation_summary(
+            qt_events=qt_events,
+            raw_by_signal=raw_by_signal,
+        )
+        reject_counterfactuals = build_reject_counterfactuals(
+            raw_rows=raw_rows,
+            qt_events=qt_events,
+            all_decisions=all_decisions,
+            limit=args.limit,
+        )
         reached_final_signal_ids = count_raw_signals_reaching_final_entry_contract(raw_rows, decisions)
         qt_rows = []
         stage_counts = Counter()
@@ -986,6 +1451,13 @@ def build_report(args):
                     "symbol": audit.get("symbol"),
                     "tier": audit.get("tier"),
                     "stage": event["stage"],
+                    "decision_event_id": event.get("decision_event_id"),
+                    "reject_ts": event.get("reject_ts"),
+                    "price_at_reject": event.get("price_at_reject"),
+                    "price_at_reject_source": event.get("price_at_reject_source"),
+                    "quote_age_at_reject": event.get("quote_age_at_reject"),
+                    "quote_age_at_reject_source": event.get("quote_age_at_reject_source"),
+                    "peak_vs_reject_ordering": event.get("peak_vs_reject_ordering"),
                     "shadow_review_cluster": cluster,
                     "attribution": event["attribution"],
                     "candidate_observation_count": len(signal_obs),
@@ -1092,6 +1564,18 @@ def build_report(args):
             }),
             "quality_timing_reject_share_of_raw_all": rate(qt_count, len(raw_rows)),
             "quality_timing_reject_share_of_raw_all_pct": pct(qt_count, len(raw_rows)),
+            "dud_inclusive_reject_denominator_available": (
+                reject_counterfactuals.get("dud_inclusive_denominator") or {}
+            ).get("available"),
+            "all_quality_timing_reject_events": (
+                reject_counterfactuals.get("dud_inclusive_denominator") or {}
+            ).get("all_quality_timing_reject_events"),
+            "all_quality_timing_reject_signal_count": (
+                reject_counterfactuals.get("dud_inclusive_denominator") or {}
+            ).get("all_quality_timing_reject_signal_count"),
+            "base_gold_silver_rate": (
+                reject_counterfactuals.get("dud_inclusive_denominator") or {}
+            ).get("base_gold_silver_rate"),
         }
         summary = build_top_level_summary(
             verdict=verdict,
@@ -1140,6 +1624,8 @@ def build_report(args):
             "blockers": blockers,
             "summary": summary,
             "denominator": denominator,
+            "reject_instrumentation": reject_instrumentation,
+            "reject_counterfactuals": reject_counterfactuals,
             "observation_load": obs_meta,
             "candidate_match_attribution": {
                 "expected_candidates": args.expected_candidates,
@@ -1213,6 +1699,18 @@ def compact_summary(report):
             report.get("blocked_context_dimensions_excluded_view") or {}
         ),
         "readiness_impact_upper_bound": report.get("readiness_impact_upper_bound") or {},
+        "reject_instrumentation": report.get("reject_instrumentation") or {},
+        "reject_counterfactuals": {
+            "dud_inclusive_denominator": (
+                (report.get("reject_counterfactuals") or {}).get("dud_inclusive_denominator") or {}
+            ),
+            "top_per_reason_denominators": (
+                (report.get("reject_counterfactuals") or {}).get("per_reason_denominators") or []
+            )[:10],
+            "shadow_quote_fresh_reanchor_variant": (
+                (report.get("reject_counterfactuals") or {}).get("shadow_quote_fresh_reanchor_variant") or {}
+            ),
+        },
         "reason_level_breakout": report.get("reason_level_breakout") or {},
         "top_stage_counts": ((report.get("stage_attribution") or {}).get("stage_counts") or [])[:8],
         "top_reason_counts": ((report.get("stage_attribution") or {}).get("reason_counts") or [])[:8],
@@ -1304,12 +1802,74 @@ def self_test():
         paper.executemany(
             "INSERT INTO paper_decision_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
-                (1, now - 80, "101", "QT1", "QT1", "lc1", "smart_entry", "quality_score_low", "quality_gate", "REJECT", None, None, None, "{}"),
+                (
+                    1,
+                    now - 80,
+                    "101",
+                    "QT1",
+                    "QT1",
+                    "lc1",
+                    "smart_entry",
+                    "quality_score_low",
+                    "quality_gate",
+                    "REJECT",
+                    None,
+                    None,
+                    None,
+                    json.dumps({"signal_price": 0.00000101, "quote_age_sec": 12}),
+                ),
                 (2, now - 70, "102", "QT2", "QT2", "lc2", "smart_entry", "pass", "would_enter", "PASS", None, None, None, "{}"),
-                (3, now - 65, "102", "QT2", "QT2", "lc2", "scout_quality", "timing_too_late", "timing_decision", "REJECT", None, None, None, "{}"),
+                (
+                    3,
+                    now - 65,
+                    "102",
+                    "QT2",
+                    "QT2",
+                    "lc2",
+                    "scout_quality",
+                    "timing_too_late",
+                    "timing_decision",
+                    "REJECT",
+                    None,
+                    None,
+                    None,
+                    json.dumps({"current_price": 0.00000102, "quote_age_sec": 18}),
+                ),
                 (4, now - 60, "103", "OK", "OK", "lc3", "smart_entry", "pass", "would_enter", "PASS", None, None, None, "{}"),
                 (5, now - 55, "103", "OK", "OK", "lc3", "entry_engine", "pending", "pending_entry", "PENDING", None, None, None, "{}"),
                 (6, now - 50, "103", "OK", "OK", "lc3", "final_entry_contract", "mode_disabled", "entry_block", "BLOCK", None, None, None, "{}"),
+                (
+                    7,
+                    now - 75,
+                    "201",
+                    "DUD1",
+                    "DUD1",
+                    "lc4",
+                    "smart_entry",
+                    "quality_score_low",
+                    "quality_gate",
+                    "REJECT",
+                    None,
+                    None,
+                    None,
+                    json.dumps({"signal_price": 0.00000201, "quote_age_sec": 7}),
+                ),
+                (
+                    8,
+                    now - 74,
+                    "202",
+                    "DUD2",
+                    "DUD2",
+                    "lc5",
+                    "entry_execution_eligibility",
+                    "entry_execution_signal_stale",
+                    "entry_block",
+                    "WATCH_ONLY",
+                    None,
+                    None,
+                    None,
+                    json.dumps({"trigger_price": 0.00000202, "quote_age_sec": 9}),
+                ),
             ],
         )
         paper.commit()
@@ -1381,6 +1941,27 @@ def self_test():
         assert report["summary"]["automatic_runtime_change_allowed"] is False
         assert report["summary"]["paper_enablement_allowed"] is False
         assert report["denominator"]["quality_timing_reject_event_rows"] == 2
+        assert report["denominator"]["dud_inclusive_reject_denominator_available"] is True
+        reject_instrumentation = report["reject_instrumentation"]
+        assert reject_instrumentation["reject_ts_coverage_rate"] == 1.0
+        assert reject_instrumentation["price_at_reject_coverage_rate"] == 1.0
+        assert reject_instrumentation["quote_age_at_reject_coverage_rate"] == 1.0
+        assert reject_instrumentation["peak_vs_reject_ordering_coverage_rate"] == 1.0
+        assert reject_instrumentation["peak_vs_reject_ordering_counts"][0]["count"] == 2
+        counterfactuals = report["reject_counterfactuals"]
+        assert counterfactuals["dud_inclusive_denominator"]["all_quality_timing_reject_events"] >= 4
+        assert counterfactuals["per_reason_denominators"]
+        quality_reason = next(
+            row
+            for row in counterfactuals["per_reason_denominators"]
+            if row["reason"] == "quality_score_low"
+        )
+        assert quality_reason["raw_gs_reject_signal_count"] == 1
+        assert quality_reason["dud_kills"] == 1
+        stale_variant = counterfactuals["shadow_quote_fresh_reanchor_variant"]
+        assert stale_variant["allowed_use"] == "watch_only"
+        assert stale_variant["would_be_quote_fresh_events"] == 1
+        assert stale_variant["promotion_allowed"] is False
         assert report["candidate_match_attribution"]["candidate_matched_any_events"] == 2
         assert report["candidate_match_attribution"]["full_candidate_coverage_rate"] == 1.0
         clean_view = report["blocked_context_dimensions_excluded_view"]
@@ -1427,6 +2008,8 @@ def self_test():
         assert "pending_without_final_entry_contract" not in stages
         compact = compact_summary(report)
         assert compact["promotion_allowed"] is False
+        assert compact["reject_instrumentation"]["peak_vs_reject_ordering_coverage_rate"] == 1.0
+        assert compact["reject_counterfactuals"]["dud_inclusive_denominator"]["available"] is True
         assert compact["reason_level_breakout"]["classification"] == "QUALITY_TIMING_REASON_LEVEL_READY"
         assert compact["shadow_only_review"]["classification"] == "QUALITY_TIMING_SHADOW_REVIEW_READY"
         assert compact["blocked_context_dimensions_excluded_view"]["classification"] == "CLEAN_CANDIDATE_ATTRIBUTION_READY"
