@@ -102,3 +102,47 @@ Local verification:
 - `scripts/agent_capture_discovery_loop.py --self-test`
 - `pytest tests/test_strategy_memory_scripts.py -q`
 - `pytest tests/test_a_class_runtime_safety.py tests/test_final_entry_contract.py tests/test_goal_runtime_safety.py tests/test_a_class_live_enqueue.py tests/test_a_class_fastlane.py -q`
+
+### 2026-07-03 P7 Strict OOS Waiting Task Remote Validation
+
+- code_commit: `98c1dff2238f6977fe360b61992d997aa08d8c36`
+- remote_run_id: `api_20260703T125929Z_2adfd775`
+- remote_run_finished_at: `2026-07-03T13:12:40.412Z`
+- remote_exit_code: `0`
+- remote_timed_out: `false`
+- tests_passed: `true`
+- artifact: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+- artifact_schema: `p7_exit_policy_oos_validation.v1`
+- classification: `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`
+- blocker: `waiting_for_two_non_overlapping_forward_windows`
+- freeze_commit: `7c9f4160b1cc8a2a1ae0069b671c5922936fe47b`
+- freeze_ts: `1783083042`
+- freeze_iso: `2026-07-03T12:50:42Z`
+- source_code_commit_tested: `a3b23d8738279a39bb90b6b5e54262db3035cc19`
+- frozen_policy_count: `3`
+- frozen_policies:
+  - `trail_a50_dd15_stop20`
+  - `trail_a30_dd15_stop20`
+  - `trail_a20_dd15_stop20`
+- frozen_policy_fingerprints:
+  - `sha256:ab66e272ac4ffa2149627428fd51a8261cf24062cd8292639ada0caf39fbb166`
+  - `sha256:0b2769f1f583007dc7587addf9d1944c0f82bfc51ed33d1e2afdbdc25dd7c8c5`
+  - `sha256:77ba57ea236f408d4752fd50fe3ef62b3c47c177a671fec4ccab5dc164d7a4c7`
+- primary_metric: `rolling_24h_realized_net_roi_median_pct`
+- compound_cumulative_roi_is_reference_only: `true`
+- ranking_stability_delay_grid_sec: `[5, 10, 20, 30]`
+- delay_zero_excluded_from_ranking_stability: `true`
+- only_signal_ts_gte_freeze_ts: `true`
+- requires_two_non_overlapping_windows: `true`
+- two_windows_complete: `false`
+- two_windows_same_positive_direction: `false`
+- paper_proposal_allowed: `false`
+- promotion_allowed: `false`
+- live_exit_policy_changed: `false`
+- production_files_touched: `[]`
+- final_reviewer_classification: `A_CLASS_EXPECTED_SHADOW`
+- final_reviewer_top_blocker: `discovery_same_window_not_promotion_evidence`
+
+Result:
+
+The stricter OOS validation task is installed and running as a waiting task. It has not passed or failed the champion; it is waiting for two post-freeze, non-overlapping 24h forward windows. P7 is closed for queue management only, so P5/P6/P8 may proceed in parallel while this OOS evidence accumulates. Paper proposal drafting remains blocked until OOS passes and opens the next human checkpoint.

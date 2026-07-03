@@ -2,9 +2,16 @@
 
 ## Status
 
-P7 is complete and the Phase 2 queue is paused for human review.
+P7 produced a shadow-only champion and the human checkpoint selected option 2:
+create stricter shadow/OOS validation, then resume the Phase 2 queue while
+forward evidence accumulates.
 
-The pause is intentional. `docs/agents/codex-goal-capture60-phase2.md` requires the agent to stop when P7 produces a ranked winner because adopting an exit policy is an S2 governance decision, not an automatic code change.
+The original pause was intentional. `docs/agents/codex-goal-capture60-phase2.md`
+requires the agent to stop when P7 produces a ranked winner because adopting an
+exit policy is an S2 governance decision, not an automatic code change. After
+the human option 2 decision, P7 remains blocked from paper proposal or production
+use, but the queue may resume with P5/P6/P8 while OOS validation waits for new
+forward data.
 
 ## Evidence
 
@@ -97,9 +104,10 @@ Codex must not:
 - change canary size
 - change wallet settings
 - change risk budget
-- continue to P5/P6/P8 while this P7 champion is pending human review
+- use the P7 champion for any paper proposal or production change before OOS
+  validation passes and opens the next human checkpoint
 
-## Current Queue State
+## Initial Queue State Before Human Decision
 
 - P2.1: complete
 - P3: complete
@@ -133,3 +141,31 @@ Option 3 is postponed until OOS passes and opens the next human checkpoint.
 
 Because the stricter OOS validation is now a waiting task, the P7 checkpoint is closed for queue
 management and Phase 2 may resume with P5/P6/P8 while P7 OOS evidence accumulates.
+
+## Remote OOS Waiting Task Verification 2026-07-03
+
+- code commit deployed: `98c1dff2238f6977fe360b61992d997aa08d8c36`
+- AutoLoop run id: `api_20260703T125929Z_2adfd775`
+- AutoLoop exit code: `0`
+- AutoLoop timed out: `false`
+- P7 OOS artifact: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+- P7 OOS classification: `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`
+- blocker: `waiting_for_two_non_overlapping_forward_windows`
+- freeze commit: `7c9f4160b1cc8a2a1ae0069b671c5922936fe47b`
+- freeze iso: `2026-07-03T12:50:42Z`
+- frozen policy count: `3`
+- frozen policies:
+  - `trail_a50_dd15_stop20`
+  - `trail_a30_dd15_stop20`
+  - `trail_a20_dd15_stop20`
+- primary metric: `rolling_24h_realized_net_roi_median_pct`
+- ranking stability delay grid: `5, 10, 20, 30`
+- delay zero excluded from ranking stability: `true`
+- compound cumulative ROI reference only: `true`
+- promotion allowed: `false`
+- paper proposal allowed: `false`
+- live exit policy changed: `false`
+- production files touched: `[]`
+
+This closes the P7 checkpoint for queue management. It does not validate the
+champion yet; validation is waiting for two complete post-freeze 24h windows.
