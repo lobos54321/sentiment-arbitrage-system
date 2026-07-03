@@ -97,8 +97,6 @@ QUOTE_AGE_AT_REJECT_PATHS = [
     ("quote_age_sec",),
     ("entry_quote_age_sec",),
     ("quoteAgeSec",),
-    ("ageSec",),
-    ("age_sec",),
     ("candidate", "quote_age_sec"),
     ("candidate", "entry_quote_age_sec"),
     ("final_candidate", "quote_age_sec"),
@@ -120,6 +118,27 @@ QUOTE_TS_AT_REJECT_PATHS = [
     ("final_candidate", "quote_ts"),
     ("candidate", "quote_ts"),
 ]
+PRICE_AT_REJECT_RECURSIVE_KEYS = {
+    "price_at_reject",
+    "price_at_rejection",
+    "decision_price",
+    "current_price",
+    "trigger_price",
+    "signal_price",
+    "entry_price",
+    "quote_price",
+    "mark_price",
+    "effective_price",
+    "effectivePrice",
+    "rawEffectivePrice",
+}
+QUOTE_AGE_AT_REJECT_RECURSIVE_KEYS = {
+    "quote_age_at_reject",
+    "quote_age_sec",
+    "entry_quote_age_sec",
+    "quoteAgeSec",
+}
+QUOTE_TS_AT_REJECT_RECURSIVE_KEYS = {"quote_ts", "quoteTs"}
 
 
 def utc_now():
@@ -207,16 +226,120 @@ def first_float_from_paths(payload, paths):
     return None, None
 
 
+def recursive_first_float(value, keys, path=()):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            next_path = (*path, str(key))
+            if key in keys:
+                parsed = safe_float(nested)
+                if parsed is not None and parsed > 0:
+                    return parsed, ".".join(next_path)
+            parsed, source = recursive_first_float(nested, keys, next_path)
+            if parsed is not None:
+                return parsed, source
+    elif isinstance(value, list):
+        for idx, nested in enumerate(value):
+            parsed, source = recursive_first_float(nested, keys, (*path, f"[{idx}]"))
+            if parsed is not None:
+                return parsed, source
+    return None, None
+
+
+def price_from_payload(payload):
+    price, source = first_float_from_paths(payload, PRICE_AT_REJECT_PATHS)
+    if price is not None:
+        return price, source
+    price, source = recursive_first_float(payload, PRICE_AT_REJECT_RECURSIVE_KEYS)
+    if price is not None:
+        return price, source
+    return None, None
+
+
 def quote_age_from_payload(payload, reject_ts):
     age, source = first_float_from_paths(payload, QUOTE_AGE_AT_REJECT_PATHS)
     if age is not None:
         return age, source
+    age, source = recursive_first_float(payload, QUOTE_AGE_AT_REJECT_RECURSIVE_KEYS)
+    if age is not None:
+        return age, source
     quote_ts, ts_source = first_float_from_paths(payload, QUOTE_TS_AT_REJECT_PATHS)
+    if quote_ts is None:
+        quote_ts, ts_source = recursive_first_float(payload, QUOTE_TS_AT_REJECT_RECURSIVE_KEYS)
     if quote_ts is None or reject_ts is None:
         return None, None
     if quote_ts > 10_000_000_000:
         quote_ts = quote_ts / 1000.0
     return max(0.0, float(reject_ts) - float(quote_ts)), ts_source
+
+
+def extract_payload_context_fields(row, *, reject_ts=None):
+    payload = decision_payload(row)
+    price, price_source = price_from_payload(payload)
+    quote_age, quote_age_source = quote_age_from_payload(payload, reject_ts)
+    return {
+        "price_at_reject": price,
+        "price_at_reject_source": price_source,
+        "quote_age_at_reject": quote_age,
+        "quote_age_at_reject_source": quote_age_source,
+    }
+
+
+def context_row_relation(row, reject_ts):
+    event_ts = normalize_ts(decision_value(row, "event_ts_norm") or decision_value(row, "event_ts"))
+    if event_ts is None or reject_ts is None:
+        return "unknown_time_relation"
+    if event_ts <= reject_ts:
+        return "at_or_before_reject"
+    return "after_reject"
+
+
+def context_row_sort_key(row, reject_ts):
+    event_ts = normalize_ts(decision_value(row, "event_ts_norm") or decision_value(row, "event_ts"))
+    if event_ts is None or reject_ts is None:
+        return (2, float("inf"))
+    if event_ts <= reject_ts:
+        return (0, abs(float(reject_ts) - float(event_ts)))
+    return (1, abs(float(event_ts) - float(reject_ts)))
+
+
+def context_source_label(row, field_source):
+    component = decision_value(row, "source_component") or decision_value(row, "component") or "UNKNOWN"
+    event_type = decision_value(row, "event_type") or "UNKNOWN"
+    return f"signal_context:{component}.{event_type}:{field_source}"
+
+
+def enrich_event_from_signal_context(event, signal_rows):
+    if not event:
+        return event
+    reject_ts = event.get("reject_ts")
+    rows = sorted(signal_rows or [], key=lambda row: context_row_sort_key(row, reject_ts))
+    if event.get("price_at_reject") is None:
+        for row in rows:
+            fields = extract_payload_context_fields(row, reject_ts=reject_ts)
+            if fields.get("price_at_reject") is not None:
+                event["price_at_reject"] = fields["price_at_reject"]
+                event["price_at_reject_source"] = context_source_label(
+                    row,
+                    fields.get("price_at_reject_source") or "payload",
+                )
+                event["price_at_reject_context_relation"] = context_row_relation(row, reject_ts)
+                break
+    if event.get("quote_age_at_reject") is None:
+        for row in rows:
+            fields = extract_payload_context_fields(row, reject_ts=reject_ts)
+            if fields.get("quote_age_at_reject") is not None:
+                event["quote_age_at_reject"] = fields["quote_age_at_reject"]
+                event["quote_age_at_reject_source"] = context_source_label(
+                    row,
+                    fields.get("quote_age_at_reject_source") or "payload",
+                )
+                event["quote_age_at_reject_context_relation"] = context_row_relation(row, reject_ts)
+                break
+    if event.get("price_at_reject") is None:
+        event["price_at_reject_missing_reason"] = "no_price_in_reject_or_same_signal_context_payloads"
+    if event.get("quote_age_at_reject") is None:
+        event["quote_age_at_reject_missing_reason"] = "no_quote_age_or_quote_ts_in_reject_or_same_signal_context_payloads"
+    return event
 
 
 def reject_event_stage(row):
@@ -247,10 +370,8 @@ def quality_timing_event_from_decision(row, *, stage=None):
     )
     if category != "QUALITY_OR_TIMING_REJECT":
         return None
-    payload = decision_payload(row)
     reject_ts = normalize_ts(decision_value(row, "event_ts_norm") or decision_value(row, "event_ts"))
-    price_at_reject, price_source = first_float_from_paths(payload, PRICE_AT_REJECT_PATHS)
-    quote_age_at_reject, quote_age_source = quote_age_from_payload(payload, reject_ts)
+    payload_fields = extract_payload_context_fields(row, reject_ts=reject_ts)
     item = {
         "decision_event_id": decision_value(row, "id"),
         "signal_id": signal_id_key(decision_value(row, "signal_id")),
@@ -258,10 +379,10 @@ def quality_timing_event_from_decision(row, *, stage=None):
         "stage": stage,
         "category": category,
         "reject_ts": reject_ts,
-        "price_at_reject": price_at_reject,
-        "price_at_reject_source": price_source,
-        "quote_age_at_reject": quote_age_at_reject,
-        "quote_age_at_reject_source": quote_age_source,
+        "price_at_reject": payload_fields.get("price_at_reject"),
+        "price_at_reject_source": payload_fields.get("price_at_reject_source"),
+        "quote_age_at_reject": payload_fields.get("quote_age_at_reject"),
+        "quote_age_at_reject_source": payload_fields.get("quote_age_at_reject_source"),
         "attribution": attribution,
     }
     item["reason_key"] = (
@@ -595,6 +716,17 @@ def _event_rows_to_unique_signals(events):
     }
 
 
+def group_decisions_by_signal(decisions):
+    grouped = defaultdict(list)
+    for row in decisions or []:
+        key = signal_id_key(decision_value(row, "signal_id"))
+        if key:
+            grouped[key].append(row)
+    for key in grouped:
+        grouped[key].sort(key=row_ts)
+    return grouped
+
+
 def build_reject_counterfactuals(*, raw_rows, qt_events, all_decisions, limit):
     raw_by_signal = {
         row.get("signal_id_key"): row
@@ -602,6 +734,7 @@ def build_reject_counterfactuals(*, raw_rows, qt_events, all_decisions, limit):
         if row.get("signal_id_key")
     }
     raw_signal_ids = set(raw_by_signal)
+    all_decisions_by_signal = group_decisions_by_signal(all_decisions)
     all_decision_signal_ids = {
         signal_id_key(decision_value(row, "signal_id"))
         for row in all_decisions
@@ -613,6 +746,10 @@ def build_reject_counterfactuals(*, raw_rows, qt_events, all_decisions, limit):
         event = quality_timing_event_from_decision(row)
         if not event:
             continue
+        enrich_event_from_signal_context(
+            event,
+            all_decisions_by_signal.get(event.get("signal_id"), []),
+        )
         if not event.get("signal_id"):
             missing_signal_id += 1
         all_qt_events.append(event)
@@ -737,13 +874,27 @@ def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
     quote_age_count = 0
     peak_ordering_count = 0
     ordering_counts = Counter()
+    price_source_counts = Counter()
+    quote_age_source_counts = Counter()
+    price_missing_reason_counts = Counter()
+    quote_age_missing_reason_counts = Counter()
     for signal_id, event in (qt_events or {}).items():
         if event.get("reject_ts") is not None:
             reject_ts_count += 1
         if event.get("price_at_reject") is not None:
             price_count += 1
+            price_source_counts[event.get("price_at_reject_source") or "UNKNOWN"] += 1
+        else:
+            price_missing_reason_counts[
+                event.get("price_at_reject_missing_reason") or "unknown_missing_price_at_reject"
+            ] += 1
         if event.get("quote_age_at_reject") is not None:
             quote_age_count += 1
+            quote_age_source_counts[event.get("quote_age_at_reject_source") or "UNKNOWN"] += 1
+        else:
+            quote_age_missing_reason_counts[
+                event.get("quote_age_at_reject_missing_reason") or "unknown_missing_quote_age_at_reject"
+            ] += 1
         ordering = peak_vs_reject_ordering(raw_by_signal.get(signal_id), event.get("reject_ts"))
         event["peak_vs_reject_ordering"] = ordering
         if ordering.get("available"):
@@ -770,6 +921,18 @@ def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
         "quote_age_at_reject_coverage_rate": rate(quote_age_count, qt_count),
         "peak_vs_reject_ordering_coverage_rate": rate(peak_ordering_count, qt_count),
         "peak_vs_reject_ordering_counts": compact_counter(ordering_counts, ["ordering"], 20),
+        "price_at_reject_source_counts": compact_counter(price_source_counts, ["source"], 20),
+        "quote_age_at_reject_source_counts": compact_counter(quote_age_source_counts, ["source"], 20),
+        "price_at_reject_missing_reason_counts": compact_counter(
+            price_missing_reason_counts,
+            ["missing_reason"],
+            20,
+        ),
+        "quote_age_at_reject_missing_reason_counts": compact_counter(
+            quote_age_missing_reason_counts,
+            ["missing_reason"],
+            20,
+        ),
         "blockers": blockers,
         "acceptance_target": {
             "reject_ts_coverage_rate": 1.0,
@@ -1320,6 +1483,7 @@ def build_report(args):
         observations, obs_meta = load_candidate_observations(paper_db, raw_signal_ids, since_ts)
         decisions = load_paper_decisions(paper_db, raw_tokens, since_ts, until_ts)
         all_decisions = load_all_paper_decision_events(paper_db, since_ts, until_ts)
+        all_decisions_by_signal = group_decisions_by_signal(all_decisions)
         trades = load_paper_trades(paper_db, raw_tokens, since_ts, until_ts)
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
         audits_by_signal = {row.get("signal_id"): row for row in audits if row.get("signal_id")}
@@ -1330,6 +1494,11 @@ def build_report(args):
                 observations_by_signal[obs["signal_id_key"]].append(obs)
 
         qt_events = stage_quality_timing_events(raw_rows, decisions)
+        for event in qt_events.values():
+            enrich_event_from_signal_context(
+                event,
+                all_decisions_by_signal.get(event.get("signal_id"), []),
+            )
         reject_instrumentation = build_reject_instrumentation_summary(
             qt_events=qt_events,
             raw_by_signal=raw_by_signal,
@@ -1455,8 +1624,12 @@ def build_report(args):
                     "reject_ts": event.get("reject_ts"),
                     "price_at_reject": event.get("price_at_reject"),
                     "price_at_reject_source": event.get("price_at_reject_source"),
+                    "price_at_reject_context_relation": event.get("price_at_reject_context_relation"),
+                    "price_at_reject_missing_reason": event.get("price_at_reject_missing_reason"),
                     "quote_age_at_reject": event.get("quote_age_at_reject"),
                     "quote_age_at_reject_source": event.get("quote_age_at_reject_source"),
+                    "quote_age_at_reject_context_relation": event.get("quote_age_at_reject_context_relation"),
+                    "quote_age_at_reject_missing_reason": event.get("quote_age_at_reject_missing_reason"),
                     "peak_vs_reject_ordering": event.get("peak_vs_reject_ordering"),
                     "shadow_review_cluster": cluster,
                     "attribution": event["attribution"],
@@ -1833,7 +2006,30 @@ def self_test():
                     None,
                     None,
                     None,
-                    json.dumps({"current_price": 0.00000102, "quote_age_sec": 18}),
+                    json.dumps({"note": "reject row intentionally lacks price and quote fields"}),
+                ),
+                (
+                    9,
+                    now - 66,
+                    "102",
+                    "QT2",
+                    "QT2",
+                    "lc2",
+                    "lotto_recovery",
+                    "quote_probe_observed",
+                    "discovery_tracking",
+                    "OBSERVE",
+                    None,
+                    None,
+                    None,
+                    json.dumps({
+                        "final_reclaim_quote_probe": {
+                            "execution": {
+                                "effectivePrice": 0.00000102,
+                                "quoteTs": now - 70,
+                            }
+                        }
+                    }),
                 ),
                 (4, now - 60, "103", "OK", "OK", "lc3", "smart_entry", "pass", "would_enter", "PASS", None, None, None, "{}"),
                 (5, now - 55, "103", "OK", "OK", "lc3", "entry_engine", "pending", "pending_entry", "PENDING", None, None, None, "{}"),
@@ -1948,6 +2144,11 @@ def self_test():
         assert reject_instrumentation["quote_age_at_reject_coverage_rate"] == 1.0
         assert reject_instrumentation["peak_vs_reject_ordering_coverage_rate"] == 1.0
         assert reject_instrumentation["peak_vs_reject_ordering_counts"][0]["count"] == 2
+        qt2_example = next(row for row in report["top_examples"] if row["signal_id"] == "102")
+        assert str(qt2_example["price_at_reject_source"]).startswith("signal_context:lotto_recovery")
+        assert str(qt2_example["quote_age_at_reject_source"]).startswith("signal_context:lotto_recovery")
+        assert qt2_example["price_at_reject_context_relation"] == "at_or_before_reject"
+        assert qt2_example["quote_age_at_reject"] == 5.0
         counterfactuals = report["reject_counterfactuals"]
         assert counterfactuals["dud_inclusive_denominator"]["all_quality_timing_reject_events"] >= 4
         assert counterfactuals["per_reason_denominators"]
