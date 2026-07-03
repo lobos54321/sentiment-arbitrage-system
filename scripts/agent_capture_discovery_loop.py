@@ -54,6 +54,7 @@ REPORT_TEST_COMMANDS = (
     ("strategy_memory_audit_self_test", ["scripts/offline_strategy_memory_audit.py", "--self-test"]),
     ("strategy_memory_validation_self_test", ["scripts/strategy_memory_validation.py", "--self-test"]),
     ("exit_policy_shadow_lab_self_test", ["scripts/exit_policy_shadow_lab.py", "--self-test"]),
+    ("p7_exit_policy_oos_validation_self_test", ["scripts/p7_exit_policy_oos_validation.py", "--self-test"]),
     ("capture_60_target_loop_self_test", ["scripts/capture_60_target_loop.py", "--self-test"]),
     ("autoloop_lightweight_reconciliation_self_test", ["scripts/autoloop_lightweight_reconciliation.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
@@ -2184,6 +2185,7 @@ def run_reports(run_dir, args):
     strategy_memory_exit_shadow_summary_path = run_dir / "strategy_memory_exit_shadow_summary.json"
     strategy_memory_delay_replay_summary_path = run_dir / "strategy_memory_delay_replay_summary.json"
     exit_policy_shadow_lab_path = run_dir / f"exit_policy_shadow_lab_{primary_hours}h.json"
+    p7_exit_policy_oos_validation_path = run_dir / "p7_exit_policy_oos_validation.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -2627,6 +2629,20 @@ def run_reports(run_dir, args):
     ))
     if exit_policy_shadow_lab_path.exists():
         readiness_paths["exit_policy_shadow_lab"] = exit_policy_shadow_lab_path
+    diagnostics.append(run_report(
+        "p7_exit_policy_oos_validation",
+        [
+            "scripts/p7_exit_policy_oos_validation.py",
+            "--raw-db", args.raw_db,
+            "--paper-db", args.paper_db,
+            "--freeze-registry", "docs/agents/P7_EXIT_POLICY_OOS_FREEZE_REGISTRY.json",
+            "--out", str(p7_exit_policy_oos_validation_path),
+        ],
+        p7_exit_policy_oos_validation_path,
+        timeout=max(60, int(args.report_timeout_sec) * 2),
+    ))
+    if p7_exit_policy_oos_validation_path.exists():
+        readiness_paths["p7_exit_policy_oos_validation"] = p7_exit_policy_oos_validation_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,

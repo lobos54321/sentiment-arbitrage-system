@@ -110,3 +110,26 @@ Codex must not:
 - P8: not started
 
 The correct next state is human review, not automatic implementation.
+
+## Human Decision 2026-07-03
+
+Decision: option 2 approved.
+
+Codex is allowed to create stricter shadow/OOS validation for `trail_a50_dd15_stop20`.
+
+Scope remains read-only and shadow-only:
+
+- freeze champion plus top-ranked challengers at commit `7c9f4160b1cc8a2a1ae0069b671c5922936fe47b`
+- use only forward data after the freeze timestamp
+- require two non-overlapping forward windows in the same positive direction
+- recompute on all samples, unique-token dedupe, and token/cluster dedupe
+- use rolling-24h ROI median and distribution as primary metrics
+- keep compounded cumulative ROI as reference only
+- judge ranking stability on entry-delay `5, 10, 20, 30` seconds only
+- exclude `delay=0` from ranking-stability evidence
+- report drop-top-1 and drop-top-3 winner sensitivity separately
+
+Option 3 is postponed until OOS passes and opens the next human checkpoint.
+
+Because the stricter OOS validation is now a waiting task, the P7 checkpoint is closed for queue
+management and Phase 2 may resume with P5/P6/P8 while P7 OOS evidence accumulates.

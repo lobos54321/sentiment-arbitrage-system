@@ -71,3 +71,34 @@ This stage is not a production strategy change. It must never edit live exits, e
 Result:
 
 P7 produced a shadow-only champion. The strict queue must stop here for human review. No production exit policy, strategy, gate, A_CLASS mode, executor, canary, wallet, or risk setting may be changed from this result alone.
+
+### 2026-07-03 Human Option 2 Approval
+
+- decision: `approve_stricter_shadow_oos_validation`
+- approved_policy_id: `trail_a50_dd15_stop20`
+- paper_proposal_allowed_now: `false`
+- production_exit_change_allowed: `false`
+- queue_handling: `P7 checkpoint closed after OOS waiting task creation; resume P5/P6/P8 while OOS evidence accumulates`
+- freeze_registry: `docs/agents/P7_EXIT_POLICY_OOS_FREEZE_REGISTRY.json`
+- validator_script: `scripts/p7_exit_policy_oos_validation.py`
+- AutoLoop artifact: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+
+Validation contract:
+
+- freeze champion and top-ranked challengers at commit `7c9f4160b1cc8a2a1ae0069b671c5922936fe47b`
+- only use forward rows with `signal_ts >= freeze_ts`
+- require two non-overlapping forward windows in the same positive direction
+- primary metric is rolling-24h ROI median and distribution
+- compound cumulative ROI is reference only
+- ranking stability uses entry-delay `5, 10, 20, 30` seconds; `delay=0` does not count
+- recompute views: all samples, unique token, token/time cluster
+- report drop-top-1 and drop-top-3 winner sensitivity separately
+- if OOS passes, open the next human checkpoint before any paper proposal or production change
+
+Local verification:
+
+- `python -m py_compile scripts/p7_exit_policy_oos_validation.py scripts/agent_capture_discovery_loop.py scripts/exit_policy_shadow_lab.py`
+- `scripts/p7_exit_policy_oos_validation.py --self-test`
+- `scripts/agent_capture_discovery_loop.py --self-test`
+- `pytest tests/test_strategy_memory_scripts.py -q`
+- `pytest tests/test_a_class_runtime_safety.py tests/test_final_entry_contract.py tests/test_goal_runtime_safety.py tests/test_a_class_live_enqueue.py tests/test_a_class_fastlane.py -q`
