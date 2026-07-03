@@ -19,10 +19,16 @@ from collections import Counter
 from pathlib import Path
 
 
-SCHEMA_VERSION = "a_class_fastlane_mode_readiness_audit.v2"
+SCHEMA_VERSION = "a_class_fastlane_mode_readiness_audit.v3"
 MODE_KEY = "A_CLASS_FASTLANE"
-CLEAN_WINDOW_COUNTER_SCHEMA_VERSION = "a_class_clean_window_counter.v1"
+CLEAN_WINDOW_COUNTER_SCHEMA_VERSION = "a_class_clean_window_counter.v2"
 CLEAN_WINDOW_COUNTER_BUCKET_SEC = 3600
+RECOVERY_SLA_SCHEMA_VERSION = "a_class_circuit_recovery_sla.v1"
+DATA_INFRA_CLEAN_WINDOWS_REQUIRED = 6
+MARKET_CLEAN_WINDOWS_REQUIRED = 24
+CIRCUIT_COOLDOWN_SEC = 24 * 60 * 60
+HUMAN_ESCALATION_SEC = 48 * 60 * 60
+DAILY_REMINDER_SEC = 24 * 60 * 60
 
 
 def utc_now():
@@ -206,6 +212,205 @@ def clean_window_counter_from_detail(detail):
     return value if isinstance(value, dict) else {}
 
 
+def normalize_breach_class(value):
+    text = str(value or "").strip().upper()
+    if text in {"DATA_INFRA", "INFRA", "PROVIDER", "QUOTE_INFRA", "NO_ROUTE_INFRA"}:
+        return "DATA_INFRA"
+    if text in {"MARKET", "REAL_LOSS", "EXECUTION_MARKET"}:
+        return "MARKET"
+    return None
+
+
+def compact_detail_text(*values):
+    return " ".join(str(value or "").strip().lower() for value in values if str(value or "").strip())
+
+
+def infer_breach_class(state):
+    """Classify the last circuit trip into the P2.1 recovery SLA classes.
+
+    DATA_INFRA means the breach evidence points at quote corruption, no-route/trap,
+    provider outage, or other execution-data failure. MARKET is the conservative
+    default for a normal realized loss with no infra evidence.
+    """
+    state = state if isinstance(state, dict) else {}
+    detail = state.get("detail") if isinstance(state.get("detail"), dict) else {}
+    persisted = normalize_breach_class(
+        detail.get("breach_class")
+        or detail.get("circuit_breaker_breach_class")
+        or detail.get("recovery_breach_class")
+        or detail.get("sla_breach_class")
+    )
+    if persisted:
+        return {
+            "breach_class": persisted,
+            "source": "persisted_runtime_detail",
+            "evidence": ["persisted_breach_class"],
+        }
+
+    evidence_text = compact_detail_text(
+        detail.get("exit_reason"),
+        detail.get("reason"),
+        detail.get("quote_failure_reason"),
+        detail.get("route_failure_reason"),
+        detail.get("provider_reason"),
+        detail.get("evidence_status"),
+        detail.get("data_confidence"),
+        state.get("reason"),
+        state.get("symbol"),
+        state.get("token_ca"),
+    )
+    infra_evidence = []
+    for key in (
+        "no_route_flag",
+        "trapped_flag",
+        "quote_corruption_flag",
+        "provider_outage_flag",
+        "provider_timeout_flag",
+    ):
+        if truthy(detail.get(key)):
+            infra_evidence.append(key)
+    if any(
+        marker in evidence_text
+        for marker in (
+            "quote corruption",
+            "quote_corruption",
+            "no_route",
+            "no route",
+            "route unavailable",
+            "route_unavailable",
+            "route failed",
+            "route_failure",
+            "trapped",
+            "provider outage",
+            "provider_outage",
+            "provider failed",
+            "provider_failed",
+            "rate limited",
+            "rate_limited",
+            "429",
+            "timeout",
+            "quote failed",
+            "quote_failed",
+            "quote unavailable",
+            "quote_unavailable",
+        )
+    ):
+        infra_evidence.append("infra_text_match")
+    if infra_evidence:
+        return {
+            "breach_class": "DATA_INFRA",
+            "source": "runtime_detail_inference",
+            "evidence": sorted(set(infra_evidence)),
+        }
+    return {
+        "breach_class": "MARKET",
+        "source": "default_realized_loss_without_data_infra_evidence",
+        "evidence": ["loss_cap_breach_without_infra_markers"],
+    }
+
+
+def clean_windows_required_for_breach_class(breach_class):
+    return DATA_INFRA_CLEAN_WINDOWS_REQUIRED if breach_class == "DATA_INFRA" else MARKET_CLEAN_WINDOWS_REQUIRED
+
+
+def build_motion_trace_review_artifact(state, breach_class, now_ts):
+    state = state if isinstance(state, dict) else {}
+    detail = state.get("detail") if isinstance(state.get("detail"), dict) else {}
+    required = breach_class == "MARKET"
+    trade_id = state.get("source_trade_id") or detail.get("trade_id")
+    token = state.get("token_ca") or detail.get("token_ca")
+    symbol = state.get("symbol") or detail.get("symbol")
+    pnl_pct = state.get("last_realized_pnl_pct")
+    loss_cap_pct = state.get("loss_cap_pct")
+    available = bool(not required or trade_id)
+    summary = (
+        f"A_CLASS MARKET circuit review for trade {trade_id or 'UNKNOWN'} "
+        f"({symbol or token or 'UNKNOWN'}): realized_pnl_pct={pnl_pct}, "
+        f"loss_cap_pct={loss_cap_pct}. Review confirms the recovery SLA is "
+        "24 clean hourly buckets before paper auto-resume; LIVE still requires "
+        "human operator action."
+    )
+    return {
+        "schema_version": "a_class_motion_trace_review.v1",
+        "required": required,
+        "available": available,
+        "auto_generated": True,
+        "artifact_scope": "readiness_audit_inline",
+        "artifact_id": f"a_class_motion_trace:{trade_id or token or 'unknown'}",
+        "generated_at_ts": float(now_ts),
+        "source_trade_id": trade_id,
+        "token_ca": token,
+        "symbol": symbol,
+        "last_realized_pnl_pct": pnl_pct,
+        "loss_cap_pct": loss_cap_pct,
+        "human_readable_summary": summary,
+        "review_questions": [
+            "Was the loss caused by normal market movement rather than quote/provider corruption?",
+            "Was the -20% loss cap enforced and recorded?",
+            "Are 24 clean hourly buckets present before paper auto-resume?",
+            "Is LIVE re-enable still routed to the human operator script?",
+        ] if required else [],
+        "satisfies_market_recovery_requirement": bool(required and available),
+    }
+
+
+def build_circuit_recovery_sla(state, now_ts):
+    state = state if isinstance(state, dict) else {}
+    inferred = infer_breach_class(state)
+    breach_class = inferred["breach_class"]
+    required = clean_windows_required_for_breach_class(breach_class)
+    motion_trace = build_motion_trace_review_artifact(state, breach_class, now_ts)
+    cooldown_remaining = safe_float(state.get("cooldown_remaining_sec"), 0) or 0
+    return {
+        "schema_version": RECOVERY_SLA_SCHEMA_VERSION,
+        "mode_key": MODE_KEY,
+        "breach_class": breach_class,
+        "breach_class_source": inferred.get("source"),
+        "breach_class_evidence": inferred.get("evidence") or [],
+        "class_definitions": {
+            "DATA_INFRA": {
+                "examples": ["quote_corruption", "no_route_trap", "provider_outage"],
+                "clean_windows_required": DATA_INFRA_CLEAN_WINDOWS_REQUIRED,
+                "motion_trace_review_required": False,
+            },
+            "MARKET": {
+                "examples": ["real_loss_with_normal_data_quality"],
+                "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
+                "motion_trace_review_required": True,
+            },
+        },
+        "cooldown_required_sec": CIRCUIT_COOLDOWN_SEC,
+        "cooldown_remaining_sec": cooldown_remaining,
+        "cooldown_elapsed": cooldown_remaining <= 0,
+        "legacy_clean_windows_required": safe_int(state.get("clean_windows_required"), 4),
+        "effective_clean_windows_required": required,
+        "clean_window_bucket_sec": CLEAN_WINDOW_COUNTER_BUCKET_SEC,
+        "motion_trace_review": motion_trace,
+        "live_reenable_contract": {
+            "live_auto_reenable_allowed": False,
+            "human_operator_required": True,
+            "operator_script": "scripts/a_class_mode_reenable_operator.py",
+        },
+        "paper_recovery_contract": {
+            "paper_auto_resume_after_sla_allowed": True,
+            "real_capital_risk": False,
+            "live_canary_reenable_allowed": False,
+        },
+        "promotion_allowed": False,
+    }
+
+
+def apply_recovery_sla_to_runtime(runtime, now_ts):
+    runtime = dict(runtime or {})
+    state = dict(runtime.get("mode_state") or {})
+    policy = build_circuit_recovery_sla(state, now_ts)
+    state["legacy_clean_windows_required"] = state.get("clean_windows_required")
+    state["clean_windows_required"] = policy["effective_clean_windows_required"]
+    state["circuit_recovery_sla"] = policy
+    runtime["mode_state"] = state
+    return runtime, policy
+
+
 def clean_window_counter_summary(state, clean_windows_passed, failed_conditions, now_ts):
     required = max(0, safe_int(state.get("clean_windows_required"), 4))
     detail = state.get("detail") if isinstance(state, dict) else {}
@@ -231,6 +436,8 @@ def clean_window_counter_summary(state, clean_windows_passed, failed_conditions,
     return {
         "schema_version": CLEAN_WINDOW_COUNTER_SCHEMA_VERSION,
         "mode_key": MODE_KEY,
+        "breach_class": ((state.get("circuit_recovery_sla") or {}).get("breach_class") if isinstance(state, dict) else None),
+        "required_source": "circuit_recovery_sla",
         "counter_bucket_sec": bucket["bucket_sec"],
         "last_window_key": current_key,
         "last_window_bucket": current_bucket,
@@ -1253,7 +1460,120 @@ def build_readiness_shortfall_summary(capture_stage_rates):
     }
 
 
-def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions, clean_counter):
+def recovery_sla_requirements_satisfied(recovery_sla, clean_counter, failed_conditions):
+    recovery_sla = recovery_sla if isinstance(recovery_sla, dict) else {}
+    clean_ok = bool(not failed_conditions and (clean_counter or {}).get("sufficient"))
+    motion = recovery_sla.get("motion_trace_review") or {}
+    motion_ok = bool(not motion.get("required") or motion.get("available"))
+    cooldown_ok = bool(recovery_sla.get("cooldown_elapsed"))
+    return bool(clean_ok and motion_ok and cooldown_ok)
+
+
+def paper_ready_tracker_from_detail(detail):
+    if not isinstance(detail, dict):
+        return {}
+    value = (
+        detail.get("paper_entry_ready_tracker")
+        or detail.get("paper_auto_resume_ready_tracker")
+        or detail.get("paper_entry_proposal_ready_tracker")
+    )
+    return value if isinstance(value, dict) else {}
+
+
+def build_handoff_escalation_sla(state, paper_status, now_ts):
+    state = state if isinstance(state, dict) else {}
+    tracker = paper_ready_tracker_from_detail(state.get("detail") or {})
+    ready = str(paper_status or "").upper() in {
+        "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+        "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+    }
+    ready_since = safe_float(tracker.get("ready_since_ts"))
+    if ready and ready_since is None:
+        ready_since = float(now_ts)
+    elapsed = None if not ready or ready_since is None else max(0.0, float(now_ts) - ready_since)
+    high_priority = bool(elapsed is not None and elapsed > HUMAN_ESCALATION_SEC)
+    last_reminder_ts = safe_float(tracker.get("last_daily_reminder_ts"))
+    reminder_due = bool(
+        high_priority
+        and (last_reminder_ts is None or float(now_ts) - last_reminder_ts >= DAILY_REMINDER_SEC)
+    )
+    return {
+        "schema_version": "a_class_handoff_escalation_sla.v1",
+        "tracked_status": paper_status,
+        "ready": ready,
+        "ready_since_ts": ready_since,
+        "ready_elapsed_sec": elapsed,
+        "threshold_sec": HUMAN_ESCALATION_SEC,
+        "high_priority": high_priority,
+        "daily_reminder_due": reminder_due,
+        "daily_reminder_field": "a_class_live_human_review_daily_reminder",
+        "last_daily_reminder_ts": last_reminder_ts,
+        "promotion_allowed": False,
+    }
+
+
+def persist_paper_ready_tracker(db_path, paper_status, now_ts):
+    result = {
+        "attempted": True,
+        "available": False,
+        "mode_key": MODE_KEY,
+        "changes_runtime_mode": False,
+        "changes_circuit_breaker": False,
+    }
+    try:
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+    except Exception as exc:
+        result["reason"] = "db_open_failed"
+        result["error"] = str(exc)
+        return result
+    try:
+        if not table_exists(db, "a_class_mode_runtime_state"):
+            result["reason"] = "a_class_mode_runtime_state_table_missing"
+            return result
+        row = db.execute(
+            "SELECT detail_json FROM a_class_mode_runtime_state WHERE mode_key = ?",
+            (MODE_KEY,),
+        ).fetchone()
+        if row is None:
+            result["reason"] = "a_class_fastlane_row_missing"
+            return result
+        detail = jloads(row_value(row, "detail_json"), {})
+        if not isinstance(detail, dict):
+            detail = {}
+        ready = str(paper_status or "").upper() in {
+            "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+            "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+        }
+        tracker = paper_ready_tracker_from_detail(detail)
+        if ready:
+            tracker.setdefault("ready_since_ts", float(now_ts))
+            tracker["last_status"] = paper_status
+            tracker["last_seen_ts"] = float(now_ts)
+        else:
+            tracker = {
+                "last_status": paper_status,
+                "last_seen_ts": float(now_ts),
+                "ready_since_ts": None,
+            }
+        tracker["schema_version"] = "a_class_paper_ready_tracker.v1"
+        detail["paper_entry_ready_tracker"] = tracker
+        db.execute(
+            """
+            UPDATE a_class_mode_runtime_state
+            SET detail_json = ?, updated_at = ?
+            WHERE mode_key = ?
+            """,
+            (json.dumps(detail, sort_keys=True), float(now_ts), MODE_KEY),
+        )
+        db.commit()
+        result.update({"available": True, "reason": "persisted", "tracker": tracker})
+        return result
+    finally:
+        db.close()
+
+
+def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions, clean_counter, recovery_sla=None):
     mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
     rate_value = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
     events = capture_stage_rates.get("events") or {}
@@ -1262,8 +1582,21 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
         reasons.append("clean_window_conditions_not_passed")
     if clean_counter and not clean_counter.get("sufficient"):
         reasons.append("clean_window_streak_below_required")
+    recovery_sla = recovery_sla if isinstance(recovery_sla, dict) else {}
+    motion = recovery_sla.get("motion_trace_review") or {}
+    if motion.get("required") and not motion.get("available"):
+        reasons.append("motion_trace_review_artifact_missing")
+    if recovery_sla and not recovery_sla.get("cooldown_elapsed"):
+        reasons.append("cooldown_not_elapsed")
     final_status = classification.get("final_entry_status")
-    if final_status == "FUNNEL_BLOCKED_STUCK" and not reasons:
+    paper_auto_resume_allowed = bool(
+        final_status in {"FUNNEL_READY_FOR_PAPER_AUTO_RESUME", "FUNNEL_BLOCKED_STUCK", "FUNNEL_READY_FOR_PAPER_PROPOSAL"}
+        and not reasons
+        and recovery_sla_requirements_satisfied(recovery_sla, clean_counter, failed_conditions)
+    )
+    if paper_auto_resume_allowed:
+        status = "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN"
+    elif final_status == "FUNNEL_BLOCKED_STUCK" and not reasons:
         status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
     elif final_status == "FUNNEL_READY_FOR_PAPER_PROPOSAL" and not reasons:
         status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
@@ -1271,6 +1604,14 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
         status = "NOT_READY_FOR_PAPER_ENTRY_PROPOSAL"
     return {
         "status": status,
+        "ready": bool(status in {
+            "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+            "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+        }),
+        "paper_auto_resume_allowed": paper_auto_resume_allowed,
+        "paper_auto_resume_status": (
+            "ELIGIBLE_AFTER_SLA" if paper_auto_resume_allowed else "NOT_ELIGIBLE"
+        ),
         "final_entry_status": final_status,
         "current_capture_stage": classification.get("current_capture_stage"),
         "mode_disabled_adjusted_final_eligibility_rate": rate_value,
@@ -1281,15 +1622,19 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
         "paper_intent_required_while_shadow": False,
         "paper_committed_required_while_shadow": False,
         "clean_window_counter": clean_counter or {},
+        "circuit_recovery_sla": recovery_sla,
         "blocking_reasons": reasons,
-        "human_action_required_before_enabling": True,
+        "human_action_required_before_enabling_live": True,
+        "human_action_required_before_enabling": not paper_auto_resume_allowed,
         "promotion_allowed": False,
-        "paper_enablement_allowed": False,
+        "paper_enablement_allowed": paper_auto_resume_allowed,
+        "live_enablement_allowed": False,
+        "automatic_paper_resume_allowed": paper_auto_resume_allowed,
         "automatic_runtime_change_allowed": False,
     }
 
 
-def classify(runtime, final_contract, failed_conditions, clean_counter=None):
+def classify(runtime, final_contract, failed_conditions, clean_counter=None, recovery_sla=None):
     state = runtime.get("mode_state") or {}
     hard_blockers = final_contract.get("hard_blockers") or {}
     mode_disabled_count = int(hard_blockers.get("mode_disabled") or 0)
@@ -1299,20 +1644,30 @@ def classify(runtime, final_contract, failed_conditions, clean_counter=None):
     recovery_required = truthy(state.get("recovery_required"))
     clean_windows_passed = not failed_conditions
     clean_window_streak_sufficient = bool(clean_windows_passed and (clean_counter or {}).get("sufficient"))
+    recovery_sla_sufficient = recovery_sla_requirements_satisfied(recovery_sla, clean_counter, failed_conditions)
+    motion = (recovery_sla or {}).get("motion_trace_review") or {}
     human = False
     if status == "CIRCUIT_BROKEN" or cooldown_remaining > 0:
         verdict = "FUNNEL_BLOCKED_EXPECTED"
         reason = "a_class_runtime_cooldown_active"
         current_capture_stage = "final_entry_cooldown"
+    elif (
+        motion.get("required")
+        and not motion.get("available")
+        and (mode_disabled_count or status == "SHADOW" or recovery_required)
+    ):
+        verdict = "FUNNEL_BLOCKED_EXPECTED"
+        reason = "motion_trace_review_artifact_missing"
+        current_capture_stage = "mode_disabled_motion_trace_review_pending"
     elif (mode_disabled_count or status == "SHADOW" or recovery_required) and not clean_window_streak_sufficient:
         verdict = "FUNNEL_BLOCKED_EXPECTED"
         reason = "clean_window_streak_below_required" if clean_windows_passed else "cooldown_elapsed_requires_clean_windows"
         current_capture_stage = "mode_disabled_clean_window_pending"
-    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and clean_window_streak_sufficient:
-        verdict = "FUNNEL_BLOCKED_STUCK"
-        reason = "mode_disabled_after_clean_windows_passed"
+    elif (mode_disabled_count or status == "SHADOW" or recovery_required) and recovery_sla_sufficient:
+        verdict = "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
+        reason = "paper_auto_resume_ready_live_requires_human_operator"
         human = True
-        current_capture_stage = "mode_disabled_stuck_requires_human_review"
+        current_capture_stage = "paper_auto_resume_ready_live_requires_human_review"
     elif final_rows and not mode_disabled_count:
         verdict = "FUNNEL_READY_FOR_PAPER_PROPOSAL"
         reason = "final_entry_contract_no_mode_disabled_blocker"
@@ -1328,6 +1683,7 @@ def classify(runtime, final_contract, failed_conditions, clean_counter=None):
         "human_action_required": human,
         "clean_windows_passed": clean_windows_passed,
         "clean_window_streak_sufficient": clean_window_streak_sufficient,
+        "recovery_sla_sufficient": recovery_sla_sufficient,
         "current_capture_stage": current_capture_stage,
     }
 
@@ -1352,9 +1708,12 @@ def build_stage2_flat_summary(runtime, classification, failed_conditions, captur
             else ("updated_at" if state.get("updated_at") is not None else "created_at")
         )
     clean_windows_passed = classification.get("clean_windows_passed")
+    recovery_sla = state.get("circuit_recovery_sla") or {}
     required_clean_window = {
         "condition": "context_coverage_clean_window",
         "clean_windows_required": state.get("clean_windows_required"),
+        "breach_class": recovery_sla.get("breach_class"),
+        "required_source": "circuit_recovery_sla",
         "passed": clean_windows_passed,
         "streak": (clean_counter or {}).get("streak"),
         "streak_sufficient": (clean_counter or {}).get("sufficient"),
@@ -1389,6 +1748,7 @@ def build_stage2_flat_summary(runtime, classification, failed_conditions, captur
         "realized": events.get("realized"),
         "promotion_allowed": False,
         "paper_enablement_allowed": False,
+        "automatic_paper_resume_allowed": False,
         "automatic_runtime_change_allowed": False,
         "strategy_change_allowed": False,
     }
@@ -1405,6 +1765,7 @@ def build_report(args):
     db.row_factory = sqlite3.Row
     try:
         runtime = load_runtime_state(db, now_ts)
+        runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
         final_contract = load_final_entry_contract_events(db, since_ts, now_ts)
         failed = context_failed_conditions(context, volume_kline, context_monitor)
         current_clean_passed = not failed
@@ -1416,13 +1777,14 @@ def build_report(args):
             now_ts,
         )
         runtime = load_runtime_state(db, now_ts)
+        runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
     finally:
         db.close()
     clean_counter = clean_window_counter_from_detail((runtime.get("mode_state") or {}).get("detail") or {})
     if not clean_counter and clean_counter_persistence.get("counter"):
         clean_counter = clean_counter_persistence.get("counter") or {}
     quote_reconciliation = quote_window_pending_reconciliation(context_monitor)
-    classification = classify(runtime, final_contract, failed, clean_counter)
+    classification = classify(runtime, final_contract, failed, clean_counter, recovery_sla)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
     capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
     readiness_shortfall = build_readiness_shortfall_summary(capture_stage_rates)
@@ -1431,7 +1793,25 @@ def build_report(args):
         capture_stage_rates,
         failed,
         clean_counter,
+        recovery_sla,
     )
+    paper_tracker_persistence = persist_paper_ready_tracker(
+        args.db,
+        paper_proposal_readiness.get("status"),
+        now_ts,
+    )
+    tracker_state = dict(runtime.get("mode_state") or {})
+    tracker_detail = dict(tracker_state.get("detail") or {})
+    if paper_tracker_persistence.get("tracker"):
+        tracker_detail["paper_entry_ready_tracker"] = paper_tracker_persistence.get("tracker")
+        tracker_state["detail"] = tracker_detail
+    handoff_escalation_sla = build_handoff_escalation_sla(
+        tracker_state,
+        paper_proposal_readiness.get("status"),
+        now_ts,
+    )
+    paper_proposal_readiness["handoff_escalation_sla"] = handoff_escalation_sla
+    paper_proposal_readiness["paper_ready_tracker_persistence"] = paper_tracker_persistence
     flat_summary = build_stage2_flat_summary(
         runtime,
         classification,
@@ -1456,6 +1836,8 @@ def build_report(args):
         "strategy_change_allowed": False,
         "canary_increase_allowed": False,
         "paper_enablement_allowed": False,
+        "automatic_paper_resume_allowed": paper_proposal_readiness.get("automatic_paper_resume_allowed"),
+        "live_enablement_allowed": False,
         "mode_status": flat_summary["mode_status"],
         "mode_action": flat_summary["mode_action"],
         "mode_reason": flat_summary["mode_reason"],
@@ -1468,6 +1850,20 @@ def build_report(args):
         "clean_window_failed_conditions": flat_summary["clean_window_failed_conditions"],
         "clean_window_counter": flat_summary["clean_window_counter"],
         "clean_window_counter_persistence": clean_counter_persistence,
+        "circuit_recovery_sla": recovery_sla,
+        "breach_class": recovery_sla.get("breach_class"),
+        "effective_clean_windows_required": recovery_sla.get("effective_clean_windows_required"),
+        "paper_auto_resume_readiness": {
+            "status": paper_proposal_readiness.get("paper_auto_resume_status"),
+            "allowed": paper_proposal_readiness.get("paper_auto_resume_allowed"),
+            "automatic_paper_resume_allowed": paper_proposal_readiness.get("automatic_paper_resume_allowed"),
+            "paper_enablement_allowed": paper_proposal_readiness.get("paper_enablement_allowed"),
+            "real_capital_risk": False,
+            "live_enablement_allowed": False,
+        },
+        "live_reenable_contract": recovery_sla.get("live_reenable_contract") or {},
+        "handoff_escalation_sla": handoff_escalation_sla,
+        "paper_ready_tracker_persistence": paper_tracker_persistence,
         "raw_gs_events": flat_summary["raw_gs_events"],
         "raw_gs_signal_ids": flat_summary["raw_gs_signal_ids"],
         "candidate_matched_any": flat_summary["candidate_matched_any"],
@@ -1494,6 +1890,7 @@ def build_report(args):
         "clean_window_conditions": {
             "passed": classification["clean_windows_passed"],
             "streak_sufficient": classification.get("clean_window_streak_sufficient"),
+            "recovery_sla_sufficient": classification.get("recovery_sla_sufficient"),
             "clean_window_counter": clean_counter,
             "clean_window_counter_persistence": clean_counter_persistence,
             "failed_conditions": failed,
@@ -1555,7 +1952,8 @@ def build_report(args):
         "stop_conditions": {
             "requires_human_approval_before_mode_change": True,
             "must_not_reset_shadow_automatically": True,
-            "must_not_enable_paper_or_live_automatically": True,
+            "paper_auto_resume_after_sla_allowed": paper_proposal_readiness.get("paper_auto_resume_allowed"),
+            "must_not_enable_live_automatically": True,
             "must_not_change_final_entry_contract_automatically": True,
         },
     }
@@ -1582,6 +1980,10 @@ def compact_summary(report):
         "clean_windows_passed": (report.get("clean_window_conditions") or {}).get("passed"),
         "clean_window_streak_sufficient": (report.get("clean_window_conditions") or {}).get("streak_sufficient"),
         "clean_window_counter": report.get("clean_window_counter"),
+        "breach_class": report.get("breach_class"),
+        "effective_clean_windows_required": report.get("effective_clean_windows_required"),
+        "paper_auto_resume_readiness": report.get("paper_auto_resume_readiness"),
+        "handoff_escalation_sla": report.get("handoff_escalation_sla"),
         "failed_clean_window_conditions": (report.get("clean_window_conditions") or {}).get("failed_conditions"),
         "effective_runtime_mode_state": report.get("effective_runtime_mode_state"),
         "final_entry_contract_blocker_breakdown": report.get("final_entry_contract_blocker_breakdown"),
@@ -1805,6 +2207,10 @@ def self_test():
         assert "paper_trade_entry_intent_zero" not in report["paper_entry_proposal_readiness"]["blocking_reasons"]
         assert "paper_trade_committed_zero" not in report["paper_entry_proposal_readiness"]["blocking_reasons"]
         assert report["clean_window_counter"]["streak"] == 0
+        assert report["breach_class"] == "MARKET"
+        assert report["effective_clean_windows_required"] == 24
+        assert report["circuit_recovery_sla"]["motion_trace_review"]["required"] is True
+        assert report["circuit_recovery_sla"]["motion_trace_review"]["available"] is True
         assert report["clean_window_counter_persistence"]["changes_runtime_mode"] is False
         write_json(context_monitor_path, {
             "overall_verdict": {
@@ -1903,8 +2309,8 @@ def self_test():
             "last_window_key": f"{bucket['bucket_sec']}s:{bucket['previous_bucket']}",
             "last_window_bucket": bucket["previous_bucket"],
             "last_passed": True,
-            "streak": 3,
-            "required": 4,
+            "streak": 5,
+            "required": 6,
             "sufficient": False,
             "failed_condition_codes": [],
             "updated_at": now - bucket["bucket_sec"],
@@ -1914,19 +2320,61 @@ def self_test():
         db = sqlite3.connect(db_path)
         db.execute(
             "UPDATE a_class_mode_runtime_state SET detail_json=? WHERE mode_key=?",
-            (json.dumps({"clean_window_counter": previous_counter}, sort_keys=True), MODE_KEY),
+            (json.dumps({"breach_class": "DATA_INFRA", "clean_window_counter": previous_counter}, sort_keys=True), MODE_KEY),
         )
         db.commit()
         db.close()
         report = build_report(args)
-        assert report["final_entry_status"] == "FUNNEL_BLOCKED_STUCK"
+        assert report["final_entry_status"] == "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
         assert report["human_action_required"] is True
         assert report["clean_window_conditions"]["passed"] is True
         assert report["clean_window_conditions"]["streak_sufficient"] is True
-        assert report["clean_window_counter"]["streak"] == 4
-        assert report["paper_entry_proposal_readiness"]["status"] == "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+        assert report["clean_window_conditions"]["recovery_sla_sufficient"] is True
+        assert report["breach_class"] == "DATA_INFRA"
+        assert report["effective_clean_windows_required"] == 6
+        assert report["clean_window_counter"]["streak"] == 6
+        assert report["paper_entry_proposal_readiness"]["status"] == "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN"
+        assert report["paper_entry_proposal_readiness"]["paper_auto_resume_allowed"] is True
+        assert report["paper_entry_proposal_readiness"]["paper_enablement_allowed"] is True
+        assert report["paper_entry_proposal_readiness"]["live_enablement_allowed"] is False
         assert report["paper_entry_proposal_readiness"]["paper_intent_required_while_shadow"] is False
         assert report["paper_entry_proposal_readiness"]["mode_disabled_adjusted_final_eligibility_target_met"] is False
+        assert report["paper_auto_resume_readiness"]["allowed"] is True
+        assert report["live_reenable_contract"]["live_auto_reenable_allowed"] is False
+        previous_counter["streak"] = 23
+        previous_counter["required"] = 24
+        db = sqlite3.connect(db_path)
+        db.execute(
+            "UPDATE a_class_mode_runtime_state SET detail_json=? WHERE mode_key=?",
+            (
+                json.dumps(
+                    {
+                        "breach_class": "MARKET",
+                        "clean_window_counter": previous_counter,
+                        "paper_entry_ready_tracker": {
+                            "schema_version": "a_class_paper_ready_tracker.v1",
+                            "ready_since_ts": now - HUMAN_ESCALATION_SEC - 60,
+                            "last_seen_ts": now - 60,
+                            "last_status": "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+                        },
+                    },
+                    sort_keys=True,
+                ),
+                MODE_KEY,
+            ),
+        )
+        db.commit()
+        db.close()
+        report = build_report(args)
+        assert report["breach_class"] == "MARKET"
+        assert report["effective_clean_windows_required"] == 24
+        assert report["clean_window_counter"]["streak"] == 24
+        assert report["final_entry_status"] == "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
+        assert report["paper_entry_proposal_readiness"]["paper_auto_resume_allowed"] is True
+        assert report["circuit_recovery_sla"]["motion_trace_review"]["required"] is True
+        assert report["circuit_recovery_sla"]["motion_trace_review"]["available"] is True
+        assert report["handoff_escalation_sla"]["high_priority"] is True
+        assert report["handoff_escalation_sla"]["daily_reminder_due"] is True
     print("SELF_TEST_PASS a_class_fastlane_mode_readiness_audit")
 
 

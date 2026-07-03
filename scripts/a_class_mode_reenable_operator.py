@@ -117,7 +117,10 @@ def load_readiness(path):
 
 def readiness_allows_human_proposal(readiness):
     proposal = readiness.get("paper_entry_proposal_readiness") or {}
-    return proposal.get("status") == "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+    return proposal.get("status") in {
+        "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+        "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+    }
 
 
 def reenable(db_path, *, operator, reason, readiness_path=None, execute=False, out=None, now_ts=None):
@@ -218,6 +221,7 @@ def reenable(db_path, *, operator, reason, readiness_path=None, execute=False, o
             "mode_key": MODE_KEY,
             "execute_requested": bool(execute),
             "executed": bool(execute),
+            "allowed": True,
             "action": action,
             "operator": operator,
             "reason": reason,
@@ -268,6 +272,19 @@ def self_test():
         db.close()
         dry = reenable(db_path, operator="unit", reason="dry run", readiness_path=ready_path, execute=False)
         assert dry["executed"] is False
+        write_json(ready_path, {
+            "paper_entry_proposal_readiness": {
+                "status": "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN"
+            }
+        })
+        dry_new_status = reenable(db_path, operator="unit", reason="dry run new status", readiness_path=ready_path, execute=False)
+        assert dry_new_status["executed"] is False
+        assert dry_new_status["allowed"] is True
+        write_json(ready_path, {
+            "paper_entry_proposal_readiness": {
+                "status": "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+            }
+        })
         db = sqlite3.connect(db_path)
         row = db.execute("SELECT status, circuit_broken FROM a_class_mode_runtime_state WHERE mode_key=?", (MODE_KEY,)).fetchone()
         assert row == ("SHADOW", 1)

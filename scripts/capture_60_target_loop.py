@@ -3661,6 +3661,8 @@ def build_volume_blocker_closure_plan(
 
 def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
     paper_readiness = (a_class or {}).get("paper_entry_proposal_readiness") or {}
+    paper_auto_resume = (a_class or {}).get("paper_auto_resume_readiness") or {}
+    handoff_escalation = (a_class or {}).get("handoff_escalation_sla") or {}
     final_entry_status = (a_class or {}).get("final_entry_status")
     current_capture_stage = (a_class or {}).get("current_capture_stage")
     reason = (a_class or {}).get("reason")
@@ -3679,15 +3681,24 @@ def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
         or paper_readiness.get("ready_for_paper_proposal")
         or paper_readiness.get("paper_entry_proposal_ready")
     )
+    paper_auto_resume_allowed = boolish(
+        paper_readiness.get("paper_auto_resume_allowed")
+        or paper_readiness.get("automatic_paper_resume_allowed")
+        or paper_auto_resume.get("allowed")
+    )
     status_blob = json.dumps({
         "final_entry_status": final_entry_status,
         "current_capture_stage": current_capture_stage,
         "reason": reason,
         "mode_status": mode_status,
     }, sort_keys=True, default=str).lower()
-    if ready_for_paper_proposal:
+    if paper_auto_resume_allowed:
+        classification = "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
+        next_action = "allow_paper_auto_resume_keep_live_reenable_human_only"
+        human_approval_required = boolish((paper_readiness.get("human_action_required_before_enabling_live")))
+    elif ready_for_paper_proposal:
         classification = "FUNNEL_READY_FOR_PAPER_PROPOSAL"
-        next_action = "request_human_review_before_any_paper_or_mode_change"
+        next_action = "request_human_review_before_any_live_mode_change"
         human_approval_required = True
     elif "stuck" in status_blob:
         classification = "A_CLASS_STUCK_REVIEW_REQUIRED"
@@ -3721,7 +3732,9 @@ def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
-        "paper_enablement_allowed": False,
+        "automatic_paper_resume_allowed": paper_auto_resume_allowed,
+        "paper_enablement_allowed": paper_auto_resume_allowed,
+        "live_enablement_allowed": False,
         "final_entry_status": final_entry_status,
         "current_capture_stage": current_capture_stage,
         "current_target_stage": "mode_disabled_adjusted_final_eligibility",
@@ -3735,6 +3748,9 @@ def build_final_entry_readiness_audit(a_class, stage_metrics, pending_audit):
         "stage2_flat_summary": (a_class or {}).get("stage2_flat_summary") or {},
         "readiness_shortfall_summary": readiness_shortfall,
         "paper_entry_proposal_readiness": paper_readiness,
+        "paper_auto_resume_readiness": paper_auto_resume,
+        "handoff_escalation_sla": handoff_escalation,
+        "circuit_recovery_sla": (a_class or {}).get("circuit_recovery_sla") or {},
         "final_entry_contract_blocker_breakdown": (a_class or {}).get("final_entry_contract_blocker_breakdown") or {},
         "mode_disabled_adjusted_final_eligibility": mode_disabled_adjusted,
         "pending_to_final_entry_classification": pending_classification,

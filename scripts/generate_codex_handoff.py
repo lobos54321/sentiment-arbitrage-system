@@ -84,10 +84,26 @@ def actionable_blockers(verdict):
     return blockers
 
 
+def handoff_escalation_sla(verdict):
+    direct = verdict.get("handoff_escalation_sla")
+    if isinstance(direct, dict):
+        return direct
+    paper = verdict.get("paper_entry_proposal_readiness") or {}
+    nested = paper.get("handoff_escalation_sla")
+    return nested if isinstance(nested, dict) else {}
+
+
 def handoff_needed(verdict):
+    escalation = handoff_escalation_sla(verdict)
+    if bool(escalation.get("high_priority")):
+        return True
     if bool(verdict.get("human_action_required")):
         return True
-    if verdict.get("classification") in {"A_CLASS_STUCK_REVIEW_REQUIRED", "HUMAN_APPROVAL_REQUIRED"}:
+    if verdict.get("classification") in {
+        "A_CLASS_STUCK_REVIEW_REQUIRED",
+        "HUMAN_APPROVAL_REQUIRED",
+        "FUNNEL_READY_FOR_PAPER_AUTO_RESUME",
+    }:
         return True
     if str(verdict.get("next_action") or "").startswith("human_review_"):
         return True
@@ -268,6 +284,8 @@ def build_handoff(verdict):
     parallel_action = verdict.get("parallel_next_action")
     parallel_reason = verdict.get("parallel_next_action_reason")
     display_next_blocker = verdict.get("next_highest_priority_blocker")
+    escalation = handoff_escalation_sla(verdict)
+    handoff_priority = "HIGH" if escalation.get("high_priority") else "NORMAL"
     if quote_clean_window_pending(verdict) and display_next_blocker in QUOTE_COVERAGE_BLOCKERS:
         display_next_blocker = actionable[0] if actionable else None
     lines = [
@@ -284,6 +302,9 @@ def build_handoff(verdict):
         f"- parallel_next_action_reason: `{parallel_reason}`",
         f"- promotion_allowed: `{str(bool(verdict.get('promotion_allowed'))).lower()}`",
         f"- human_action_required: `{str(bool(verdict.get('human_action_required'))).lower()}`",
+        f"- handoff_priority: `{handoff_priority}`",
+        f"- a_class_live_human_review_daily_reminder: `{str(bool(escalation.get('daily_reminder_due'))).lower()}`",
+        f"- a_class_handoff_ready_elapsed_sec: `{escalation.get('ready_elapsed_sec')}`",
         f"- next_highest_priority_blocker: `{display_next_blocker}`",
         f"- non_quote_sensitive_capture_discovery_allowed: `{str(bool(verdict.get('non_quote_sensitive_capture_discovery_allowed'))).lower()}`",
         f"- quote_sensitive_slices_blocked: `{str(bool(verdict.get('quote_sensitive_slices_blocked'))).lower()}`",
