@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import https from 'https';
+import { pathToFileURL } from 'url';
 import Database from 'better-sqlite3';
 import autonomyConfig from '../src/config/autonomy-config.js';
 
@@ -60,7 +61,7 @@ function fetchJson(url) {
   });
 }
 
-function ensurePremiumSignalsSchema(db) {
+export function ensurePremiumSignalsSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS premium_signals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +90,10 @@ function ensurePremiumSignalsSchema(db) {
       trade_result TEXT,
       downstream_trade_id INTEGER,
       downstream_lifecycle_id TEXT,
+      indices_json TEXT,
+      ath_stage TEXT,
+      token_supply REAL,
+      token_decimals INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -105,36 +110,63 @@ function ensurePremiumSignalsSchema(db) {
   addColumn(`ALTER TABLE premium_signals ADD COLUMN gate_result TEXT`);
   addColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_trade_id INTEGER`);
   addColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_lifecycle_id TEXT`);
+  addColumn(`ALTER TABLE premium_signals ADD COLUMN indices_json TEXT`);
+  addColumn(`ALTER TABLE premium_signals ADD COLUMN ath_stage TEXT`);
+  addColumn(`ALTER TABLE premium_signals ADD COLUMN token_supply REAL`);
+  addColumn(`ALTER TABLE premium_signals ADD COLUMN token_decimals INTEGER`);
   addColumn(`ALTER TABLE premium_signals ADD COLUMN remote_signal_id INTEGER`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS token_motion_events (
+      mint TEXT NOT NULL,
+      signal_id INTEGER NOT NULL DEFAULT 0,
+      lifecycle_id TEXT NOT NULL DEFAULT '',
+      ts_ms INTEGER NOT NULL,
+      domain TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT,
+      created_at_ms INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+      PRIMARY KEY (mint, signal_id, ts_ms, domain, event_type)
+    )
+  `);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_premium_signals_remote_signal_id ON premium_signals(remote_signal_id) WHERE remote_signal_id IS NOT NULL`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_premium_signals_token_ts_type ON premium_signals(token_ca, timestamp, signal_type)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_token_motion_events_signal ON token_motion_events(signal_id, ts_ms)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_token_motion_events_mint_ts ON token_motion_events(mint, ts_ms)`);
 }
 
-function normalizeJsonField(value, fallback = null) {
+export function normalizeJsonField(value, fallback = null) {
   if (value == null || value === '') return fallback;
   if (typeof value === 'string') return value;
   return JSON.stringify(value);
 }
 
-function normalizeInt(value, fallback = null) {
+export function normalizeInt(value, fallback = null) {
   if (value == null || value === '') return fallback;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.trunc(numeric) : fallback;
 }
 
-function normalizeFloat(value, fallback = null) {
+export function normalizeFloat(value, fallback = null) {
   if (value == null || value === '') return fallback;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
 }
 
-function normalizeSignalType(row) {
+export function normalizeSignalType(row) {
   if (row.signal_type) return String(row.signal_type).toUpperCase();
   if (row.is_ath === 1 || row.is_ath === true) return 'ATH';
   return 'NEW_TRENDING';
 }
 
-function normalizeRow(row) {
+export function normalizeAthStage(row, signalType) {
+  const explicit = row.ath_stage || row.athStage || row.ath_stage_at_signal;
+  if (explicit !== undefined && explicit !== null && String(explicit).trim()) return String(explicit).trim();
+  const athNum = row.ath_num || row.athNum || row.ath_count || row.ath_index || row.ath_number;
+  if (athNum !== undefined && athNum !== null && String(athNum).trim()) return `ATH${String(athNum).trim()}`;
+  return signalType === 'ATH' ? 'ATH_UNKNOWN' : 'NOT_ATH';
+}
+
+export function normalizeRow(row) {
   const signalType = normalizeSignalType(row);
   const timestamp = normalizeInt(row.timestamp, normalizeInt(row.source_message_ts, normalizeInt(row.receive_ts, Date.now())));
   const sourceMessageTs = normalizeInt(row.source_message_ts, timestamp);
@@ -143,6 +175,7 @@ function normalizeRow(row) {
     ? JSON.stringify(row.parse_missing_fields)
     : normalizeJsonField(row.parse_missing_fields, null);
   const gateResult = normalizeJsonField(row.gate_result, null);
+  const indicesJson = normalizeJsonField(row.indices_json ?? row.indices ?? row.signal_indices, null);
 
   return {
     remoteSignalId: normalizeInt(row.id, null),
@@ -171,11 +204,15 @@ function normalizeRow(row) {
     tradeResult: row.trade_result || null,
     downstreamTradeId: normalizeInt(row.downstream_trade_id, null),
     downstreamLifecycleId: row.downstream_lifecycle_id || null,
+    indicesJson,
+    athStage: normalizeAthStage(row, signalType),
+    tokenSupply: normalizeFloat(row.token_supply ?? row.total_supply ?? row.supply, null),
+    tokenDecimals: normalizeInt(row.token_decimals ?? row.decimals ?? row.mint_decimals, null),
     createdAt: row.created_at || null
   };
 }
 
-function rowsDiffer(localRow, incoming) {
+export function rowsDiffer(localRow, incoming) {
   const fields = [
     ['token_ca', incoming.tokenCa],
     ['symbol', incoming.symbol],
@@ -202,6 +239,10 @@ function rowsDiffer(localRow, incoming) {
     ['trade_result', incoming.tradeResult],
     ['downstream_trade_id', incoming.downstreamTradeId],
     ['downstream_lifecycle_id', incoming.downstreamLifecycleId],
+    ['indices_json', incoming.indicesJson],
+    ['ath_stage', incoming.athStage],
+    ['token_supply', incoming.tokenSupply],
+    ['token_decimals', incoming.tokenDecimals],
     ['remote_signal_id', incoming.remoteSignalId]
   ];
   return fields.some(([key, value]) => (localRow[key] ?? null) !== (value ?? null));
@@ -248,8 +289,8 @@ async function main() {
       signal_type, is_ath, parse_status, parse_missing_fields,
       hard_gate_status, gate_result, ai_action, ai_confidence, ai_narrative_tier,
       executed, trade_result, downstream_trade_id, downstream_lifecycle_id, remote_signal_id,
-      created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+      indices_json, ath_stage, token_supply, token_decimals, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
   `);
   const updateStmt = db.prepare(`
     UPDATE premium_signals
@@ -278,6 +319,10 @@ async function main() {
         trade_result = ?,
         downstream_trade_id = ?,
         downstream_lifecycle_id = ?,
+        indices_json = ?,
+        ath_stage = ?,
+        token_supply = ?,
+        token_decimals = ?,
         remote_signal_id = COALESCE(remote_signal_id, ?)
     WHERE id = ?
   `);
@@ -320,6 +365,10 @@ async function main() {
         incoming.downstreamTradeId,
         incoming.downstreamLifecycleId,
         incoming.remoteSignalId,
+        incoming.indicesJson,
+        incoming.athStage,
+        incoming.tokenSupply,
+        incoming.tokenDecimals,
         incoming.createdAt
       );
       inserted += 1;
@@ -357,6 +406,10 @@ async function main() {
       incoming.tradeResult,
       incoming.downstreamTradeId,
       incoming.downstreamLifecycleId,
+      incoming.indicesJson,
+      incoming.athStage,
+      incoming.tokenSupply,
+      incoming.tokenDecimals,
       incoming.remoteSignalId,
       existing.id
     );
@@ -461,7 +514,9 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exit(1);
+  });
+}
