@@ -85,6 +85,12 @@ def actionable_blockers(verdict):
 
 
 def handoff_needed(verdict):
+    if bool(verdict.get("human_action_required")):
+        return True
+    if verdict.get("classification") in {"A_CLASS_STUCK_REVIEW_REQUIRED", "HUMAN_APPROVAL_REQUIRED"}:
+        return True
+    if str(verdict.get("next_action") or "").startswith("human_review_"):
+        return True
     return any(blocker in FIXABLE_BLOCKER_HINTS for blocker in actionable_blockers(verdict))
 
 
@@ -2779,6 +2785,22 @@ def self_test():
     assert "Matured Volume Shadow Validation" in text
     assert "SHADOW_MATURED_VOLUME_PATH_AVAILABLE" in text
     assert "shadow_matured_volume_slices_evaluable: `true`" in text
+    human_review_verdict = {
+        **verdict,
+        "classification": "A_CLASS_STUCK_REVIEW_REQUIRED",
+        "next_action": "human_review_a_class_shadow_state",
+        "human_action_required": True,
+        "blockers": ["discovery_same_window_not_promotion_evidence"],
+        "paper_entry_proposal_readiness": {
+            "status": "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+            "promotion_allowed": False,
+            "automatic_runtime_change_allowed": False,
+        },
+    }
+    text = build_handoff(human_review_verdict)
+    assert "handoff_needed: `true`" in text
+    assert "human_action_required: `true`" in text
+    assert "next_action: `human_review_a_class_shadow_state`" in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text

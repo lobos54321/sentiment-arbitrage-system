@@ -86,3 +86,14 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   Next action is to collect the remaining clean hourly windows; only after `streak>=4` can the
   read-only audit emit a human approval handoff. The operator script is dry-run by default and must
   not be executed by AutoLoop.
+- **2026-07-03** (P2 acceptance verified, run `codex_p2_20260703T000051Z`, commit `146a7a3`):
+  four consecutive clean hourly windows are now recorded in
+  `a_class_mode_runtime_state.detail_json.clean_window_counter`: `streak=4/4`,
+  `sufficient=true`, `failed_condition_codes=[]`. Latest verdict is
+  `A_CLASS_STUCK_REVIEW_REQUIRED`; `current_capture_stage=mode_disabled_stuck_requires_human_review`;
+  `paper_entry_proposal_readiness.status=PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL`;
+  `promotion_allowed=false`; A_CLASS remains SHADOW/circuit-broken. Current 24h funnel:
+  denominator 77, detector 77/77, decision 77/77, pass_allow 19/77, pending 12/77,
+  mode-disabled-adjusted final eligibility 2/77, paper 0/77. P2 is complete at the engineering
+  contract level: the next action is a human A_CLASS review/re-enable decision using the dry-run
+  operator script. AutoLoop/Codex must not execute the re-enable switch.
