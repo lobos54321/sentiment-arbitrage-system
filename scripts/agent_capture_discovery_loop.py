@@ -56,6 +56,7 @@ REPORT_TEST_COMMANDS = (
     ("capture_60_target_loop_self_test", ["scripts/capture_60_target_loop.py", "--self-test"]),
     ("autoloop_lightweight_reconciliation_self_test", ["scripts/autoloop_lightweight_reconciliation.py", "--self-test"]),
     ("oos_probe_refresh_self_test", ["scripts/refresh_oos_readiness_probes.py", "--self-test"]),
+    ("capture_cross_post_freeze_oos_self_test", ["scripts/capture_cross_post_freeze_oos_validation.py", "--self-test"]),
     ("reviewer_self_test", ["scripts/review_agent_verdict.py", "--self-test"]),
     ("handoff_self_test", ["scripts/generate_codex_handoff.py", "--self-test"]),
 )

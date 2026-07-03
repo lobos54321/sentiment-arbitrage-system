@@ -10,7 +10,10 @@ final_entry_contract, A_CLASS, executor, wallet, canary, or risk settings.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
+import random
 import sqlite3
 import tempfile
 import time
@@ -42,10 +45,13 @@ from quality_timing_reject_research_audit import (
 )
 
 
-SCHEMA_VERSION = "capture_cross_post_freeze_oos_validation.v1"
+SCHEMA_VERSION = "capture_cross_post_freeze_oos_validation.v2"
 DEFAULT_EXPECTED_CANDIDATES = 84
 DEFAULT_MIN_RAW_EVENTS = 10
 DEFAULT_MIN_SELECTED_EVENTS = 3
+DEFAULT_MIN_UNIQUE_TOKENS = 10
+DEFAULT_FDR_Q = 0.1
+DEFAULT_NULL_REPLICATES = 64
 DEFAULT_SAFETY_SEC = 120
 
 SUPPORTED_STAGES = {
@@ -87,6 +93,68 @@ def truthy(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "enter", "would_enter"}
+
+
+def stable_hash(parts):
+    body = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def token_key(row):
+    token = row.get("token_ca") if isinstance(row, dict) else None
+    if token not in (None, ""):
+        return f"token:{str(token)}"
+    signal_id = row.get("signal_id_key") if isinstance(row, dict) else None
+    return f"signal:{signal_id}"
+
+
+def log_choose(n, k):
+    if k < 0 or k > n:
+        return float("-inf")
+    return math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+
+
+def hypergeom_sf(k, population_n, success_n, draw_n):
+    """One-sided Fisher/hypergeometric tail P[X >= k]."""
+    try:
+        k = int(k)
+        population_n = int(population_n)
+        success_n = int(success_n)
+        draw_n = int(draw_n)
+    except Exception:
+        return None
+    if population_n <= 0 or draw_n < 0 or success_n < 0:
+        return None
+    if draw_n > population_n or success_n > population_n:
+        return None
+    lo = max(0, draw_n - (population_n - success_n))
+    hi = min(draw_n, success_n)
+    if k <= lo:
+        return 1.0
+    if k > hi:
+        return 0.0
+    denom = log_choose(population_n, draw_n)
+    probs = []
+    for x in range(k, hi + 1):
+        probs.append(math.exp(log_choose(success_n, x) + log_choose(population_n - success_n, draw_n - x) - denom))
+    return min(1.0, max(0.0, sum(probs)))
+
+
+def benjamini_hochberg(p_values):
+    indexed = [(idx, p) for idx, p in enumerate(p_values) if p is not None]
+    m = len(indexed)
+    out = [None for _ in p_values]
+    if m <= 0:
+        return out
+    ranked = sorted(indexed, key=lambda item: item[1])
+    prev = 1.0
+    for rank_from_end, (idx, p) in enumerate(reversed(ranked), start=1):
+        rank = m - rank_from_end + 1
+        q = min(prev, float(p) * m / rank)
+        q = min(1.0, max(0.0, q))
+        out[idx] = q
+        prev = q
+    return out
 
 
 def jloads(value):
@@ -293,6 +361,38 @@ def quality_timing_value(event, dimension):
     return None
 
 
+def self_cross_reason(candidate_id, dimension):
+    """Detect mechanically-defined candidate x context crosses.
+
+    This is intentionally conservative. It only excludes dimensions that are
+    visibly part of the candidate definition, so the statistics panel does not
+    treat tautological gates as independent evidence.
+    """
+    candidate = str(candidate_id or "").lower()
+    dim = str(dimension or "").lower()
+    if not candidate or not dim:
+        return None
+    if dim in {"source_quote_clean", "source_quote_executable", "quote_clean", "quote_executable"}:
+        if "quote" in candidate or "executable" in candidate:
+            return "candidate_definition_contains_quote_dimension"
+    if dim in {"market_cap_bucket", "mc_bucket", "market_cap"}:
+        if "mc_" in candidate or "market_cap" in candidate or "_mc" in candidate:
+            return "candidate_definition_contains_market_cap_dimension"
+    if dim in {"volume_profile", "matured_volume_profile"}:
+        if "volume" in candidate or "lowvol" in candidate:
+            return "candidate_definition_contains_volume_dimension"
+    if dim in {"candle_pattern", "kline_profile", "fbr_time_legal"}:
+        if candidate.startswith("kline:") or "fbr" in candidate or "first_bar" in candidate:
+            return "candidate_definition_contains_kline_dimension"
+    if dim == "lifecycle_profile":
+        if candidate.startswith("lifecycle:") or "lifecycle" in candidate:
+            return "candidate_definition_contains_lifecycle_dimension"
+    if dim == "source_component":
+        if candidate.startswith("source:") or candidate.startswith("source_"):
+            return "candidate_definition_contains_source_dimension"
+    return None
+
+
 def matured_volume_profile(bars):
     vols = [float(bar.get("volume") or 0) for bar in bars]
     if len(vols) < 3:
@@ -385,6 +485,7 @@ def validate_capture_cross_item(
     stages,
     global_stage_rates,
     min_selected_events,
+    safety_sec,
 ):
     definition = item.get("freeze_definition") or {}
     candidate_id = definition.get("candidate_id")
@@ -395,11 +496,18 @@ def validate_capture_cross_item(
         or definition.get("expected_capture_stage_improved")
         or "detector_capture"
     )
+    item_frozen_ts = parse_utc_ts(item.get("frozen_at") or definition.get("frozen_at"))
+    item_eval_start_ts = None if item_frozen_ts is None else int(item_frozen_ts) + int(safety_sec)
     selected = []
+    selected_tokens = set()
     for row in raw_rows:
         signal_id = row.get("signal_id_key")
         if not signal_id:
             continue
+        if item_eval_start_ts is not None:
+            signal_ts = row.get("signal_ts_norm") or row.get("signal_ts")
+            if signal_ts is None or int(signal_ts) < item_eval_start_ts:
+                continue
         if candidate_id and candidate_id not in matched_candidates.get(signal_id, set()):
             continue
         if dimension:
@@ -418,8 +526,15 @@ def validate_capture_cross_item(
             if norm_value(observed_value) != norm_value(slice_value):
                 continue
         selected.append(signal_id)
+        selected_tokens.add(token_key(row))
     selected_rates = signal_stage_rates(selected, stages)
     selected_count = len(selected)
+    success_count = (
+        selected_rates.get(f"{expected_stage}_count")
+        if expected_stage in SUPPORTED_STAGES
+        else None
+    )
+    self_cross = self_cross_reason(candidate_id, dimension)
     if expected_stage not in SUPPORTED_STAGES:
         stage_lift = None
         verdict = "CAPTURE_CROSS_POST_FREEZE_UNSUPPORTED_EXPECTED_STAGE"
@@ -448,6 +563,7 @@ def validate_capture_cross_item(
             if expected_stage in SUPPORTED_STAGES
             else None
         ),
+        "expected_stage_success_count": success_count,
         "global_expected_stage_rate": (
             global_stage_rates.get(f"{expected_stage}_rate")
             if expected_stage in SUPPORTED_STAGES
@@ -456,12 +572,310 @@ def validate_capture_cross_item(
         "expected_stage_lift_vs_post_freeze_global": stage_lift,
         "selected_stage_rates": selected_rates,
         "global_stage_rates": global_stage_rates,
+        "selected_signal_id_count": len(set(selected)),
+        "selected_signal_ids_hash": stable_hash(sorted(set(selected))),
+        "selected_unique_token_count": len(selected_tokens),
+        "selected_token_hash": stable_hash(sorted(selected_tokens)),
+        "_selected_signal_ids": sorted(set(selected)),
+        "_selected_token_keys": sorted(selected_tokens),
+        "item_frozen_at": item.get("frozen_at"),
+        "item_eval_start_ts": item_eval_start_ts,
+        "item_eval_start_iso": iso_from_ts(item_eval_start_ts),
+        "self_cross_excluded": bool(self_cross),
+        "self_cross_reason": self_cross,
         "current_window_evidence": item.get("current_window_evidence") or {},
         "verdict": verdict,
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
         "paper_enablement_allowed": False,
+    }
+
+
+def stage_success_tokens(raw_rows, stages, stage):
+    successes = set(stages.get(stage) or set())
+    tokens = set()
+    for row in raw_rows or []:
+        signal_id = row.get("signal_id_key")
+        if signal_id in successes:
+            tokens.add(token_key(row))
+    return tokens
+
+
+def raw_tokens(raw_rows):
+    return {token_key(row) for row in (raw_rows or []) if row.get("signal_id_key")}
+
+
+def family_key_for_item(item):
+    return stable_hash({
+        "expected_stage": item.get("expected_capture_stage_improved"),
+        "selected_signal_ids_hash": item.get("selected_signal_ids_hash"),
+        "selected_token_hash": item.get("selected_token_hash"),
+    })
+
+
+def build_family_statistics(
+    items,
+    raw_rows,
+    stages,
+    *,
+    min_unique_tokens,
+    fdr_q,
+    null_replicates,
+):
+    """Collapse definitions into event-set families and run exact/FDR stats.
+
+    The family key intentionally ignores candidate/dimension labels after the
+    selected event set has been formed. Identical selected events for the same
+    expected stage are one hypothesis, not multiple independent tests.
+    """
+    global_tokens = raw_tokens(raw_rows)
+    family_map = {}
+    definition_rows = []
+    for item in items or []:
+        fid = family_key_for_item(item)
+        stage = item.get("expected_capture_stage_improved")
+        family = family_map.setdefault(
+            fid,
+            {
+                "family_id": fid,
+                "expected_capture_stage_improved": stage,
+                "selected_signal_ids": set(item.get("_selected_signal_ids") or []),
+                "selected_token_keys": set(item.get("_selected_token_keys") or []),
+                "definition_count": 0,
+                "definition_ids": [],
+                "definition_fingerprints": [],
+                "candidate_ids": set(),
+                "dimensions": set(),
+                "sources": set(),
+                "self_cross_definition_count": 0,
+                "self_cross_reasons": Counter(),
+                "min_item_eval_start_ts": item.get("item_eval_start_ts"),
+                "max_item_eval_start_ts": item.get("item_eval_start_ts"),
+                "frozen_at_values": set(),
+            },
+        )
+        family["selected_signal_ids"].update(item.get("_selected_signal_ids") or [])
+        family["selected_token_keys"].update(item.get("_selected_token_keys") or [])
+        family["definition_count"] += 1
+        family["definition_ids"].append(item.get("freeze_id"))
+        family["definition_fingerprints"].append(item.get("definition_fingerprint"))
+        if item.get("candidate_id"):
+            family["candidate_ids"].add(item.get("candidate_id"))
+        if item.get("dimension"):
+            family["dimensions"].add(item.get("dimension"))
+        if item.get("source"):
+            family["sources"].add(item.get("source"))
+        if item.get("self_cross_excluded"):
+            family["self_cross_definition_count"] += 1
+            family["self_cross_reasons"][item.get("self_cross_reason") or "self_cross"] += 1
+        if item.get("item_eval_start_ts") is not None:
+            current_min = family.get("min_item_eval_start_ts")
+            current_max = family.get("max_item_eval_start_ts")
+            ts = int(item.get("item_eval_start_ts"))
+            family["min_item_eval_start_ts"] = ts if current_min is None else min(int(current_min), ts)
+            family["max_item_eval_start_ts"] = ts if current_max is None else max(int(current_max), ts)
+        if item.get("item_frozen_at"):
+            family["frozen_at_values"].add(item.get("item_frozen_at"))
+        definition_rows.append({
+            "freeze_id": item.get("freeze_id"),
+            "definition_fingerprint": item.get("definition_fingerprint"),
+            "family_id": fid,
+            "candidate_id": item.get("candidate_id"),
+            "dimension": item.get("dimension"),
+            "slice_value": item.get("slice_value"),
+            "source": item.get("source"),
+            "expected_capture_stage_improved": stage,
+            "self_cross_excluded": bool(item.get("self_cross_excluded")),
+            "self_cross_reason": item.get("self_cross_reason"),
+            "selected_raw_gold_silver_events": item.get("selected_raw_gold_silver_events"),
+            "selected_unique_token_count": item.get("selected_unique_token_count"),
+            "item_frozen_at": item.get("item_frozen_at"),
+            "item_eval_start_iso": item.get("item_eval_start_iso"),
+        })
+
+    families = []
+    for family in family_map.values():
+        stage = family.get("expected_capture_stage_improved")
+        selected_tokens = set(family.get("selected_token_keys") or set())
+        success_tokens = stage_success_tokens(raw_rows, stages, stage) if stage in SUPPORTED_STAGES else set()
+        selected_success_tokens = selected_tokens & success_tokens
+        n = len(selected_tokens)
+        k = len(selected_success_tokens)
+        N = len(global_tokens)
+        K = len(success_tokens)
+        selected_rate = rate(k, n)
+        global_rate = rate(K, N)
+        lift = None if selected_rate is None or global_rate is None else round(selected_rate - global_rate, 6)
+        all_defs_self_cross = (
+            family["definition_count"] > 0
+            and family["self_cross_definition_count"] == family["definition_count"]
+        )
+        p_value = None
+        testable = (
+            stage in SUPPORTED_STAGES
+            and not all_defs_self_cross
+            and n >= int(min_unique_tokens)
+            and N > 0
+            and K > 0
+        )
+        if testable:
+            p_value = hypergeom_sf(k, N, K, n)
+        status = (
+            "SELF_CROSS_EXCLUDED"
+            if all_defs_self_cross
+            else "TOO_SMALL_UNIQUE_TOKENS"
+            if n < int(min_unique_tokens)
+            else "UNSUPPORTED_STAGE"
+            if stage not in SUPPORTED_STAGES
+            else "TESTABLE"
+        )
+        families.append({
+            "family_id": family["family_id"],
+            "expected_capture_stage_improved": stage,
+            "definition_count": family["definition_count"],
+            "definition_ids": family["definition_ids"],
+            "definition_fingerprints": family["definition_fingerprints"],
+            "candidate_ids": sorted(family["candidate_ids"]),
+            "dimensions": sorted(family["dimensions"]),
+            "sources": sorted(family["sources"]),
+            "selected_signal_count": len(family["selected_signal_ids"]),
+            "selected_event_set_hash": stable_hash(sorted(family["selected_signal_ids"])),
+            "unique_token_n": n,
+            "selected_success_unique_tokens": k,
+            "global_unique_token_n": N,
+            "global_success_unique_tokens": K,
+            "selected_stage_rate_unique_token": selected_rate,
+            "global_stage_rate_unique_token": global_rate,
+            "stage_lift_vs_post_freeze_global_unique_token": lift,
+            "p_value_one_sided_exact": p_value,
+            "q_value_bh_fdr": None,
+            "fdr_q_threshold": float(fdr_q),
+            "testable": testable,
+            "family_status": status,
+            "self_cross_definition_count": family["self_cross_definition_count"],
+            "self_cross_reasons": dict(family["self_cross_reasons"]),
+            "min_item_eval_start_ts": family.get("min_item_eval_start_ts"),
+            "min_item_eval_start_iso": iso_from_ts(family.get("min_item_eval_start_ts")),
+            "max_item_eval_start_ts": family.get("max_item_eval_start_ts"),
+            "max_item_eval_start_iso": iso_from_ts(family.get("max_item_eval_start_ts")),
+            "frozen_at_values": sorted(family["frozen_at_values"]),
+            "two_window_status": "SECOND_DISJOINT_WINDOW_REQUIRED",
+            "oos_confirmed_family": False,
+            "promotion_allowed": False,
+        })
+
+    p_values = [row.get("p_value_one_sided_exact") if row.get("testable") else None for row in families]
+    q_values = benjamini_hochberg(p_values)
+    for row, q in zip(families, q_values):
+        row["q_value_bh_fdr"] = q
+        row["same_window_statistical_hit"] = bool(
+            row.get("testable")
+            and q is not None
+            and q <= float(fdr_q)
+            and (row.get("stage_lift_vs_post_freeze_global_unique_token") or 0) > 0
+        )
+        row["family_verdict"] = (
+            "OOS_STAT_HIT_SECOND_WINDOW_REQUIRED"
+            if row["same_window_statistical_hit"]
+            else row["family_status"]
+            if row["family_status"] != "TESTABLE"
+            else "NO_STATISTICAL_REPEAT"
+        )
+
+    null_panel = build_null_panel(families, global_tokens, stages, raw_rows, fdr_q, null_replicates)
+    tested = [row for row in families if row.get("testable")]
+    observed_hits = sum(1 for row in tested if row.get("same_window_statistical_hit"))
+    return {
+        "schema_version": "capture_cross_oos_statistics.v1",
+        "family_table": sorted(families, key=lambda row: (not row.get("same_window_statistical_hit"), row.get("q_value_bh_fdr") is None, row.get("q_value_bh_fdr") or 1, row.get("family_id"))),
+        "definition_family_map": definition_rows,
+        "tested_family_count": len(tested),
+        "raw_definition_count": len(items or []),
+        "family_count": len(families),
+        "deduped_definition_count": max(0, len(items or []) - len(families)),
+        "self_cross_excluded_family_count": sum(1 for row in families if row.get("family_status") == "SELF_CROSS_EXCLUDED"),
+        "too_small_family_count": sum(1 for row in families if row.get("family_status") == "TOO_SMALL_UNIQUE_TOKENS"),
+        "observed_statistical_hit_count": observed_hits,
+        "fdr_q_threshold": float(fdr_q),
+        "minimum_unique_tokens_per_family": int(min_unique_tokens),
+        "multiplicity_budget": {
+            "raw_cells_searched": len(items or []),
+            "families_after_event_set_dedupe": len(families),
+            "families_tested_after_self_cross_and_min_n": len(tested),
+            "expected_false_hits_at_q_threshold": round(float(fdr_q) * len(tested), 6),
+            "observed_statistical_hits": observed_hits,
+        },
+        "null_panel": null_panel,
+        "two_window_rule": {
+            "required": True,
+            "current_window_can_only_create_watch": True,
+            "confirmed_family_count": 0,
+            "reason": "Second disjoint post-freeze OOS window not yet attached to this artifact.",
+        },
+        "promotion_allowed": False,
+    }
+
+
+def build_null_panel(families, global_tokens, stages, raw_rows, fdr_q, null_replicates):
+    testable = [row for row in families if row.get("testable")]
+    if not testable:
+        return {
+            "available": True,
+            "method": "deterministic_label_shuffle",
+            "replicates": 0,
+            "null_repeat_rate": 0.0,
+            "repeat_counts": [],
+            "promotion_allowed": False,
+        }
+    token_list = sorted(global_tokens)
+    token_count = len(token_list)
+    by_stage_success_count = {
+        stage: len(stage_success_tokens(raw_rows, stages, stage))
+        for stage in SUPPORTED_STAGES
+    }
+    repeat_counts = []
+    for replicate in range(int(null_replicates)):
+        p_values = []
+        rows = []
+        rng = random.Random(f"capture-cross-null-v1:{replicate}:{token_count}")
+        shuffled_success = {}
+        for stage, success_count in by_stage_success_count.items():
+            if success_count <= 0:
+                shuffled_success[stage] = set()
+            else:
+                shuffled_success[stage] = set(rng.sample(token_list, min(success_count, token_count)))
+        for row in testable:
+            stage = row.get("expected_capture_stage_improved")
+            n = int(row.get("unique_token_n") or 0)
+            # Random-candidate null: keep the observed family size and stage
+            # prevalence, but assign a deterministic random token set.
+            selected_rng = random.Random(f"capture-cross-null-family:{replicate}:{row.get('family_id')}")
+            selected_tokens = set(selected_rng.sample(token_list, min(n, token_count))) if n > 0 else set()
+            success_tokens = shuffled_success.get(stage) or set()
+            k = len(selected_tokens & success_tokens)
+            p_values.append(hypergeom_sf(k, token_count, len(success_tokens), len(selected_tokens)))
+            rows.append({
+                "stage_lift": (rate(k, len(selected_tokens)) or 0) - (rate(len(success_tokens), token_count) or 0),
+            })
+        q_values = benjamini_hochberg(p_values)
+        repeat_count = 0
+        for row, q in zip(rows, q_values):
+            if q is not None and q <= float(fdr_q) and row.get("stage_lift", 0) > 0:
+                repeat_count += 1
+        repeat_counts.append(repeat_count)
+    denominator = max(1, len(testable) * int(null_replicates))
+    return {
+        "available": True,
+        "method": "deterministic_label_shuffle_holdout_negative_controls_compatible",
+        "holdout_negative_controls_reused_as": "discovery_null_panel_shape",
+        "replicates": int(null_replicates),
+        "tested_family_count": len(testable),
+        "repeat_counts": repeat_counts,
+        "null_repeat_rate": round(sum(repeat_counts) / denominator, 6),
+        "max_null_repeat_count": max(repeat_counts) if repeat_counts else 0,
+        "mean_null_repeat_count": round(sum(repeat_counts) / max(1, len(repeat_counts)), 6),
+        "promotion_allowed": False,
     }
 
 
@@ -534,7 +948,17 @@ def build_report(args):
             "paper_enablement_allowed": False,
             "items": [],
         }
-    eval_start_ts = int(frozen_ts) + int(args.safety_sec)
+    registry_items = [
+        item for item in (registry.get("items") or [])
+        if isinstance(item, dict) and item.get("source") in CAPTURE_CROSS_FREEZE_SOURCES
+    ]
+    item_eval_starts = []
+    for item in registry_items:
+        item_frozen_ts = parse_utc_ts(item.get("frozen_at") or (item.get("freeze_definition") or {}).get("frozen_at"))
+        if item_frozen_ts is not None:
+            item_eval_starts.append(int(item_frozen_ts) + int(args.safety_sec))
+    definition_set_eval_start_ts = int(frozen_ts) + int(args.safety_sec)
+    eval_start_ts = min(item_eval_starts or [definition_set_eval_start_ts])
     now_ts = int(time.time())
     raw_db = sqlite3.connect(args.raw_db)
     raw_db.row_factory = sqlite3.Row
@@ -585,10 +1009,18 @@ def build_report(args):
             stages,
             global_stage_rates,
             int(args.min_selected_events),
+            int(args.safety_sec),
         )
-        for item in (registry.get("items") or [])
-        if isinstance(item, dict) and item.get("source") in CAPTURE_CROSS_FREEZE_SOURCES
+        for item in registry_items
     ]
+    oos_statistics = build_family_statistics(
+        items,
+        raw_rows,
+        stages,
+        min_unique_tokens=int(args.min_unique_tokens),
+        fdr_q=float(args.fdr_q),
+        null_replicates=int(args.null_replicates),
+    )
     status_counts = Counter(row.get("verdict") for row in items)
     repeat_watch = [row for row in items if row.get("verdict") == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"]
     positive_lift = [
@@ -620,6 +1052,10 @@ def build_report(args):
         "freeze_registry_available": bool(registry),
         "definition_set_frozen_at": registry.get("definition_set_frozen_at"),
         "freeze_generated_at": registry.get("generated_at"),
+        "definition_set_eval_start_ts": definition_set_eval_start_ts,
+        "definition_set_eval_start_iso": iso_from_ts(definition_set_eval_start_ts),
+        "earliest_item_eval_start_ts": eval_start_ts,
+        "earliest_item_eval_start_iso": iso_from_ts(eval_start_ts),
         "eval_start_ts": eval_start_ts,
         "eval_start_iso": iso_from_ts(eval_start_ts),
         "now_ts": now_ts,
@@ -680,6 +1116,18 @@ def build_report(args):
         "status_counts": dict(status_counts),
         "source_counts": dict(Counter(row.get("source") for row in items)),
         "stage_counts": dict(Counter(row.get("expected_capture_stage_improved") for row in items)),
+        "oos_statistics": oos_statistics,
+        "family_table": oos_statistics.get("family_table"),
+        "definition_family_map": oos_statistics.get("definition_family_map"),
+        "null_panel_repeat_rate": (oos_statistics.get("null_panel") or {}).get("null_repeat_rate"),
+        "multiplicity_budget": oos_statistics.get("multiplicity_budget"),
+        "window_lineage": {
+            "definition_set_frozen_at": registry.get("definition_set_frozen_at"),
+            "definition_set_eval_start_iso": iso_from_ts(definition_set_eval_start_ts),
+            "earliest_item_eval_start_iso": iso_from_ts(eval_start_ts),
+            "item_eval_start_policy": "item.frozen_at + safety_sec",
+            "post_freeze_safety_sec": int(args.safety_sec),
+        },
         "top_repeat_watch_items": sorted(
             repeat_watch,
             key=lambda row: (
@@ -713,6 +1161,19 @@ def create_self_test_inputs(root):
                 "freeze_id": "capture-cross-1",
                 "source": "capture_first_2d_cross",
                 "definition_fingerprint": "abc",
+                "frozen_at": iso_from_ts(frozen_ts),
+                "expected_capture_stage_improved": "pending_capture",
+                "freeze_definition": {
+                    "candidate_id": "notath_quote_clean",
+                    "dimension": "source_component",
+                    "slice_value": "matrix_evaluator",
+                    "expected_capture_stage_improved": "pending_capture",
+                },
+            },
+            {
+                "freeze_id": "capture-cross-duplicate-event-set",
+                "source": "capture_first_2d_cross",
+                "definition_fingerprint": "abc-duplicate",
                 "frozen_at": iso_from_ts(frozen_ts),
                 "expected_capture_stage_improved": "pending_capture",
                 "freeze_definition": {
@@ -884,6 +1345,9 @@ def run_self_test():
             safety_sec=120,
             min_raw_events=1,
             min_selected_events=1,
+            min_unique_tokens=1,
+            fdr_q=0.1,
+            null_replicates=8,
         )
         payload = build_report(args)
         write_json(out, payload)
@@ -891,11 +1355,20 @@ def run_self_test():
         assert payload["promotion_allowed"] is False
         assert payload["raw_gold_silver_event_rows"] == 2
         assert payload["oos_data_availability_classification"] == "OOS_DATA_AVAILABLE_FOR_JUDGMENT"
-        assert payload["validated_definition_count"] == 3
-        assert payload["repeat_watch_count"] == 2
-        assert payload["source_counts"]["capture_first_2d_cross"] == 1
+        assert payload["validated_definition_count"] == 4
+        assert payload["repeat_watch_count"] == 3
+        assert payload["source_counts"]["capture_first_2d_cross"] == 2
         assert payload["source_counts"]["quality_timing_reason_cross"] == 1
         assert payload["source_counts"]["shadow_matured_volume_cross"] == 1
+        assert payload["oos_statistics"]["schema_version"] == "capture_cross_oos_statistics.v1"
+        assert payload["oos_statistics"]["raw_definition_count"] == 4
+        assert payload["oos_statistics"]["family_count"] == 2
+        assert payload["oos_statistics"]["deduped_definition_count"] == 2
+        assert payload["oos_statistics"]["tested_family_count"] >= 1
+        assert payload["oos_statistics"]["null_panel"]["available"] is True
+        assert payload["oos_statistics"]["null_panel"]["replicates"] == 8
+        assert payload["multiplicity_budget"]["families_after_event_set_dedupe"] == 2
+        assert payload["window_lineage"]["item_eval_start_policy"] == "item.frozen_at + safety_sec"
         assert payload["post_freeze_matured_volume_context"]["known_count"] == 1
         assert payload["classification"] == "CAPTURE_CROSS_POST_FREEZE_REPEAT_WATCH"
         assert payload["post_freeze_global_stage_rates"]["decision_capture_rate"] == 1.0
@@ -951,6 +1424,9 @@ def parse_args(argv=None):
     parser.add_argument("--safety-sec", type=int, default=DEFAULT_SAFETY_SEC)
     parser.add_argument("--min-raw-events", type=int, default=DEFAULT_MIN_RAW_EVENTS)
     parser.add_argument("--min-selected-events", type=int, default=DEFAULT_MIN_SELECTED_EVENTS)
+    parser.add_argument("--min-unique-tokens", type=int, default=DEFAULT_MIN_UNIQUE_TOKENS)
+    parser.add_argument("--fdr-q", type=float, default=DEFAULT_FDR_Q)
+    parser.add_argument("--null-replicates", type=int, default=DEFAULT_NULL_REPLICATES)
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
 
