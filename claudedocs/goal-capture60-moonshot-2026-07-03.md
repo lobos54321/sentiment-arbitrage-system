@@ -23,3 +23,11 @@
 请你从这个目标倒推完整路径,帮我设计一套可执行的战略方案。
 在给方案前,先做一次事前推断:假设 1–2 年后这个目标失败了,最可能的原因是什么?这些风险应该如何提前规避?
 然后输出:1. 总体战略路径 2. 阶段性里程碑 3. 关键系统与资源配置 4. 最大风险与应对方式 5. 本周最高杠杆行动 6. 3 个能进一步优化计划的问题
+
+---
+
+## 已定决策(2026-07-03,用户确认)
+
+1. **收益口径**:rolling 24h realized net ROI on allocated strategy risk capital = 200%;**最大回撤硬约束 15%**(对 allocated risk capital)。→ exit-policy lab 目标函数:max rolling-24h realized ROI s.t. maxDD ≤ 15%;隐含仓位约束:单笔资本风险 ≤~2%(-20% 止损 × ≤10% 仓位),7 连败 ≈ -14% 仍在预算内。
+2. **第二感知源路线**:pump.fun/链上实时流(主感知)→ GMGN(市场确认)→ X narrative(叙事层)→ smart money(precision layer)。
+3. 熔断恢复 SLA:见 claude 提案(分级恢复:paper 自动、LIVE 人批、fail-closed 默认、48h 响应 SLA),待用户最终确认参数。
