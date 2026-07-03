@@ -97,3 +97,19 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   mode-disabled-adjusted final eligibility 2/77, paper 0/77. P2 is complete at the engineering
   contract level: the next action is a human A_CLASS review/re-enable decision using the dry-run
   operator script. AutoLoop/Codex must not execute the re-enable switch.
+- **2026-07-03** (P2.1 deployed/verified, run `20260703T051745Z`, commit `84d4847`):
+  the A_CLASS recovery SLA is now breach-class parameterized in
+  `/app/data/agent_runs/latest/a_class_fastlane_mode_audit_24h.json`.
+  Post-deploy artifact fields verified:
+  `schema_version=a_class_fastlane_mode_readiness_audit.v3`,
+  `breach_class=MARKET`, `circuit_recovery_sla.effective_clean_windows_required=24`,
+  `clean_window_counter.schema_version=a_class_clean_window_counter.v2`,
+  `clean_window_counter.streak=1`, `clean_window_counter.required=24`,
+  `clean_window_counter.required_source=circuit_recovery_sla`, and
+  `circuit_recovery_sla.motion_trace_review.available=true` for breaching trade 61 ERBAI.
+  `paper_auto_resume_readiness.allowed=false` because the MARKET SLA has only 1/24 clean hourly
+  buckets; `live_reenable_contract.live_auto_reenable_allowed=false`; `promotion_allowed=false`.
+  AutoLoop completed with `classification=A_CLASS_EXPECTED_SHADOW`, `tests_passed=true`, and
+  `current_capture_stage=mode_disabled_clean_window_pending`. This supersedes the old 4-window
+  placeholder for this MARKET breach; paper can auto-resume only after the class-appropriate SLA
+  passes, while LIVE still requires the human operator script.
