@@ -901,14 +901,31 @@ def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
             peak_ordering_count += 1
         ordering_counts[ordering.get("ordering")] += 1
     blockers = []
+    warnings = []
+    price_missing_count = max(0, qt_count - price_count)
+    quote_age_missing_count = max(0, qt_count - quote_age_count)
+    price_missing_attributed = sum(price_missing_reason_counts.values()) == price_missing_count
+    quote_age_missing_attributed = sum(quote_age_missing_reason_counts.values()) == quote_age_missing_count
     if qt_count and reject_ts_count < qt_count:
         blockers.append("reject_ts_coverage_below_100pct")
     if qt_count and price_count < qt_count:
-        blockers.append("price_at_reject_coverage_below_100pct")
+        if price_missing_attributed:
+            warnings.append("price_at_reject_missing_has_deterministic_context_reason")
+        else:
+            blockers.append("price_at_reject_coverage_below_100pct")
     if qt_count and quote_age_count < qt_count:
-        blockers.append("quote_age_at_reject_coverage_below_100pct")
+        if quote_age_missing_attributed:
+            warnings.append("quote_age_at_reject_missing_has_deterministic_context_reason")
+        else:
+            blockers.append("quote_age_at_reject_coverage_below_100pct")
     if qt_count and peak_ordering_count < qt_count:
         blockers.append("peak_vs_reject_ordering_coverage_below_100pct")
+    if blockers:
+        acceptance_status = "BLOCKED_MISSING_CONTEXT_UNATTRIBUTED"
+    elif qt_count and (price_missing_count or quote_age_missing_count):
+        acceptance_status = "ACCEPTED_WITH_DETERMINISTIC_CONTEXT_MISSING"
+    else:
+        acceptance_status = "PASS_FULL_COVERAGE"
     return {
         "schema_version": "quality_timing_reject_instrumentation.v1",
         "quality_timing_reject_event_rows": qt_count,
@@ -923,6 +940,16 @@ def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
         "peak_vs_reject_ordering_counts": compact_counter(ordering_counts, ["ordering"], 20),
         "price_at_reject_source_counts": compact_counter(price_source_counts, ["source"], 20),
         "quote_age_at_reject_source_counts": compact_counter(quote_age_source_counts, ["source"], 20),
+        "accepted_missing_context_gaps": {
+            "price_at_reject_missing_count": price_missing_count,
+            "price_at_reject_missing_attributed": price_missing_attributed,
+            "quote_age_at_reject_missing_count": quote_age_missing_count,
+            "quote_age_at_reject_missing_attributed": quote_age_missing_attributed,
+            "policy": (
+                "Do not infer price or quote age from unrelated token-time rows. "
+                "Rows with no reject-row or same-signal context payload remain missing and attributed."
+            ),
+        },
         "price_at_reject_missing_reason_counts": compact_counter(
             price_missing_reason_counts,
             ["missing_reason"],
@@ -934,12 +961,18 @@ def build_reject_instrumentation_summary(*, qt_events, raw_by_signal):
             20,
         ),
         "blockers": blockers,
+        "warnings": warnings,
+        "coverage_acceptance_status": acceptance_status,
         "acceptance_target": {
             "reject_ts_coverage_rate": 1.0,
             "price_at_reject_coverage_rate": 1.0,
             "quote_age_at_reject_coverage_rate": 1.0,
             "peak_vs_reject_ordering_coverage_rate": 1.0,
         },
+        "acceptance_fallback": (
+            "If full coverage is impossible because the reject row and same-signal context rows contain no "
+            "price or quote timestamp, deterministic missing reasons are accepted for read-only audit purposes."
+        ),
         "promotion_allowed": False,
         "strategy_change_allowed": False,
         "automatic_runtime_change_allowed": False,
@@ -2143,6 +2176,8 @@ def self_test():
         assert reject_instrumentation["price_at_reject_coverage_rate"] == 1.0
         assert reject_instrumentation["quote_age_at_reject_coverage_rate"] == 1.0
         assert reject_instrumentation["peak_vs_reject_ordering_coverage_rate"] == 1.0
+        assert reject_instrumentation["coverage_acceptance_status"] == "PASS_FULL_COVERAGE"
+        assert reject_instrumentation["blockers"] == []
         assert reject_instrumentation["peak_vs_reject_ordering_counts"][0]["count"] == 2
         qt2_example = next(row for row in report["top_examples"] if row["signal_id"] == "102")
         assert str(qt2_example["price_at_reject_source"]).startswith("signal_context:lotto_recovery")
