@@ -17,6 +17,7 @@ import {
   buildRolling24hGoalStatusFromLiveSnapshot,
   buildCounterfactualAiAuditFromP0,
   buildGoalControllerActions,
+  buildAgentLatestStatus,
   buildMissedDogAiReviewFromP0,
   buildAClassBlockCauseBreakdown,
   summarizeAClassMatrixEvents,
@@ -230,6 +231,57 @@ test('runtime final evidence health reports missing and existing evidence log', 
   assert.equal(existing.status, 'ok');
   assert.equal(existing.size_bytes > 0, true);
   assert.match(existing.mtime, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test('buildAgentLatestStatus reports compact motion trace coverage', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'agent-latest-status-'));
+  const signalDbPath = join(dir, 'sentiment_arb.db');
+  const db = new Database(signalDbPath);
+  db.exec(`
+    CREATE TABLE premium_signals (
+      id INTEGER PRIMARY KEY,
+      token_ca TEXT,
+      timestamp INTEGER,
+      indices_json TEXT,
+      ath_stage TEXT,
+      token_supply REAL,
+      token_decimals INTEGER
+    );
+    CREATE TABLE token_motion_events (
+      mint TEXT NOT NULL,
+      signal_id INTEGER NOT NULL DEFAULT 0,
+      lifecycle_id TEXT NOT NULL DEFAULT '',
+      ts_ms INTEGER NOT NULL,
+      domain TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT,
+      created_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (mint, signal_id, ts_ms, domain, event_type)
+    );
+  `);
+  db.prepare(`
+    INSERT INTO premium_signals (id, token_ca, timestamp, indices_json, ath_stage, token_supply, token_decimals)
+    VALUES (1, 'StatusToken', ?, '{"super_index":{"current":90}}', 'ATH1', 1000, 6)
+  `).run(Math.floor(Date.now() / 1000));
+  db.prepare(`
+    INSERT INTO token_motion_events (mint, signal_id, lifecycle_id, ts_ms, domain, event_type, payload_json, created_at_ms)
+    VALUES ('StatusToken', 1, '', ?, 'perceive', 'signal_received', '{}', ?)
+  `).run(Date.now(), Date.now());
+  db.close();
+
+  const status = buildAgentLatestStatus({
+    signalDbPath,
+    hours: 24,
+    nowMs: Date.now(),
+  });
+
+  assert.equal(status.schema_version, 'agent_latest_status.v1');
+  assert.equal(status.guardrails.promotion_allowed, false);
+  assert.equal(status.motion_trace.signal_coverage.available, true);
+  assert.equal(status.motion_trace.signal_coverage.signal_rows, 1);
+  assert.equal(status.motion_trace.signal_coverage.indices_json_present_rate, 1);
+  assert.equal(status.motion_trace.event_coverage.available, true);
+  assert.equal(status.motion_trace.event_coverage.total_events, 1);
 });
 
 test('incident artifact snapshot lists allowed evidence and blocks path escape', () => {

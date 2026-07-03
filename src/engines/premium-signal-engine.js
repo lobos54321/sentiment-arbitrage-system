@@ -38,6 +38,49 @@ export function normalizeSignalTimestampSec(value, fallbackSec = Math.floor(Date
   return normalizeUnixTimestampSec(value, fallbackSec);
 }
 
+export function normalizeSignalTimestampMs(value, fallbackMs = Date.now()) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return Math.floor(fallbackMs);
+  return numeric > 1_000_000_000_000 ? Math.floor(numeric) : Math.floor(numeric * 1000);
+}
+
+export function deriveSignalAthStage(signal = {}, aiResult = null) {
+  const explicit = signal.ath_stage || signal.athStage || signal.ath_stage_at_signal;
+  if (explicit !== undefined && explicit !== null && String(explicit).trim()) {
+    return String(explicit).trim();
+  }
+  const athNum = signal.ath_num || signal.athNum || aiResult?.ath_num || aiResult?.athNum;
+  if (athNum !== undefined && athNum !== null && String(athNum).trim()) {
+    return `ATH${String(athNum).trim()}`;
+  }
+  return signal.is_ath ? 'ATH_UNKNOWN' : 'NOT_ATH';
+}
+
+export function extractTokenSupplyDecimals(signal = {}) {
+  const supplyCandidates = [
+    signal.token_supply,
+    signal.total_supply,
+    signal.supply,
+    signal.mint_supply,
+    signal.snapshot?.token_supply,
+    signal.snapshot?.total_supply,
+    signal.chain_snapshot?.token_supply,
+    signal.chain_snapshot?.total_supply,
+  ];
+  const decimalCandidates = [
+    signal.token_decimals,
+    signal.decimals,
+    signal.mint_decimals,
+    signal.snapshot?.token_decimals,
+    signal.snapshot?.decimals,
+    signal.chain_snapshot?.token_decimals,
+    signal.chain_snapshot?.decimals,
+  ];
+  const supply = supplyCandidates.map(Number).find((value) => Number.isFinite(value) && value > 0) ?? null;
+  const decimals = decimalCandidates.map(Number).find((value) => Number.isInteger(value) && value >= 0 && value <= 18) ?? null;
+  return { supply, decimals };
+}
+
 export class PremiumSignalEngine {
   constructor(config, db) {
     this.config = config;
@@ -264,6 +307,10 @@ export class PremiumSignalEngine {
         trade_result TEXT,
         downstream_trade_id INTEGER,
         downstream_lifecycle_id TEXT,
+        indices_json TEXT,
+        ath_stage TEXT,
+        token_supply REAL,
+        token_decimals INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -278,6 +325,8 @@ export class PremiumSignalEngine {
         name TEXT,
         first_seen_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
         mc_at_signal REAL,
+        token_supply REAL,
+        token_decimals INTEGER,
         rating TEXT,
         action TEXT,
         position_tier TEXT,
@@ -395,7 +444,171 @@ export class PremiumSignalEngine {
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN narrative_tags TEXT`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_trade_id INTEGER`);
     addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN downstream_lifecycle_id TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN indices_json TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN ath_stage TEXT`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN token_supply REAL`);
+    addSqlColumn(`ALTER TABLE premium_signals ADD COLUMN token_decimals INTEGER`);
+    addSqlColumn(`ALTER TABLE tokens ADD COLUMN token_supply REAL`);
+    addSqlColumn(`ALTER TABLE tokens ADD COLUMN token_decimals INTEGER`);
     addSqlColumn(`ALTER TABLE trades ADD COLUMN premium_signal_id INTEGER`);
+    this._initTokenMotionEvents();
+  }
+
+  _initTokenMotionEvents() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS token_motion_events (
+        mint TEXT NOT NULL,
+        signal_id INTEGER NOT NULL DEFAULT 0,
+        lifecycle_id TEXT NOT NULL DEFAULT '',
+        ts_ms INTEGER NOT NULL,
+        domain TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT,
+        created_at_ms INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+        PRIMARY KEY (mint, signal_id, ts_ms, domain, event_type)
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_token_motion_events_signal ON token_motion_events(signal_id, ts_ms)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_token_motion_events_mint_ts ON token_motion_events(mint, ts_ms)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_token_motion_events_domain_ts ON token_motion_events(domain, event_type, ts_ms)`);
+    this._tokenMotionInsertStmt = this.db.prepare(`
+      INSERT OR IGNORE INTO token_motion_events (
+        mint, signal_id, lifecycle_id, ts_ms, domain, event_type, payload_json, created_at_ms
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+  }
+
+  _writeTokenIdentity(signal, supplyDecimals = extractTokenSupplyDecimals(signal)) {
+    if (!signal?.token_ca) return;
+    try {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO tokens (
+          token_ca, chain, symbol, first_seen_at, mc_at_signal, token_supply, token_decimals
+        ) VALUES (?, 'SOL', ?, ?, ?, ?, ?)
+      `).run(
+        signal.token_ca,
+        signal.symbol || null,
+        Math.floor(Date.now() / 1000),
+        signal.market_cap || null,
+        supplyDecimals.supply,
+        supplyDecimals.decimals,
+      );
+      this.db.prepare(`
+        UPDATE tokens
+        SET
+          symbol = COALESCE(symbol, ?),
+          mc_at_signal = COALESCE(mc_at_signal, ?),
+          token_supply = COALESCE(token_supply, ?),
+          token_decimals = COALESCE(token_decimals, ?)
+        WHERE token_ca = ?
+      `).run(
+        signal.symbol || null,
+        signal.market_cap || null,
+        supplyDecimals.supply,
+        supplyDecimals.decimals,
+        signal.token_ca,
+      );
+    } catch (error) {
+      console.warn('⚠️  [MotionTrace] token identity write failed:', error.message);
+    }
+  }
+
+  _appendTokenMotionEvent(signal, options = {}) {
+    if (!signal?.token_ca) return false;
+    try {
+      if (!this._tokenMotionInsertStmt) this._initTokenMotionEvents();
+      const fallbackMs = Date.now();
+      const tsMs = normalizeSignalTimestampMs(options.ts_ms ?? options.ts ?? signal.receive_ts ?? signal.timestamp, fallbackMs);
+      const signalId = Number(options.signal_id ?? signal._premiumSignalId ?? signal.id ?? 0) || 0;
+      const lifecycleId = String(options.lifecycle_id ?? signal.downstream_lifecycle_id ?? signal.lifecycle_id ?? '').trim();
+      const domain = String(options.domain || '').trim();
+      const eventType = String(options.event_type || '').trim();
+      if (!domain || !eventType) return false;
+      const payload = {
+        schema_version: 'token_motion_event_payload.v1',
+        ...(options.payload || {}),
+      };
+      this._tokenMotionInsertStmt.run(
+        signal.token_ca,
+        signalId,
+        lifecycleId,
+        tsMs,
+        domain,
+        eventType,
+        JSON.stringify(payload),
+        Date.now(),
+      );
+      return true;
+    } catch (error) {
+      console.warn('⚠️  [MotionTrace] event write failed:', error.message);
+      return false;
+    }
+  }
+
+  _writeSignalMotionEvents(signal, context = {}) {
+    const signalId = Number(signal?._premiumSignalId || 0) || 0;
+    if (!signalId || !signal?.token_ca) return;
+    const receiveTsMs = normalizeSignalTimestampMs(signal.receive_ts || signal.timestamp);
+    const athStage = context.athStage || deriveSignalAthStage(signal, context.aiResult);
+    const supplyDecimals = context.supplyDecimals || extractTokenSupplyDecimals(signal);
+    const indices = signal.indices && typeof signal.indices === 'object' ? signal.indices : null;
+    const signalType = signal.signal_type || (signal.is_ath ? 'ATH' : 'NEW_TRENDING');
+    const source = signal.signal_source || signal.source || (signal.is_ath ? 'premium_channel_ath' : 'premium_channel');
+
+    this._appendTokenMotionEvent(signal, {
+      signal_id: signalId,
+      lifecycle_id: context.linkage?.lifecycleId,
+      ts_ms: receiveTsMs,
+      domain: 'perceive',
+      event_type: 'signal_received',
+      payload: {
+        source,
+        signal_type: signalType,
+        source_event_id: context.sourceEventId || null,
+        raw_indices: indices,
+        ath_stage: athStage,
+        market_cap: signal.market_cap || null,
+        holders: signal.holders || null,
+        top10_pct: signal.top10_pct || null,
+        volume_24h: signal.volume_24h || null,
+        token_supply: supplyDecimals.supply,
+        token_decimals: supplyDecimals.decimals,
+        parse_status: context.parseStatus || null,
+      },
+    });
+
+    this._appendTokenMotionEvent(signal, {
+      signal_id: signalId,
+      lifecycle_id: context.linkage?.lifecycleId,
+      ts_ms: Date.now(),
+      domain: 'decide',
+      event_type: 'gate_evaluation',
+      payload: {
+        component: 'premium_signal_engine',
+        decision: context.gateStatus || null,
+        reason_code: context.gateStatus || null,
+        executed: Boolean(context.executed),
+        ai_action: context.aiResult?.action || null,
+        ai_confidence: context.aiResult?.confidence || null,
+        price_at_decision: signal.price_at_decision || signal.price_at_signal || signal.signal_price || signal.price || null,
+        quote_age_at_decision: signal.quote_age_at_decision || signal.quote_age_ms || signal.source_quote_age_ms || null,
+      },
+    });
+
+    if (context.executed || context.linkage?.tradeId || context.linkage?.lifecycleId) {
+      this._appendTokenMotionEvent(signal, {
+        signal_id: signalId,
+        lifecycle_id: context.linkage?.lifecycleId,
+        ts_ms: Date.now(),
+        domain: 'stage',
+        event_type: context.executed ? 'paper_or_live_intent_recorded' : 'downstream_linkage_recorded',
+        payload: {
+          executed: Boolean(context.executed),
+          downstream_trade_id: context.linkage?.tradeId || null,
+          downstream_lifecycle_id: context.linkage?.lifecycleId || null,
+        },
+      });
+    }
   }
 
   /**
@@ -522,6 +735,8 @@ export class PremiumSignalEngine {
       const sigHistory = this.signalHistory.get(ca);
       const prevAthCount = sigHistory ? (sigHistory.athCount || 0) : 0;
       const currentAthNum = prevAthCount + 1;
+      signal.ath_num = currentAthNum;
+      signal.ath_stage = `ATH${currentAthNum}`;
 
       // 提交 ATH 计数（不论是否入场，ATH# 就是 ATH#）
       if (!sigHistory) {
@@ -1245,6 +1460,11 @@ export class PremiumSignalEngine {
       const sourceEventId = signal.source_event_id
         || [signalSource, signal.token_ca, sourceMessageTs || receiveTs, signalType].filter(Boolean).join(':');
       const parseStatus = signal.parse_status || (parseMissingFields.length ? 'partial' : 'parsed');
+      const athStage = deriveSignalAthStage(signal, aiResult);
+      const supplyDecimals = extractTokenSupplyDecimals(signal);
+      const indicesJson = signal.indices && typeof signal.indices === 'object'
+        ? JSON.stringify(signal.indices)
+        : null;
       const inheritedGateResult = linkage.gateResult && typeof linkage.gateResult === 'object'
         ? linkage.gateResult
         : (signal._prebuyGateResult && typeof signal._prebuyGateResult === 'object' ? signal._prebuyGateResult : null);
@@ -1275,8 +1495,9 @@ export class PremiumSignalEngine {
           hard_gate_status, gate_result, signal_links_json, narrative_features_json,
           narrative_score, narrative_confidence, narrative_tags,
           ai_action, ai_confidence, ai_narrative_tier, executed,
-          downstream_trade_id, downstream_lifecycle_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          downstream_trade_id, downstream_lifecycle_id,
+          indices_json, ath_stage, token_supply, token_decimals
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         signal.token_ca,
         signal.symbol || null,
@@ -1309,8 +1530,23 @@ export class PremiumSignalEngine {
         executed ? 1 : 0,
         linkage.tradeId || null,
         linkage.lifecycleId || null,
+        indicesJson,
+        athStage,
+        supplyDecimals.supply,
+        supplyDecimals.decimals,
       );
       signal._premiumSignalId = Number(result.lastInsertRowid || 0) || null;
+      this._writeTokenIdentity(signal, supplyDecimals);
+      this._writeSignalMotionEvents(signal, {
+        gateStatus,
+        aiResult,
+        executed,
+        linkage,
+        sourceEventId,
+        parseStatus,
+        athStage,
+        supplyDecimals,
+      });
       return signal._premiumSignalId;
     } catch (error) {
       console.error('❌ [DB] 保存信号记录失败:', error.message);

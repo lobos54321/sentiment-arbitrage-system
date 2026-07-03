@@ -2188,6 +2188,188 @@ function readAgentCaptureLoopRunnerStatus() {
   };
 }
 
+function compactVerdictSummary(verdict) {
+  if (!verdict || verdict.error_code) {
+    return { available: false, error_code: verdict?.error_code || 'verdict_missing' };
+  }
+  return {
+    available: true,
+    classification: verdict.classification || null,
+    top_blocker: verdict.top_blocker || null,
+    current_capture_stage: verdict.current_capture_stage || null,
+    next_action: verdict.next_action || null,
+    tests_passed: verdict.tests_passed === undefined ? null : Boolean(verdict.tests_passed),
+    promotion_allowed: Boolean(verdict.promotion_allowed),
+    strategy_change_allowed: Boolean(verdict.strategy_change_allowed),
+    paper_enablement_allowed: Boolean(verdict.paper_enablement_allowed),
+    blockers: Array.isArray(verdict.blockers) ? verdict.blockers.slice(0, 8) : [],
+  };
+}
+
+function summarizeTokenMotionTrace(database, { sinceMs = Date.now() - 24 * 3600 * 1000, limit = 8 } = {}) {
+  const empty = {
+    available: false,
+    table: 'token_motion_events',
+    since_ms: sinceMs,
+    total_events: 0,
+    unique_tokens: 0,
+    latest_ts_ms: null,
+    latest_iso: null,
+    domain_counts: [],
+    recent_events: [],
+  };
+  if (!database) return empty;
+  const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+  if (!tables.has('token_motion_events')) return { ...empty, reason: 'token_motion_events_missing' };
+  const cols = getTableColumns(database, 'token_motion_events');
+  const required = ['mint', 'signal_id', 'ts_ms', 'domain', 'event_type'];
+  const missing = required.filter((col) => !cols.has(col));
+  if (missing.length) return { ...empty, available: true, reason: 'token_motion_events_schema_incomplete', missing_columns: missing };
+
+  const stats = database.prepare(`
+    SELECT
+      COUNT(*) AS total_events,
+      COUNT(DISTINCT mint) AS unique_tokens,
+      MAX(ts_ms) AS latest_ts_ms
+    FROM token_motion_events
+    WHERE ts_ms >= @sinceMs
+  `).get({ sinceMs }) || {};
+  const domainCounts = database.prepare(`
+    SELECT domain, event_type, COUNT(*) AS n
+    FROM token_motion_events
+    WHERE ts_ms >= @sinceMs
+    GROUP BY domain, event_type
+    ORDER BY n DESC, domain ASC, event_type ASC
+    LIMIT 20
+  `).all({ sinceMs });
+  const recentEvents = database.prepare(`
+    SELECT mint, signal_id, lifecycle_id, ts_ms, domain, event_type
+    FROM token_motion_events
+    WHERE ts_ms >= @sinceMs
+    ORDER BY ts_ms DESC
+    LIMIT @limit
+  `).all({ sinceMs, limit });
+  return {
+    ...empty,
+    available: true,
+    total_events: Number(stats.total_events || 0),
+    unique_tokens: Number(stats.unique_tokens || 0),
+    latest_ts_ms: stats.latest_ts_ms || null,
+    latest_iso: stats.latest_ts_ms ? new Date(Number(stats.latest_ts_ms)).toISOString() : null,
+    domain_counts: domainCounts || [],
+    recent_events: recentEvents || [],
+  };
+}
+
+function summarizePremiumSignalMotionCoverage(database, { sinceSec = Math.floor(Date.now() / 1000) - 24 * 3600 } = {}) {
+  const empty = {
+    available: false,
+    table: 'premium_signals',
+    since_sec: sinceSec,
+    signal_rows: 0,
+    indices_json_present: 0,
+    ath_stage_present: 0,
+    token_supply_present: 0,
+    token_decimals_present: 0,
+    latest_signal_ts: null,
+    latest_signal_iso: null,
+    missing_columns: [],
+  };
+  if (!database) return empty;
+  const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((row) => row.name));
+  if (!tables.has('premium_signals')) return { ...empty, reason: 'premium_signals_missing' };
+  const cols = getTableColumns(database, 'premium_signals');
+  const required = ['timestamp', 'indices_json', 'ath_stage', 'token_supply', 'token_decimals'];
+  const missing = required.filter((col) => !cols.has(col));
+  if (!cols.has('timestamp')) return { ...empty, available: true, missing_columns: missing, reason: 'premium_signals_timestamp_missing' };
+  const timestampExpr = "CASE WHEN timestamp > 1000000000000 THEN CAST(timestamp / 1000 AS INTEGER) ELSE CAST(timestamp AS INTEGER) END";
+  const row = database.prepare(`
+    SELECT
+      COUNT(*) AS signal_rows,
+      ${cols.has('indices_json') ? "SUM(CASE WHEN indices_json IS NOT NULL AND indices_json != '' THEN 1 ELSE 0 END)" : '0'} AS indices_json_present,
+      ${cols.has('ath_stage') ? "SUM(CASE WHEN ath_stage IS NOT NULL AND ath_stage != '' THEN 1 ELSE 0 END)" : '0'} AS ath_stage_present,
+      ${cols.has('token_supply') ? "SUM(CASE WHEN token_supply IS NOT NULL THEN 1 ELSE 0 END)" : '0'} AS token_supply_present,
+      ${cols.has('token_decimals') ? "SUM(CASE WHEN token_decimals IS NOT NULL THEN 1 ELSE 0 END)" : '0'} AS token_decimals_present,
+      MAX(${timestampExpr}) AS latest_signal_ts
+    FROM premium_signals
+    WHERE ${timestampExpr} >= @sinceSec
+  `).get({ sinceSec }) || {};
+  const signalRows = Number(row.signal_rows || 0);
+  const pct = (n) => signalRows > 0 ? Number((Number(n || 0) / signalRows).toFixed(4)) : null;
+  return {
+    ...empty,
+    available: true,
+    signal_rows: signalRows,
+    indices_json_present: Number(row.indices_json_present || 0),
+    indices_json_present_rate: pct(row.indices_json_present),
+    ath_stage_present: Number(row.ath_stage_present || 0),
+    ath_stage_present_rate: pct(row.ath_stage_present),
+    token_supply_present: Number(row.token_supply_present || 0),
+    token_supply_present_rate: pct(row.token_supply_present),
+    token_decimals_present: Number(row.token_decimals_present || 0),
+    token_decimals_present_rate: pct(row.token_decimals_present),
+    latest_signal_ts: row.latest_signal_ts || null,
+    latest_signal_iso: row.latest_signal_ts ? new Date(Number(row.latest_signal_ts) * 1000).toISOString() : null,
+    missing_columns: missing,
+  };
+}
+
+export function buildAgentLatestStatus(options = {}) {
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+  const hours = Math.max(1, Math.min(Number.parseInt(String(options.hours ?? 24), 10) || 24, 168));
+  const sinceSec = Math.floor(nowMs / 1000) - hours * 3600;
+  const sinceMs = nowMs - hours * 3600 * 1000;
+  const paths = agentCaptureArtifactPaths();
+  const verdict = safeReadAgentJson(paths.verdict);
+  const runner = readAgentCaptureLoopRunnerStatus();
+  const status = {
+    schema_version: 'agent_latest_status.v1',
+    generated_at: new Date(nowMs).toISOString(),
+    commit: runtimeCommitFingerprint(),
+    window_hours: hours,
+    runner_status: {
+      available: Boolean(runner.available),
+      running: Boolean(runner.running),
+      run_id: runner.run_id || null,
+      started_at: runner.started_at || null,
+      finished_at: runner.finished_at || null,
+      exit_code: runner.exit_code ?? null,
+      timed_out: runner.timed_out ?? null,
+    },
+    verdict: compactVerdictSummary(verdict),
+    motion_trace: {
+      signal_coverage: { available: false },
+      event_coverage: { available: false },
+    },
+    guardrails: {
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    },
+  };
+  let signalDb;
+  try {
+    const signalDbPath = options.signalDbPath || resolvedDbPath;
+    if (signalDbPath && fs.existsSync(signalDbPath)) {
+      signalDb = openDashboardSqlite(signalDbPath, { readonly: true, fileMustExist: true, timeout: Number(options.timeoutMs || 5000) });
+      status.motion_trace.signal_coverage = summarizePremiumSignalMotionCoverage(signalDb, { sinceSec });
+      status.motion_trace.event_coverage = summarizeTokenMotionTrace(signalDb, {
+        sinceMs,
+        limit: Math.max(1, Math.min(Number.parseInt(String(options.recentLimit ?? 8), 10) || 8, 50)),
+      });
+    } else {
+      status.motion_trace.signal_coverage = { available: false, reason: 'signal_db_missing', path: signalDbPath || null };
+      status.motion_trace.event_coverage = { available: false, reason: 'signal_db_missing', path: signalDbPath || null };
+    }
+  } catch (error) {
+    status.motion_trace.error = error.message;
+  } finally {
+    try { if (signalDb) signalDb.close(); } catch {}
+  }
+  return status;
+}
+
 function sanitizeCaptureHours(value, primaryHours) {
   const fallback = String(primaryHours || 24);
   const raw = String(value || fallback).split(',');
@@ -11507,6 +11689,15 @@ const server = http.createServer(async (req, res) => {
       ? process.env.LIFECYCLE_DB
       : join(projectRoot, process.env.LIFECYCLE_DB || 'data/lifecycle_tracks.db');
     await downloadSqliteDatabase(req, res, url, lifecycleDbPath, 'lifecycle_tracks.db', 'Lifecycle tracks database', 'lifecycle_tracks_download');
+    return;
+  } else if (url.pathname === '/api/agent/latest-status') {
+    if (!checkAuth(req, url, res)) return;
+    const status = buildAgentLatestStatus({
+      hours: boundedIntParam(url, 'hours', 24, 1, 168),
+      recentLimit: boundedIntParam(url, 'limit', 8, 1, 50),
+    });
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify(status, null, 2));
     return;
   } else if (url.pathname === '/api/agent/capture-discovery/latest') {
     if (!checkAuth(req, url, res)) return;
