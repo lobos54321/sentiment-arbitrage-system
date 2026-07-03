@@ -74,3 +74,23 @@ ran; no verdict was issued on event-counted (vs token-counted) N.
   both ways.
 - **2026-07-02**: capture_cross freeze/OOS builder code exists only on GitHub main (local checkout
   127 commits behind) — always diff against deployed commit before citing code.
+- **2026-07-03** (verified P4 deploy): commit
+  `c66f7626d0a18e982cc345123cc4007ff4faa296` deployed and AutoLoop run
+  `api_20260703T071719Z_072a871e` completed with `exit_code=0`, `timed_out=false`,
+  `tests_passed=true`. Artifact:
+  `/app/data/agent_runs/latest/capture_cross_post_freeze_oos_validation.json`.
+- **2026-07-03**: capture-cross OOS artifact schema is
+  `capture_cross_post_freeze_oos_validation.v2`; statistics schema is
+  `capture_cross_oos_statistics.v1`. It publishes raw definitions=66, deduped definitions=62,
+  event-set families=4, tested families=0, too-small families=4, self-cross excluded
+  families=0, BH-FDR q-threshold=0.1, observed statistical hits=0, and
+  `promotion_allowed=false`.
+- **2026-07-03**: the null panel ran and reported `null_panel_repeat_rate=0.0`; multiplicity
+  budget reported `raw_cells_searched=66`, `families_after_event_set_dedupe=4`,
+  `families_tested_after_self_cross_and_min_n=0`, `expected_false_hits_at_q_threshold=0.0`,
+  `observed_statistical_hits=0`.
+- **2026-07-03**: two-window rule is present and strict:
+  `required=true`, `confirmed_family_count=0`,
+  `current_window_can_only_create_watch=true`, reason
+  `Second disjoint post-freeze OOS window not yet attached to this artifact.` Current artifact
+  classification is `CAPTURE_CROSS_POST_FREEZE_OOS_WAITING_FOR_RAW_SIGNALS`.
