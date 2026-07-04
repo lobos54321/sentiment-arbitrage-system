@@ -100,3 +100,16 @@ consistent ms timestamps, and reproduces the published funnel counts.
   fields and creates `token_motion_events` for synced DBs. Remote tests passed:
   `sync-remote-premium-logs.test.mjs` 3/3, `dashboard-heavy-api-utils.test.mjs` 56/56, and
   `premium-signal-engine-dedup.test.mjs` 5/5 under `--test-force-exit`.
+- **2026-07-04** (P5 token identity hydrate, commit `c09f382`): Forward premium-signal rows now
+  backfill missing `token_supply` / `token_decimals` from the Solana mint account without blocking
+  the entry decision path. `chain-snapshot-sol` exposes mint parsed `token_supply` and
+  `token_decimals`; `premium-signal-engine` schedules a fire-and-forget identity hydrate after
+  `saveSignalRecord`, updates only `premium_signals` / `tokens`, and appends
+  `context/token_identity_hydrated` motion events. Remote verification on Zeabur passed
+  `node --check` for the touched JS files and `node --test --test-force-exit
+  /app/tests/premium-signal-engine-dedup.test.mjs` (6/6). AutoLoop
+  `api_20260704T075406Z_844f034b` completed on deployed commit `c09f382` with `exit_code=0`,
+  `tests_passed=true`, and guardrails false; `/api/agent/latest-status` then reported
+  `token_supply_present=7`, `token_decimals_present=7`, and 7
+  `context/token_identity_hydrated` events. This is read-only data-carrier enrichment only; no
+  strategy, gate, final_entry_contract, executor, canary, wallet, or risk path was changed.
