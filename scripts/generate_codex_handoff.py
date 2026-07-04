@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 
 
-SCHEMA_VERSION = "capture_discovery_codex_handoff.v6"
+SCHEMA_VERSION = "capture_discovery_codex_handoff.v7"
+MACHINE_SCHEMA_VERSION = "capture_discovery_codex_handoff_machine.v1"
 QUOTE_COVERAGE_BLOCKERS = {
     "source_quote_clean_coverage_below_80pct",
     "source_quote_executable_coverage_below_80pct",
@@ -108,6 +109,135 @@ def handoff_needed(verdict):
     if str(verdict.get("next_action") or "").startswith("human_review_"):
         return True
     return any(blocker in FIXABLE_BLOCKER_HINTS for blocker in actionable_blockers(verdict))
+
+
+def handoff_guardrails():
+    return {
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+        "forbidden_changes": [
+            "strategy",
+            "entry_policy",
+            "hard_gates",
+            "exit_gates",
+            "final_entry_contract",
+            "A_CLASS_runtime_mode",
+            "executor",
+            "canary_size",
+            "wallet",
+            "risk_settings",
+        ],
+    }
+
+
+def verification_artifacts(verdict):
+    loop = verdict.get("loop") or {}
+    run_dir = loop.get("run_dir")
+    if not run_dir:
+        return {}
+    return {
+        "reviewer_verdict": f"{run_dir}/reviewer_verdict.json",
+        "run_summary": f"{run_dir}/run_summary.md",
+        "tests": f"{run_dir}/tests.json",
+        "codex_handoff": f"{run_dir}/codex_handoff.md",
+        "codex_handoff_json": f"{run_dir}/codex_handoff.json",
+    }
+
+
+def task_from_action(task_id, title, reason, *, priority="normal"):
+    guardrails = handoff_guardrails()
+    return {
+        "task_id": task_id,
+        "title": title or "collect_next_clean_window_and_rerun_autoloop",
+        "priority": priority,
+        "reason": reason,
+        "allowed_scope": [
+            "read_only_evaluator",
+            "reporting",
+            "dashboard_api",
+            "shadow_only_context",
+            "self_tests",
+            "handoff_generation",
+        ],
+        "forbidden_scope": guardrails["forbidden_changes"],
+        "acceptance_criteria": [
+            "implementation_remains_shadow_or_read_only",
+            "promotion_allowed_false",
+            "strategy_change_allowed_false",
+            "post_deploy_autoloop_or_stage_runner_verification_recorded",
+            "task_outcome_records_commit_and_artifacts",
+        ],
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }
+
+
+def build_machine_readable_handoff(verdict):
+    loop = verdict.get("loop") or {}
+    tasks = []
+    if handoff_needed(verdict):
+        for idx, blocker in enumerate(actionable_blockers(verdict), start=1):
+            hint = FIXABLE_BLOCKER_HINTS.get(blocker)
+            if not hint:
+                continue
+            tasks.append(task_from_action(
+                f"fix_blocker_{idx}_{blocker}",
+                f"Fix data/report blocker: {blocker}",
+                hint,
+                priority="high" if idx == 1 else "normal",
+            ))
+    if not tasks and verdict.get("next_action"):
+        tasks.append(task_from_action(
+            "next_action",
+            str(verdict.get("next_action")),
+            "Primary reviewer next_action from the latest AutoLoop verdict.",
+        ))
+    if verdict.get("parallel_next_action"):
+        tasks.append(task_from_action(
+            "parallel_next_action",
+            str(verdict.get("parallel_next_action")),
+            str(verdict.get("parallel_next_action_reason") or "Reviewer-approved parallel read-only task."),
+        ))
+    if not tasks:
+        tasks.append(task_from_action(
+            "collect_next_clean_window",
+            "collect_next_clean_window_and_rerun_autoloop",
+            "No blocking Codex fix is required by the primary verdict.",
+        ))
+    task_outcomes = [{
+        "task_id": "latest_autoloop_verification",
+        "status": "completed" if verdict.get("autoloop_execution_status") == "FULL_RUN_COMPLETED" else "partial",
+        "classification": verdict.get("classification"),
+        "next_action": verdict.get("next_action"),
+        "current_commit": verdict.get("current_commit"),
+        "deployment_commit": verdict.get("deployment_commit"),
+        "run_id": loop.get("run_id"),
+        "run_dir": loop.get("run_dir"),
+        "state": loop.get("state"),
+        "tests_passed": verdict.get("tests_passed"),
+        "autoloop_execution_status": verdict.get("autoloop_execution_status"),
+        "verification_artifacts": verification_artifacts(verdict),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
+    }]
+    return {
+        "schema_version": MACHINE_SCHEMA_VERSION,
+        "generated_at": utc_now(),
+        "current_commit": verdict.get("current_commit"),
+        "deployment_commit": verdict.get("deployment_commit"),
+        "verdict": verdict.get("classification"),
+        "next_action": verdict.get("next_action"),
+        "handoff_needed": handoff_needed(verdict),
+        "guardrails": handoff_guardrails(),
+        "tasks": tasks,
+        "task_outcomes": task_outcomes,
+    }
 
 
 def compact_shadow_queue_items(items, limit=5):
@@ -720,6 +850,14 @@ def build_handoff(verdict):
             if hint:
                 lines.append(f"- `{blocker}`: {hint}")
         lines.append("")
+    lines.extend([
+        "## Machine Readable Handoff",
+        "",
+        "```json",
+        json.dumps(build_machine_readable_handoff(verdict), indent=2, sort_keys=True),
+        "```",
+        "",
+    ])
     volume_state = verdict.get("volume_profile_blocker_state") or {}
     show_volume_kline = (
         any(blocker in {"volume_profile_coverage_below_80pct", "kline_coverage_below_80pct"} for blocker in actionable)
@@ -2822,6 +2960,13 @@ def self_test():
     assert "handoff_needed: `true`" in text
     assert "human_action_required: `true`" in text
     assert "next_action: `human_review_a_class_shadow_state`" in text
+    machine = build_machine_readable_handoff(human_review_verdict)
+    assert machine["tasks"]
+    assert machine["task_outcomes"]
+    assert machine["guardrails"]["promotion_allowed"] is False
+    assert "Machine Readable Handoff" in text
+    assert '"tasks": [' in text
+    assert '"task_outcomes": [' in text
     verdict["blockers"] = []
     text = build_handoff(verdict)
     assert "handoff_needed: `false`" in text
@@ -2836,6 +2981,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verdict", required=False)
     parser.add_argument("--out", default="data/agent_handoffs/latest_codex_handoff.md")
+    parser.add_argument("--json-out", default=None)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -2846,7 +2992,14 @@ def main():
     verdict = load_json(args.verdict)
     text = build_handoff(verdict)
     write_text(args.out, text)
-    print(json.dumps({"out": args.out, "handoff_needed": handoff_needed(verdict)}, sort_keys=True))
+    if args.json_out:
+        target = Path(args.json_out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(build_machine_readable_handoff(verdict), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    print(json.dumps({"out": args.out, "json_out": args.json_out, "handoff_needed": handoff_needed(verdict)}, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -159,3 +159,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `a_class_paper_breach_recap.py --self-test`, `a_class_mode_reenable_operator.py --self-test`,
   and pytest on A_CLASS runtime/final-entry tests. `promotion_allowed=false` and no strategy,
   gate, executor, canary, wallet, or risk settings were changed.
+- **2026-07-04** (P6 loop hygiene patch prepared): AutoLoop handoffs now include a machine-readable
+  `codex_handoff.json` sidecar plus a `Machine Readable Handoff` JSON block in the Markdown with
+  `tasks[]`, `task_outcomes[]`, immutable guardrails, commit/run identifiers, and verification
+  artifact paths. `agent_capture_discovery_loop.py` and `agent_autoloop_stage_runner.py` sync both
+  Markdown and JSON handoff aliases into `agent_runs/latest` and `agent_handoffs`. The dashboard
+  runner status writer now records scheduler/cadence settings and `exec_run_provenance`
+  (trigger, command, commit, paths, guardrails, exit status), and `/api/agent/latest-status`
+  exposes the compact provenance summary. Local verification passed:
+  `generate_codex_handoff.py --self-test`, `agent_autoloop_stage_runner.py --self-test`,
+  `py_compile` for the touched Python scripts, and `node --check src/web/dashboard-server.js`.
+  This is reporting/orchestration only; `promotion_allowed=false` and no strategy, gate, executor,
+  canary, wallet, or risk settings were changed.

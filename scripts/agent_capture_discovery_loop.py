@@ -24,7 +24,11 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from generate_codex_handoff import build_handoff, write_text as write_handoff_text
+from generate_codex_handoff import (
+    build_handoff,
+    build_machine_readable_handoff,
+    write_text as write_handoff_text,
+)
 from review_agent_verdict import build_verdict, write_json
 
 
@@ -4922,7 +4926,7 @@ def build_run_summary(verdict, paths, diagnostics, tests):
     return "\n".join(lines)
 
 
-def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path):
+def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path, handoff_json_path=None):
     latest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(verdict_path, latest_dir / "reviewer_verdict.json")
     shutil.copy2(summary_path, latest_dir / "run_summary.md")
@@ -4933,6 +4937,10 @@ def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, ha
     shutil.copy2(handoff_path, latest_dir / "latest_codex_handoff.md")
     handoff_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(handoff_path, handoff_dir / "latest_codex_handoff.md")
+    if handoff_json_path and Path(handoff_json_path).exists():
+        shutil.copy2(handoff_json_path, latest_dir / "codex_handoff.json")
+        shutil.copy2(handoff_json_path, latest_dir / "latest_codex_handoff.json")
+        shutil.copy2(handoff_json_path, handoff_dir / "latest_codex_handoff.json")
 
 
 def write_materialized_artifacts(
@@ -5349,6 +5357,8 @@ def write_materialized_artifacts(
     handoff_text = build_handoff(verdict)
     handoff_path = run_dir / "codex_handoff.md"
     write_handoff_text(handoff_path, handoff_text)
+    handoff_json_path = run_dir / "codex_handoff.json"
+    write_json(handoff_json_path, build_machine_readable_handoff(verdict))
 
     artifact_paths = {
         "run_dir": str(run_dir),
@@ -5356,6 +5366,7 @@ def write_materialized_artifacts(
         "reviewer_verdict": str(verdict_path),
         "run_summary": str(run_dir / "run_summary.md"),
         "codex_handoff": str(handoff_path),
+        "codex_handoff_json": str(handoff_json_path),
         "hypothesis_registry": str(args.registry),
         "capture_report": str(capture_path),
         "pnl_cross_report": str(pnl_path) if pnl_path else None,
@@ -5369,7 +5380,7 @@ def write_materialized_artifacts(
     summary_path = run_dir / "run_summary.md"
     write_text(summary_path, summary)
     if publish_latest:
-        sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path)
+        sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, handoff_path, handoff_json_path)
     return verdict, registry, verdict_path, summary_path, handoff_path, tests_path
 
 

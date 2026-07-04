@@ -809,14 +809,27 @@ def stage_finalize(args, run_dir):
     sync_skipped_same_latest = False
     latest_dir = Path(args.out_root) / "latest"
     if eligibility["eligible"]:
+        handoff_json_path = run_dir / "codex_handoff.json"
         if run_dir.resolve() == latest_dir.resolve():
             sync_skipped_same_latest = True
             shutil.copy2(handoff_path, latest_dir / "latest_codex_handoff.md")
+            if handoff_json_path.exists():
+                shutil.copy2(handoff_json_path, latest_dir / "latest_codex_handoff.json")
             Path(args.handoff_dir).mkdir(parents=True, exist_ok=True)
             shutil.copy2(handoff_path, Path(args.handoff_dir) / "latest_codex_handoff.md")
+            if handoff_json_path.exists():
+                shutil.copy2(handoff_json_path, Path(args.handoff_dir) / "latest_codex_handoff.json")
             published = True
         else:
-            sync_latest(run_dir, latest_dir, Path(args.handoff_dir), verdict_path, summary_path, handoff_path)
+            sync_latest(
+                run_dir,
+                latest_dir,
+                Path(args.handoff_dir),
+                verdict_path,
+                summary_path,
+                handoff_path,
+                handoff_json_path,
+            )
             published = True
     update_stage_state(
         run_dir,
@@ -985,7 +998,9 @@ def self_test():
         assert (latest / "reviewer_verdict.json").exists()
         assert (latest / "capture_60_gap_report.json").exists()
         assert (latest / "latest_codex_handoff.md").exists()
+        assert (latest / "latest_codex_handoff.json").exists()
         assert (root / "agent_handoffs" / "latest_codex_handoff.md").exists()
+        assert (root / "agent_handoffs" / "latest_codex_handoff.json").exists()
         latest_verdict = load_json(latest / "reviewer_verdict.json")
         assert latest_verdict["promotion_allowed"] is False
         assert latest_verdict["decision_capture_60_gap_audit"]["available"] is True
@@ -994,13 +1009,19 @@ def self_test():
         )
         assert load_json(root / "hypothesis_registry.json")["promotion_allowed"] is False
         (latest / "latest_codex_handoff.md").write_text("STALE_LATEST_ALIAS", encoding="utf-8")
+        (latest / "latest_codex_handoff.json").write_text('{"stale": true}', encoding="utf-8")
         (root / "agent_handoffs" / "latest_codex_handoff.md").write_text("STALE_GLOBAL_ALIAS", encoding="utf-8")
+        (root / "agent_handoffs" / "latest_codex_handoff.json").write_text('{"stale": true}', encoding="utf-8")
         same_latest_finalize = stage_finalize(args, latest)
         assert same_latest_finalize["publish_latest"] is True
         assert same_latest_finalize["sync_skipped_same_latest"] is True
         assert "STALE_LATEST_ALIAS" not in (latest / "latest_codex_handoff.md").read_text(encoding="utf-8")
+        assert "stale" not in (latest / "latest_codex_handoff.json").read_text(encoding="utf-8")
         assert "STALE_GLOBAL_ALIAS" not in (
             root / "agent_handoffs" / "latest_codex_handoff.md"
+        ).read_text(encoding="utf-8")
+        assert "stale" not in (
+            root / "agent_handoffs" / "latest_codex_handoff.json"
         ).read_text(encoding="utf-8")
     print("SELF_TEST_PASS agent_autoloop_stage_runner")
 
