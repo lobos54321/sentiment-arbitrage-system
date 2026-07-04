@@ -41,6 +41,7 @@ Rules:
 | [reject-reason-counterfactual.md](reject-reason-counterfactual.md) | `review_quality_timing_rejects_shadow_only`; "is reason X protective or harmful" |
 | [post-freeze-oos-validation.md](post-freeze-oos-validation.md) | frozen definitions awaiting OOS; any `*_post_freeze_oos_validation` design change |
 | [token-motion-trace-spec.md](token-motion-trace-spec.md) | designing/extending per-token lifecycle recording; "why can't we see what the token did" |
+| [source-shadow-trial.md](source-shadow-trial.md) | adding or validating a shadow-only external signal/source trial such as pump.fun |
 
 ## Lifecycle: how experience gets in here
 
