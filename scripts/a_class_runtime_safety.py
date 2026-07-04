@@ -16,6 +16,10 @@ from typing import Any
 A_CLASS_RUNTIME_MODE_KEY = "A_CLASS_FASTLANE"
 DEFAULT_LOSS_CAP_BREACH_COOLDOWN_SEC = 24 * 60 * 60
 _BREACH_REASON = "realized_loss_cap_breach"
+BREACH_CLASS_DATA_INFRA = "DATA_INFRA"
+BREACH_CLASS_PAPER_MARKET = "PAPER_MARKET"
+BREACH_CLASS_LIVE_MARKET = "LIVE_MARKET"
+BREACH_DETAIL_SCHEMA_VERSION = "a_class_runtime_breach_detail.v2.paper_market_recovery"
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -214,6 +218,96 @@ def _parse_json(value: Any, default: Any) -> Any:
         return default
 
 
+def _paper_trade_lookup(db, trade_id: str) -> dict:
+    if not _table_exists(db, "paper_trades"):
+        return {"available": False, "reason": "paper_trades_missing"}
+    cols = _table_columns(db, "paper_trades")
+    if "id" not in cols:
+        return {"available": False, "reason": "paper_trades_missing_id"}
+    select = [
+        "id",
+        "paper_only" if "paper_only" in cols else "NULL AS paper_only",
+        "token_ca" if "token_ca" in cols else "NULL AS token_ca",
+        "symbol" if "symbol" in cols else "NULL AS symbol",
+        "premium_signal_id" if "premium_signal_id" in cols else "NULL AS premium_signal_id",
+        "entry_ts" if "entry_ts" in cols else "NULL AS entry_ts",
+        "exit_ts" if "exit_ts" in cols else "NULL AS exit_ts",
+        "entry_price" if "entry_price" in cols else "NULL AS entry_price",
+        "exit_price" if "exit_price" in cols else "NULL AS exit_price",
+        "pnl_pct" if "pnl_pct" in cols else "NULL AS pnl_pct",
+        "exit_reason" if "exit_reason" in cols else "NULL AS exit_reason",
+    ]
+    try:
+        row = db.execute(f"SELECT {', '.join(select)} FROM paper_trades WHERE id = ?", (trade_id,)).fetchone()
+    except Exception as exc:
+        return {"available": False, "reason": "paper_trade_lookup_failed", "error": str(exc)}
+    if row is None:
+        return {"available": False, "reason": "paper_trade_not_found"}
+    return {
+        "available": True,
+        "paper_trade_id": str(_row_value(row, "id")),
+        "paper_only": bool(_truthy(_row_value(row, "paper_only", True))),
+        "token_ca": _row_value(row, "token_ca"),
+        "symbol": _row_value(row, "symbol"),
+        "premium_signal_id": _row_value(row, "premium_signal_id"),
+        "entry_ts": _safe_float(_row_value(row, "entry_ts"), None),
+        "exit_ts": _safe_float(_row_value(row, "exit_ts"), None),
+        "entry_price": _safe_float(_row_value(row, "entry_price"), None),
+        "exit_price": _safe_float(_row_value(row, "exit_price"), None),
+        "pnl_pct": _safe_float(_row_value(row, "pnl_pct"), None),
+        "exit_reason": _row_value(row, "exit_reason"),
+    }
+
+
+def _is_paper_only_breach(row: Any, detail: dict, paper_trade: dict) -> tuple[bool, list[str]]:
+    evidence = []
+    if paper_trade.get("available") and bool(paper_trade.get("paper_only")):
+        evidence.append("paper_trades.paper_only")
+    metadata = _parse_json(_row_value(row, "metadata_json"), {})
+    for source, payload in (("loss_cap_detail_json", detail), ("canonical_metadata_json", metadata)):
+        if not isinstance(payload, dict):
+            continue
+        if _truthy(payload.get("paper_only")):
+            evidence.append(f"{source}.paper_only")
+        if _truthy(payload.get("paper_only_scout")):
+            evidence.append(f"{source}.paper_only_scout")
+        scope = str(payload.get("execution_scope") or payload.get("executionScope") or "").lower()
+        if scope == "paper_only":
+            evidence.append(f"{source}.execution_scope")
+    return bool(evidence), sorted(set(evidence))
+
+
+def _classify_breach(row: Any, detail: dict, paper_trade: dict) -> dict:
+    paper_only, paper_evidence = _is_paper_only_breach(row, detail, paper_trade)
+    evidence = list(paper_evidence)
+    if _truthy(_row_value(row, "no_route_flag")):
+        evidence.append("canonical_ledger.no_route_flag")
+    if _truthy(_row_value(row, "trapped_flag")):
+        evidence.append("canonical_ledger.trapped_flag")
+    if not paper_only and any(item.endswith(("no_route_flag", "trapped_flag")) for item in evidence):
+        return {
+            "breach_class": BREACH_CLASS_DATA_INFRA,
+            "source": "canonical_ledger_runtime_flags",
+            "evidence": sorted(set(evidence)),
+            "paper_only": False,
+        }
+    if paper_only:
+        evidence.append("paper_only_loss_cap_breach")
+        return {
+            "breach_class": BREACH_CLASS_PAPER_MARKET,
+            "source": "paper_trade_runtime_lookup",
+            "evidence": sorted(set(evidence)),
+            "paper_only": True,
+        }
+    evidence.append("a_class_loss_cap_breach_without_paper_only_marker")
+    return {
+        "breach_class": BREACH_CLASS_LIVE_MARKET,
+        "source": "canonical_ledger_default_live_market",
+        "evidence": sorted(set(evidence)),
+        "paper_only": False,
+    }
+
+
 def fetch_mode_runtime_state(db, mode: Any = None, *, now_ts: float | None = None) -> dict:
     now_ts = float(now_ts if now_ts is not None else time.time())
     mode_key = normalize_runtime_mode_key(mode)
@@ -253,7 +347,7 @@ def record_loss_cap_breach_reaction(
                COALESCE(is_a_class_fastlane, 0) AS is_a_class_fastlane,
                loss_cap_breach, loss_cap_pct, loss_cap_detail_json,
                realized_pnl_pct, realized_pnl_sol, entry_size_sol, exit_ts,
-               exit_reason, no_route_flag, trapped_flag
+               exit_reason, no_route_flag, trapped_flag, metadata_json
         FROM canonical_trade_ledger
         WHERE trade_id = ?
         """,
@@ -289,15 +383,23 @@ def record_loss_cap_breach_reaction(
     cooldown_sec = loss_cap_breach_cooldown_sec() if cooldown_sec is None else max(0, int(cooldown_sec))
     event_ts = _safe_float(_row_value(row, "exit_ts"), now_ts) or now_ts
     cooldown_until = max(now_ts, event_ts) + cooldown_sec
+    loss_cap_detail = _parse_json(_row_value(row, "loss_cap_detail_json"), {})
+    paper_trade = _paper_trade_lookup(db, trade_id)
+    breach_classification = _classify_breach(row, loss_cap_detail, paper_trade)
     existing = db.execute(
         "SELECT source_trade_id, breach_count FROM a_class_mode_runtime_state WHERE mode_key = ?",
         (mode_key,),
     ).fetchone()
     duplicate = existing is not None and str(_row_value(existing, "source_trade_id") or "") == trade_id
     breach_count = _safe_int(_row_value(existing, "breach_count"), 0) if duplicate else _safe_int(_row_value(existing, "breach_count"), 0) + 1
+    paper_only = bool(breach_classification.get("paper_only"))
     detail = {
+        "schema_version": BREACH_DETAIL_SCHEMA_VERSION,
         "breach": True,
         "reason": _BREACH_REASON,
+        "breach_class": breach_classification.get("breach_class"),
+        "breach_class_source": breach_classification.get("source"),
+        "breach_class_evidence": breach_classification.get("evidence") or [],
         "mode_key": mode_key,
         "trade_id": trade_id,
         "token_ca": _row_value(row, "token_ca"),
@@ -311,6 +413,16 @@ def record_loss_cap_breach_reaction(
         "exit_reason": _row_value(row, "exit_reason"),
         "no_route_flag": bool(_truthy(_row_value(row, "no_route_flag"))),
         "trapped_flag": bool(_truthy(_row_value(row, "trapped_flag"))),
+        "paper_only": paper_only,
+        "paper_trade_lookup": paper_trade,
+        "paper_recovery_contract": {
+            "paper_auto_resume_after_clean_windows_allowed": paper_only,
+            "paper_auto_recovery_counter_started": paper_only,
+            "paper_only_loss_records_recap_required": paper_only,
+            "paper_only_loss_requires_human_live_reenable": True,
+            "live_reenable_requires_human_operator": True,
+            "changes_strategy_or_gates": False,
+        },
         "cooldown_sec": cooldown_sec,
         "cooldown_until_ts": cooldown_until,
         "clean_windows_required": int(clean_windows_required),
@@ -395,7 +507,7 @@ def summarize_runtime_safety(db, *, since_ts: float | None = None, now_ts: float
                 f"""
                 SELECT trade_id, token_ca, symbol, normalized_mode, entry_mode,
                        exit_ts, realized_pnl_pct, realized_pnl_sol, loss_cap_pct,
-                       exit_reason, no_route_flag, trapped_flag
+                       exit_reason, no_route_flag, trapped_flag, loss_cap_detail_json
                 FROM canonical_trade_ledger
                 {where}
                 ORDER BY COALESCE(exit_ts, updated_at, created_at, 0) DESC

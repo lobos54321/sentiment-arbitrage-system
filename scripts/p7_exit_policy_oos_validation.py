@@ -25,6 +25,7 @@ SCHEMA_VERSION = "p7_exit_policy_oos_validation.v1"
 DEFAULT_DATA_DIR = Path("/app/data")
 DEFAULT_FREEZE_REGISTRY = Path("docs/agents/P7_EXIT_POLICY_OOS_FREEZE_REGISTRY.json")
 PRIMARY_DELAY_GRID_SEC = (5, 10, 20, 30)
+STOP_FILL_STRESS_FLOORS_PCT = (-25.0, -30.0)
 
 
 def utc_now() -> str:
@@ -253,6 +254,70 @@ def sensitivity_summary(results, drop_count):
     }
 
 
+def has_hard_stop_exit(row):
+    reason = str(row.get("exit_reason") or "").lower()
+    if "hard_stop" in reason:
+        return True
+    for item in row.get("exits") or []:
+        if "hard_stop" in str(item.get("reason") or "").lower():
+            return True
+    return False
+
+
+def apply_stop_fill_stress(results, floor_pct):
+    stressed = []
+    hard_stop_count = 0
+    for row in results:
+        item = dict(row)
+        exits = []
+        changed = False
+        weighted = 0.0
+        if item.get("exits"):
+            for exit_row in item.get("exits") or []:
+                exit_item = dict(exit_row)
+                fraction = safe_float(exit_item.get("fraction"), 0.0) or 0.0
+                if "hard_stop" in str(exit_item.get("reason") or "").lower():
+                    exit_item["unstressed_net_pnl_pct"] = safe_float(exit_item.get("net_pnl_pct"))
+                    exit_item["net_pnl_pct"] = float(floor_pct)
+                    exit_item["stop_fill_stress_floor_pct"] = float(floor_pct)
+                    changed = True
+                weighted += (safe_float(exit_item.get("net_pnl_pct"), 0.0) or 0.0) * fraction
+                exits.append(exit_item)
+        elif has_hard_stop_exit(item):
+            weighted = float(floor_pct)
+            changed = True
+        if changed:
+            hard_stop_count += 1
+            item["unstressed_net_pnl_pct"] = safe_float(item.get("net_pnl_pct"))
+            item["net_pnl_pct"] = round(weighted, 6)
+            item["capital_roi_pct"] = round(weighted * lab.POSITION_FRACTION_OF_RISK_CAPITAL, 6)
+            item["win"] = weighted > 0
+            item["stop_fill_stressed"] = True
+            item["stop_fill_stress_floor_pct"] = float(floor_pct)
+            if exits:
+                item["exits"] = exits
+        stressed.append(item)
+    return stressed, hard_stop_count
+
+
+def stop_fill_stress_summary(results):
+    summaries = {}
+    for floor in STOP_FILL_STRESS_FLOORS_PCT:
+        stressed, hard_stop_count = apply_stop_fill_stress(results, floor)
+        valid = [row for row in stressed if row.get("net_pnl_pct") is not None]
+        rolling = lab.rolling_24h_distribution(valid)
+        summaries[str(int(floor))] = {
+            "stress_floor_net_pnl_pct": float(floor),
+            "hard_stop_exit_count": hard_stop_count,
+            "simulated_trade_count": len(valid),
+            "rolling_24h_roi_median_pct": rolling.get("median_pct"),
+            "rolling_24h_roi_distribution_pct": rolling,
+            "compound_cumulative_roi_pct_reference": compounded_cumulative_roi_pct(stressed),
+            "median_net_pnl_pct": None if not valid else round(statistics.median(row["net_pnl_pct"] for row in valid), 6),
+        }
+    return summaries
+
+
 def summarize_oos_cell(policy, slippage, delay_sec, results):
     base = lab.summarize_variant(policy, slippage, delay_sec, results)
     rolling = base.get("rolling_24h_realized_net_roi_distribution_pct") or {}
@@ -262,6 +327,7 @@ def summarize_oos_cell(policy, slippage, delay_sec, results):
         "compound_cumulative_roi_pct_reference": compounded_cumulative_roi_pct(results),
         "drop_top_1_winner_sensitivity": sensitivity_summary(results, 1),
         "drop_top_3_winners_sensitivity": sensitivity_summary(results, 3),
+        "stop_fill_stress_tests": stop_fill_stress_summary(results),
     })
     return base
 
@@ -291,12 +357,20 @@ def simulate_cells(samples, policies):
     return cells
 
 
-def rank_cells(cells):
+def cell_primary_metric(row, *, stop_fill_floor_pct=None):
+    if stop_fill_floor_pct is None:
+        return safe_float(row.get("primary_metric_pct"))
+    tests = row.get("stop_fill_stress_tests") or {}
+    key = str(int(stop_fill_floor_pct))
+    return safe_float((tests.get(key) or {}).get("rolling_24h_roi_median_pct"))
+
+
+def rank_cells(cells, *, stop_fill_floor_pct=None):
     ranked = sorted(
         cells,
         key=lambda row: (
-            row.get("primary_metric_pct") is not None,
-            safe_float(row.get("primary_metric_pct"), -1e18),
+            cell_primary_metric(row, stop_fill_floor_pct=stop_fill_floor_pct) is not None,
+            cell_primary_metric(row, stop_fill_floor_pct=stop_fill_floor_pct) or -1e18,
             safe_float(row.get("win_rate"), -1e18),
             -safe_float(row.get("max_drawdown_pct"), 1e18),
         ),
@@ -307,12 +381,12 @@ def rank_cells(cells):
     return ranked
 
 
-def aggregate_policy_primary(cells, *, delays=PRIMARY_DELAY_GRID_SEC):
+def aggregate_policy_primary(cells, *, delays=PRIMARY_DELAY_GRID_SEC, stop_fill_floor_pct=None):
     by_policy = defaultdict(list)
     for row in cells:
         if int(row.get("entry_delay_sec") or 0) not in set(delays):
             continue
-        value = safe_float(row.get("primary_metric_pct"))
+        value = cell_primary_metric(row, stop_fill_floor_pct=stop_fill_floor_pct)
         if value is None:
             continue
         by_policy[row.get("policy_id")].append(value)
@@ -321,6 +395,7 @@ def aggregate_policy_primary(cells, *, delays=PRIMARY_DELAY_GRID_SEC):
         out.append({
             "policy_id": policy_id,
             "primary_delay_grid_sec": list(delays),
+            "stop_fill_stress_floor_pct": stop_fill_floor_pct,
             "cell_count": len(values),
             "median_primary_metric_pct": round(statistics.median(values), 6),
             "mean_primary_metric_pct": round(sum(values) / len(values), 6),
@@ -332,7 +407,7 @@ def aggregate_policy_primary(cells, *, delays=PRIMARY_DELAY_GRID_SEC):
     return out
 
 
-def ranking_stability(cells, champion_policy_id):
+def ranking_stability(cells, champion_policy_id, *, stop_fill_floor_pct=None):
     groups = defaultdict(list)
     for row in cells:
         delay = int(row.get("entry_delay_sec") or 0)
@@ -342,7 +417,7 @@ def ranking_stability(cells, champion_policy_id):
     rows = []
     champion_top = 0
     for (delay, slippage), group in sorted(groups.items()):
-        ranked = rank_cells(list(group))
+        ranked = rank_cells(list(group), stop_fill_floor_pct=stop_fill_floor_pct)
         top = ranked[0] if ranked else {}
         is_champion = top.get("policy_id") == champion_policy_id
         champion_top += 1 if is_champion else 0
@@ -350,18 +425,44 @@ def ranking_stability(cells, champion_policy_id):
             "entry_delay_sec": delay,
             "slippage_pct": slippage,
             "top_policy_id": top.get("policy_id"),
-            "top_primary_metric_pct": top.get("primary_metric_pct"),
+            "top_primary_metric_pct": cell_primary_metric(top, stop_fill_floor_pct=stop_fill_floor_pct),
             "champion_is_top": is_champion,
         })
     return {
         "delay_zero_excluded": True,
         "primary_delay_grid_sec": list(PRIMARY_DELAY_GRID_SEC),
+        "stop_fill_stress_floor_pct": stop_fill_floor_pct,
         "cell_count": len(rows),
         "champion_top_count": champion_top,
         "champion_top_rate": None if not rows else round(champion_top / len(rows), 6),
         "strictly_stable": bool(rows) and champion_top == len(rows),
         "rows": rows,
     }
+
+
+def stop_fill_stress_ranking_panels(cells, champion_policy_id):
+    out = {}
+    for floor in STOP_FILL_STRESS_FLOORS_PCT:
+        policy_primary = aggregate_policy_primary(cells, stop_fill_floor_pct=floor)
+        top_policy = policy_primary[0].get("policy_id") if policy_primary else None
+        champion_row = next((row for row in policy_primary if row.get("policy_id") == champion_policy_id), None)
+        out[str(int(floor))] = {
+            "stress_floor_net_pnl_pct": float(floor),
+            "policy_primary_ranking_delay_5_30": policy_primary,
+            "ranking_stability_delay_5_30": ranking_stability(
+                cells,
+                champion_policy_id,
+                stop_fill_floor_pct=floor,
+            ),
+            "top_policy_id_delay_5_30": top_policy,
+            "champion_primary_delay_5_30": champion_row,
+            "direction_positive_for_champion": bool(
+                champion_row
+                and top_policy == champion_policy_id
+                and safe_float(champion_row.get("median_primary_metric_pct"), -1e18) > 0
+            ),
+        }
+    return out
 
 
 def build_window_report(raw_db, paper_db, registry, window_index, window_start, window_end, now_ts, limit):
@@ -376,12 +477,18 @@ def build_window_report(raw_db, paper_db, registry, window_index, window_start, 
         policy_primary = aggregate_policy_primary(cells)
         top_policy = policy_primary[0].get("policy_id") if policy_primary else None
         champion_row = next((row for row in policy_primary if row.get("policy_id") == champion_policy_id), None)
+        stop_stress = stop_fill_stress_ranking_panels(cells, champion_policy_id)
         dedupe_reports.append({
             "dedupe_meta": dedupe_meta,
             "policy_primary_ranking_delay_5_30": policy_primary,
             "ranking_stability_delay_5_30": ranking_stability(cells, champion_policy_id),
             "top_policy_id_delay_5_30": top_policy,
             "champion_primary_delay_5_30": champion_row,
+            "stop_fill_stress_ranking_delay_5_30": stop_stress,
+            "stop_fill_stress_passed_for_champion": all(
+                bool((panel or {}).get("direction_positive_for_champion"))
+                for panel in stop_stress.values()
+            ) if stop_stress else False,
             "direction_positive_for_champion": bool(
                 champion_row
                 and top_policy == champion_policy_id
@@ -401,6 +508,7 @@ def build_window_report(raw_db, paper_db, registry, window_index, window_start, 
         "paper_evidence": paper_evidence_summary(paper_db, window_start, min(window_end, now_ts)),
         "dedupe_reports": dedupe_reports,
         "primary_all_samples_direction_positive": bool(all_view.get("direction_positive_for_champion")),
+        "stop_fill_stress_all_samples_passed_for_champion": bool(all_view.get("stop_fill_stress_passed_for_champion")),
     }
 
 
@@ -428,16 +536,19 @@ def build_report(args):
     completed = [w for w in windows if w.get("complete")]
     two_complete = len(completed) == 2
     same_direction = two_complete and all(w.get("primary_all_samples_direction_positive") for w in windows)
+    stop_stress_passed = two_complete and all(w.get("stop_fill_stress_all_samples_passed_for_champion") for w in windows)
     blockers = list(registry_errors)
     if not two_complete:
         blockers.append("waiting_for_two_non_overlapping_forward_windows")
     elif not same_direction:
         blockers.append("two_forward_windows_not_same_positive_direction")
+    elif not stop_stress_passed:
+        blockers.append("stop_fill_stress_champion_not_stable")
     classification = (
         "P7_EXIT_POLICY_OOS_BLOCKED_REGISTRY"
         if registry_errors
         else "P7_EXIT_POLICY_OOS_PASSED_PENDING_HUMAN_REVIEW"
-        if same_direction
+        if same_direction and stop_stress_passed
         else "P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA"
         if not two_complete
         else "P7_EXIT_POLICY_OOS_NOT_PASSED"
@@ -457,9 +568,16 @@ def build_report(args):
         "compound_cumulative_roi_is_reference_only": True,
         "ranking_stability_delay_grid_sec": list(PRIMARY_DELAY_GRID_SEC),
         "delay_zero_excluded_from_ranking_stability": True,
+        "stop_fill_stress_contract": {
+            "enabled": True,
+            "hard_stop_fill_floors_net_pnl_pct": list(STOP_FILL_STRESS_FLOORS_PCT),
+            "champion_must_remain_top_delay_5_30": True,
+            "basis": "paper_trade_id_71_probe_quote_guard_stop_filled_near_-29.75pct",
+        },
         "windows": windows,
         "two_windows_complete": two_complete,
         "two_windows_same_positive_direction": same_direction,
+        "stop_fill_stress_champion_stable": stop_stress_passed,
         "classification": classification,
         "blockers": blockers,
         "promotion_allowed": False,
@@ -591,6 +709,10 @@ def self_test():
         assert report["two_windows_complete"] is True
         assert len(report["windows"]) == 2
         assert report["windows"][0]["dedupe_reports"][0]["ranking_stability_delay_5_30"]["delay_zero_excluded"] is True
+        assert report["stop_fill_stress_contract"]["enabled"] is True
+        assert report["windows"][0]["dedupe_reports"][0]["stop_fill_stress_ranking_delay_5_30"]
+        first_cell = report["windows"][0]["dedupe_reports"][0]["ranked_cells"][0]
+        assert first_cell["stop_fill_stress_tests"]["-25"]["stress_floor_net_pnl_pct"] == -25.0
         assert report["classification"] in {
             "P7_EXIT_POLICY_OOS_PASSED_PENDING_HUMAN_REVIEW",
             "P7_EXIT_POLICY_OOS_NOT_PASSED",

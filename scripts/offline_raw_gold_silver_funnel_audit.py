@@ -1102,19 +1102,25 @@ def load_raw_signal_decision_bridge(
         reason_key = _decision_reason_key(chosen)
         payload = jloads(chosen["payload_json"]) if chosen is not None else {}
         decision_no_pass_reasons[reason_key] += 1
-        if len(decision_no_pass_examples) < 20:
-            decision_no_pass_examples.append(
-                {
-                    "signal_id": signal_id,
-                    "attribution": {
-                        "component": reason_key[0],
-                        "event_type": reason_key[1],
-                        "decision": reason_key[2],
-                        "reason": reason_key[3],
-                        "hard_blockers": _extract_hard_blockers(payload),
-                    },
-                }
-            )
+        raw_row = raw_by_signal.get(signal_id) or {}
+        decision_no_pass_examples.append(
+            {
+                "signal_id": signal_id,
+                "raw_token_ca": raw_row.get("token_ca"),
+                "raw_symbol": raw_row.get("symbol"),
+                "raw_signal_ts": raw_row.get("signal_ts"),
+                "raw_primary_tier": raw_row.get("raw_primary_tier"),
+                "raw_peak_pct": raw_row.get("max_sustained_peak_pct"),
+                "decision_event_ts": chosen["event_ts"] if chosen is not None else None,
+                "attribution": {
+                    "component": reason_key[0],
+                    "event_type": reason_key[1],
+                    "decision": reason_key[2],
+                    "reason": reason_key[3],
+                    "hard_blockers": _extract_hard_blockers(payload),
+                },
+            }
+        )
 
     pass_without_pending = (pass_allow - pending) & raw_id_set
     pass_without_pending_reasons = Counter()
@@ -1213,6 +1219,9 @@ def load_raw_signal_decision_bridge(
             "raw_signals_with_decision_no_pass_or_allow": len(decision_no_pass),
             "decision_no_pass_or_allow_reason_counts": _reason_rows(decision_no_pass_reasons),
             "decision_no_pass_or_allow_examples": decision_no_pass_examples,
+            "decision_no_pass_or_allow_rows_persisted": len(decision_no_pass_examples),
+            "decision_no_pass_or_allow_rows_complete": len(decision_no_pass_examples) == len(decision_no_pass),
+            "decision_no_pass_or_allow_examples_limit": None,
             "raw_signals_pass_or_allow_without_pending_entry": len(pass_without_pending),
             "pass_or_allow_without_pending_entry_reason_counts": _reason_rows(pass_without_pending_reasons),
             "pass_or_allow_without_pending_entry_examples": pass_without_pending_examples,

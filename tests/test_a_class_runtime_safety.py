@@ -77,6 +77,43 @@ def test_loss_cap_breach_downgrades_a_class_mode_and_is_idempotent():
     assert row["source_trade_id"] == "trade-a"
 
 
+def test_paper_only_loss_cap_breach_records_paper_market_recovery_contract():
+    db = memory_db()
+    _record_a_class_trade(db, trade_id="71", exit_sol=0.0007025)
+    db.execute(
+        """
+        CREATE TABLE paper_trades(
+          id INTEGER PRIMARY KEY,
+          paper_only INTEGER,
+          token_ca TEXT,
+          symbol TEXT,
+          premium_signal_id INTEGER,
+          entry_ts INTEGER,
+          exit_ts INTEGER,
+          entry_price REAL,
+          exit_price REAL,
+          pnl_pct REAL,
+          exit_reason TEXT
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO paper_trades VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (71, 1, "TokenA", "USDC", 49535, 1_000, 1_030, 1.0, 0.7025, -0.2975, "probe_quote_guard_stop"),
+    )
+    db.commit()
+
+    detail = record_loss_cap_breach_reaction(db, "71", now_ts=1_030, cooldown_sec=600)
+
+    assert detail["breach"] is True
+    assert detail["breach_class"] == "PAPER_MARKET"
+    assert detail["paper_only"] is True
+    assert detail["paper_recovery_contract"]["paper_auto_recovery_counter_started"] is True
+    assert detail["paper_recovery_contract"]["live_reenable_requires_human_operator"] is True
+    state = fetch_mode_runtime_state(db, "A_CLASS_FASTLANE", now_ts=1_031)
+    assert state["detail"]["breach_class"] == "PAPER_MARKET"
+
+
 def test_cooldown_expiry_returns_shadow_not_live():
     db = memory_db()
     _record_a_class_trade(db)

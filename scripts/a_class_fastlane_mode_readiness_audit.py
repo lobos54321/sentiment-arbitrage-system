@@ -216,6 +216,10 @@ def normalize_breach_class(value):
     text = str(value or "").strip().upper()
     if text in {"DATA_INFRA", "INFRA", "PROVIDER", "QUOTE_INFRA", "NO_ROUTE_INFRA"}:
         return "DATA_INFRA"
+    if text in {"PAPER_MARKET", "PAPER_ONLY_MARKET", "PAPER_REAL_LOSS"}:
+        return "PAPER_MARKET"
+    if text in {"LIVE_MARKET", "LIVE_REAL_LOSS"}:
+        return "LIVE_MARKET"
     if text in {"MARKET", "REAL_LOSS", "EXECUTION_MARKET"}:
         return "MARKET"
     return None
@@ -316,7 +320,7 @@ def clean_windows_required_for_breach_class(breach_class):
 def build_motion_trace_review_artifact(state, breach_class, now_ts):
     state = state if isinstance(state, dict) else {}
     detail = state.get("detail") if isinstance(state.get("detail"), dict) else {}
-    required = breach_class == "MARKET"
+    required = breach_class in {"MARKET", "PAPER_MARKET", "LIVE_MARKET"}
     trade_id = state.get("source_trade_id") or detail.get("trade_id")
     token = state.get("token_ca") or detail.get("token_ca")
     symbol = state.get("symbol") or detail.get("symbol")
@@ -324,7 +328,7 @@ def build_motion_trace_review_artifact(state, breach_class, now_ts):
     loss_cap_pct = state.get("loss_cap_pct")
     available = bool(not required or trade_id)
     summary = (
-        f"A_CLASS MARKET circuit review for trade {trade_id or 'UNKNOWN'} "
+        f"A_CLASS {breach_class} circuit review for trade {trade_id or 'UNKNOWN'} "
         f"({symbol or token or 'UNKNOWN'}): realized_pnl_pct={pnl_pct}, "
         f"loss_cap_pct={loss_cap_pct}. Review confirms the recovery SLA is "
         "24 clean hourly buckets before paper auto-resume; LIVE still requires "
@@ -377,6 +381,20 @@ def build_circuit_recovery_sla(state, now_ts):
                 "examples": ["real_loss_with_normal_data_quality"],
                 "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
                 "motion_trace_review_required": True,
+            },
+            "PAPER_MARKET": {
+                "examples": ["paper_only_loss_with_normal_market_quote_collapse"],
+                "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
+                "motion_trace_review_required": True,
+                "paper_auto_resume_after_sla_allowed": True,
+                "live_reenable_requires_human": True,
+            },
+            "LIVE_MARKET": {
+                "examples": ["real_capital_loss_with_normal_market_movement"],
+                "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
+                "motion_trace_review_required": True,
+                "paper_auto_resume_after_sla_allowed": True,
+                "live_reenable_requires_human": True,
             },
         },
         "cooldown_required_sec": CIRCUIT_COOLDOWN_SEC,
