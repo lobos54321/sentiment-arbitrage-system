@@ -248,3 +248,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `promotion_allowed=false`, `production_impact=zero_shadow_only`. This confirms the P8
   second-source trial is accumulating without changing production funnel, strategy, gates,
   executor, canary, wallet, or risk.
+- **2026-07-04** (P7 OOS status audit after P8): OOS refresh completed at
+  `2026-07-04T03:55:56Z` with `promotion_allowed=false`. The P7 validator artifact
+  `p7_exit_policy_oos_validation.json` was regenerated at `2026-07-04T03:47:42Z` and reports
+  `classification=P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`,
+  `next_action=wait_for_forward_oos_windows`, `paper_proposal_allowed=false`,
+  `human_checkpoint_required=false`, and `live_exit_policy_changed=false`. Freeze remains
+  `2026-07-03T12:50:42Z`; window 0 (`2026-07-03T12:50:42Z` to
+  `2026-07-04T12:50:42Z`) is incomplete but already has 378 forward samples and positive
+  champion direction/stress status; window 1 (`2026-07-04T12:50:42Z` to
+  `2026-07-05T12:50:42Z`) has not started collecting eligible samples yet. Blocker is exactly
+  `waiting_for_two_non_overlapping_forward_windows`, not strategy failure. P7 remains
+  shadow-only and no paper proposal is allowed.
