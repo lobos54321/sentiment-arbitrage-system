@@ -2182,16 +2182,32 @@ function readAgentCaptureLoopRunnerStatus() {
   }
   const startedMs = Date.parse(status.started_at || '');
   const ageMs = Number.isFinite(startedMs) ? Date.now() - startedMs : null;
-  const staleRunning = Boolean(status.running && ageMs != null && ageMs > 3 * 60 * 60 * 1000);
-  const running = Boolean(status.running && !staleRunning && processIsAlive(status.pid));
-  return {
+  const pidAlive = processIsAlive(status.pid);
+  const staleRunning = Boolean(
+    status.running
+    && (
+      !pidAlive
+      || (ageMs != null && ageMs > 3 * 60 * 60 * 1000)
+    )
+  );
+  const running = Boolean(status.running && !staleRunning && pidAlive);
+  const normalized = {
     ...status,
     available: true,
     running,
     stale_running_status: staleRunning,
+    stale_running_reason: staleRunning
+      ? (!pidAlive ? 'pid_not_alive' : 'age_exceeded_3h')
+      : null,
     age_minutes: ageMs == null ? null : +(ageMs / 60000).toFixed(2),
-    pid_alive: processIsAlive(status.pid),
+    pid_alive: pidAlive,
   };
+  if (staleRunning && status.running) {
+    normalized.reconciled_at = new Date().toISOString();
+    normalized.reconciliation_note = 'runner status normalized because stored running pid is not active or exceeded stale age';
+    try { safeWriteAgentJson(paths.runner_status, normalized); } catch {}
+  }
+  return normalized;
 }
 
 function compactVerdictSummary(verdict) {
@@ -11904,6 +11920,11 @@ const server = http.createServer(async (req, res) => {
         supported_artifacts: Object.keys(paths).sort(),
         supported_aliases: Object.keys(aliases).sort(),
       }, null, 2));
+      return;
+    }
+    if (artifact === 'runner_status') {
+      res.writeHead(200, apiJsonHeaders());
+      res.end(JSON.stringify(readAgentCaptureLoopRunnerStatus(), null, 2));
       return;
     }
     if (!fs.existsSync(artifactPath)) {

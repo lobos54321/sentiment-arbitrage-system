@@ -283,3 +283,11 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   real-capital `MARKET` / `LIVE_MARKET` stays 24h + 24 clean hourly buckets and human-only. This is
   documentation/ledger hygiene only; it does not change runtime policy, strategy, gates, executor,
   canary, wallet, or risk.
+- **2026-07-04** (P6 runner-status stale-pid fix): AutoLoop run
+  `api_20260704T061543Z_d56eb8b2` produced latest artifacts and stage state through `finalize` /
+  `oos`, but the raw runner status file still said `running=true` after pid `277` had exited.
+  Dashboard runner-status normalization now treats `running=true` + dead pid as
+  `stale_running_status=true`, `stale_running_reason=pid_not_alive`, `running=false`, writes the
+  reconciled status back to the status file, and serves normalized JSON for
+  `artifact=runner_status`. This is P6 reporting hygiene only; it does not change strategy, gates,
+  executor, canary, wallet, risk, or paper/LIVE enablement.
