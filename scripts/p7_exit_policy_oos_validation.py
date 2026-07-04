@@ -537,6 +537,14 @@ def build_report(args):
     two_complete = len(completed) == 2
     same_direction = two_complete and all(w.get("primary_all_samples_direction_positive") for w in windows)
     stop_stress_passed = two_complete and all(w.get("stop_fill_stress_all_samples_passed_for_champion") for w in windows)
+    stop_stress_scope = {
+        "windows": "two_forward_windows",
+        "dedupe_view": "all_samples",
+        "entry_delay_grid_sec": list(PRIMARY_DELAY_GRID_SEC),
+        "delay_zero_excluded": True,
+        "stress_floor_set_pct": list(STOP_FILL_STRESS_FLOORS_PCT),
+        "pass_condition": "champion remains top and positive in every listed all_samples stress panel for both completed windows",
+    }
     blockers = list(registry_errors)
     if not two_complete:
         blockers.append("waiting_for_two_non_overlapping_forward_windows")
@@ -577,6 +585,9 @@ def build_report(args):
         "windows": windows,
         "two_windows_complete": two_complete,
         "two_windows_same_positive_direction": same_direction,
+        "stop_fill_stress_champion_stable_scope": stop_stress_scope,
+        "stop_fill_stress_champion_stable_all_samples_delay_5_30_all_floors": stop_stress_passed,
+        "legacy_stop_fill_stress_champion_stable": stop_stress_passed,
         "stop_fill_stress_champion_stable": stop_stress_passed,
         "classification": classification,
         "blockers": blockers,
