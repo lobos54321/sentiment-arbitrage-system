@@ -300,11 +300,47 @@ async function fetchJsonEvents(url) {
   return extractEvents(await response.json());
 }
 
+async function resolveWebSocketConstructor() {
+  if (typeof globalThis.WebSocket === 'function') {
+    return { WebSocketCtor: globalThis.WebSocket, backend: 'global_websocket' };
+  }
+  try {
+    const mod = await import('ws');
+    const WebSocketCtor = mod.WebSocket || mod.default;
+    if (typeof WebSocketCtor === 'function') {
+      return { WebSocketCtor, backend: 'ws_package' };
+    }
+  } catch (error) {
+    return {
+      WebSocketCtor: null,
+      backend: 'unavailable',
+      error_code: 'websocket_backend_unavailable',
+      error: error.message,
+    };
+  }
+  return {
+    WebSocketCtor: null,
+    backend: 'unavailable',
+    error_code: 'websocket_backend_unavailable',
+  };
+}
+
+function websocketOn(ws, eventName, handler) {
+  if (typeof ws.addEventListener === 'function') {
+    ws.addEventListener(eventName, handler);
+  } else if (typeof ws.on === 'function') {
+    ws.on(eventName, handler);
+  }
+}
+
 async function collectWebSocketEvents(args) {
-  if (typeof globalThis.WebSocket !== 'function') {
+  const resolved = await resolveWebSocketConstructor();
+  if (!resolved.WebSocketCtor) {
     return {
       status: 'P8_STREAM_BACKEND_UNAVAILABLE',
-      error_code: 'global_websocket_unavailable',
+      backend: resolved.backend,
+      error_code: resolved.error_code || 'websocket_backend_unavailable',
+      error: resolved.error || null,
       events: [],
     };
   }
@@ -313,21 +349,22 @@ async function collectWebSocketEvents(args) {
   let opened = false;
   let closeReason = null;
   await new Promise((resolve) => {
-    const ws = new globalThis.WebSocket(args.websocketUrl);
+    const ws = new resolved.WebSocketCtor(args.websocketUrl);
     const timeout = setTimeout(() => {
       closeReason = 'duration_elapsed';
       try { ws.close(); } catch {}
       resolve();
     }, args.durationSec * 1000);
-    ws.addEventListener('open', () => {
+    websocketOn(ws, 'open', () => {
       opened = true;
       if (args.subscribeJson) {
         try { ws.send(args.subscribeJson); } catch {}
       }
     });
-    ws.addEventListener('message', (message) => {
+    websocketOn(ws, 'message', (message) => {
       try {
-        const raw = typeof message.data === 'string' ? message.data : Buffer.from(message.data).toString('utf8');
+        const data = message?.data !== undefined ? message.data : message;
+        const raw = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
         const parsed = JSON.parse(raw);
         for (const event of extractEvents(parsed)) {
           if (events.length < args.limit) events.push(event);
@@ -342,18 +379,19 @@ async function collectWebSocketEvents(args) {
         // Ignore malformed stream messages; this is a shadow source.
       }
     });
-    ws.addEventListener('error', (event) => {
+    websocketOn(ws, 'error', (event) => {
       closeReason = 'websocket_error';
       clearTimeout(timeout);
       resolve(event);
     });
-    ws.addEventListener('close', () => {
+    websocketOn(ws, 'close', () => {
       clearTimeout(timeout);
       resolve();
     });
   });
   return {
     status: 'P8_STREAM_COLLECTED',
+    backend: resolved.backend,
     opened,
     elapsed_sec: Math.round((Date.now() - started) / 1000),
     close_reason: closeReason,
@@ -420,10 +458,12 @@ async function run(args) {
       collection = insertEvents(db, wsResult.events || [], args);
       sourceStatus = wsResult.status;
       notes.push({
+        websocket_backend: wsResult.backend ?? null,
         websocket_opened: wsResult.opened ?? null,
         close_reason: wsResult.close_reason ?? null,
         elapsed_sec: wsResult.elapsed_sec ?? null,
         error_code: wsResult.error_code ?? null,
+        error: wsResult.error ?? null,
       });
     } else if (args.sourceUrl) {
       mode = 'http_poll';
@@ -535,4 +575,3 @@ if (args.selfTest) {
     process.exit(1);
   });
 }
-

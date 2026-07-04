@@ -190,3 +190,7 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   This is discovery-only / shadow-only; GMGN confirmation, X narrative, and smart-money
   layers remain out of scope, `promotion_allowed=false`, and no strategy, gate, executor,
   canary, wallet, or risk settings were changed.
+- **2026-07-04** (P8 stream backend fallback): Zeabur's runtime did not expose a global
+  `WebSocket`, so the pump.fun observer now falls back to the explicit `ws` package and records
+  `websocket_backend` in the observer summary. This only affects the isolated P8 shadow script;
+  production routes and trading guardrails remain untouched.
