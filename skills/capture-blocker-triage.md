@@ -236,3 +236,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   Dashboard downloads for `pump_fun_shadow_worker_status` and
   `pump_fun_shadow_source_comparison_30d` were verified. `promotion_allowed=false`,
   `production_impact=zero_shadow_only`.
+- **2026-07-04** (P8 post-deploy AutoLoop reconciliation): After P8 worker startup, AutoLoop
+  run `api_20260704T033304Z_79a47d7b` completed on commit `6c7e766` with `exit_code=0`,
+  `timed_out=false`, `tests_passed=true`, and verdict
+  `classification=A_CLASS_EXPECTED_SHADOW`. Guardrails stayed closed:
+  `promotion_allowed=false`, `strategy_change_allowed=false`, and the top blocker remained
+  `discovery_same_window_not_promotion_evidence`. P8 artifacts stayed isolated:
+  worker `/proc/<pid>` was alive, `pump_fun_shadow_worker_status.loop_count=15`,
+  24h comparison `status=P8_TRIAL_ACCUMULATING` with `pump_fun_shadow.unique_tokens=236`,
+  and 30d comparison `status=P8_TRIAL_ACCUMULATING`, `pump_fun_shadow.unique_tokens=216`,
+  `promotion_allowed=false`, `production_impact=zero_shadow_only`. This confirms the P8
+  second-source trial is accumulating without changing production funnel, strategy, gates,
+  executor, canary, wallet, or risk.
