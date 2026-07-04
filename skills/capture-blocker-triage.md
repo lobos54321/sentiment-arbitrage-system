@@ -276,3 +276,10 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA` with the `trail_a50_dd15_stop20` champion
   still shadow-only and stop-fill stress enabled from the trade-71 observed floor. P8 worker
   stayed isolated with `production_impact=zero_shadow_only` and `promotion_allowed=false`.
+- **2026-07-04** (Phase 2 contract documentation sync): `docs/agents/codex-goal-capture60-phase2.md`
+  was updated to match the deployed P2.1 recovery contract: `DATA_INFRA` remains 6 clean hourly
+  buckets with paper auto-resume allowed, `PAPER_MARKET` is 4h cooldown + 6 clean hourly buckets
+  with clean windows accumulating during cooldown and `system_paper_auto_resume`, while
+  real-capital `MARKET` / `LIVE_MARKET` stays 24h + 24 clean hourly buckets and human-only. This is
+  documentation/ledger hygiene only; it does not change runtime policy, strategy, gates, executor,
+  canary, wallet, or risk.

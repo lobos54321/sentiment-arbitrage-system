@@ -21,21 +21,26 @@ switch is the operator's action, not yours.
 Upgrade the P2 recovery contract from placeholder params to the tiered policy:
 
 1. **Breach classes**: classify each circuit-breaker trip as `DATA_INFRA` (quote corruption,
-   no-route trap, provider outage — evidence from context/quote artifacts) vs `MARKET`
-   (real loss within normal data quality).
-2. **Per-class clean-window requirements**: DATA_INFRA → 6 consecutive hourly buckets;
-   MARKET → 24 consecutive hourly buckets **plus** a motion-trace review artifact for the
-   breaching trade (auto-generated, human-readable).
-3. Cooldown stays 24h.
-4. **Paper/LIVE split**: after class-appropriate clean windows pass, **paper trading auto-resumes
-   without human action** (zero real-capital risk; never starve evidence collection again).
-   LIVE canary re-enable remains exclusively via the human-run operator script.
-5. **Fail-closed + escalation SLA**: LIVE never auto-enables. If
+   no-route trap, provider outage — evidence from context/quote artifacts), `PAPER_MARKET`
+   (paper-only loss within normal data quality), or `MARKET` / `LIVE_MARKET` (real-capital
+   market loss within normal data quality).
+2. **Per-class clean-window and cooldown requirements**:
+   - `DATA_INFRA` → 6 consecutive hourly buckets; paper auto-resume is allowed after the SLA.
+   - `PAPER_MARKET` → 4h cooldown + 6 clean hourly buckets; clean buckets may accumulate during
+     the cooldown; paper auto-resume is allowed after the SLA and a motion-trace recap artifact.
+   - `MARKET` / `LIVE_MARKET` → 24h cooldown + 24 consecutive clean hourly buckets plus a
+     motion-trace review artifact for the breaching trade (auto-generated, human-readable).
+3. **Paper/LIVE split**: `PAPER_MARKET` and `DATA_INFRA` can restore the paper-only evidence
+   collection path automatically after their SLA. Real-capital `MARKET` / `LIVE_MARKET` recovery
+   never auto-enables paper or LIVE; LIVE canary re-enable remains exclusively via the human-run
+   operator script.
+4. **Fail-closed + escalation SLA**: LIVE never auto-enables. If
    `PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL` persists >48h, handoff escalates to
    high-priority with a daily reminder field.
 
 Acceptance: readiness artifact exposes `breach_class`, per-class requirements and streak;
-self-test simulates both breach classes end-to-end incl. paper auto-resume; guardrail files
+self-test simulates data-infra, paper-market, and real-market classes end-to-end incl. paper
+auto-resume only where allowed; guardrail files
 untouched (mode/evaluator layer only).
 
 ### P3 — Reject counterfactual instrumentation (unchanged from Phase 1; prerequisite for P7)
