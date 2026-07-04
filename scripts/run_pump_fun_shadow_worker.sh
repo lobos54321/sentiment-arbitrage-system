@@ -23,13 +23,16 @@ COMPARE_30D_EVERY_N="${PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N:-12}"
 SIGNAL_DB="${SENTIMENT_DB:-$DATA_DIR/sentiment_arb.db}"
 RAW_DB="${RAW_SIGNAL_OUTCOMES_DB:-$DATA_DIR/raw_signal_outcomes.db}"
 WORKER_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+WORKER_PARENT_PID="${PUMP_FUN_SHADOW_SUPERVISOR_PID:-${PPID:-}}"
+SUPERVISOR_KIND="${PUMP_FUN_SHADOW_SUPERVISOR_KIND:-unknown}"
+DEPLOYMENT_COMMIT="${PUMP_FUN_SHADOW_DEPLOYMENT_COMMIT:-${ZEABUR_GIT_COMMIT_SHA:-${ZEABUR_GIT_COMMIT:-${GIT_COMMIT:-${SOURCE_VERSION:-}}}}}"
 LOOP_COUNT=0
 
 write_status() {
   local state="$1"
   local note="${2:-}"
   local next_run_at="${3:-}"
-  python3 - "$STATUS_PATH" "$state" "$note" "$next_run_at" "$PUMP_DB" "$LOG_PATH" "$$" "$WORKER_STARTED_AT" "$DURATION_SEC" "$INTERVAL_SEC" "$WEBSOCKET_URL" "$SOURCE_URL" "$COMPARE_30D_EVERY_N" "$LOOP_COUNT" <<'PY'
+  python3 - "$STATUS_PATH" "$state" "$note" "$next_run_at" "$PUMP_DB" "$LOG_PATH" "$$" "$WORKER_PARENT_PID" "$SUPERVISOR_KIND" "$DEPLOYMENT_COMMIT" "$WORKER_STARTED_AT" "$DURATION_SEC" "$INTERVAL_SEC" "$WEBSOCKET_URL" "$SOURCE_URL" "$COMPARE_30D_EVERY_N" "$LOOP_COUNT" <<'PY'
 import json
 import os
 import sys
@@ -43,6 +46,9 @@ import time
     pump_db,
     log_path,
     worker_pid,
+    worker_parent_pid,
+    supervisor_kind,
+    deployment_commit,
     worker_started_at,
     duration_sec,
     interval_sec,
@@ -55,6 +61,11 @@ payload = {
     "schema_version": "pump_fun_shadow_worker_status.v1",
     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     "pid": int(worker_pid),
+    "parent_pid": int(worker_parent_pid) if str(worker_parent_pid or "").isdigit() else None,
+    "supervisor_pid": int(worker_parent_pid) if str(worker_parent_pid or "").isdigit() else None,
+    "supervisor_kind": supervisor_kind or None,
+    "deployment_commit": deployment_commit or None,
+    "worker_status_source": "supervised_bash_sidecar",
     "started_at": worker_started_at,
     "state": state,
     "note": note or None,

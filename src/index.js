@@ -1158,6 +1158,15 @@ function startPumpFunShadowWorker(config) {
         PUMP_FUN_SHADOW_LIMIT: process.env.PUMP_FUN_SHADOW_LIMIT || '1000',
         PUMP_FUN_SHADOW_INTERVAL_SEC: process.env.PUMP_FUN_SHADOW_INTERVAL_SEC || '5',
         PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N: process.env.PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N || '12',
+        PUMP_FUN_SHADOW_SUPERVISOR_KIND: 'node_index_runtime_supervisor',
+        PUMP_FUN_SHADOW_SUPERVISOR_PID: String(process.pid),
+        PUMP_FUN_SHADOW_DEPLOYMENT_COMMIT: process.env.SOURCE_VERSION
+          || process.env.GITHUB_SHA
+          || process.env.ZEABUR_GIT_COMMIT_SHA
+          || process.env.ZEABUR_GIT_COMMIT
+          || process.env.GIT_COMMIT
+          || process.env.COMMIT_SHA
+          || '',
       },
     }),
   ];
