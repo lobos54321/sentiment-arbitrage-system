@@ -146,3 +146,26 @@ Local verification:
 Result:
 
 The stricter OOS validation task is installed and running as a waiting task. It has not passed or failed the champion; it is waiting for two post-freeze, non-overlapping 24h forward windows. P7 is closed for queue management only, so P5/P6/P8 may proceed in parallel while this OOS evidence accumulates. Paper proposal drafting remains blocked until OOS passes and opens the next human checkpoint.
+
+### 2026-07-04 P7 OOS Download Key Repair
+
+- code_commit: `7c53ca0b4d00831260e2d3a5d17ac83e0d7acb90`
+- scope: read-only dashboard artifact exposure
+- changed_file: `src/web/dashboard-server.js`
+- artifact_key: `p7_exit_policy_oos_validation`
+- artifact_path: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+- download_endpoint: `/api/data/download/agent-capture-discovery?artifact=p7_exit_policy_oos_validation`
+- verified_schema: `p7_exit_policy_oos_validation.v1`
+- verified_generated_at: `2026-07-04T05:05:31Z`
+- verified_classification: `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`
+- verified_next_action: `wait_for_forward_oos_windows`
+- promotion_allowed: `false`
+- paper_proposal_allowed: `false`
+- human_checkpoint_required: `false`
+- live_exit_policy_changed: `false`
+
+Result:
+
+P7's OOS waiting artifact is now available through the standard agent capture discovery download
+API, not only by direct filesystem inspection. This satisfies the Phase 2 requirement that P7
+produce both an artifact and a download key while preserving the shadow-only contract.
