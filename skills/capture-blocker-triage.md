@@ -303,3 +303,27 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   reports the validator's wait action (for example `wait_for_post_freeze_raw_signal_rows`) instead
   of repeatedly asking to freeze the same hit again. This is read-only reporting hygiene only; no
   strategy, gate, executor, canary, wallet, risk, or paper/LIVE enablement path changes.
+- **2026-07-04** (Phase 2 deployed-state reconciliation, run
+  `api_20260704T081856Z_a3489853`, deployed commit `3d99d83`): AutoLoop completed with
+  `exit_code=0`, `timed_out=false`, `tests_passed=true`, and
+  `classification=CAPTURE_DISCOVERY_HIT`. The runner provenance and summary are aligned to
+  `current_commit=deployment_commit=3d99d83bf95e4edf49c581453f4cb11bbb610064`; the prior
+  `08:15Z` run was interrupted by deployment restart and did not become the authoritative latest
+  run. Integrity is clean: `candidate_count_observed=84`, `observation_coverage_pct=100.0`,
+  `raw_dog_rows_complete=true`, and all signal-id join rates are `1.0`. The paper-only recovery
+  path is active with `mode_status=PAPER_ELIGIBLE`,
+  `mode_reason=system_paper_auto_resume_after_sla`, `automatic_paper_resume_allowed=true`, and
+  `breach_class=PAPER_MARKET`; LIVE remains human-only. Current 24h gold/silver funnel:
+  `raw_gs_events=103`, `candidate_matched_any=103`, `decision_records=102`, `pass_allow=40`,
+  `pending_entry=27`, `final_entry_contract=0`, `paper_trade_intent=7`,
+  `paper_committed=7`, `realized=0`. The first sub-60 target is still pass/allow
+  (`38.835%`, needs +22 events to hit 60%), while the readiness target
+  `mode_disabled_adjusted_final_eligibility` remains `0.0` and needs +62 events. Latest handoff
+  next actions are read-only / shadow-only:
+  `wait_for_post_freeze_raw_signal_rows`, plus parallel
+  `review_quality_timing_rejects_shadow_only`. Detailed gap artifacts identify
+  `decision_no_pass_quality_timing` as the pass/allow gap, with the largest cluster
+  `matrix_alignment_wait` (13 events), and `stale_before_final` as the dominant pending-to-final
+  category (11 of 27 pending-without-final rows). Guardrails remain false:
+  `promotion_allowed=false`, `strategy_change_allowed=false`, `automatic_runtime_change_allowed=false`,
+  and `paper_enablement_allowed=false`.

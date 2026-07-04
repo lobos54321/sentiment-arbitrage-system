@@ -169,3 +169,37 @@ Result:
 P7's OOS waiting artifact is now available through the standard agent capture discovery download
 API, not only by direct filesystem inspection. This satisfies the Phase 2 requirement that P7
 produce both an artifact and a download key while preserving the shadow-only contract.
+
+### 2026-07-04 P7 OOS Pre-Window1 Status Recheck
+
+- deployed_commit: `3d99d83bf95e4edf49c581453f4cb11bbb610064`
+- remote_run_id: `api_20260704T081856Z_a3489853`
+- remote_run_finished_at: `2026-07-04T08:35:19.822Z`
+- remote_exit_code: `0`
+- remote_timed_out: `false`
+- tests_passed: `true`
+- artifact: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+- artifact_schema: `p7_exit_policy_oos_validation.v1`
+- classification: `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`
+- next_action: `wait_for_forward_oos_windows`
+- freeze_iso: `2026-07-03T12:50:42Z`
+- window1_close_iso: `2026-07-04T12:50:42Z`
+- checked_at_utc: `2026-07-04T08:36:36Z`
+- two_windows_complete: `false`
+- two_windows_same_positive_direction: `false`
+- paper_proposal_allowed: `false`
+- promotion_allowed: `false`
+- strategy_change_allowed: `false`
+- live_exit_policy_changed: `false`
+- production_files_touched: `[]`
+- stop_fill_stress_contract: `enabled`
+- stop_fill_stress_basis: `paper_trade_id_71_probe_quote_guard_stop_filled_near_-29.75pct`
+- stop_fill_stress_champion_stable: `false`
+
+Result:
+
+The strict P7 OOS task is still waiting for its required forward windows. Window 1 had not closed
+at this recheck, so no paper proposal, promotion, or live-exit conclusion is allowed. The
+`stop_fill_stress_champion_stable=false` field is a pre-window warning from the pressure-test
+contract, not a final OOS verdict; it must be judged after the non-overlapping windows close and
+the validator materializes complete results.
