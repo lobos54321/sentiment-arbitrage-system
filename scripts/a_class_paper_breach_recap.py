@@ -121,7 +121,7 @@ def load_decision_events(db, trade):
         "reason", "token_ca", "symbol", "trade_id", "data_source", "payload_json",
     ):
         selected.append(col if col in cols else f"NULL AS {col}")
-    params = []
+    clause_params = []
     clauses = []
     token = str(trade.get("token_ca") or "")
     signal_id = trade.get("premium_signal_id")
@@ -129,13 +129,17 @@ def load_decision_events(db, trade):
     exit_ts = safe_int(trade.get("exit_ts"), entry_ts) or entry_ts
     if token and "token_ca" in cols:
         clauses.append("token_ca=?")
-        params.append(token)
+        clause_params.append(token)
     if signal_id is not None and "signal_id" in cols:
         clauses.append("CAST(signal_id AS TEXT)=?")
-        params.append(str(signal_id))
-    time_clause = "event_ts BETWEEN ? AND ?"
-    params.extend([entry_ts - 900, exit_ts + 300])
-    where = f"(({ ' OR '.join(clauses) }) OR {time_clause})" if clauses else time_clause
+        clause_params.append(str(signal_id))
+    window_start = entry_ts - 900
+    window_end = exit_ts + 300
+    params = [window_start, window_end] + clause_params
+    if clauses:
+        where = f"event_ts BETWEEN ? AND ? AND ({' OR '.join(clauses)})"
+    else:
+        where = "event_ts BETWEEN ? AND ?"
     rows = db.execute(
         f"""
         SELECT {', '.join(selected)}
