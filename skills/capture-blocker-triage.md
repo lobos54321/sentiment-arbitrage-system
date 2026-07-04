@@ -113,3 +113,30 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `current_capture_stage=mode_disabled_clean_window_pending`. This supersedes the old 4-window
   placeholder for this MARKET breach; paper can auto-resume only after the class-appropriate SLA
   passes, while LIVE still requires the human operator script.
+- **2026-07-04** (P2.1 PAPER_MARKET live-test repair verified, AutoLoop generated
+  `2026-07-04T01:31:52Z`, commit `e0e9ef3`): trade `71` was a paper-only A_CLASS loss
+  (`paper_only=true`, symbol `USDC`, token
+  `8R5xg6XqmxoJ5htazTTktmQ9gxJ7CszYDthh4gr6pump`, `probe_quote_guard_stop`, realized
+  `pnl_pct=-0.297536130936832`). The old mode row was idempotently rewritten through
+  `scripts/a_class_runtime_safety.py` with `should_record_event=false`, adding
+  `detail.breach_class=PAPER_MARKET`,
+  `detail.paper_recovery_contract.paper_auto_recovery_counter_started=true`, and
+  `detail.paper_recovery_contract.live_reenable_requires_human_operator=true`.
+  The recap artifact `/app/data/agent_runs/latest/a_class_paper_breach_recap_trade_71.json`
+  marks `spoofed_symbol_review.spoofed_symbol_risk=true`,
+  `quote_collapse.entry_to_exit_price_return_pct=-0.297536`, and
+  `quote_collapse.stop_overshoot_pp=0.097536`. The latest readiness artifact
+  `/app/data/agent_runs/latest/a_class_fastlane_mode_audit_24h.json` verifies
+  `breach_class=PAPER_MARKET`,
+  `circuit_recovery_sla.effective_clean_windows_required=24`,
+  `clean_window_counter.streak=1`, `clean_window_counter.required=24`,
+  `circuit_recovery_sla.motion_trace_review.available=true`,
+  `paper_auto_resume_readiness.status=NOT_ELIGIBLE`,
+  `live_reenable_contract.live_auto_reenable_allowed=false`, and
+  `promotion_allowed=false`. The full AutoLoop verdict completed with
+  `autoloop_execution_status=FULL_RUN_COMPLETED`, `tests_passed=true`, and
+  `classification=A_CLASS_EXPECTED_SHADOW`. This confirms paper-only losses are recorded and
+  routed into the class-appropriate recovery SLA without changing strategy, gates,
+  final_entry_contract, executor, canary, wallet, or risk; paper evidence collection remains
+  blocked only until cooldown and the 24 clean hourly buckets pass, while LIVE re-enable stays
+  human-operated.
