@@ -194,3 +194,16 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `WebSocket`, so the pump.fun observer now falls back to the explicit `ws` package and records
   `websocket_backend` in the observer summary. This only affects the isolated P8 shadow script;
   production routes and trading guardrails remain untouched.
+- **2026-07-04** (P8 deployed/verified, code commit `a41ecfc`): Remote verification passed
+  `node --check scripts/pump_fun_shadow_observer.js`,
+  `node scripts/pump_fun_shadow_observer.js --self-test`, and
+  `python3 scripts/pump_fun_shadow_source_comparison.py --self-test`. A bounded 45-second
+  pump.fun stream collection used `websocket_backend=ws_package`, inserted 10 shadow rows
+  across 9 unique tokens, and wrote `/app/data/agent_runs/latest/pump_fun_shadow_observer_summary.json`.
+  The 24h source comparison artifact reported `status=P8_TRIAL_ACCUMULATING`,
+  `pump_fun_shadow.unique_tokens=9`, `telegram_premium.unique_tokens=313`,
+  `raw_gold_silver_denominator.unique_tokens=70`, `production_impact=zero_shadow_only`,
+  and `promotion_allowed=false`. Dashboard artifact downloads for
+  `pump_fun_shadow_observer_summary` and `pump_fun_shadow_source_comparison` were verified.
+  No production strategy, gate, executor, canary, wallet, risk, paper-enable, or A_CLASS
+  setting was changed.
