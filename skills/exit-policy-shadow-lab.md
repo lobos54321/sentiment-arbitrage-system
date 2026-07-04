@@ -203,3 +203,43 @@ at this recheck, so no paper proposal, promotion, or live-exit conclusion is all
 `stop_fill_stress_champion_stable=false` field is a pre-window warning from the pressure-test
 contract, not a final OOS verdict; it must be judged after the non-overlapping windows close and
 the validator materializes complete results.
+
+### 2026-07-04 P7 OOS Window1 Materialization
+
+- freeze_iso: `2026-07-03T12:50:42Z`
+- window1_close_iso: `2026-07-04T12:50:42Z`
+- materialized_at: `2026-07-04T12:58:41Z`
+- artifact: `/app/data/agent_runs/latest/p7_exit_policy_oos_validation.json`
+- artifact_schema: `p7_exit_policy_oos_validation.v1`
+- classification: `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA`
+- next_action: `wait_for_forward_oos_windows`
+- window1_complete: `true`
+- window2_complete: `false`
+- two_windows_complete: `false`
+- two_windows_same_positive_direction: `false`
+- paper_proposal_allowed: `false`
+- promotion_allowed: `false`
+- live_exit_policy_changed: `false`
+- window1_sample_count: `502`
+- window1_raw_rows_considered: `502`
+- window1_paper_trades_rows: `5`
+- champion_policy_id: `trail_a50_dd15_stop20`
+- champion_rank_all_samples_delay_5_30: `1`
+- champion_rank_unique_token_delay_5_30: `1`
+- champion_rank_token_time_cluster_delay_5_30: `1`
+- champion_positive_cells_all_samples: `16`
+- champion_positive_cells_unique_token: `16`
+- champion_positive_cells_token_time_cluster: `16`
+- champion_median_primary_metric_pct_all_samples: `2770304.471006`
+- champion_median_primary_metric_pct_unique_token: `50820.498511`
+- champion_median_primary_metric_pct_token_time_cluster: `2752780.644666`
+- stop_fill_stress_window1_passed_for_champion: `true`
+
+Result:
+
+Window 1 is now materialized and directionally positive for the frozen champion across the required
+5/10/20/30 second delay grid and all three dedupe views. The result is still not a paper proposal
+or promotion signal because the approved P7 contract requires two non-overlapping forward windows.
+Window 2 runs from `2026-07-04T12:50:42Z` to `2026-07-05T12:50:42Z`; until that closes and agrees
+in direction, `paper_proposal_allowed=false`, `promotion_allowed=false`, and no live exit policy
+may change.

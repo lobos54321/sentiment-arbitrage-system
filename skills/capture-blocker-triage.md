@@ -327,3 +327,20 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   category (11 of 27 pending-without-final rows). Guardrails remain false:
   `promotion_allowed=false`, `strategy_change_allowed=false`, `automatic_runtime_change_allowed=false`,
   and `paper_enablement_allowed=false`.
+- **2026-07-04** (P7 window1 post-close materialization and runner-channel reconciliation):
+  Window 1 closed at `2026-07-04T12:50:42Z`. Two attempts to materialize the full AutoLoop through
+  the dashboard API (`api_20260704T125050Z_b0dbb436` and
+  `api_20260704T125353Z_78843b6c`) were interrupted by dashboard/container restarts; runner status
+  normalized both as `stale_running_status=true`, `stale_running_reason=pid_not_alive`, with
+  guardrails still false. The reliable path was Zeabur service exec running the read-only
+  `agent_autoloop_stage_runner.py --stage oos,finalize`, followed by a direct read-only
+  `p7_exit_policy_oos_validation.py` refresh using the frozen registry
+  `docs/agents/P7_EXIT_POLICY_OOS_FREEZE_REGISTRY.json`. The stage run completed successfully:
+  `pass_allow_60_post_freeze_oos_validation.classification=PASS_ALLOW_60_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS`,
+  `capture_cross_post_freeze_oos_validation.classification=CAPTURE_CROSS_POST_FREEZE_OOS_BELOW_MIN_RAW_EVENTS`,
+  `raw_gold_silver_event_rows=7`, `repeat_watch_count=0`, and `promotion_allowed=false`.
+  P7 window1 was materialized with `window1_complete=true`, champion
+  `trail_a50_dd15_stop20` rank `1` across all required 5/10/20/30s delay-grid dedupe views,
+  and stop-fill stress passed for the champion, but `window2_complete=false` and
+  `paper_proposal_allowed=false`. This is an evidence-refresh and reporting reconciliation only;
+  no strategy, gate, executor, canary, wallet, risk, paper enablement, or live exit policy changed.
