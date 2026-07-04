@@ -224,3 +224,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   comparison still refreshes every loop. Worker status records the real shell pid, loop count,
   duration, interval, and cadence so the 30-day side-by-side trial can be monitored without
   repeatedly scanning the long window.
+- **2026-07-04** (P8 worker started on Zeabur): The dedicated shadow worker was started with
+  `PUMP_FUN_SHADOW_DURATION_SEC=60`, `PUMP_FUN_SHADOW_INTERVAL_SEC=5`, and
+  `PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N=12`. Verification showed `/proc/<pid>` alive,
+  worker `state=sleeping` after the first complete loop, then `state=collecting` on loop 2.
+  First loop refreshed both comparison artifacts:
+  `pump_fun_shadow_source_comparison_24h.json` at `2026-07-04T03:24:42Z`
+  (`pump_fun_shadow.unique_tokens=39`) and
+  `pump_fun_shadow_source_comparison_30d.json` at `2026-07-04T03:25:31Z`
+  (`pump_fun_shadow.unique_tokens=39`, `telegram_premium.unique_tokens=6322`).
+  Dashboard downloads for `pump_fun_shadow_worker_status` and
+  `pump_fun_shadow_source_comparison_30d` were verified. `promotion_allowed=false`,
+  `production_impact=zero_shadow_only`.
