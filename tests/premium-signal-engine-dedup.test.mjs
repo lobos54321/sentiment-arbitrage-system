@@ -117,6 +117,59 @@ test('saveSignalRecord persists motion trace fields and append-only events', () 
   assert.equal(JSON.parse(perceive.payload_json).ath_stage, 'ATH2');
 });
 
+test('token identity hydrate backfills missing supply and decimals without changing decision fields', async () => {
+  const db = new Database(':memory:');
+  const engine = Object.create(PremiumSignalEngine.prototype);
+  engine.db = db;
+  engine._tokenIdentityHydrateEnabled = true;
+  engine._tokenIdentityHydrateInFlight = new Set();
+  engine.solService = {
+    async getMintSupplyDecimals(mint) {
+      assert.equal(mint, 'HydrateToken1111111111111111111111111111111');
+      return { supply: 123456789, decimals: 9, source: 'unit_test_mint_account' };
+    },
+  };
+  engine.initDB();
+
+  const signal = {
+    token_ca: 'HydrateToken1111111111111111111111111111111',
+    symbol: 'HYDR',
+    market_cap: 51000,
+    timestamp: 1783000000,
+    receive_ts: 1783000000123,
+    signal_type: 'NEW_TRENDING',
+    is_ath: false,
+    signal_source: 'unit_test',
+    source_event_id: 'unit:event:hydrate',
+  };
+
+  const id = engine.saveSignalRecord(signal, 'PASS', null, false);
+  assert.ok(id > 0);
+  assert.equal(db.prepare('SELECT token_supply FROM premium_signals WHERE id = ?').get(id).token_supply, null);
+
+  assert.equal(await engine._hydrateTokenIdentity(signal, id), true);
+
+  const row = db.prepare('SELECT hard_gate_status, token_supply, token_decimals FROM premium_signals WHERE id = ?').get(id);
+  assert.equal(row.hard_gate_status, 'PASS');
+  assert.equal(row.token_supply, 123456789);
+  assert.equal(row.token_decimals, 9);
+
+  const token = db.prepare('SELECT token_supply, token_decimals FROM tokens WHERE token_ca = ?').get(signal.token_ca);
+  assert.equal(token.token_supply, 123456789);
+  assert.equal(token.token_decimals, 9);
+
+  const hydratedEvent = db.prepare(`
+    SELECT payload_json FROM token_motion_events
+    WHERE domain = 'context' AND event_type = 'token_identity_hydrated'
+    LIMIT 1
+  `).get();
+  assert.ok(hydratedEvent);
+  const payload = JSON.parse(hydratedEvent.payload_json);
+  assert.equal(payload.source, 'unit_test_mint_account');
+  assert.equal(payload.token_supply, 123456789);
+  assert.equal(payload.token_decimals, 9);
+});
+
 test('motion trace timestamp and ath stage helpers normalize inputs', () => {
   assert.equal(normalizeSignalTimestampMs(1783000000), 1783000000000);
   assert.equal(normalizeSignalTimestampMs(1783000000123), 1783000000123);

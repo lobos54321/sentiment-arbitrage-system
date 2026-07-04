@@ -103,6 +103,8 @@ export class PremiumSignalEngine {
     this.liveExecution = null; // 实盘模式下注入共享执行器
     this.livePositionMonitor = null; // 外部注入
     this.livePriceMonitor = null; // 外部注入（shadow 也可用）
+    this._tokenIdentityHydrateEnabled = process.env.PREMIUM_SIGNAL_TOKEN_IDENTITY_HYDRATE !== 'false';
+    this._tokenIdentityHydrateInFlight = new Set();
     this.buzzScanner = null; // 需要 setTelegramClient 初始化
     this.shadowTracker = new ShadowPnlTracker();
     this.paperStrategyRegistry = null;
@@ -511,6 +513,93 @@ export class PremiumSignalEngine {
     } catch (error) {
       console.warn('⚠️  [MotionTrace] token identity write failed:', error.message);
     }
+  }
+
+  _scheduleTokenIdentityHydrate(signal, signalId, supplyDecimals = extractTokenSupplyDecimals(signal)) {
+    if (!this._tokenIdentityHydrateEnabled || !signal?.token_ca || !signalId) return;
+    if (supplyDecimals?.supply && supplyDecimals?.decimals !== null && supplyDecimals?.decimals !== undefined) return;
+    if ((signal.chain || 'SOL').toUpperCase() !== 'SOL') return;
+    if (!this.solService || typeof this.solService.getMintSupplyDecimals !== 'function') return;
+    const key = `${signal.token_ca}:${signalId}`;
+    if (this._tokenIdentityHydrateInFlight?.has(key)) return;
+    this._tokenIdentityHydrateInFlight?.add(key);
+    const run = async () => {
+      try {
+        await this._hydrateTokenIdentity(signal, signalId);
+      } catch (error) {
+        console.warn(`⚠️  [MotionTrace] token identity hydrate failed for ${signal.token_ca}: ${error.message}`);
+      } finally {
+        this._tokenIdentityHydrateInFlight?.delete(key);
+      }
+    };
+    setTimeout(run, 0).unref?.();
+  }
+
+  async _hydrateTokenIdentity(signal, signalId) {
+    if (!signal?.token_ca || !signalId) return false;
+    let existing = null;
+    try {
+      existing = this.db.prepare(`
+        SELECT token_supply, token_decimals
+        FROM tokens
+        WHERE token_ca = ?
+        LIMIT 1
+      `).get(signal.token_ca);
+    } catch {
+      existing = null;
+    }
+    const existingSupply = existing?.token_supply === null || existing?.token_supply === undefined
+      ? null
+      : Number(existing.token_supply);
+    const existingDecimals = existing?.token_decimals === null || existing?.token_decimals === undefined
+      ? null
+      : Number(existing.token_decimals);
+    if (
+      Number.isFinite(existingSupply) && existingSupply > 0
+      && Number.isInteger(existingDecimals) && existingDecimals >= 0 && existingDecimals <= 18
+    ) {
+      this.db.prepare(`
+        UPDATE premium_signals
+        SET token_supply = COALESCE(token_supply, ?),
+            token_decimals = COALESCE(token_decimals, ?)
+        WHERE id = ?
+      `).run(existingSupply, existingDecimals, signalId);
+      return true;
+    }
+
+    const hydrated = await this.solService.getMintSupplyDecimals(signal.token_ca);
+    const supply = Number(hydrated?.supply);
+    const decimals = Number(hydrated?.decimals);
+    if (!Number.isFinite(supply) || supply <= 0 || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      return false;
+    }
+
+    const enrichedSignal = {
+      ...signal,
+      token_supply: supply,
+      token_decimals: decimals,
+    };
+    this._writeTokenIdentity(enrichedSignal, { supply, decimals });
+    this.db.prepare(`
+      UPDATE premium_signals
+      SET token_supply = COALESCE(token_supply, ?),
+          token_decimals = COALESCE(token_decimals, ?)
+      WHERE id = ?
+    `).run(supply, decimals, signalId);
+    this._appendTokenMotionEvent(enrichedSignal, {
+      signal_id: signalId,
+      ts_ms: Date.now(),
+      domain: 'context',
+      event_type: 'token_identity_hydrated',
+      payload: {
+        source: hydrated?.source || 'solana_mint_account',
+        token_supply: supply,
+        token_decimals: decimals,
+      },
+    });
+    signal.token_supply = supply;
+    signal.token_decimals = decimals;
+    return true;
   }
 
   _appendTokenMotionEvent(signal, options = {}) {
@@ -1547,6 +1636,7 @@ export class PremiumSignalEngine {
         athStage,
         supplyDecimals,
       });
+      this._scheduleTokenIdentityHydrate(signal, signal._premiumSignalId, supplyDecimals);
       return signal._premiumSignalId;
     } catch (error) {
       console.error('❌ [DB] 保存信号记录失败:', error.message);

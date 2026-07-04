@@ -75,14 +75,18 @@ export class SolanaSnapshotService {
         fastMode ? Promise.resolve([]) : this.identifyRiskWallets(tokenCA)
       ]);
 
+      const mintData = this.unwrap(mintInfo);
+
       return {
         // Basic info
         chain: 'SOL',
         token_ca: tokenCA,
 
         // Mint authorities
-        freeze_authority: this.unwrap(mintInfo)?.freeze_authority || 'Unknown',
-        mint_authority: this.unwrap(mintInfo)?.mint_authority || 'Unknown',
+        freeze_authority: mintData?.freeze_authority || 'Unknown',
+        mint_authority: mintData?.mint_authority || 'Unknown',
+        token_supply: mintData?.token_supply || null,
+        token_decimals: mintData?.token_decimals ?? null,
 
         // LP status
         lp_status: this.unwrap(lpStatus)?.status || 'Unknown',
@@ -136,16 +140,30 @@ export class SolanaSnapshotService {
 
       const parsed = mintInfo.value.data.parsed.info;
 
+      const tokenSupply = Number(parsed.supply);
+      const tokenDecimals = Number(parsed.decimals);
+
       return {
         freeze_authority: parsed.freezeAuthority ? 'Enabled' : 'Disabled',
         mint_authority: parsed.mintAuthority ? 'Enabled' : 'Disabled',
         raw_freeze: parsed.freezeAuthority,
-        raw_mint: parsed.mintAuthority
+        raw_mint: parsed.mintAuthority,
+        token_supply: Number.isFinite(tokenSupply) && tokenSupply > 0 ? tokenSupply : null,
+        token_decimals: Number.isInteger(tokenDecimals) && tokenDecimals >= 0 && tokenDecimals <= 18 ? tokenDecimals : null
       };
     } catch (error) {
       console.error('Error getting mint authorities:', error.message);
       return { freeze_authority: 'Unknown', mint_authority: 'Unknown' };
     }
+  }
+
+  async getMintSupplyDecimals(tokenCA) {
+    const mintData = await this.getMintAuthorities(tokenCA);
+    return {
+      supply: mintData?.token_supply ?? null,
+      decimals: mintData?.token_decimals ?? null,
+      source: 'solana_mint_account'
+    };
   }
 
   /**
