@@ -120,6 +120,7 @@ def readiness_allows_human_proposal(readiness):
     return proposal.get("status") in {
         "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
         "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
+        "HUMAN_OPERATOR_REENABLE_READY",
     }
 
 
@@ -249,7 +250,7 @@ def self_test():
         ready_path = root / "ready.json"
         write_json(ready_path, {
             "paper_entry_proposal_readiness": {
-                "status": "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
+                "status": "HUMAN_OPERATOR_REENABLE_READY"
             }
         })
         db = sqlite3.connect(db_path)

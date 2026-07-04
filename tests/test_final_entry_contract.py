@@ -105,6 +105,29 @@ def test_final_entry_contract_blocks_shadow_and_circuit_broken_modes():
     assert "mode_circuit_breaker" in circuit.hard_blockers
 
 
+def test_final_entry_contract_allows_paper_only_auto_resume_but_blocks_live_scope():
+    paper_only = evaluate_final_entry_contract(
+        base_candidate(paper_only_scout=True, execution_scope="paper_only"),
+        mode_state={"status": "PAPER_ELIGIBLE", "action": "PAPER_ONLY"},
+        budget_state={"active_count": 0, "max_concurrent": 1},
+        config=load_a_class_config({}),
+        now_ts=1_000,
+    )
+    live_scope = evaluate_final_entry_contract(
+        base_candidate(),
+        mode_state={"status": "PAPER_ELIGIBLE", "action": "PAPER_ONLY"},
+        budget_state={"active_count": 0, "max_concurrent": 1},
+        config=load_a_class_config({}),
+        now_ts=1_000,
+    )
+
+    assert paper_only.passed is True
+    assert "paper_auto_resume_only" in paper_only.soft_notes
+    assert live_scope.passed is False
+    assert "mode_disabled" in live_scope.hard_blockers
+    assert "paper_auto_resume_only_live_scope_blocked" in live_scope.soft_notes
+
+
 def test_final_entry_contract_notes_missing_soft_rr_but_does_not_block():
     decision = evaluate_final_entry_contract(
         base_candidate(expected_rr=None, defined_risk_pct=None),

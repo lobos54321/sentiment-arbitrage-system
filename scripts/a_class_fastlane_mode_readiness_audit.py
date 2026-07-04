@@ -25,10 +25,16 @@ CLEAN_WINDOW_COUNTER_SCHEMA_VERSION = "a_class_clean_window_counter.v2"
 CLEAN_WINDOW_COUNTER_BUCKET_SEC = 3600
 RECOVERY_SLA_SCHEMA_VERSION = "a_class_circuit_recovery_sla.v1"
 DATA_INFRA_CLEAN_WINDOWS_REQUIRED = 6
+PAPER_MARKET_CLEAN_WINDOWS_REQUIRED = 6
 MARKET_CLEAN_WINDOWS_REQUIRED = 24
-CIRCUIT_COOLDOWN_SEC = 24 * 60 * 60
+PAPER_MARKET_COOLDOWN_SEC = 4 * 60 * 60
+MARKET_COOLDOWN_SEC = 24 * 60 * 60
+CIRCUIT_COOLDOWN_SEC = MARKET_COOLDOWN_SEC
 HUMAN_ESCALATION_SEC = 48 * 60 * 60
 DAILY_REMINDER_SEC = 24 * 60 * 60
+SYSTEM_PAPER_AUTO_RESUME_OPERATOR = "system_paper_auto_resume"
+A_CLASS_MODE_OPERATOR_AUDIT_TABLE = "a_class_mode_operator_audit"
+PAPER_AUTO_RESUME_BREACH_CLASSES = {"DATA_INFRA", "PAPER_MARKET"}
 
 
 def utc_now():
@@ -314,7 +320,36 @@ def infer_breach_class(state):
 
 
 def clean_windows_required_for_breach_class(breach_class):
-    return DATA_INFRA_CLEAN_WINDOWS_REQUIRED if breach_class == "DATA_INFRA" else MARKET_CLEAN_WINDOWS_REQUIRED
+    if breach_class == "DATA_INFRA":
+        return DATA_INFRA_CLEAN_WINDOWS_REQUIRED
+    if breach_class == "PAPER_MARKET":
+        return PAPER_MARKET_CLEAN_WINDOWS_REQUIRED
+    return MARKET_CLEAN_WINDOWS_REQUIRED
+
+
+def cooldown_required_for_breach_class(breach_class):
+    return PAPER_MARKET_COOLDOWN_SEC if breach_class == "PAPER_MARKET" else MARKET_COOLDOWN_SEC
+
+
+def effective_cooldown_window(state, breach_class, now_ts):
+    state = state if isinstance(state, dict) else {}
+    required = cooldown_required_for_breach_class(breach_class)
+    stored_until = safe_float(state.get("cooldown_until_ts"))
+    last_breach_ts = safe_float(state.get("last_breach_ts"))
+    effective_until = stored_until
+    source = "stored_cooldown_until_ts"
+    if breach_class == "PAPER_MARKET" and last_breach_ts is not None:
+        effective_until = last_breach_ts + required
+        source = "paper_market_policy_last_breach_plus_4h"
+    remaining = 0 if effective_until is None else max(0.0, float(effective_until) - float(now_ts))
+    return {
+        "cooldown_required_sec": required,
+        "stored_cooldown_until_ts": stored_until,
+        "effective_cooldown_until_ts": effective_until,
+        "cooldown_source": source,
+        "cooldown_remaining_sec": remaining,
+        "cooldown_elapsed": remaining <= 0,
+    }
 
 
 def build_motion_trace_review_artifact(state, breach_class, now_ts):
@@ -331,7 +366,7 @@ def build_motion_trace_review_artifact(state, breach_class, now_ts):
         f"A_CLASS {breach_class} circuit review for trade {trade_id or 'UNKNOWN'} "
         f"({symbol or token or 'UNKNOWN'}): realized_pnl_pct={pnl_pct}, "
         f"loss_cap_pct={loss_cap_pct}. Review confirms the recovery SLA is "
-        "24 clean hourly buckets before paper auto-resume; LIVE still requires "
+        f"{clean_windows_required_for_breach_class(breach_class)} clean hourly buckets before paper auto-resume; LIVE still requires "
         "human operator action."
     )
     return {
@@ -351,7 +386,7 @@ def build_motion_trace_review_artifact(state, breach_class, now_ts):
         "review_questions": [
             "Was the loss caused by normal market movement rather than quote/provider corruption?",
             "Was the -20% loss cap enforced and recorded?",
-            "Are 24 clean hourly buckets present before paper auto-resume?",
+            f"Are {clean_windows_required_for_breach_class(breach_class)} clean hourly buckets present before paper auto-resume?",
             "Is LIVE re-enable still routed to the human operator script?",
         ] if required else [],
         "satisfies_market_recovery_requirement": bool(required and available),
@@ -364,7 +399,7 @@ def build_circuit_recovery_sla(state, now_ts):
     breach_class = inferred["breach_class"]
     required = clean_windows_required_for_breach_class(breach_class)
     motion_trace = build_motion_trace_review_artifact(state, breach_class, now_ts)
-    cooldown_remaining = safe_float(state.get("cooldown_remaining_sec"), 0) or 0
+    cooldown = effective_cooldown_window(state, breach_class, now_ts)
     return {
         "schema_version": RECOVERY_SLA_SCHEMA_VERSION,
         "mode_key": MODE_KEY,
@@ -384,7 +419,9 @@ def build_circuit_recovery_sla(state, now_ts):
             },
             "PAPER_MARKET": {
                 "examples": ["paper_only_loss_with_normal_market_quote_collapse"],
-                "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
+                "clean_windows_required": PAPER_MARKET_CLEAN_WINDOWS_REQUIRED,
+                "cooldown_required_sec": PAPER_MARKET_COOLDOWN_SEC,
+                "clean_windows_accumulate_during_cooldown": True,
                 "motion_trace_review_required": True,
                 "paper_auto_resume_after_sla_allowed": True,
                 "live_reenable_requires_human": True,
@@ -393,13 +430,14 @@ def build_circuit_recovery_sla(state, now_ts):
                 "examples": ["real_capital_loss_with_normal_market_movement"],
                 "clean_windows_required": MARKET_CLEAN_WINDOWS_REQUIRED,
                 "motion_trace_review_required": True,
-                "paper_auto_resume_after_sla_allowed": True,
+                "paper_auto_resume_after_sla_allowed": False,
                 "live_reenable_requires_human": True,
             },
         },
-        "cooldown_required_sec": CIRCUIT_COOLDOWN_SEC,
-        "cooldown_remaining_sec": cooldown_remaining,
-        "cooldown_elapsed": cooldown_remaining <= 0,
+        "cooldown_required_sec": cooldown["cooldown_required_sec"],
+        "cooldown_remaining_sec": cooldown["cooldown_remaining_sec"],
+        "cooldown_elapsed": cooldown["cooldown_elapsed"],
+        "cooldown": cooldown,
         "legacy_clean_windows_required": safe_int(state.get("clean_windows_required"), 4),
         "effective_clean_windows_required": required,
         "clean_window_bucket_sec": CLEAN_WINDOW_COUNTER_BUCKET_SEC,
@@ -410,7 +448,7 @@ def build_circuit_recovery_sla(state, now_ts):
             "operator_script": "scripts/a_class_mode_reenable_operator.py",
         },
         "paper_recovery_contract": {
-            "paper_auto_resume_after_sla_allowed": True,
+            "paper_auto_resume_after_sla_allowed": breach_class in PAPER_AUTO_RESUME_BREACH_CLASSES,
             "real_capital_risk": False,
             "live_canary_reenable_allowed": False,
         },
@@ -424,6 +462,14 @@ def apply_recovery_sla_to_runtime(runtime, now_ts):
     policy = build_circuit_recovery_sla(state, now_ts)
     state["legacy_clean_windows_required"] = state.get("clean_windows_required")
     state["clean_windows_required"] = policy["effective_clean_windows_required"]
+    state["cooldown_until_ts"] = (policy.get("cooldown") or {}).get("effective_cooldown_until_ts")
+    state["cooldown_remaining_sec"] = policy.get("cooldown_remaining_sec")
+    if policy.get("breach_class") == "PAPER_MARKET" and policy.get("cooldown_elapsed") and state.get("status") == "CIRCUIT_BROKEN":
+        state["status"] = "SHADOW"
+        state["action"] = "SHADOW"
+        state["circuit_broken"] = False
+        state["recovery_required"] = True
+        state["reason"] = "paper_market_cooldown_elapsed_requires_clean_windows"
     state["circuit_recovery_sla"] = policy
     runtime["mode_state"] = state
     return runtime, policy
@@ -1504,6 +1550,7 @@ def build_handoff_escalation_sla(state, paper_status, now_ts):
     ready = str(paper_status or "").upper() in {
         "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
         "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+        "HUMAN_OPERATOR_REENABLE_READY",
     }
     ready_since = safe_float(tracker.get("ready_since_ts"))
     if ready and ready_since is None:
@@ -1562,6 +1609,7 @@ def persist_paper_ready_tracker(db_path, paper_status, now_ts):
         ready = str(paper_status or "").upper() in {
             "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
             "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+            "HUMAN_OPERATOR_REENABLE_READY",
         }
         tracker = paper_ready_tracker_from_detail(detail)
         if ready:
@@ -1591,6 +1639,178 @@ def persist_paper_ready_tracker(db_path, paper_status, now_ts):
         db.close()
 
 
+def init_operator_audit_table(db):
+    db.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {A_CLASS_MODE_OPERATOR_AUDIT_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_ts REAL NOT NULL,
+            mode_key TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            action TEXT NOT NULL,
+            executed INTEGER NOT NULL DEFAULT 0,
+            readiness_status TEXT,
+            before_json TEXT,
+            after_json TEXT,
+            readiness_json TEXT,
+            promotion_allowed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def row_to_dict(row):
+    if row is None:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def paper_auto_resume_should_execute(runtime, paper_readiness, recovery_sla):
+    state = (runtime or {}).get("mode_state") or {}
+    status = str(state.get("status") or "").upper()
+    action = str(state.get("action") or "").upper()
+    if status in {"PAPER_ELIGIBLE", "PAPER_ONLY"} or action in {"PAPER_ELIGIBLE", "PAPER_ONLY"}:
+        return False, "already_paper_eligible"
+    if (recovery_sla or {}).get("breach_class") not in PAPER_AUTO_RESUME_BREACH_CLASSES:
+        return False, "breach_class_not_auto_paper_resumable"
+    if not (paper_readiness or {}).get("paper_auto_resume_allowed"):
+        return False, "paper_auto_resume_not_allowed"
+    if not recovery_sla_requirements_satisfied(
+        recovery_sla,
+        (paper_readiness or {}).get("clean_window_counter") or {},
+        (paper_readiness or {}).get("blocking_reasons") or [],
+    ):
+        return False, "recovery_sla_not_satisfied"
+    return True, "eligible"
+
+
+def persist_paper_auto_resume_if_eligible(db_path, runtime, paper_readiness, recovery_sla, now_ts):
+    result = {
+        "schema_version": "a_class_paper_auto_resume_writer.v1",
+        "attempted": True,
+        "available": False,
+        "mode_key": MODE_KEY,
+        "operator": SYSTEM_PAPER_AUTO_RESUME_OPERATOR,
+        "executed": False,
+        "action": "paper_auto_resume",
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "gate_change_allowed": False,
+        "executor_change_allowed": False,
+        "canary_increase_allowed": False,
+        "risk_change_allowed": False,
+        "live_enablement_allowed": False,
+        "live_auto_reenable_allowed": False,
+    }
+    should_execute, reason = paper_auto_resume_should_execute(runtime, paper_readiness, recovery_sla)
+    result["eligibility_reason"] = reason
+    if not should_execute:
+        result["reason"] = reason
+        return result
+    try:
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+    except Exception as exc:
+        result["reason"] = "db_open_failed"
+        result["error"] = str(exc)
+        return result
+    try:
+        if not table_exists(db, "a_class_mode_runtime_state"):
+            result["reason"] = "a_class_mode_runtime_state_table_missing"
+            return result
+        init_operator_audit_table(db)
+        before_row = db.execute("SELECT * FROM a_class_mode_runtime_state WHERE mode_key=?", (MODE_KEY,)).fetchone()
+        before = row_to_dict(before_row)
+        if before is None:
+            result["reason"] = "a_class_fastlane_row_missing"
+            return result
+        detail = jloads((before or {}).get("detail_json"), {})
+        if not isinstance(detail, dict):
+            detail = {}
+        detail["paper_auto_resume_execution"] = {
+            "schema_version": result["schema_version"],
+            "operator": SYSTEM_PAPER_AUTO_RESUME_OPERATOR,
+            "reason": "a_class_recovery_sla_satisfied_auto_resume_paper_only",
+            "executed_at_ts": float(now_ts),
+            "executed_at": utc_now(),
+            "source_trade_id": before.get("source_trade_id"),
+            "breach_class": (recovery_sla or {}).get("breach_class"),
+            "cooldown_required_sec": (recovery_sla or {}).get("cooldown_required_sec"),
+            "effective_clean_windows_required": (recovery_sla or {}).get("effective_clean_windows_required"),
+            "clean_window_counter": (paper_readiness or {}).get("clean_window_counter") or {},
+            "paper_scope_status": "PAPER_ELIGIBLE",
+            "paper_scope_action": "PAPER_ONLY",
+            "live_reenable_requires_human_operator": True,
+            "changes_strategy_or_gates": False,
+        }
+        detail["paper_auto_resume_active"] = True
+        detail["paper_auto_resume_status"] = "PAPER_ELIGIBLE"
+        detail["live_reenable_requires_human_operator"] = True
+        db.execute(
+            """
+            UPDATE a_class_mode_runtime_state
+            SET status='PAPER_ELIGIBLE',
+                action='PAPER_ONLY',
+                circuit_broken=0,
+                reason=?,
+                clean_windows_required=?,
+                detail_json=?,
+                updated_at=?
+            WHERE mode_key=?
+            """,
+            (
+                "system_paper_auto_resume_after_sla",
+                safe_int((recovery_sla or {}).get("effective_clean_windows_required"), PAPER_MARKET_CLEAN_WINDOWS_REQUIRED),
+                json.dumps(detail, sort_keys=True),
+                float(now_ts),
+                MODE_KEY,
+            ),
+        )
+        after = row_to_dict(db.execute("SELECT * FROM a_class_mode_runtime_state WHERE mode_key=?", (MODE_KEY,)).fetchone())
+        db.execute(
+            f"""
+            INSERT INTO {A_CLASS_MODE_OPERATOR_AUDIT_TABLE} (
+                event_ts, mode_key, operator, reason, action, executed,
+                readiness_status, before_json, after_json, readiness_json,
+                promotion_allowed, created_at
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?)
+            """,
+            (
+                float(now_ts),
+                MODE_KEY,
+                SYSTEM_PAPER_AUTO_RESUME_OPERATOR,
+                "a_class_recovery_sla_satisfied_auto_resume_paper_only",
+                "paper_auto_resume",
+                (paper_readiness or {}).get("status"),
+                json.dumps(before, sort_keys=True),
+                json.dumps(after, sort_keys=True),
+                json.dumps({
+                    "paper_entry_proposal_readiness": paper_readiness,
+                    "circuit_recovery_sla": recovery_sla,
+                }, sort_keys=True),
+                utc_now(),
+            ),
+        )
+        db.commit()
+        result.update({
+            "available": True,
+            "executed": True,
+            "reason": "a_class_recovery_sla_satisfied_auto_resume_paper_only",
+            "before": before,
+            "after": after,
+            "audit_table": A_CLASS_MODE_OPERATOR_AUDIT_TABLE,
+            "paper_status": "PAPER_ELIGIBLE",
+            "paper_action": "PAPER_ONLY",
+            "paper_enablement_allowed": True,
+            "automatic_paper_resume_allowed": True,
+        })
+        return result
+    finally:
+        db.close()
+
+
 def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions, clean_counter, recovery_sla=None):
     mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
     rate_value = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
@@ -1607,13 +1827,18 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
     if recovery_sla and not recovery_sla.get("cooldown_elapsed"):
         reasons.append("cooldown_not_elapsed")
     final_status = classification.get("final_entry_status")
+    breach_class = recovery_sla.get("breach_class")
     paper_auto_resume_allowed = bool(
+        breach_class in PAPER_AUTO_RESUME_BREACH_CLASSES
+        and
         final_status in {"FUNNEL_READY_FOR_PAPER_AUTO_RESUME", "FUNNEL_BLOCKED_STUCK", "FUNNEL_READY_FOR_PAPER_PROPOSAL"}
         and not reasons
         and recovery_sla_requirements_satisfied(recovery_sla, clean_counter, failed_conditions)
     )
     if paper_auto_resume_allowed:
         status = "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN"
+    elif final_status == "FUNNEL_READY_FOR_HUMAN_OPERATOR_REENABLE" and not reasons:
+        status = "HUMAN_OPERATOR_REENABLE_READY"
     elif final_status == "FUNNEL_BLOCKED_STUCK" and not reasons:
         status = "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL"
     elif final_status == "FUNNEL_READY_FOR_PAPER_PROPOSAL" and not reasons:
@@ -1625,6 +1850,7 @@ def build_paper_entry_proposal_readiness(classification, capture_stage_rates, fa
         "ready": bool(status in {
             "PAPER_AUTO_RESUME_READY_LIVE_REENABLE_REQUIRES_HUMAN",
             "PAPER_ENTRY_PROPOSAL_READY_REQUIRES_HUMAN_APPROVAL",
+            "HUMAN_OPERATOR_REENABLE_READY",
         }),
         "paper_auto_resume_allowed": paper_auto_resume_allowed,
         "paper_auto_resume_status": (
@@ -1682,10 +1908,16 @@ def classify(runtime, final_contract, failed_conditions, clean_counter=None, rec
         reason = "clean_window_streak_below_required" if clean_windows_passed else "cooldown_elapsed_requires_clean_windows"
         current_capture_stage = "mode_disabled_clean_window_pending"
     elif (mode_disabled_count or status == "SHADOW" or recovery_required) and recovery_sla_sufficient:
-        verdict = "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
-        reason = "paper_auto_resume_ready_live_requires_human_operator"
+        breach_class = (recovery_sla or {}).get("breach_class")
+        if breach_class in PAPER_AUTO_RESUME_BREACH_CLASSES:
+            verdict = "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
+            reason = "paper_auto_resume_ready_live_requires_human_operator"
+            current_capture_stage = "paper_auto_resume_ready_live_requires_human_review"
+        else:
+            verdict = "FUNNEL_READY_FOR_HUMAN_OPERATOR_REENABLE"
+            reason = "live_market_recovery_ready_requires_human_operator"
+            current_capture_stage = "live_market_recovery_ready_requires_human_review"
         human = True
-        current_capture_stage = "paper_auto_resume_ready_live_requires_human_review"
     elif final_rows and not mode_disabled_count:
         verdict = "FUNNEL_READY_FOR_PAPER_PROPOSAL"
         reason = "final_entry_contract_no_mode_disabled_blocker"
@@ -1818,6 +2050,21 @@ def build_report(args):
         paper_proposal_readiness.get("status"),
         now_ts,
     )
+    paper_auto_resume_execution = persist_paper_auto_resume_if_eligible(
+        args.db,
+        runtime,
+        paper_proposal_readiness,
+        recovery_sla,
+        now_ts,
+    )
+    if paper_auto_resume_execution.get("executed"):
+        db = sqlite3.connect(args.db)
+        db.row_factory = sqlite3.Row
+        try:
+            runtime = load_runtime_state(db, now_ts)
+            runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
+        finally:
+            db.close()
     tracker_state = dict(runtime.get("mode_state") or {})
     tracker_detail = dict(tracker_state.get("detail") or {})
     if paper_tracker_persistence.get("tracker"):
@@ -1882,6 +2129,7 @@ def build_report(args):
         "live_reenable_contract": recovery_sla.get("live_reenable_contract") or {},
         "handoff_escalation_sla": handoff_escalation_sla,
         "paper_ready_tracker_persistence": paper_tracker_persistence,
+        "paper_auto_resume_execution": paper_auto_resume_execution,
         "raw_gs_events": flat_summary["raw_gs_events"],
         "raw_gs_signal_ids": flat_summary["raw_gs_signal_ids"],
         "candidate_matched_any": flat_summary["candidate_matched_any"],
@@ -1971,6 +2219,7 @@ def build_report(args):
             "requires_human_approval_before_mode_change": True,
             "must_not_reset_shadow_automatically": True,
             "paper_auto_resume_after_sla_allowed": paper_proposal_readiness.get("paper_auto_resume_allowed"),
+            "paper_auto_resume_writer_executed": paper_auto_resume_execution.get("executed"),
             "must_not_enable_live_automatically": True,
             "must_not_change_final_entry_contract_automatically": True,
         },
@@ -2001,6 +2250,7 @@ def compact_summary(report):
         "breach_class": report.get("breach_class"),
         "effective_clean_windows_required": report.get("effective_clean_windows_required"),
         "paper_auto_resume_readiness": report.get("paper_auto_resume_readiness"),
+        "paper_auto_resume_execution": report.get("paper_auto_resume_execution"),
         "handoff_escalation_sla": report.get("handoff_escalation_sla"),
         "failed_clean_window_conditions": (report.get("clean_window_conditions") or {}).get("failed_conditions"),
         "effective_runtime_mode_state": report.get("effective_runtime_mode_state"),
@@ -2337,8 +2587,46 @@ def self_test():
         }
         db = sqlite3.connect(db_path)
         db.execute(
-            "UPDATE a_class_mode_runtime_state SET detail_json=? WHERE mode_key=?",
-            (json.dumps({"breach_class": "DATA_INFRA", "clean_window_counter": previous_counter}, sort_keys=True), MODE_KEY),
+            """
+            UPDATE a_class_mode_runtime_state
+            SET status='CIRCUIT_BROKEN', action='SHADOW', circuit_broken=1, reason='loss_cap_breach',
+                last_breach_ts=?, cooldown_until_ts=?, detail_json=?
+            WHERE mode_key=?
+            """,
+            (
+                now - (5 * 3600),
+                now + (19 * 3600),
+                json.dumps({"breach_class": "PAPER_MARKET", "clean_window_counter": previous_counter}, sort_keys=True),
+                MODE_KEY,
+            ),
+        )
+        db.commit()
+        db.close()
+        report = build_report(args)
+        assert report["breach_class"] == "PAPER_MARKET"
+        assert report["circuit_recovery_sla"]["cooldown"]["stored_cooldown_until_ts"] == now + (19 * 3600)
+        assert report["circuit_recovery_sla"]["cooldown"]["effective_cooldown_until_ts"] == now - 3600
+        assert report["circuit_recovery_sla"]["cooldown_elapsed"] is True
+        assert report["effective_clean_windows_required"] == 6
+        assert report["clean_window_counter"]["streak"] == 6
+        assert report["paper_auto_resume_execution"]["executed"] is True
+        assert report["paper_auto_resume_execution"]["operator"] == SYSTEM_PAPER_AUTO_RESUME_OPERATOR
+        assert report["mode_status"] == "PAPER_ELIGIBLE"
+        assert report["mode_action"] == "PAPER_ONLY"
+        db = sqlite3.connect(db_path)
+        db.execute(
+            """
+            UPDATE a_class_mode_runtime_state
+            SET status='SHADOW', action='SHADOW', circuit_broken=1, reason='loss_cap_breach',
+                last_breach_ts=?, cooldown_until_ts=?, detail_json=?
+            WHERE mode_key=?
+            """,
+            (
+                now - 90000,
+                now - 1,
+                json.dumps({"breach_class": "DATA_INFRA", "clean_window_counter": previous_counter}, sort_keys=True),
+                MODE_KEY,
+            ),
         )
         db.commit()
         db.close()
@@ -2358,13 +2646,23 @@ def self_test():
         assert report["paper_entry_proposal_readiness"]["paper_intent_required_while_shadow"] is False
         assert report["paper_entry_proposal_readiness"]["mode_disabled_adjusted_final_eligibility_target_met"] is False
         assert report["paper_auto_resume_readiness"]["allowed"] is True
+        assert report["paper_auto_resume_execution"]["executed"] is True
+        assert report["paper_auto_resume_execution"]["operator"] == SYSTEM_PAPER_AUTO_RESUME_OPERATOR
+        assert report["mode_status"] == "PAPER_ELIGIBLE"
+        assert report["mode_action"] == "PAPER_ONLY"
         assert report["live_reenable_contract"]["live_auto_reenable_allowed"] is False
         previous_counter["streak"] = 23
         previous_counter["required"] = 24
         db = sqlite3.connect(db_path)
         db.execute(
-            "UPDATE a_class_mode_runtime_state SET detail_json=? WHERE mode_key=?",
+            """
+            UPDATE a_class_mode_runtime_state
+            SET status='SHADOW', action='SHADOW', circuit_broken=1, reason='loss_cap_breach',
+                cooldown_until_ts=?, detail_json=?
+            WHERE mode_key=?
+            """,
             (
+                now - 1,
                 json.dumps(
                     {
                         "breach_class": "MARKET",
@@ -2387,8 +2685,10 @@ def self_test():
         assert report["breach_class"] == "MARKET"
         assert report["effective_clean_windows_required"] == 24
         assert report["clean_window_counter"]["streak"] == 24
-        assert report["final_entry_status"] == "FUNNEL_READY_FOR_PAPER_AUTO_RESUME"
-        assert report["paper_entry_proposal_readiness"]["paper_auto_resume_allowed"] is True
+        assert report["final_entry_status"] == "FUNNEL_READY_FOR_HUMAN_OPERATOR_REENABLE"
+        assert report["paper_entry_proposal_readiness"]["paper_auto_resume_allowed"] is False
+        assert report["paper_auto_resume_execution"]["executed"] is False
+        assert report["paper_auto_resume_execution"]["eligibility_reason"] == "breach_class_not_auto_paper_resumable"
         assert report["circuit_recovery_sla"]["motion_trace_review"]["required"] is True
         assert report["circuit_recovery_sla"]["motion_trace_review"]["available"] is True
         assert report["handoff_escalation_sla"]["high_priority"] is True

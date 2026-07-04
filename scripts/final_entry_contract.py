@@ -41,6 +41,14 @@ def _truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _candidate_is_paper_only(candidate: Any) -> bool:
+    scope = str(_get(candidate, "execution_scope", _get(candidate, "executionScope", "")) or "").strip().lower()
+    return bool(
+        _truthy(_get(candidate, "paper_only_scout", _get(candidate, "paperOnlyScout", False)))
+        or scope in {"paper_only", "paper-only", "paper_scout", "paper_probe"}
+    )
+
+
 def _risk_flags(candidate: Any) -> list[str]:
     flags = _get(candidate, "risk_flags", []) or []
     if isinstance(flags, str):
@@ -161,8 +169,15 @@ def evaluate_final_entry_contract(
         notes.append("defined_risk_missing")
 
     status = str(mode_state.get("status") or mode_state.get("action") or "LIVE").upper()
-    if status in {"DISABLED", "BLOCK", "BLOCKED", "CIRCUIT_BROKEN", "SHADOW"}:
+    action = str(mode_state.get("action") or status or "LIVE").upper()
+    paper_only_runtime = status in {"PAPER_ELIGIBLE", "PAPER_ONLY"} or action in {"PAPER_ELIGIBLE", "PAPER_ONLY"}
+    if paper_only_runtime and not _candidate_is_paper_only(candidate):
         blockers.append("mode_disabled")
+        notes.append("paper_auto_resume_only_live_scope_blocked")
+    elif status in {"DISABLED", "BLOCK", "BLOCKED", "CIRCUIT_BROKEN", "SHADOW"}:
+        blockers.append("mode_disabled")
+    elif paper_only_runtime:
+        notes.append("paper_auto_resume_only")
     if _truthy(mode_state.get("circuit_broken", False)):
         blockers.append("mode_circuit_breaker")
 

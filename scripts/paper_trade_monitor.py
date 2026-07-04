@@ -12816,6 +12816,8 @@ def build_final_entry_contract_candidate(
         'route_bucket': route_bucket,
         'entry_mode': entry_mode,
         'normalized_mode': normalized_mode,
+        'paper_only_scout': bool(pending.get('paper_only_scout')),
+        'execution_scope': pending.get('execution_scope'),
         'quote_source': entry_execution_data_source,
         'quote_available': executable,
         'quote_executable': executable,

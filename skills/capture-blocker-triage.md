@@ -140,3 +140,19 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   final_entry_contract, executor, canary, wallet, or risk; paper evidence collection remains
   blocked only until cooldown and the 24 clean hourly buckets pass, while LIVE re-enable stays
   human-operated.
+- **2026-07-04** (P2.1 PAPER_MARKET parameter patch): PAPER_MARKET no longer inherits the
+  real-money MARKET sentence. `scripts/a_class_runtime_safety.py` now defaults paper-only market
+  breaches to 4h cooldown + 6 clean hourly windows and writes top-level
+  `detail.paper_auto_recovery_counter_started=true`. `scripts/a_class_fastlane_mode_readiness_audit.py`
+  applies this effective SLA even to old rows whose stored `cooldown_until_ts` was written under
+  the prior 24h policy, and it owns the system writer that changes eligible paper-only recovery
+  states to `status=PAPER_ELIGIBLE`, `action=PAPER_ONLY`, with audit row
+  `operator=system_paper_auto_resume`. LIVE/MARKET recovery remains human-only:
+  `LIVE_MARKET`/`MARKET` do not auto-resume paper and still require
+  `scripts/a_class_mode_reenable_operator.py`. `scripts/final_entry_contract.py` only treats
+  `PAPER_ELIGIBLE/PAPER_ONLY` as passable for candidates explicitly marked
+  `paper_only_scout` or `execution_scope=paper_only`; live-scope candidates remain
+  `mode_disabled`. Verified locally with `a_class_fastlane_mode_readiness_audit.py --self-test`,
+  `a_class_paper_breach_recap.py --self-test`, `a_class_mode_reenable_operator.py --self-test`,
+  and pytest on A_CLASS runtime/final-entry tests. `promotion_allowed=false` and no strategy,
+  gate, executor, canary, wallet, or risk settings were changed.

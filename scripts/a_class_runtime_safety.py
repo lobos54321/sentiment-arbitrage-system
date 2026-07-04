@@ -15,6 +15,10 @@ from typing import Any
 
 A_CLASS_RUNTIME_MODE_KEY = "A_CLASS_FASTLANE"
 DEFAULT_LOSS_CAP_BREACH_COOLDOWN_SEC = 24 * 60 * 60
+PAPER_MARKET_LOSS_CAP_BREACH_COOLDOWN_SEC = 4 * 60 * 60
+DATA_INFRA_CLEAN_WINDOWS_REQUIRED = 6
+PAPER_MARKET_CLEAN_WINDOWS_REQUIRED = 6
+MARKET_CLEAN_WINDOWS_REQUIRED = 24
 _BREACH_REASON = "realized_loss_cap_breach"
 BREACH_CLASS_DATA_INFRA = "DATA_INFRA"
 BREACH_CLASS_PAPER_MARKET = "PAPER_MARKET"
@@ -105,6 +109,26 @@ def loss_cap_breach_cooldown_sec(config: Any = None) -> int:
     if value is None:
         value = os.environ.get("A_CLASS_LOSS_CAP_BREACH_COOLDOWN_SEC")
     return max(0, _safe_int(value, DEFAULT_LOSS_CAP_BREACH_COOLDOWN_SEC))
+
+
+def loss_cap_breach_cooldown_sec_for_class(breach_class: str | None, config: Any = None) -> int:
+    if str(breach_class or "").upper() == BREACH_CLASS_PAPER_MARKET:
+        value = None
+        if config is not None:
+            value = getattr(config, "paper_market_loss_cap_breach_cooldown_sec", None)
+        if value is None:
+            value = os.environ.get("A_CLASS_PAPER_MARKET_LOSS_CAP_BREACH_COOLDOWN_SEC")
+        return max(0, _safe_int(value, PAPER_MARKET_LOSS_CAP_BREACH_COOLDOWN_SEC))
+    return loss_cap_breach_cooldown_sec(config)
+
+
+def clean_windows_required_for_class(breach_class: str | None) -> int:
+    text = str(breach_class or "").upper()
+    if text == BREACH_CLASS_DATA_INFRA:
+        return DATA_INFRA_CLEAN_WINDOWS_REQUIRED
+    if text == BREACH_CLASS_PAPER_MARKET:
+        return PAPER_MARKET_CLEAN_WINDOWS_REQUIRED
+    return MARKET_CLEAN_WINDOWS_REQUIRED
 
 
 def init_runtime_safety(db) -> None:
@@ -328,7 +352,7 @@ def record_loss_cap_breach_reaction(
     mode: Any = None,
     now_ts: float | None = None,
     cooldown_sec: int | None = None,
-    clean_windows_required: int = 4,
+    clean_windows_required: int | None = None,
 ) -> dict:
     """Downgrade A_CLASS live modes after a realized SOL loss-cap breach.
 
@@ -380,12 +404,18 @@ def record_loss_cap_breach_reaction(
             "should_record_event": False,
         }
 
-    cooldown_sec = loss_cap_breach_cooldown_sec() if cooldown_sec is None else max(0, int(cooldown_sec))
     event_ts = _safe_float(_row_value(row, "exit_ts"), now_ts) or now_ts
-    cooldown_until = max(now_ts, event_ts) + cooldown_sec
     loss_cap_detail = _parse_json(_row_value(row, "loss_cap_detail_json"), {})
     paper_trade = _paper_trade_lookup(db, trade_id)
     breach_classification = _classify_breach(row, loss_cap_detail, paper_trade)
+    breach_class = str(breach_classification.get("breach_class") or BREACH_CLASS_LIVE_MARKET)
+    cooldown_sec = (
+        loss_cap_breach_cooldown_sec_for_class(breach_class)
+        if cooldown_sec is None else max(0, int(cooldown_sec))
+    )
+    if clean_windows_required is None:
+        clean_windows_required = clean_windows_required_for_class(breach_class)
+    cooldown_until = max(now_ts, event_ts) + cooldown_sec
     existing = db.execute(
         "SELECT source_trade_id, breach_count FROM a_class_mode_runtime_state WHERE mode_key = ?",
         (mode_key,),
@@ -397,7 +427,7 @@ def record_loss_cap_breach_reaction(
         "schema_version": BREACH_DETAIL_SCHEMA_VERSION,
         "breach": True,
         "reason": _BREACH_REASON,
-        "breach_class": breach_classification.get("breach_class"),
+        "breach_class": breach_class,
         "breach_class_source": breach_classification.get("source"),
         "breach_class_evidence": breach_classification.get("evidence") or [],
         "mode_key": mode_key,
@@ -414,6 +444,7 @@ def record_loss_cap_breach_reaction(
         "no_route_flag": bool(_truthy(_row_value(row, "no_route_flag"))),
         "trapped_flag": bool(_truthy(_row_value(row, "trapped_flag"))),
         "paper_only": paper_only,
+        "paper_auto_recovery_counter_started": paper_only,
         "paper_trade_lookup": paper_trade,
         "paper_recovery_contract": {
             "paper_auto_resume_after_clean_windows_allowed": paper_only,

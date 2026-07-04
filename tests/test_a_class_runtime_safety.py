@@ -114,6 +114,40 @@ def test_paper_only_loss_cap_breach_records_paper_market_recovery_contract():
     assert state["detail"]["breach_class"] == "PAPER_MARKET"
 
 
+def test_paper_only_loss_cap_breach_defaults_to_short_paper_market_sla():
+    db = memory_db()
+    _record_a_class_trade(db, trade_id="72", exit_sol=0.0007025)
+    db.execute(
+        """
+        CREATE TABLE paper_trades(
+          id INTEGER PRIMARY KEY,
+          paper_only INTEGER,
+          token_ca TEXT,
+          symbol TEXT,
+          premium_signal_id INTEGER,
+          entry_ts INTEGER,
+          exit_ts INTEGER,
+          entry_price REAL,
+          exit_price REAL,
+          pnl_pct REAL,
+          exit_reason TEXT
+        )
+        """
+    )
+    db.execute(
+        "INSERT INTO paper_trades VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (72, 1, "TokenA", "USDC", 49536, 1_000, 1_030, 1.0, 0.7025, -0.2975, "probe_quote_guard_stop"),
+    )
+    db.commit()
+
+    detail = record_loss_cap_breach_reaction(db, "72", now_ts=1_030)
+
+    assert detail["breach_class"] == "PAPER_MARKET"
+    assert detail["cooldown_sec"] == 4 * 60 * 60
+    assert detail["clean_windows_required"] == 6
+    assert detail["paper_auto_recovery_counter_started"] is True
+
+
 def test_cooldown_expiry_returns_shadow_not_live():
     db = memory_db()
     _record_a_class_trade(db)
