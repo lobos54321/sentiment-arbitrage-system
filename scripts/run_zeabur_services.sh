@@ -65,6 +65,7 @@ shutdown() {
     "${PAPER_PID:-}" \
     "${CANDIDATE_SHADOW_PID:-}" \
     "${AGENT_CAPTURE_PID:-}" \
+    "${PUMP_FUN_SHADOW_PID:-}" \
     "${SCOUT_PID:-}" \
     "${RESONANCE_PID:-}" \
     "${SOCIAL_PID:-}" 2>/dev/null || true
@@ -78,6 +79,7 @@ trap shutdown TERM INT
 # defined because this script runs with `set -u`.
 CANDIDATE_SHADOW_PID=""
 AGENT_CAPTURE_PID=""
+PUMP_FUN_SHADOW_PID=""
 SCOUT_PID=""
 RESONANCE_PID=""
 
@@ -312,6 +314,37 @@ else
   echo "[STARTUP] Gold/silver capture discovery agent loop disabled; set AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE=true only for a dedicated worker/container."
 fi
 
+if [ "${PUMP_FUN_SHADOW_WORKER_ENABLED:-true}" = "true" ]; then
+  echo "[STARTUP] Starting P8 pump.fun shadow worker..."
+  (
+    while true; do
+      echo "[pump-fun-shadow-worker-supervisor] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" | tee -a /app/data/pump-fun-shadow-worker-supervisor.log
+      set +e
+      ZEABUR_DATA_DIR=/app/data \
+      DATA_DIR=/app/data \
+      AGENT_CAPTURE_RUNS_DIR="${AGENT_CAPTURE_RUNS_DIR:-/app/data/agent_runs}" \
+      PUMP_FUN_SHADOW_DB="${PUMP_FUN_SHADOW_DB:-/app/data/pump_fun_shadow_signals.db}" \
+      PUMP_FUN_SHADOW_WORKER_LOG="${PUMP_FUN_SHADOW_WORKER_LOG:-/app/data/pump-fun-shadow-worker.log}" \
+      PUMP_FUN_SHADOW_WORKER_STATUS="${PUMP_FUN_SHADOW_WORKER_STATUS:-/app/data/agent_runs/latest/pump_fun_shadow_worker_status.json}" \
+      PUMP_FUN_SHADOW_DURATION_SEC="${PUMP_FUN_SHADOW_DURATION_SEC:-60}" \
+      PUMP_FUN_SHADOW_LIMIT="${PUMP_FUN_SHADOW_LIMIT:-1000}" \
+      PUMP_FUN_SHADOW_INTERVAL_SEC="${PUMP_FUN_SHADOW_INTERVAL_SEC:-5}" \
+      PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N="${PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N:-12}" \
+      SENTIMENT_DB=/app/data/sentiment_arb.db \
+      RAW_SIGNAL_OUTCOMES_DB=/app/data/raw_signal_outcomes.db \
+      PYTHONUNBUFFERED=1 \
+      bash scripts/run_pump_fun_shadow_worker.sh 2>&1 | tee -a /app/data/pump-fun-shadow-worker-supervisor.log
+      EXIT_CODE=${PIPESTATUS[0]}
+      set -e
+      echo "[pump-fun-shadow-worker-supervisor] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in 15s" | tee -a /app/data/pump-fun-shadow-worker-supervisor.log
+      sleep 15
+    done
+  ) &
+  PUMP_FUN_SHADOW_PID=$!
+else
+  echo "[STARTUP] P8 pump.fun shadow worker disabled by PUMP_FUN_SHADOW_WORKER_ENABLED=false."
+fi
+
 if [ "$PAPER_DB_WRITE_SIDECARS_ENABLED" = "true" ] && [ "$SOURCE_SHADOW_WORKERS_ENABLED" = "true" ]; then
   echo "[STARTUP] Starting GMGN external-alpha scout..."
   (
@@ -379,7 +412,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} agent_capture=${AGENT_CAPTURE_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} agent_capture=${AGENT_CAPTURE_PID:-disabled} pump_fun_shadow=${PUMP_FUN_SHADOW_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -392,6 +425,9 @@ if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
 fi
 if [ -n "${AGENT_CAPTURE_PID:-}" ]; then
   kill -0 "$AGENT_CAPTURE_PID" 2>/dev/null || echo "WARN: AGENT_CAPTURE dead"
+fi
+if [ -n "${PUMP_FUN_SHADOW_PID:-}" ]; then
+  kill -0 "$PUMP_FUN_SHADOW_PID" 2>/dev/null || echo "WARN: PUMP_FUN_SHADOW dead"
 fi
 if [ -n "${SCOUT_PID:-}" ]; then
   kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"
