@@ -153,7 +153,8 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `PAPER_ELIGIBLE/PAPER_ONLY` as passable for candidates explicitly marked
   `paper_only_scout` or `execution_scope=paper_only`; live-scope candidates remain
   `mode_disabled`. Idempotent duplicate breach writes use `event_ts + class cooldown`, not
-  `now + cooldown`, so replaying trade `71` does not extend the paper cooldown. Verified locally
+  `now + cooldown`, and preserve existing `clean_window_counter` / ready trackers, so replaying
+  trade `71` neither extends the paper cooldown nor erases accumulated clean windows. Verified locally
   with `a_class_fastlane_mode_readiness_audit.py --self-test`,
   `a_class_paper_breach_recap.py --self-test`, `a_class_mode_reenable_operator.py --self-test`,
   and pytest on A_CLASS runtime/final-entry tests. `promotion_allowed=false` and no strategy,

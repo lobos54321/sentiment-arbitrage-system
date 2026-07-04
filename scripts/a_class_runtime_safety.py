@@ -410,10 +410,11 @@ def record_loss_cap_breach_reaction(
     breach_classification = _classify_breach(row, loss_cap_detail, paper_trade)
     breach_class = str(breach_classification.get("breach_class") or BREACH_CLASS_LIVE_MARKET)
     existing = db.execute(
-        "SELECT source_trade_id, breach_count FROM a_class_mode_runtime_state WHERE mode_key = ?",
+        "SELECT source_trade_id, breach_count, detail_json FROM a_class_mode_runtime_state WHERE mode_key = ?",
         (mode_key,),
     ).fetchone()
     duplicate = existing is not None and str(_row_value(existing, "source_trade_id") or "") == trade_id
+    existing_detail = _parse_json(_row_value(existing, "detail_json"), {}) if duplicate else {}
     cooldown_sec = (
         loss_cap_breach_cooldown_sec_for_class(breach_class)
         if cooldown_sec is None else max(0, int(cooldown_sec))
@@ -460,6 +461,18 @@ def record_loss_cap_breach_reaction(
         "clean_windows_required": int(clean_windows_required),
         "idempotent_duplicate": duplicate,
     }
+    if duplicate and isinstance(existing_detail, dict):
+        for key in (
+            "clean_window_counter",
+            "paper_entry_ready_tracker",
+            "paper_auto_resume_ready_tracker",
+            "paper_entry_proposal_ready_tracker",
+            "paper_auto_resume_execution",
+            "paper_auto_resume_active",
+            "paper_auto_resume_status",
+        ):
+            if key in existing_detail and key not in detail:
+                detail[key] = existing_detail[key]
     db.execute(
         """
         INSERT INTO a_class_mode_runtime_state (

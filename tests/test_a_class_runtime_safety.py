@@ -64,6 +64,18 @@ def test_loss_cap_breach_downgrades_a_class_mode_and_is_idempotent():
     assert state["status"] == "CIRCUIT_BROKEN"
     assert state["circuit_broken"] is True
     assert state["cooldown_remaining_sec"] == 530
+    db.execute(
+        """
+        UPDATE a_class_mode_runtime_state
+        SET detail_json=?
+        WHERE mode_key=?
+        """,
+        (
+            '{"clean_window_counter":{"streak":3,"required":6},"paper_entry_ready_tracker":{"last_status":"NOT_READY"}}',
+            A_CLASS_RUNTIME_MODE_KEY,
+        ),
+    )
+    db.commit()
 
     duplicate = record_loss_cap_breach_reaction(db, "trade-a", now_ts=1_040, cooldown_sec=600)
     assert duplicate["breach"] is True
@@ -76,6 +88,9 @@ def test_loss_cap_breach_downgrades_a_class_mode_and_is_idempotent():
     assert row["breach_count"] == 1
     assert row["source_trade_id"] == "trade-a"
     assert row["cooldown_until_ts"] == 1_630
+    state = fetch_mode_runtime_state(db, "a_class_fastlane_tiny_canary", now_ts=1_100)
+    assert state["detail"]["clean_window_counter"]["streak"] == 3
+    assert state["detail"]["paper_entry_ready_tracker"]["last_status"] == "NOT_READY"
 
 
 def test_paper_only_loss_cap_breach_records_paper_market_recovery_contract():
