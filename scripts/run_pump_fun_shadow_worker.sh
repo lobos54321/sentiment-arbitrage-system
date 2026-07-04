@@ -56,7 +56,7 @@ import time
     source_url,
     compare_30d_every_n,
     loop_count,
-) = sys.argv[1:15]
+) = sys.argv[1:18]
 payload = {
     "schema_version": "pump_fun_shadow_worker_status.v1",
     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
