@@ -70,11 +70,12 @@ def test_loss_cap_breach_downgrades_a_class_mode_and_is_idempotent():
     assert duplicate["should_record_event"] is False
 
     row = db.execute(
-        "SELECT breach_count, source_trade_id FROM a_class_mode_runtime_state WHERE mode_key = ?",
+        "SELECT breach_count, source_trade_id, cooldown_until_ts FROM a_class_mode_runtime_state WHERE mode_key = ?",
         (A_CLASS_RUNTIME_MODE_KEY,),
     ).fetchone()
     assert row["breach_count"] == 1
     assert row["source_trade_id"] == "trade-a"
+    assert row["cooldown_until_ts"] == 1_630
 
 
 def test_paper_only_loss_cap_breach_records_paper_market_recovery_contract():

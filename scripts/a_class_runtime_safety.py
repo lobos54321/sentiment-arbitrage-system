@@ -409,18 +409,19 @@ def record_loss_cap_breach_reaction(
     paper_trade = _paper_trade_lookup(db, trade_id)
     breach_classification = _classify_breach(row, loss_cap_detail, paper_trade)
     breach_class = str(breach_classification.get("breach_class") or BREACH_CLASS_LIVE_MARKET)
+    existing = db.execute(
+        "SELECT source_trade_id, breach_count FROM a_class_mode_runtime_state WHERE mode_key = ?",
+        (mode_key,),
+    ).fetchone()
+    duplicate = existing is not None and str(_row_value(existing, "source_trade_id") or "") == trade_id
     cooldown_sec = (
         loss_cap_breach_cooldown_sec_for_class(breach_class)
         if cooldown_sec is None else max(0, int(cooldown_sec))
     )
     if clean_windows_required is None:
         clean_windows_required = clean_windows_required_for_class(breach_class)
-    cooldown_until = max(now_ts, event_ts) + cooldown_sec
-    existing = db.execute(
-        "SELECT source_trade_id, breach_count FROM a_class_mode_runtime_state WHERE mode_key = ?",
-        (mode_key,),
-    ).fetchone()
-    duplicate = existing is not None and str(_row_value(existing, "source_trade_id") or "") == trade_id
+    cooldown_base_ts = event_ts if duplicate else max(now_ts, event_ts)
+    cooldown_until = cooldown_base_ts + cooldown_sec
     breach_count = _safe_int(_row_value(existing, "breach_count"), 0) if duplicate else _safe_int(_row_value(existing, "breach_count"), 0) + 1
     paper_only = bool(breach_classification.get("paper_only"))
     detail = {
