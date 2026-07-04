@@ -880,6 +880,7 @@ function startIndexRuntimeSupervisor() {
     ...startCandidateShadowObserver({}),
     ...startAgentCaptureDiscoveryLoop({}),
     ...startAutoloopOosRefreshWorker({}),
+    ...startPumpFunShadowWorker({}),
   ];
   startRawPathObserverSupervisor();
   startRawDogDiscoverySupervisor();
@@ -1026,6 +1027,85 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
   };
 }
 
+function startBashSidecar({ name, args, env = {}, logPath }) {
+  let child = null;
+  let stopped = false;
+  const status = {
+    name,
+    running: false,
+    pid: null,
+    log_path: logPath,
+    started_at: null,
+    last_exit_at: null,
+    last_exit_code: null,
+    last_exit_signal: null,
+    restart_count: 0,
+  };
+  fs.mkdirSync(dirname(logPath), { recursive: true });
+  const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+
+  const launch = () => {
+    if (stopped) return;
+    logStream.write(`[node-supervisor] ${new Date().toISOString()} starting ${name}: bash ${args.join(' ')}\n`);
+    status.started_at = new Date().toISOString();
+    status.last_exit_at = null;
+    status.last_exit_code = null;
+    status.last_exit_signal = null;
+    child = spawn('bash', args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        ...env,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    status.running = true;
+    status.pid = child.pid || null;
+    child.stdout.pipe(logStream, { end: false });
+    child.stderr.pipe(logStream, { end: false });
+    child.on('exit', (code, signal) => {
+      status.running = false;
+      status.pid = null;
+      status.last_exit_at = new Date().toISOString();
+      status.last_exit_code = code;
+      status.last_exit_signal = signal;
+      logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} exited code=${code} signal=${signal}\n`);
+      if (!stopped) {
+        status.restart_count += 1;
+        setTimeout(launch, 15000).unref?.();
+      }
+    });
+    child.on('error', (error) => {
+      status.running = false;
+      status.pid = null;
+      status.last_exit_at = new Date().toISOString();
+      logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} spawn error: ${error.message}\n`);
+      if (!stopped) {
+        status.restart_count += 1;
+        setTimeout(launch, 15000).unref?.();
+      }
+    });
+  };
+
+  launch();
+  return {
+    name,
+    getStatus() {
+      return {
+        ...status,
+        stopped,
+      };
+    },
+    stop() {
+      stopped = true;
+      status.running = false;
+      try { if (child && !child.killed) child.kill('SIGTERM'); } catch {}
+      try { logStream.end(`[node-supervisor] ${new Date().toISOString()} stopping ${name}\n`); } catch {}
+    },
+  };
+}
+
 function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
   return startPythonSidecar({
     name: 'paper-review-snapshot',
@@ -1045,6 +1125,42 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
       PAPER_REVIEW_LIVE_DIR: process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
     },
   });
+}
+
+function startPumpFunShadowWorker(config) {
+  if (!envFlag('PUMP_FUN_SHADOW_WORKER_ENABLED', true)) {
+    console.log('[PumpFunShadow] disabled by PUMP_FUN_SHADOW_WORKER_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = runtimeDataDir();
+  const runsDir = process.env.AGENT_CAPTURE_RUNS_DIR || process.env.AGENT_RUNS_DIR || join(dataDir, 'agent_runs');
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
+  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
+  return [
+    startBashSidecar({
+      name: 'pump-fun-shadow-worker',
+      logPath: process.env.PUMP_FUN_SHADOW_SUPERVISOR_LOG || join(dataDir, 'pump-fun-shadow-worker-supervisor.log'),
+      args: [
+        'scripts/run_pump_fun_shadow_worker.sh',
+      ],
+      env: {
+        ZEABUR_DATA_DIR: dataDir,
+        DATA_DIR: dataDir,
+        AGENT_CAPTURE_RUNS_DIR: runsDir,
+        SENTIMENT_DB: signalDb,
+        DB_PATH: signalDb,
+        RAW_SIGNAL_OUTCOMES_DB: rawDb,
+        PUMP_FUN_SHADOW_DB: process.env.PUMP_FUN_SHADOW_DB || join(dataDir, 'pump_fun_shadow_signals.db'),
+        PUMP_FUN_SHADOW_WORKER_LOG: process.env.PUMP_FUN_SHADOW_WORKER_LOG || join(dataDir, 'pump-fun-shadow-worker.log'),
+        PUMP_FUN_SHADOW_WORKER_STATUS: process.env.PUMP_FUN_SHADOW_WORKER_STATUS || join(runsDir, 'latest', 'pump_fun_shadow_worker_status.json'),
+        PUMP_FUN_SHADOW_DURATION_SEC: process.env.PUMP_FUN_SHADOW_DURATION_SEC || '60',
+        PUMP_FUN_SHADOW_LIMIT: process.env.PUMP_FUN_SHADOW_LIMIT || '1000',
+        PUMP_FUN_SHADOW_INTERVAL_SEC: process.env.PUMP_FUN_SHADOW_INTERVAL_SEC || '5',
+        PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N: process.env.PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N || '12',
+      },
+    }),
+  ];
 }
 
 function startCandidateShadowObserver(config) {
