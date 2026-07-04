@@ -159,7 +159,8 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `a_class_paper_breach_recap.py --self-test`, `a_class_mode_reenable_operator.py --self-test`,
   and pytest on A_CLASS runtime/final-entry tests. `promotion_allowed=false` and no strategy,
   gate, executor, canary, wallet, or risk settings were changed.
-- **2026-07-04** (P6 loop hygiene patch prepared): AutoLoop handoffs now include a machine-readable
+- **2026-07-04** (P6 loop hygiene deployed/verified, run `api_20260704T022320Z_e6121235`,
+  code commit `464f47f`): AutoLoop handoffs now include a machine-readable
   `codex_handoff.json` sidecar plus a `Machine Readable Handoff` JSON block in the Markdown with
   `tasks[]`, `task_outcomes[]`, immutable guardrails, commit/run identifiers, and verification
   artifact paths. `agent_capture_discovery_loop.py` and `agent_autoloop_stage_runner.py` sync both
@@ -169,5 +170,11 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   exposes the compact provenance summary. Local verification passed:
   `generate_codex_handoff.py --self-test`, `agent_autoloop_stage_runner.py --self-test`,
   `py_compile` for the touched Python scripts, and `node --check src/web/dashboard-server.js`.
-  This is reporting/orchestration only; `promotion_allowed=false` and no strategy, gate, executor,
-  canary, wallet, or risk settings were changed.
+  Post-deploy AutoLoop completed with `exit_code=0`, `timed_out=false`,
+  runner status `exec_run_provenance.commit=464f47f5d76b5a775ebc66c06cabfe97f1117263`,
+  `scheduler.trigger=dashboard_api`, and compact `/api/agent/latest-status` provenance available.
+  The downloaded `handoff_json` artifact has `schema_version=capture_discovery_codex_handoff_machine.v1`,
+  `task_count=2`, `task_outcome_count=1`, `task_outcomes[0].status=completed`,
+  `tests_passed=true`, and all guardrails false. This is reporting/orchestration only;
+  `promotion_allowed=false` and no strategy, gate, executor, canary, wallet, or risk settings were
+  changed.
