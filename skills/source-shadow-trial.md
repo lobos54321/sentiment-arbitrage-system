@@ -50,3 +50,22 @@ risk table is written by the source worker.
   Comparison artifact `/app/data/agent_runs/latest/pump_fun_shadow_source_comparison_24h.json`
   remained `P8_TRIAL_ACCUMULATING`, `promotion_allowed=false`, with pump.fun shadow rows
   `744`, unique tokens `706`, and `production_impact=zero_shadow_only`.
+- **2026-07-04** (P8 worker status self-evidence repair, commits
+  `9da39c3c535654821815e8f9a3c9c8ae38eeefc2` and
+  `7147d8c4b0225d42feefe70919c4ed00ea005902`): Runtime supervision must be visible in the
+  worker artifact, not only inferred from `/proc`. `scripts/run_pump_fun_shadow_worker.sh` now
+  writes `parent_pid`, `supervisor_pid`, `supervisor_kind`, `deployment_commit`, and
+  `worker_status_source` into `/app/data/agent_runs/latest/pump_fun_shadow_worker_status.json`;
+  `src/index.js` injects `PUMP_FUN_SHADOW_SUPERVISOR_PID=process.pid`,
+  `PUMP_FUN_SHADOW_SUPERVISOR_KIND=node_index_runtime_supervisor`, and the Zeabur deployment
+  commit. Commit `9da39c3...` initially introduced a status argv slicing bug that made the
+  worker exit on boot; commit `7147d8c...` fixed the slice to `sys.argv[1:18]`. Post-deploy
+  evidence from `pump_fun_shadow_worker_status.json` at `2026-07-04T05:08:24Z` showed
+  `pid=51`, `parent_pid=23`, `supervisor_pid=23`,
+  `supervisor_kind=node_index_runtime_supervisor`,
+  `deployment_commit=7147d8c4b0225d42feefe70919c4ed00ea005902`,
+  `worker_status_source=supervised_bash_sidecar`, and `promotion_allowed=false`; `/proc` agreed
+  that `bash scripts/run_pump_fun_shadow_worker.sh` was parented by pid `23`
+  (`node src/index.js --premium`). The refreshed comparison artifact at `2026-07-04T05:07:49Z`
+  stayed `P8_TRIAL_ACCUMULATING`, `promotion_allowed=false`, and
+  `production_impact=zero_shadow_only`.
