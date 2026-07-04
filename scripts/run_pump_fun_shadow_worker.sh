@@ -19,15 +19,17 @@ SOURCE_URL="${PUMP_FUN_SHADOW_SOURCE_URL:-}"
 DURATION_SEC="${PUMP_FUN_SHADOW_DURATION_SEC:-300}"
 LIMIT="${PUMP_FUN_SHADOW_LIMIT:-2000}"
 INTERVAL_SEC="${PUMP_FUN_SHADOW_INTERVAL_SEC:-5}"
+COMPARE_30D_EVERY_N="${PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N:-12}"
 SIGNAL_DB="${SENTIMENT_DB:-$DATA_DIR/sentiment_arb.db}"
 RAW_DB="${RAW_SIGNAL_OUTCOMES_DB:-$DATA_DIR/raw_signal_outcomes.db}"
 WORKER_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+LOOP_COUNT=0
 
 write_status() {
   local state="$1"
   local note="${2:-}"
   local next_run_at="${3:-}"
-  python3 - "$STATUS_PATH" "$state" "$note" "$next_run_at" "$PUMP_DB" "$LOG_PATH" "$$" "$WORKER_STARTED_AT" "$DURATION_SEC" "$INTERVAL_SEC" "$WEBSOCKET_URL" "$SOURCE_URL" <<'PY'
+  python3 - "$STATUS_PATH" "$state" "$note" "$next_run_at" "$PUMP_DB" "$LOG_PATH" "$$" "$WORKER_STARTED_AT" "$DURATION_SEC" "$INTERVAL_SEC" "$WEBSOCKET_URL" "$SOURCE_URL" "$COMPARE_30D_EVERY_N" "$LOOP_COUNT" <<'PY'
 import json
 import os
 import sys
@@ -46,7 +48,9 @@ import time
     interval_sec,
     websocket_url,
     source_url,
-) = sys.argv[1:13]
+    compare_30d_every_n,
+    loop_count,
+) = sys.argv[1:15]
 payload = {
     "schema_version": "pump_fun_shadow_worker_status.v1",
     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -59,6 +63,8 @@ payload = {
     "log_path": log_path,
     "duration_sec": int(duration_sec),
     "interval_sec": int(interval_sec),
+    "compare_30d_every_n": int(compare_30d_every_n),
+    "loop_count": int(loop_count),
     "stream_config": {
         "mode": "http_poll" if source_url else "websocket",
         "websocket_url_configured": bool(websocket_url),
@@ -97,8 +103,9 @@ echo "[pump-fun-shadow-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting shadow 
 write_status "starting" "worker_boot" ""
 
 while true; do
+  LOOP_COUNT=$((LOOP_COUNT + 1))
   STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  echo "[pump-fun-shadow-worker] $STARTED_AT collection start" | tee -a "$LOG_PATH"
+  echo "[pump-fun-shadow-worker] $STARTED_AT collection start loop=$LOOP_COUNT" | tee -a "$LOG_PATH"
   write_status "collecting" "bounded_shadow_collection" ""
 
   set +e
@@ -137,14 +144,19 @@ while true; do
     --out "$LATEST_DIR/pump_fun_shadow_source_comparison_24h.json" \
     --quiet 2>&1 | tee -a "$LOG_PATH"
   CMP24_EXIT=${PIPESTATUS[0]}
-  python3 scripts/pump_fun_shadow_source_comparison.py \
-    --pump-db "$PUMP_DB" \
-    --signal-db "$SIGNAL_DB" \
-    --raw-db "$RAW_DB" \
-    --hours 720 \
-    --out "$LATEST_DIR/pump_fun_shadow_source_comparison_30d.json" \
-    --quiet 2>&1 | tee -a "$LOG_PATH"
-  CMP30_EXIT=${PIPESTATUS[0]}
+  CMP30_EXIT=0
+  if [[ "$LOOP_COUNT" -eq 1 || $((LOOP_COUNT % COMPARE_30D_EVERY_N)) -eq 0 ]]; then
+    python3 scripts/pump_fun_shadow_source_comparison.py \
+      --pump-db "$PUMP_DB" \
+      --signal-db "$SIGNAL_DB" \
+      --raw-db "$RAW_DB" \
+      --hours 720 \
+      --out "$LATEST_DIR/pump_fun_shadow_source_comparison_30d.json" \
+      --quiet 2>&1 | tee -a "$LOG_PATH"
+    CMP30_EXIT=${PIPESTATUS[0]}
+  else
+    echo "[pump-fun-shadow-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') skipping 30d comparison loop=$LOOP_COUNT cadence=$COMPARE_30D_EVERY_N" | tee -a "$LOG_PATH"
+  fi
   set -e
 
   NEXT_RUN_AT="$(python3 - "$INTERVAL_SEC" <<'PY'

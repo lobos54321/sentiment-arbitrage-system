@@ -219,3 +219,8 @@ The class assignment survives the consumer + cohort tests recomputed by a second
 - **2026-07-04** (P8 worker log hygiene): `pump_fun_shadow_source_comparison.py` gained
   `--quiet`, and the P8 worker uses it for both 24h and 30d refreshes. This keeps the long-running
   shadow worker log bounded while still writing the full JSON artifacts for review.
+- **2026-07-04** (P8 worker comparison cadence): The worker refreshes the 30d comparison on the
+  first loop and then every `PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N` loops (default 12), while 24h
+  comparison still refreshes every loop. Worker status records the real shell pid, loop count,
+  duration, interval, and cadence so the 30-day side-by-side trial can be monitored without
+  repeatedly scanning the long window.
