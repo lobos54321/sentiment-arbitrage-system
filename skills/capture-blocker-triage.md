@@ -207,3 +207,12 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `pump_fun_shadow_observer_summary` and `pump_fun_shadow_source_comparison` were verified.
   No production strategy, gate, executor, canary, wallet, risk, paper-enable, or A_CLASS
   setting was changed.
+- **2026-07-04** (P8 persistent trial worker scaffold): Added
+  `scripts/run_pump_fun_shadow_worker.sh` as a dedicated shadow worker loop. It repeatedly runs
+  bounded pump.fun collection, refreshes 24h and 30d source-comparison artifacts, writes
+  `pump_fun_shadow_worker_status.json`, and logs to `pump-fun-shadow-worker.log`. The worker is
+  intentionally not wired into `src/index.js` or the production runtime; it must run as an
+  isolated shadow process/worker. Dashboard artifact aliases were added for
+  `pump_fun_shadow_source_comparison_30d` and `pump_fun_shadow_worker_status`. Guardrails remain:
+  `promotion_allowed=false`, production funnel impact zero, no strategy/gate/executor/canary/wallet/risk
+  changes.
