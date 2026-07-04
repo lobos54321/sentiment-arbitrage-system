@@ -291,3 +291,9 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   reconciled status back to the status file, and serves normalized JSON for
   `artifact=runner_status`. This is P6 reporting hygiene only; it does not change strategy, gates,
   executor, canary, wallet, risk, or paper/LIVE enablement.
+- **2026-07-04** (P6 runner-status reconciliation persistence): The runner-status reader now
+  preserves prior `stale_running_status`, `stale_running_reason`, and `reconciled_at` evidence on
+  subsequent reads after the first normalization write flips `running=false`. This keeps the
+  dashboard artifact auditable across repeated downloads instead of hiding the original stale-pid
+  condition after one read. This remains read-only reporting hygiene; no runtime mode, strategy,
+  gate, executor, canary, wallet, risk, or paper/LIVE enablement path changes.
