@@ -234,7 +234,13 @@ def build_machine_readable_handoff(verdict):
         "verdict": verdict.get("classification"),
         "next_action": verdict.get("next_action"),
         "handoff_needed": handoff_needed(verdict),
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
         "guardrails": handoff_guardrails(),
+        "task_count": len(tasks),
+        "task_outcome_count": len(task_outcomes),
         "tasks": tasks,
         "task_outcomes": task_outcomes,
     }
