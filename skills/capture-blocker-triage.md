@@ -178,3 +178,15 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `tests_passed=true`, and all guardrails false. This is reporting/orchestration only;
   `promotion_allowed=false` and no strategy, gate, executor, canary, wallet, or risk settings were
   changed.
+- **2026-07-04** (P8 pump.fun shadow source scaffold): Added a second-perception-source
+  shadow path for pump.fun launches without wiring it into production. `scripts/pump_fun_shadow_observer.js`
+  writes only the isolated `pump_fun_shadow_signals.db` and
+  `pump_fun_shadow_observer_summary.json`; it does not write `premium_signals`,
+  candidate observations, paper trades, or runtime mode tables. `scripts/pump_fun_shadow_source_comparison.py`
+  compares pump.fun shadow rows with Telegram/premium rows and raw gold/silver outcomes,
+  publishing per-source denominators, token overlap, incremental raw-dog token candidates,
+  and 30-day trial status. Dashboard artifact aliases were added for
+  `pump_fun_shadow_observer_summary` and `pump_fun_shadow_source_comparison`.
+  This is discovery-only / shadow-only; GMGN confirmation, X narrative, and smart-money
+  layers remain out of scope, `promotion_allowed=false`, and no strategy, gate, executor,
+  canary, wallet, or risk settings were changed.
