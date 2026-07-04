@@ -260,3 +260,19 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   `2026-07-05T12:50:42Z`) has not started collecting eligible samples yet. Blocker is exactly
   `waiting_for_two_non_overlapping_forward_windows`, not strategy failure. P7 remains
   shadow-only and no paper proposal is allowed.
+- **2026-07-04** (P2.1/P6 online recheck, run `api_20260704T054744Z_73a79a1f`, commit
+  `a5143bf`): AutoLoop completed with `exit_code=0`, `timed_out=false`,
+  `tests_passed=true`, and `classification=A_CLASS_EXPECTED_SHADOW`. The latest A_CLASS audit
+  confirms `breach_class=PAPER_MARKET`, `cooldown_required_sec=14400`,
+  `effective_clean_windows_required=6`, persisted
+  `detail.paper_auto_recovery_counter_started=true`, and
+  `paper_auto_resume_execution.operator=system_paper_auto_resume`. The writer attempted recovery
+  but correctly did not execute because the clean-window streak was only `5/6`
+  (`automatic_paper_resume_allowed=false`, `paper_auto_resume_readiness.status=NOT_ELIGIBLE`);
+  LIVE re-enable remains human-operated. The same run verified the P6 handoff hygiene patch:
+  downloaded `handoff_json` now has top-level `promotion_allowed=false`,
+  `strategy_change_allowed=false`, `automatic_runtime_change_allowed=false`,
+  `paper_enablement_allowed=false`, `task_count=2`, and `task_outcome_count=1`. P7 remains
+  `P7_EXIT_POLICY_OOS_WAITING_FOR_FORWARD_DATA` with the `trail_a50_dd15_stop20` champion
+  still shadow-only and stop-fill stress enabled from the trade-71 observed floor. P8 worker
+  stayed isolated with `production_impact=zero_shadow_only` and `promotion_allowed=false`.
