@@ -112,14 +112,16 @@ while true; do
     --signal-db "$SIGNAL_DB" \
     --raw-db "$RAW_DB" \
     --hours 24 \
-    --out "$LATEST_DIR/pump_fun_shadow_source_comparison_24h.json" 2>&1 | tee -a "$LOG_PATH"
+    --out "$LATEST_DIR/pump_fun_shadow_source_comparison_24h.json" \
+    --quiet 2>&1 | tee -a "$LOG_PATH"
   CMP24_EXIT=${PIPESTATUS[0]}
   python3 scripts/pump_fun_shadow_source_comparison.py \
     --pump-db "$PUMP_DB" \
     --signal-db "$SIGNAL_DB" \
     --raw-db "$RAW_DB" \
     --hours 720 \
-    --out "$LATEST_DIR/pump_fun_shadow_source_comparison_30d.json" 2>&1 | tee -a "$LOG_PATH"
+    --out "$LATEST_DIR/pump_fun_shadow_source_comparison_30d.json" \
+    --quiet 2>&1 | tee -a "$LOG_PATH"
   CMP30_EXIT=${PIPESTATUS[0]}
   set -e
 
@@ -136,4 +138,3 @@ PY
   echo "[pump-fun-shadow-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') sleeping ${INTERVAL_SEC}s" | tee -a "$LOG_PATH"
   sleep "$INTERVAL_SEC"
 done
-

@@ -545,6 +545,7 @@ def parse_args(argv=None):
     parser.add_argument("--trial-days", type=int, default=int(os.environ.get("PUMP_FUN_SHADOW_TRIAL_DAYS", "30")))
     parser.add_argument("--overlap-tolerance-sec", type=int, default=int(os.environ.get("PUMP_FUN_SHADOW_OVERLAP_TOLERANCE_SEC", "21600")))
     parser.add_argument("--out", default=os.environ.get("PUMP_FUN_SHADOW_COMPARISON_OUT", "/app/data/agent_runs/latest/pump_fun_shadow_source_comparison_24h.json"))
+    parser.add_argument("--quiet", action="store_true", help="Write the artifact without printing the full JSON payload.")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
 
@@ -556,10 +557,19 @@ def main(argv=None) -> int:
         return 0
     report = build_report(args)
     write_json(args.out, report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    if args.quiet:
+        print(json.dumps({
+            "ok": True,
+            "out": args.out,
+            "status": report.get("status"),
+            "pump_fun_unique_tokens": ((report.get("source_denominators") or {}).get(PUMP_SOURCE) or {}).get("unique_tokens"),
+            "telegram_unique_tokens": ((report.get("source_denominators") or {}).get(TG_SOURCE) or {}).get("unique_tokens"),
+            "promotion_allowed": report.get("promotion_allowed"),
+        }, indent=2, sort_keys=True))
+    else:
+        print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
