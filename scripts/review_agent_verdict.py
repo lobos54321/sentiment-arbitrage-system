@@ -1978,7 +1978,23 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     elif classification == "CAPTURE_READINESS_60_REACHED":
         next_action = "prepare_paper_entry_proposal_for_human_review_without_enabling_runtime"
     elif classification == "CAPTURE_DISCOVERY_HIT":
-        next_action = "freeze_hit_for_out_of_sample_validation"
+        frozen_capture_cross_count = as_int(
+            capture_cross_oos_freeze_registry.get("frozen_definition_count"),
+            0,
+        ) or 0
+        if frozen_capture_cross_count > 0 and capture_cross_post_freeze_oos_validation:
+            next_action = (
+                capture_cross_post_freeze_oos_validation.get("next_action")
+                or capture_cross_post_freeze_oos_validation.get("oos_data_next_action")
+                or "continue_collecting_post_freeze_capture_cross_oos_window"
+            )
+        elif frozen_capture_cross_count > 0:
+            next_action = (
+                capture_cross_oos_freeze_registry.get("next_action")
+                or "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window"
+            )
+        else:
+            next_action = "freeze_hit_for_out_of_sample_validation"
     elif classification == "DISCOVERY_WATCH":
         next_action = "continue_shadow_discovery_and_watchlist_validation"
     else:
@@ -3882,6 +3898,38 @@ def self_test():
     }, tests={"passed": True})
     assert "discovery_same_window_not_promotion_evidence" in same_window_guard_only["blockers"]
     assert "discovery_same_window_not_promotion_evidence" not in same_window_guard_only["actionable_blockers"]
+    hit_capture = {
+        **capture,
+        "judgment_counts": {"DISCOVERY_HIT": 1, "WATCH": 0, "TOO_SMALL": 0, "NO_SIGNAL": 0},
+        "context_slices": [
+            {
+                "candidate_id": "current_all",
+                "family": "base",
+                "dimension": "signal_type",
+                "slice_value": "ATH",
+                "judgment": "DISCOVERY_HIT",
+            }
+        ],
+    }
+    frozen_hit_verdict = build_verdict(hit_capture, tests={"passed": True}, readiness_reports={
+        "capture_cross_oos_freeze_registry": {
+            "schema_version": "capture_cross_oos_freeze_registry.v1",
+            "classification": "CAPTURE_CROSS_OOS_FREEZE_READY_PENDING_CLEAN_WINDOW",
+            "next_action": "validate_frozen_capture_cross_definitions_in_next_clean_non_overlapping_window",
+            "frozen_definition_count": 1,
+            "promotion_allowed": False,
+        },
+        "capture_cross_post_freeze_oos_validation": {
+            "schema_version": "capture_cross_post_freeze_oos_validation.v2",
+            "classification": "CAPTURE_CROSS_POST_FREEZE_OOS_WAITING_FOR_RAW_SIGNALS",
+            "next_action": "wait_for_post_freeze_raw_signal_rows",
+            "raw_gold_silver_event_rows": 0,
+            "promotion_allowed": False,
+        },
+    })
+    assert frozen_hit_verdict["classification"] == "CAPTURE_DISCOVERY_HIT"
+    assert frozen_hit_verdict["next_action"] == "wait_for_post_freeze_raw_signal_rows"
+    assert frozen_hit_verdict["promotion_allowed"] is False
     assert verdict["quote_context_coverage"]["coverage_denominator_type"] == "signal_context_carrier_rows"
     assert verdict["matured_kline_volume_recheck_audit"]["available"] is False
     assert verdict["matured_volume_capture_cross_audit"]["available"] is False

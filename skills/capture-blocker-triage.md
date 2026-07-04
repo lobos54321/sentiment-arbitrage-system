@@ -297,3 +297,9 @@ The class assignment survives the consumer + cohort tests recomputed by a second
   dashboard artifact auditable across repeated downloads instead of hiding the original stale-pid
   condition after one read. This remains read-only reporting hygiene; no runtime mode, strategy,
   gate, executor, canary, wallet, risk, or paper/LIVE enablement path changes.
+- **2026-07-04** (P6 post-freeze next-action hygiene): Reviewer verdict next-action selection now
+  detects when a capture discovery hit has already been frozen into
+  `capture_cross_oos_freeze_registry.json` and a post-freeze OOS validator exists. In that state it
+  reports the validator's wait action (for example `wait_for_post_freeze_raw_signal_rows`) instead
+  of repeatedly asking to freeze the same hit again. This is read-only reporting hygiene only; no
+  strategy, gate, executor, canary, wallet, risk, or paper/LIVE enablement path changes.
