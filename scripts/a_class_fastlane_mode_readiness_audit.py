@@ -1285,7 +1285,20 @@ def upstream_gap_priority(raw_signals, pending, upstream_gap_categories):
     }
 
 
-def build_capture_stage_rates(raw_snapshot, final_contract):
+def runtime_mode_status(runtime):
+    state = (runtime or {}).get("mode_state") or {}
+    status = str(state.get("status") or "").strip().upper()
+    action = str(state.get("action") or "").strip().upper()
+    return {
+        "status": status,
+        "action": action,
+        "paper_era": status in {"PAPER_ELIGIBLE", "PAPER_ONLY"} or action in {"PAPER_ELIGIBLE", "PAPER_ONLY"},
+    }
+
+
+def build_capture_stage_rates(raw_snapshot, final_contract, runtime=None):
+    mode_scope = runtime_mode_status(runtime)
+    paper_era = bool(mode_scope.get("paper_era"))
     raw_events = safe_int(raw_snapshot.get("raw_gold_silver_events"), 0)
     raw_signals = safe_int(raw_snapshot.get("raw_signal_ids"), 0) or raw_events
     decision_records = safe_int(raw_snapshot.get("raw_signals_with_decision_record"), 0)
@@ -1307,6 +1320,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     realized = safe_int(raw_snapshot.get("realized_events"), 0)
     paper_committed = safe_int(raw_snapshot.get("paper_trades_entry_ts_window_count"), 0)
     paper_intent = safe_int(raw_snapshot.get("paper_trade_entry_intent_events"), 0)
+    paper_era_final_eligibility = max(paper_intent, paper_committed)
     candidate_matched_any = safe_int(raw_snapshot.get("candidate_matched_any_events"), 0)
     detector_rate = raw_snapshot.get("candidate_match_any_rate")
     if detector_rate is None:
@@ -1318,12 +1332,21 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         else max(0, pending - final_entry_contract)
     )
     final_without_mode_adjusted = max(0, final_entry_contract - mode_disabled_only)
-    mode_adjusted_rate = rate(mode_disabled_only, raw_signals) if scoped_mode_disabled_only_available else None
+    legacy_mode_adjusted_rate = rate(mode_disabled_only, raw_signals) if scoped_mode_disabled_only_available else None
+    paper_era_adjusted_rate = rate(paper_era_final_eligibility, raw_signals)
+    if paper_era:
+        active_adjusted_count = paper_era_final_eligibility
+        mode_adjusted_rate = paper_era_adjusted_rate
+        active_adjusted_scope = "paper_era"
+    else:
+        active_adjusted_count = mode_disabled_only
+        mode_adjusted_rate = legacy_mode_adjusted_rate
+        active_adjusted_scope = "shadow_mode_disabled_legacy"
     pending_reason_counts = raw_snapshot.get("pending_without_final_entry_reason_counts") or []
     pending_gap_categories = categorize_pending_to_final_gap(pending_reason_counts)
     readiness_priority = readiness_gap_priority(
         raw_signals,
-        mode_disabled_only,
+        active_adjusted_count,
         final_entry_contract,
         pending_gap_categories,
     )
@@ -1339,7 +1362,13 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
     )
     upstream_priority = upstream_gap_priority(raw_signals, pending, upstream_categories)
     readiness_status = "SCOPED_FINAL_ENTRY_BLOCKERS_MISSING"
-    if scoped_mode_disabled_only_available:
+    if paper_era:
+        readiness_status = (
+            "PAPER_ERA_FINAL_ELIGIBILITY_60_REACHED"
+            if mode_adjusted_rate is not None and mode_adjusted_rate >= 0.6
+            else "PAPER_ERA_FINAL_ELIGIBILITY_BELOW_60"
+        )
+    elif scoped_mode_disabled_only_available:
         readiness_status = (
             "CAPTURE_READINESS_60_REACHED"
             if mode_adjusted_rate is not None and mode_adjusted_rate >= 0.6
@@ -1369,6 +1398,7 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
             "pending_entry": pending,
             "final_entry_contract": final_entry_contract,
             "mode_disabled_only_final_entry": mode_disabled_only,
+            "paper_era_final_eligibility": paper_era_final_eligibility,
             "mode_disabled_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled"), 0),
             "mode_disabled_plus_other_final_entry": safe_int(raw_snapshot.get("raw_signals_with_final_entry_mode_disabled_plus_other"), 0),
             "entered": entered,
@@ -1460,13 +1490,31 @@ def build_capture_stage_rates(raw_snapshot, final_contract):
         },
         "mode_disabled_adjusted_final_eligibility": {
             "status": readiness_status,
+            "scope": active_adjusted_scope,
+            "runtime_mode_status": mode_scope,
             "raw_scoped_blockers_available": scoped_mode_disabled_only_available,
+            "active_adjusted_final_eligibility_unique_signal_ids": active_adjusted_count,
             "mode_disabled_only_unique_signal_ids": mode_disabled_only,
+            "legacy_shadow_mode_disabled_only_unique_signal_ids": mode_disabled_only,
+            "legacy_shadow_mode_disabled_adjusted_rate": legacy_mode_adjusted_rate,
+            "paper_era_final_eligibility_unique_signal_ids": paper_era_final_eligibility,
+            "paper_era_adjusted_final_eligibility_rate": paper_era_adjusted_rate,
+            "paper_era_source_fields": {
+                "paper_trade_intent_events": paper_intent,
+                "paper_trades_entry_ts_window_count": paper_committed,
+                "selected_count": paper_era_final_eligibility,
+                "selection_rule": "max(paper_trade_intent_events, paper_trades_entry_ts_window_count)",
+            },
             "final_entry_contract_unique_signal_ids": final_entry_contract,
             "final_entry_contract_not_mode_adjusted_signal_ids": final_without_mode_adjusted,
             "rate": mode_adjusted_rate,
             "denominator_raw_signal_ids": raw_signals,
-            "definition": "raw gold/silver signals that reached final_entry_contract with mode_disabled as the only hard blocker",
+            "definition": (
+                "paper-era raw gold/silver signals with paper_trade_intent or paper trade committed"
+                if paper_era
+                else "raw gold/silver signals that reached final_entry_contract with mode_disabled as the only hard blocker"
+            ),
+            "legacy_definition": "raw gold/silver signals that reached final_entry_contract with mode_disabled as the only hard blocker",
             "raw_scoped_final_entry_hard_blockers": raw_snapshot.get("raw_scoped_final_entry_hard_blockers") or {},
             "unscoped_window_mode_disabled_only_unique_signal_ids": safe_int(
                 final_contract.get("mode_disabled_only_unique_signal_ids"), 0
@@ -1484,19 +1532,40 @@ def build_readiness_shortfall_summary(capture_stage_rates):
     upstream_gap = capture_stage_rates.get("upstream_funnel_gap") or {}
     readiness_priority = pending_gap.get("readiness_gap_priority") or {}
     upstream_priority = upstream_gap.get("upstream_gap_priority") or {}
-    final_eligible = safe_int(mode_adjusted.get("mode_disabled_only_unique_signal_ids"), 0)
+    final_eligible = safe_int(
+        mode_adjusted.get("active_adjusted_final_eligibility_unique_signal_ids"),
+        safe_int(mode_adjusted.get("mode_disabled_only_unique_signal_ids"), 0),
+    )
+    target_label = (
+        "paper_era_adjusted_final_eligibility_rate >= 0.60 while A_CLASS is PAPER_ELIGIBLE"
+        if mode_adjusted.get("scope") == "paper_era"
+        else "mode_disabled_adjusted_final_eligibility_rate >= 0.60 while A_CLASS is SHADOW"
+    )
     pending_count = safe_int(events.get("pending_entry"), 0)
     paper_intent = safe_int(events.get("paper_trade_intent"), 0)
     paper_committed = safe_int(events.get("paper_committed"), 0)
     best_pending_to_final = (readiness_priority.get("categories_ranked_by_optimistic_readiness_gain") or [None])[0]
     best_upstream = (upstream_priority.get("categories_ranked_by_optimistic_pending_gain") or [None])[0]
     return {
-        "target": "mode_disabled_adjusted_final_eligibility_rate >= 0.60 while A_CLASS is SHADOW",
+        "target": target_label,
+        "target_scope": mode_adjusted.get("scope") or "shadow_mode_disabled_legacy",
         "denominator_raw_signal_ids": raw_signals,
         "target_count_60pct": target_count,
         "current_mode_disabled_adjusted_final_eligibility_count": final_eligible,
         "current_mode_disabled_adjusted_final_eligibility_rate": capture_stage_rates.get(
             "mode_disabled_adjusted_final_eligibility_rate"
+        ),
+        "legacy_shadow_mode_disabled_adjusted_final_eligibility_count": safe_int(
+            mode_adjusted.get("legacy_shadow_mode_disabled_only_unique_signal_ids"), 0
+        ),
+        "legacy_shadow_mode_disabled_adjusted_final_eligibility_rate": mode_adjusted.get(
+            "legacy_shadow_mode_disabled_adjusted_rate"
+        ),
+        "paper_era_adjusted_final_eligibility_count": safe_int(
+            mode_adjusted.get("paper_era_final_eligibility_unique_signal_ids"), 0
+        ),
+        "paper_era_adjusted_final_eligibility_rate": mode_adjusted.get(
+            "paper_era_adjusted_final_eligibility_rate"
         ),
         "current_pending_entry_count": pending_count,
         "current_pending_capture_rate": capture_stage_rates.get("pending_capture_rate"),
@@ -2036,7 +2105,7 @@ def build_report(args):
     quote_reconciliation = quote_window_pending_reconciliation(context_monitor)
     classification = classify(runtime, final_contract, failed, clean_counter, recovery_sla)
     raw_snapshot = raw_funnel_snapshot(raw_funnel)
-    capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract)
+    capture_stage_rates = build_capture_stage_rates(raw_snapshot, final_contract, runtime)
     readiness_shortfall = build_readiness_shortfall_summary(capture_stage_rates)
     paper_proposal_readiness = build_paper_entry_proposal_readiness(
         classification,
