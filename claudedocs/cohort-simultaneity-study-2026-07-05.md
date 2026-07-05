@@ -72,3 +72,51 @@ The CryptoGAT read paid off not by giving us a model to build, but by giving us 
 cheap-to-test hypothesis* — and the discipline (IC + temporal holdout) to kill it in an hour. A
 negative result that costs one hour and saves weeks of build is a high-value outcome. Recorded so
 no future session re-proposes "cohort/graph features" without first re-running this script.
+
+---
+
+## Addendum (2026-07-05, same day): power analysis softens the verdict
+
+Three user objections were tested; the first materially changes the wording of the conclusion.
+
+**1. "Sample too small" — CORRECT.** The holdout test-set CIs contain BOTH 0 and the in-sample
+value: F3 test IC +0.018, 95% CI [−0.016, +0.053]; F4 test IC −0.016, CI [−0.054, +0.022]. The
+holdout therefore CANNOT distinguish "signal died" from "signal persists at ~0.048". Power math:
+detecting |IC| = 0.03 at 80% power needs ~8.7k test signals ≈ 22k total ≈ **65 days** at the
+current ~335 evaluable signals/day. We have 24 days. Weekly ICs: **F3 is positive in 4/4 weeks**
+(+0.039 / +0.088 / +0.010 / +0.041 — sign-consistent, magnitude unstable; 4/4 same-sign has
+p ≈ 1/16 under a coin-flip null). F4 flips sign in week 1 (+0.031) then goes negative ×3 —
+weaker consistency.
+
+**Revised per-feature verdicts:** F3 = *directionally persistent but underpowered* (upgraded
+from "fails holdout"); F4 = weak/inconsistent; F1/F8 = noise (unchanged). Overall verdict
+becomes **UNDERPOWERED_UNPROVEN (F3 promising)** rather than "no signal". The *decision* —
+do not build the full C1–C3 pipeline now — is unchanged, but the reason is now "underpowered,
+wait for data" rather than "disproven".
+
+**2. "Features may not match meme dynamics" — PARTIALLY CORRECT.** Only 4 of 8 planned features
+were testable from the snapshot. Untested: F6 launch-flow (needs P8 stream), F7 narrative
+resonance (needs name/theme fields + clustering), and the C3 graph-lite lead-lag features.
+These remain open hypotheses, not covered by this study's verdict.
+
+**3. "Telegram source selection bias" — STRONGEST OBJECTION, untestable with current data.**
+The cohort measured here is *channel throughput* (signals that already passed a curator's
+filter), not *market state*. If the curator's filter itself conditions on market heat, the
+observable variance of true market state is range-restricted → measured IC is attenuated
+toward 0. This also explains why F1 (signal density) is pure noise — it measures the curator's
+posting rhythm. CryptoGAT's graph was built on the whole market; our analog of "whole market"
+is exactly the **P8 pump.fun stream** (unfiltered, market-wide), which started accumulating
+2026-07-04.
+
+## Re-test triggers (pre-registered)
+
+1. **T+~40 days**: production `raw_signal_outcomes` reaches ≥22k evaluable signals → rerun
+   `cohort_simultaneity_ic_study.py --db /app/data/raw_signal_outcomes.db`. Pass = F3 holds
+   sign with |IC| ≥ 0.03 and CI excluding 0 in the held-out 40%.
+2. **P8 + 2–4 weeks**: recompute F1/F4/F6 from the *market-wide* pump.fun stream (unfiltered
+   cohort) and rerun — this is the only way to address objection 3.
+3. **When narrative fields land** (motion trace / premium_signals raw_message clustering):
+   test F7 theme-resonance.
+
+Until a trigger fires, F3 (+) may be registered as a low-priority context dimension in the
+2D-cross machinery (hypothesis-grade, shadow-only); everything else waits.
