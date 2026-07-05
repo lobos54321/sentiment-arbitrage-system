@@ -364,9 +364,16 @@ export class PremiumChannelListener {
       .replace(/[\u200B-\u200D\uFEFF]/g, '')
       .replace(/\r/g, '');
 
-    // Extract symbol: 📍 SYMBOL：$xxx
-    const symbolMatch = normalized.match(/📍\s*SYMBOL\s*[：:]\s*\$?([^\s\n]+)/i);
-    const symbol = symbolMatch ? symbolMatch[1].trim() : null;
+    // Extract symbol from the `SYMBOL：$xxx` field. The channel has used different
+    // leading emojis over time (📍 historically, 🪙 currently), so the field label
+    // is the anchor, not the emoji. Fallback: the bold `**name**` header preceding
+    // "New Trending" in the raw (pre-normalization) text.
+    const symbolMatch = normalized.match(/SYMBOL\s*[：:]\s*\$?([^\s\n]+)/i);
+    let symbol = symbolMatch ? symbolMatch[1].trim() : null;
+    if (!symbol) {
+      const headerMatch = text.match(/\*\*([^*\n]{1,32})\*\*\s*New\s+Trending/i);
+      symbol = headerMatch ? headerMatch[1].trim() : null;
+    }
 
     // Extract market cap: 🏦 MC: 21.83K
     const mcMatch = normalized.match(/🏦\s*MC\s*[：:]\s*\$?([\d,.]+)\s*([KMBkmb])?/i);
