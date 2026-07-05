@@ -1,0 +1,100 @@
+{
+  "schema_version": "narrative_sibling_ic_study.v1",
+  "allowed_use": "shadow_only_discovery_evidence",
+  "promotion_allowed": false,
+  "n_signals": 9929,
+  "base_gold_silver_rate": 0.2585,
+  "unique_normalized_symbols": 3411,
+  "multi_token_symbol_families": 639,
+  "sibling_coverage_rate": 0.0861,
+  "placebo_seed": 20260705,
+  "features": {
+    "S1_sibling_count": {
+      "ic_full": 0.0164,
+      "n_full": 9929,
+      "ci95_full": [
+        -0.0033,
+        0.0361
+      ],
+      "ic_train": 0.0202,
+      "n_train": 5956,
+      "ic_test": 0.0144,
+      "n_test": 3973,
+      "holdout_same_sign": true,
+      "coverage": 1.0
+    },
+    "S2_sibling_best_peak": {
+      "ic_full": -0.0329,
+      "n_full": 855,
+      "ci95_full": [
+        -0.0999,
+        0.0342
+      ],
+      "ic_train": 0.0626,
+      "n_train": 395,
+      "ic_test": -0.0894,
+      "n_test": 460,
+      "holdout_same_sign": false,
+      "coverage": 0.0861
+    },
+    "S3_sibling_any_gold": {
+      "ic_full": 0.0091,
+      "n_full": 855,
+      "ci95_full": [
+        -0.0579,
+        0.0761
+      ],
+      "ic_train": 0.0366,
+      "n_train": 395,
+      "ic_test": 0.0062,
+      "n_test": 460,
+      "holdout_same_sign": true,
+      "coverage": 0.0861
+    },
+    "P2_placebo_best_peak": {
+      "ic_full": 0.0128,
+      "n_full": 855,
+      "ci95_full": [
+        -0.0542,
+        0.0798
+      ],
+      "ic_train": 0.0652,
+      "n_train": 395,
+      "ic_test": -0.0257,
+      "n_test": 460,
+      "holdout_same_sign": false,
+      "coverage": 0.0861
+    },
+    "P3_placebo_any_gold": {
+      "ic_full": -0.0065,
+      "n_full": 855,
+      "ci95_full": [
+        -0.0735,
+        0.0605
+      ],
+      "ic_train": 0.0527,
+      "n_train": 395,
+      "ic_test": -0.0505,
+      "n_test": 460,
+      "holdout_same_sign": false,
+      "coverage": 0.0861
+    }
+  },
+  "preregistered_verdicts": {
+    "S2_sibling_best_peak": {
+      "beats_placebo": true,
+      "ic_ge_min": true,
+      "ci_excludes_0": false,
+      "holdout_same_sign": false,
+      "PASSES_PREREGISTERED_CRITERION": false
+    },
+    "S3_sibling_any_gold": {
+      "beats_placebo": true,
+      "ic_ge_min": false,
+      "ci_excludes_0": false,
+      "holdout_same_sign": true,
+      "PASSES_PREREGISTERED_CRITERION": false
+    }
+  },
+  "verdict": "NO_NARRATIVE_SIBLING_SIGNAL"
+}

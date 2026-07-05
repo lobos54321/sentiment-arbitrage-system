@@ -165,3 +165,77 @@ underpowered until the parser is fixed.
 
 The paper's claim 1 (own-history carries no signal) is already absorbed: Kronos AUC 0.36–0.41 +
 this study. Claim 3 (pairwise edges) remains OPEN — testable the day N1 lands.
+
+---
+
+## Part 3 (2026-07-05): N1+N2 executed — narrative-sibling edges tested, no signal, but a structural finding
+
+**N1 (symbol parser fix + backfill) — DONE, verified in production.**
+- Live parser fix (`src/inputs/premium-channel-listener.js`) merged via PR #55 (commit `2436b98`),
+  deployed, confirmed working on fresh live signals (`symbol_source=NULL` rows post-deploy show
+  correctly extracted symbols, e.g. 'SOLBULL', '丸さん', 'BullWorld' — direct proof the fix works
+  at ingestion, not just in backfill).
+- Historical backfill executed on production: `premium_signals` UNKNOWN 30.8% → **0.1%**
+  (15,500 rows recovered, audit `symbol_source=backfill_v2`); `raw_signal_outcomes` UNKNOWN 70% →
+  **0.0%** (9,598 rows propagated). Residual 49 premium rows (no `raw_message` at all — genuinely
+  unrecoverable) and 1 outcomes row (a live-write race during the backfill window, self-resolving
+  on next run). Live writers confirmed healthy post-schema-change (newest row 42.8s old at check
+  time). Idempotent design meant the mid-run gateway timeout (524) was safe — the script completed
+  server-side despite the client connection dropping; verified via before/after row counts and the
+  `symbol_source` audit trail rather than trusting the truncated response.
+
+**N2 (narrative-sibling IC test) — DONE, pre-registered criterion NOT met.**
+Script: `scripts/research/narrative_sibling_ic_study.py` (self-tested: recovers a planted
+bounded, family-specific effect at realistic magnitude — IC 0.06 vs placebo 0.03 — and correctly
+returns `NO_...SIGNAL` on pure-noise data; also guards against re-treating `'unknown'` as a valid
+symbol family, the exact bug class N1 fixed, in case residual unparseable rows linger).
+
+Run on production `raw_signal_outcomes.db` (n=9,929 evaluable, post-backfill):
+
+| Feature | IC full | CI95 | Train IC | Test IC | Holdout | Passes? |
+|---|---|---|---|---|---|---|
+| S1 sibling presence (any same-symbol signal, 24h) | +0.016 | [−0.003, +0.036] | +0.020 | +0.014 | same sign | n/a (below MIN_IC) |
+| **S2 best matured-sibling peak** | −0.033 | [−0.100, +0.034] | **+0.063** | **−0.089** | **sign flips** | **NO** |
+| S3 any matured sibling gold/silver | +0.009 | [−0.058, +0.076] | +0.037 | +0.006 | same sign | NO (CI includes 0, below MIN_IC) |
+| P2 placebo (matched random, best peak) | +0.013 | [−0.054, +0.080] | +0.065 | −0.026 | flips | — |
+| P3 placebo (matched random, any gold) | −0.007 | [−0.074, +0.061] | +0.053 | −0.051 | flips | — |
+
+**Verdict: `NO_NARRATIVE_SIBLING_SIGNAL`.** S2's train/test sign flip (+0.063 → −0.089) is the
+clearest tell — this is noise being fit, not a real effect, and it fails 3 of 4 pre-registered
+conditions. S1 (mere posting-rhythm presence) replicates Part 1's F1 finding: noise.
+
+**The structural finding that matters more than the null result:** `sibling_coverage_rate` = only
+**8.6%** (855/9,929) — i.e. 91.4% of signals have ZERO same-symbol sibling old enough (≥2h) to have
+a known outcome. Root cause quantified directly: of the 18.1% of signals that DO have some
+same-symbol sibling in the trailing 24h, **47.3% of those siblings arrived within 1 hour** of each
+other (median gap to most recent sibling: 4,576s ≈ 76 min) — copycat/relaunch waves are *bursty*,
+not spaced out. By the time enough of a burst exists to test "did the sibling do well," the
+2-hour label-maturation requirement has usually not been met by *any* member of the burst yet.
+**This is a coverage/timing problem, not necessarily a null-effect problem** — the test as designed
+cannot see most of the phenomenon it's trying to measure.
+
+**Two structurally sound but NOT yet tested alternatives this points to** (both deferred, not
+started — this round's target was N1+N2 exactly as scoped):
+1. **Within-burst peer signal** instead of matured-outcome signal: e.g. "how many other same-symbol
+   tokens were ALSO just signaled in the last 10 minutes" (a presence/intensity measure, time-legal
+   without maturation) — this is closer to what actually happens in a copycat wave and doesn't
+   require waiting 2h for an outcome that the burst dynamic itself prevents.
+2. **Interim/partial sibling performance** (e.g. sibling's price move in ITS first 15–30 minutes,
+   available in well under 2h) instead of requiring the full peak/tier label — trades label
+   completeness for coverage, worth testing once P8/motion-trace data matures.
+
+Neither is being built now; they are recorded here so a future session doesn't have to
+re-derive "why did sibling coverage die" from scratch.
+
+## Overall status of the CryptoGAT-inspired investigation
+
+| Layer | Test | Verdict |
+|---|---|---|
+| ① Own-history time-series | Kronos (external) + literature | No signal (independently corroborated) |
+| ② Global market factor | Part 1 (F1/F3/F4/F8) | Underpowered/unproven, not disproven; 3 re-test triggers pre-registered |
+| ③ Heterogeneous pairwise edges (narrative/copycat) | Part 3 (N1+N2, this section) | No signal on the *matured-outcome* sibling construction; likely a coverage artifact of burst timing, not a clean null on the underlying hypothesis |
+
+No cohort/narrative dimension is being added to the discovery mesh at this time. This document,
+`scripts/research/cohort_simultaneity_ic_study.py`, and `scripts/research/narrative_sibling_ic_study.py`
+are the reusable, re-runnable record — rerun either against a fresher/larger production snapshot
+before re-opening this investigation, and read this section first.
