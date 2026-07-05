@@ -239,3 +239,99 @@ No cohort/narrative dimension is being added to the discovery mesh at this time.
 `scripts/research/cohort_simultaneity_ic_study.py`, and `scripts/research/narrative_sibling_ic_study.py`
 are the reusable, re-runnable record — rerun either against a fresher/larger production snapshot
 before re-opening this investigation, and read this section first.
+
+---
+
+## Part 4 (2026-07-05): following the paper's essence to its correct conclusion — a strong, stable signal
+
+The user pushed back that the paper's value was not yet extracted. Correct. Parts 1–3 tested
+CROSS-TOKEN structure (cohort, narrative siblings) — all weak. But the paper's actual essence is
+more general: **predict from CONTEMPORANEOUS structure, not from stale own-history.** Following
+that to its correct conclusion for memes produced the strongest, most stable signal in the entire
+investigation — and it is NOT a cross-asset feature.
+
+### Step 1 — the dominant structure in memes is a REGIME (common factor), and it is real
+
+The paper's PC1 (55% of variance) says a strong common factor dominates. The meme analog: dog
+production is strongly TIME-CLUSTERED, not i.i.d.
+- Gold/silver rate per 2h bucket: mean 0.222, **std 0.112, range 0.000–0.778** (hot vs cold periods).
+- Dog-rate autocorrelation: **lag-1 (2h) r=+0.18, lag-2 (4h) r=+0.15**, plus a lag-12 (24h) r=+0.11
+  daily-seasonality bump. A hot 2h genuinely predicts the next being hot — 3–4× stronger than any
+  per-token cohort feature (all ~0.05).
+
+### Step 2 — but the 2h label-maturation lag blindfolds us, and that is the real problem
+
+The 0.18 autocorrelation largely leaks contemporaneous info (bucket b's rate matures 2h later,
+after bucket b+1 has begun). Made strictly time-legal:
+- Regime signal from recently-MATURED outcomes → forward dog rate: corr +0.059, **decays to +0.015
+  out of sample** (the recurring ~75% decay).
+- Live cohort PRICE momentum (F4-style) → forward dog rate: corr **−0.008 (zero)**.
+
+Interpretation: the meme problem is structurally harder than the paper's because established coins
+trade continuously with ZERO outcome lag, while we wear a **2-hour blindfold** — by the time an
+outcome-based signal says "hot," the regime has moved. Shrinking that blindfold is the highest-
+leverage move, not adding another cohort feature.
+
+### Step 3 — the unlock: a token's own EARLY trajectory predicts its LATER trajectory, strongly and stably
+
+| Predictor (time-legal, low-lag) | IC full | IC train | IC test | tercile lift | note |
+|---|---|---|---|---|---|
+| peak_5m_pct → gold/silver | +0.242 | +0.243 | +0.245 | 2.9× | stable |
+| **peak_15m_pct → gold/silver** | **+0.405** | +0.414 | +0.397 | **6.5×** (7.4%→47.7%) | stable, no decay |
+
+De-circularity (15-min peak overlaps the 2h label window, so restrict to tokens whose SUSTAINED
+peak came AFTER 15min — the early peak is then NOT the defining peak):
+- peak_15m → gold/silver among late-peakers: **IC +0.55**, top-tercile 99.7% dog rate.
+- peak_15m → pure LATE peak magnitude (60/120m, zero overlap): **IC +0.64**.
+
+This is genuine momentum persistence, not mechanical overlap. It is an order of magnitude stronger
+than the paper's 0.047 and — unlike every cohort/narrative feature — it HOLDS out of sample.
+(38.4% of dogs peak within 15min, 56.5% within 30min; median time-to-sustained-peak 1,347s.)
+
+### The extraction (what the paper's value actually is, for this system)
+
+1. **The strongest available signal is early-trajectory momentum (peak_15m), not cross-asset
+   structure.** The paper's "contemporaneous not historical" thesis is right; the winning
+   contemporaneous variable is the token's own first-15-min path, which is time-legal at 15-min lag.
+2. **It shrinks the 2h blindfold to 15min, which is what unlocks the regime.** Aggregate the
+   15-min-peak signal across recently-signaled tokens → a near-real-time "dog-market heat" index
+   (15-min lag instead of 2h). That index is the operationally useful form of the paper's common
+   factor.
+3. **Two shadow-only, governance-safe uses** (both must go through discovery→freeze→forward-OOS→
+   FDR before any promotion; entry-threshold changes remain forbidden strategy changes):
+   - **Ranking/priority dimension**: with a 6.5× precision lift, ranking detected signals by early
+     trajectory would far exceed the current 84 candidates' ~6.4% precision. Register as a
+     discovery dimension, not an entry gate.
+   - **Regime throttle**: the aggregate heat index paces capture — lean in when hot (serves 60%
+     capture), pull back when cold (serves the 15% drawdown constraint). It is a pacing signal,
+     not a per-token entry, so it sidesteps the chasing-risk tension that direct peak_15m entry
+     would create.
+
+### Honest caveats
+
+- Early-momentum-persistence is well known in meme trading; the system's smart_entry/kline gates
+  likely already exploit part of it. The value added here is (a) CLEANLY QUANTIFYING it as the
+  strongest, most stable signal available (IC 0.4–0.64 vs everything else ~0.05), (b) the REGIME
+  connection (aggregate → real-time heat throttle), which is operationally novel, and (c) the
+  recommendation to use it as a ranking DIMENSION through the existing OOS/FDR machinery.
+- Using peak_15m for ENTRY means acting at signal+15min, after the token shows its hand — a
+  chasing tension. High value for ranking/throttle, moderate for entry timing; the P7 lab and
+  entry logic would have to quantify the remaining-upside capture. Not a strategy change here.
+- The conditioning base rate in the de-circularity subset is elevated (0.69, selection effect);
+  the WITHIN-subset IC (0.55) and the pure-forward peak_15m→late-peak (0.64) are the non-circular
+  numbers.
+
+### Revised investigation scoreboard
+
+| Layer | Verdict |
+|---|---|
+| ① own-history time series | no signal (Kronos) |
+| ② cross-token cohort scalars | underpowered/unproven (~0.05, decays) |
+| ③ cross-token narrative edges | no signal (burst-timing coverage artifact) |
+| **④ own early-trajectory (peak_15m)** | **STRONG & STABLE (IC 0.4–0.64), the real extraction** |
+| ⑤ dog-rate regime | real (0.18 autocorr) but 2h-blindfolded; exploitable only via ④'s early detector |
+
+Reusable scripts: `cohort_simultaneity_ic_study.py`, `narrative_sibling_ic_study.py`. The Part 4
+regime + early-trajectory analyses are inline production queries (recorded here); if pursued, the
+next step is a proper `early_trajectory_regime_study.py` with self-test + FDR, and a shadow
+regime-heat artifact — NOT an entry change.
