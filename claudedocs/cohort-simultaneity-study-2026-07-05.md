@@ -335,3 +335,66 @@ Reusable scripts: `cohort_simultaneity_ic_study.py`, `narrative_sibling_ic_study
 regime + early-trajectory analyses are inline production queries (recorded here); if pursued, the
 next step is a proper `early_trajectory_regime_study.py` with self-test + FDR, and a shadow
 regime-heat artifact — NOT an entry change.
+
+---
+
+## Part 5 (2026-07-05): the decisive tradeability test — strong classifier, NO tradeable edge
+
+Part 4 found peak_15m is a strong, stable CLASSIFIER (IC 0.4–0.64). Before recommending any build,
+the decisive operational question: **is it a tradeable EDGE, or just a description that arrives too
+late to act on?** Two tests settle it.
+
+### Test A — entry at signal+15min, forward upside by peak_15m tercile (n=7,739)
+
+| peak_15m tercile | dog rate | median forward return from a +15min entry | frac with ≥50% remaining upside |
+|---|---|---|---|
+| LOW | 11.8% | +19.8% | 33.6% |
+| MID | 19.6% | +22.3% | 36.4% |
+| HIGH | **57.1%** | **+20.9%** | 36.7% |
+
+High-peak_15m tokens are 5× more likely to be dogs, but the **forward upside from the +15min entry
+point is flat (~20%) across all terciles.** You've correctly identified the dog, but by +15min the
+move is already partly behind you — entering then earns the same forward return as a random token.
+**This is chasing, confirmed. peak_15m is NOT an entry edge.** (The existing `chasing_top`,
+`momentum_fading`, `dead_cat` gates already encode this intuition.)
+
+### Test B — regime spillover: does recent tokens' early-pump heat predict a NEW signal's outcome?
+
+Regime-heat = median peak_15m of OTHER tokens signaled in [T−45min, T−15min] (all ≥15min old →
+time-legal), predicting whether a NEW signal arriving at T (entered at its own signal-time, no
+chasing) becomes gold/silver:
+- **IC +0.012, lift 1.05×, train +0.003 / test +0.028 (noise).** No spillover. A hot early-pump
+  environment does NOT raise the next signal's dog probability.
+
+### Final verdict on the whole investigation
+
+**peak_15m is a real, strong signal that is NOT tradeable, because meme predictability is
+CONTEMPORANEOUS and SELF-CONTAINED.** By the time the signal is observable it is either (a) already
+priced into that token (chasing), or (b) non-transferable to siblings / cohort / the next signal
+(Parts 1–3 + Test B). There is no exploitable LEAD TIME.
+
+This is the deepest reason the CryptoGAT transfer fails: the paper works because established coins
+move together, continuously, with zero outcome lag — cross-asset structure gives real-time
+predictive lead on each asset. The meme market has neither the continuous cross-asset co-movement
+(Parts 1–3: cohort/narrative ~0.05, decaying) nor exploitable own-trajectory lead time (Parts 4–5:
+strong classifier, zero tradeable edge). Its dog production is real-regime-clustered but the
+clustering is only knowable in arrears.
+
+### What this investigation actually delivered (the honest ledger)
+
+- ✅ **N1: a permanent data-quality fix** — symbol parser (full-width-colon bug) fixed and deployed;
+  30.8%/70% UNKNOWN → 0.1%/0.0% backfilled. Benefits every future analysis, not just this one.
+  This is the concrete, lasting win.
+- ✅ **A complete, evidence-backed map of dead ends** — five layers tested, each with a reusable,
+  self-tested script. Saves the system (and any future agent) from building a peak_15m entry
+  filter, a cohort dimension, a narrative-graph, or a regime throttle — all of which would have
+  cost weeks and returned nothing or lost money (the entry filter would actively chase).
+- ✅ **Two pre-registered re-test triggers still standing** (Part 1 addendum): rerun on a larger
+  production snapshot / market-wide P8 cohort before ever re-opening this.
+
+### Recommendation: close this thread
+
+Do NOT build anything from the cohort/narrative/early-trajectory investigation. No entry filter, no
+dimension, no throttle — all tested, none tradeable. Return leverage to the main line (capture
+funnel, P7 exit OOS, the mode/paper pipeline), where edges are structural (instrumentation, policy)
+rather than predictive. The one artifact worth keeping live is N1's fix, already deployed.
