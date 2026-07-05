@@ -1,0 +1,53 @@
+{
+  "schema_version": "cohort_simultaneity_ic_study.v1",
+  "allowed_use": "shadow_only_discovery_evidence",
+  "promotion_allowed": false,
+  "n_signals": 8047,
+  "base_gold_silver_rate": 0.2538,
+  "paper_reference_ic": 0.047,
+  "holdout_frac": 0.6,
+  "features": {
+    "F1_signal_density": {
+      "ic_full": 0.011,
+      "n_full": 8047,
+      "ic_train": 0.0016,
+      "n_train": 4827,
+      "ic_test": 0.0533,
+      "n_test": 3220,
+      "holdout_holds": false,
+      "coverage": 1.0
+    },
+    "F3_matured_gs_density": {
+      "ic_full": 0.0483,
+      "n_full": 8047,
+      "ic_train": 0.0695,
+      "n_train": 4827,
+      "ic_test": 0.0182,
+      "n_test": 3220,
+      "holdout_holds": false,
+      "coverage": 1.0
+    },
+    "F4_cohort_market_factor": {
+      "ic_full": -0.0467,
+      "n_full": 6150,
+      "ic_train": -0.0648,
+      "n_train": 3465,
+      "ic_test": -0.0157,
+      "n_test": 2685,
+      "holdout_holds": false,
+      "coverage": 0.7643
+    },
+    "F8_cohort_breadth": {
+      "ic_full": -0.0142,
+      "n_full": 6150,
+      "ic_train": -0.0228,
+      "n_train": 3465,
+      "ic_test": -0.0034,
+      "n_test": 2685,
+      "holdout_holds": false,
+      "coverage": 0.7643
+    }
+  },
+  "surviving_features_ic_ge_0p03_out_of_sample": [],
+  "verdict": "NO_STABLE_COHORT_SIGNAL_HOLDOUT_FAILS"
+}
