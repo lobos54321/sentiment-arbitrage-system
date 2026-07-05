@@ -110,12 +110,14 @@ def run(premium_path, outcomes_path, execute):
     report = {"schema_version": "symbol_backfill.v2", "mode": "execute" if execute else "dry_run",
               "allowed_scope": "symbol_metadata_only", "promotion_allowed": False}
     prem = sqlite3.connect(premium_path if execute else f"file:{premium_path}?mode=ro", uri=not execute)
+    prem.execute("PRAGMA busy_timeout=15000")  # live writers share these DBs
     report["premium_before"] = unknown_stats(prem, "premium_signals", with_raw_message=True)
     report["premium_backfill"] = backfill_premium(prem, execute)
     if execute:
         report["premium_after"] = unknown_stats(prem, "premium_signals", with_raw_message=True)
     prem.close()
     out = sqlite3.connect(outcomes_path if execute else f"file:{outcomes_path}?mode=ro", uri=not execute)
+    out.execute("PRAGMA busy_timeout=15000")
     report["outcomes_before"] = unknown_stats(out, "raw_signal_outcomes")
     report["outcomes_backfill"] = backfill_outcomes(out, premium_path, execute)
     if execute:
