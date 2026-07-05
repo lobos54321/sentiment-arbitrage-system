@@ -120,3 +120,48 @@ is exactly the **P8 pump.fun stream** (unfiltered, market-wide), which started a
 
 Until a trigger fires, F3 (+) may be registered as a low-priority context dimension in the
 2D-cross machinery (hypothesis-grade, shadow-only); everything else waits.
+
+---
+
+## Part 2 (2026-07-05): the paper's REAL essence — heterogeneous pairwise edges — and what blocks testing it
+
+**Correction of scope.** Part 1 tested global cohort scalars (density, median momentum). The
+CryptoGAT paper *itself* shows that version is insufficient (MF-StockMixer with a market factor:
+Sharpe 0.963 vs GAT 3.128). The paper's alpha lives in **heterogeneous pairwise relations** —
+which specific neighbors matter for this specific asset. Part 1's null therefore does NOT test
+the essence; it replicates the paper's own negative control.
+
+**Meme-scale analog of the graph.** Newborns have no price history, so edges cannot be price
+correlation. The observable-at-birth edge types are:
+1. **Narrative/copycat**: same/similar name or theme (TRUMP-family, dog-family, relaunch waves).
+2. **Creator lineage**: same deployer wallet / funding source (Helius data partially present).
+3. **Early-holder overlap**: shared first-N-minute buyers.
+4. **Launch-cohort competition**: same time-bucket launches competing for attention (possibly
+   negative edges).
+
+**Exact-symbol sibling test (attempted today) — blocked by a data bug.**
+`raw_signal_outcomes.symbol` is 'UNKNOWN' for **70%** of production rows (9,576/13,683);
+`premium_signals.symbol` is UNKNOWN/null for 30.8% (15,527/50,394). Root cause: the symbol
+parser fails on the message format `SYMBOL：$xxx` (**full-width colon** `：`), even though the
+symbol appears verbatim in `raw_message` (also as the bold `**name**` header). `raw_message` is
+retained for 63.7% of premium_signals → **retroactive backfill is possible**. After excluding
+the UNKNOWN blob, real same-symbol families cover only ~460 snapshot signals — hopelessly
+underpowered until the parser is fixed.
+
+## Task card: N-series (narrative graph, INSTRUMENTATION-first)
+
+- **N1 (cheap, do first): symbol extraction fix + backfill.** Parse `SYMBOL：$x` /
+  `SYMBOL:$x` / bold-header fallback from raw_message; backfill `premium_signals.symbol` and
+  propagate to `raw_signal_outcomes.symbol` (audit field `symbol_source=backfill_v2`).
+  Acceptance: UNKNOWN rate < 10% on rows with raw_message; zero changes to gates/strategy.
+- **N2: rerun the sibling test** (`cohort_simultaneity_ic_study.py` extended with sibling
+  features) on backfilled data. Pre-registered pass: sibling features beat the matched random
+  placebo with |IC| ≥ 0.03 and CI excluding 0, temporal holdout same-sign.
+- **N3 (conditional on N2): narrative families properly** — name normalization + theme
+  clustering over raw_message; creator-wallet edges as a second edge type; register as context
+  dimensions in the 2D-cross machinery (hypothesis-grade, shadow-only, FDR-gated).
+- **S2 later: graph-conditional exits** — theme-siblings collapsing as an exit trigger variant
+  for the P7 lab.
+
+The paper's claim 1 (own-history carries no signal) is already absorbed: Kronos AUC 0.36–0.41 +
+this study. Claim 3 (pairwise edges) remains OPEN — testable the day N1 lands.
