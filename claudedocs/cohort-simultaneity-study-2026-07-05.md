@@ -398,3 +398,61 @@ Do NOT build anything from the cohort/narrative/early-trajectory investigation. 
 dimension, no throttle — all tested, none tradeable. Return leverage to the main line (capture
 funnel, P7 exit OOS, the mode/paper pipeline), where edges are structural (instrumentation, policy)
 rather than predictive. The one artifact worth keeping live is N1's fix, already deployed.
+
+---
+
+## Part 6 (2026-07-06): DATA CONTAMINATION CORRECTION — provider-mixed bars invalidated several Part 4/5-era numbers
+
+**The bug (mine):** ad-hoc analyses in Parts 4–5 and the stop/pullback replays loaded
+`raw_price_bars_1m` ordered by (token, timestamp) only — but the table holds MULTIPLE
+provider/pool/price-unit series per token, interleaved. Same token, same minute, up to **70×
+price disagreement** between series (verified sample: 122d7g5F…, gmgn vs geckoterminal rows).
+Mixing them fabricates crashes/spikes. All my ad-hoc bar-joins were affected; the system's OWN
+columns (peak_15m_pct etc., computed on consistent path selections) are NOT affected — Part 4's
+peak_15m IC stands.
+
+**Corrected numbers (canonical series = the single (pool,provider,unit) with most bars per token):**
+
+MAE of dogs before peak (n=2,027): median **6.0%** (was 28.8% contaminated); dipped >5%: **52.0%**
+(was 90.2%); >20%: 28.7% (was 62.5%). → *Half of dogs never give a meaningful pullback; the
+"pullback is THE entry" narrative was mostly a contamination artifact.*
+
+Stop grid, clean (signal-time entry, champion-trail exit, n=8,529):
+| stop | win% | medEV | meanEV | stopped% | dogs stopped pre-peak |
+|---|---|---|---|---|---|
+| −5% | 16.3% | −10.9% | +5.2% | 81.3% | 58.6% |
+| −10% | 19.7% | −14.9% | +8.5% | 76.4% | 51.2% |
+| −20% | 24.8% | −23.5% | **+9.2%** | 67.4% | 39.0% |
+| none | 35.2% | −27.9% | +6.1% | — | — |
+
+Key clean findings: (1) a nominal −5% stop REALIZES −10.9% median (bar-close gap-through) and
+kills 59% of dogs pre-peak — still the worst cell, but for gap reasons more than noise-stop
+reasons; (2) **median EV is negative at every stop level** — per-trade expectancy is entirely
+tail-driven (lottery economics confirmed on clean data); (3) moderate stops (−10…−20%) have the
+best MEANS (+8.5–9.2% pre-cost) — some stop beats none and beats tight.
+
+Pullback grid, clean (9 cells × I50 structure rule, temporal holdout): **pullback entry does NOT
+beat signal-time entry.** All cells median ≈ −22%, means −7%…+0.1% (train); best cell D15/C0 on
+held-out test: meanEV −0.5% (I50 ON) vs baseline +4.3%. Confirmation does enrich dog-share
+(27.8% base → ~37%) but the EV doesn't follow — pullback entries buy weaker structures on
+average. The user's I50 (cancel if >50% below prior high) rule: median unchanged, mean much
+lower ON (−0.5% vs +39.8% OFF) because OFF occasionally bottom-fishes monster rebounds in
+structure-broken tokens — but those tail "wins" are rug-adjacent and likely unfillable in
+reality; as a REAL-MONEY discipline the rule remains defensible; as a backtest EV enhancer it
+is not supported.
+
+**Standing corrections to earlier parts:** Part 5's "forward upside flat ~20% across peak_15m
+terciles" used contaminated bars → PENDING re-verification on canonical series (direction may
+survive; numbers unreliable). Part 4's IC table (system columns) stands. The narrative-sibling
+and cohort ICs (already null) remain null — contamination only added noise there.
+
+**Strategic synthesis after cleaning:** price-derived SELECTION at entry-time has now failed
+every test on clean data (own-history, cohort, narrative, pullback timing; peak_15m selection
+pending re-check but was already chasing-shaped). What survives: (a) lottery portfolio
+structure — many tiny equal bets, moderate stop (−10…−20%), tail-riding exits (P7 champion),
+positive MEAN ≈ +8–9% pre-cost at signal-time entry with wide funnel; (b) the remaining alpha
+frontier is information OUTSIDE price — the user's influence/KOL thesis (who is pushing, their
+reach, fermentation state → MC ceiling), which maps to P8 phases 3–4 (X narrative, smart money)
+and is now partially instrumented via persisted viral/media indices (since P5). Next tests:
+re-verify Part 5 on clean series; EV comparison of gated-vs-wide funnel; influence-tier
+calibration once indices accumulate.
