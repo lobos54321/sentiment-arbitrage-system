@@ -456,3 +456,32 @@ reach, fermentation state → MC ceiling), which maps to P8 phases 3–4 (X narr
 and is now partially instrumented via persisted viral/media indices (since P5). Next tests:
 re-verify Part 5 on clean series; EV comparison of gated-vs-wide funnel; influence-tier
 calibration once indices accumulate.
+
+---
+
+## Part 7 (2026-07-06): user-taught rule — two-touch (爬升/拉升) classification of the pre-pullback upleg
+
+Source: user-shared trading video. Rule: an upleg where nearly every price level was VISITED
+TWICE (two-touch, overlapping candles/wicks — "爬升/climb") has buyable pullbacks; an upleg that
+moved through levels visited ONCE or gapped ("拉升/markup", vacuum) has unbuyable pullbacks. The
+video's key insight is metric, not aesthetic: "same price visited ≥2×" is scale-invariant,
+unlike slope/angle. Operationalized as revisit_ratio = (#log-price bins of the upleg covered by
+≥2 distinct bars) / (#bins covered ≥1), computed on canonical single-source 1m series; climb
+≥0.8, markup ≤0.4, mid between, flat = no ≥10% upleg before the dip. Pullback trigger D15,
+entry at trigger close, champion-trail + −20% stop exit, 60/40 temporal holdout, n=7,530 events.
+
+| class | TRAIN n / win / medEV / meanEV / dog% | TEST n / win / medEV / meanEV / dog% |
+|---|---|---|
+| climb | 531 / 32.6% / −20.8% / **+32.5%** / 44.3% | 313 / 31.9% / −21.1% / **+68.1%** / 38.0% |
+| mid | 603 / 34.3% / −20.5% / +32.6% / 56.9% | 328 / 28.0% / −22.4% / +50.0% / 43.6% |
+| **markup** | 91 / 42.9% / −20.1% / **−1.9%** / 52.7% | 49 / 26.5% / −22.3% / **−11.5%** / 36.7% |
+| flat | 3293 / 28.8% / −22.5% / +46.8% / 22.0% | 2322 / 25.6% / −22.9% / +55.4% / 21.1% |
+
+Findings: (1) **markup is the ONLY class with negative mean EV in BOTH train and test** — the
+video's "拉升段回调不能接" validates as an avoid-filter (small n: 91/49, needs forward OOS);
+(2) climb/mid enrich dog-rate ≈2× over flat (38–57% vs 21–22%) — the two-touch structure is a
+real dog-probability feature; (3) medians remain ≈−21% everywhere — lottery economics
+unchanged; means are tail-driven. Correct uses: (a) AVOID filter on markup-pullbacks (aligns
+with the chasing findings), (b) revisit_ratio as a discovery/context DIMENSION through
+freeze→forward-OOS→FDR, (c) NOT as a standalone entry edge. This is a Strategy-Memory-class
+user-taught hypothesis; next step is registering it through governance, not acting on it.
