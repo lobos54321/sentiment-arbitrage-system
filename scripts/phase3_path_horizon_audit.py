@@ -85,17 +85,32 @@ def first_col(cols, names):
     return None
 
 
-def count_recent(db, table, ts_col, since_ts):
+def sample_recent_rows(db, table, cols, max_rows):
+    selected = []
+    for col in cols:
+        if col and col not in selected:
+            selected.append(col)
+    if not selected:
+        return []
+    column_sql = ", ".join(selected)
     try:
-        return int(db.execute(
-            f"SELECT COUNT(*) AS n FROM {table} WHERE {ts_col} >= ?",
-            (int(since_ts),),
-        ).fetchone()["n"])
+        rows = db.execute(
+            f"SELECT {column_sql} FROM {table} ORDER BY rowid DESC LIMIT ?",
+            (int(max_rows),),
+        ).fetchall()
+        return [dict(row) for row in rows]
     except Exception:
-        return None
+        try:
+            rows = db.execute(
+                f"SELECT {column_sql} FROM {table} LIMIT ?",
+                (int(max_rows),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            return []
 
 
-def horizon_summary(db, table, since_ts):
+def horizon_summary(db, table, since_ts, max_sample_rows):
     cols = columns(db, table)
     ts_col = first_col(cols, ("ts", "event_ts", "observed_at", "created_at", "signal_ts", "bar_ts"))
     token_col = first_col(cols, ("token_ca", "token", "mint", "address", "token_address"))
@@ -107,35 +122,38 @@ def horizon_summary(db, table, since_ts):
             "reason": "no_timestamp_column",
             "columns_seen": sorted(cols)[:30],
         }
-    recent_count = count_recent(db, table, ts_col, since_ts)
+    sample_rows = sample_recent_rows(db, table, (ts_col, token_col, signal_col), max_sample_rows)
+    recent_sample = [
+        row for row in sample_rows
+        if safe_int(row.get(ts_col), 0) >= int(since_ts)
+    ]
     max_span_sec = None
     token_count = None
-    if token_col:
-        try:
-            row = db.execute(
-                f"""
-                SELECT MAX(span_sec) AS max_span_sec, COUNT(*) AS token_count
-                FROM (
-                  SELECT {token_col} AS token_key, MAX({ts_col}) - MIN({ts_col}) AS span_sec
-                  FROM {table}
-                  WHERE {ts_col} >= ?
-                  GROUP BY {token_col}
-                )
-                """,
-                (int(since_ts),),
-            ).fetchone()
-            max_span_sec = safe_int(row["max_span_sec"], 0)
-            token_count = safe_int(row["token_count"], 0)
-        except Exception:
-            max_span_sec = None
-            token_count = None
+    if token_col and recent_sample:
+        spans = {}
+        for row in recent_sample:
+            token = str(row.get(token_col) or "")
+            ts = safe_int(row.get(ts_col), None)
+            if not token or ts is None:
+                continue
+            prev = spans.get(token)
+            if prev is None:
+                spans[token] = [ts, ts]
+            else:
+                prev[0] = min(prev[0], ts)
+                prev[1] = max(prev[1], ts)
+        token_count = len(spans)
+        max_span_sec = max((hi - lo for lo, hi in spans.values()), default=0)
     return {
         "table": table,
         "supported": True,
         "timestamp_column": ts_col,
         "token_column": token_col,
         "signal_column": signal_col,
-        "recent_rows": recent_count,
+        "recent_rows": len(recent_sample),
+        "sampled_rows": len(sample_rows),
+        "sample_strategy": "rowid_desc_limited",
+        "max_sample_rows": int(max_sample_rows),
         "recent_unique_tokens": token_count,
         "max_observed_path_span_sec": max_span_sec,
         "max_observed_path_span_hours": round(max_span_sec / 3600.0, 3) if max_span_sec is not None else None,
@@ -164,7 +182,7 @@ def build_report(args):
         if db is None:
             table_reports.append({"table": table, "supported": False, "reason": "table_missing"})
         else:
-            table_reports.append(horizon_summary(db, table, since_ts))
+            table_reports.append(horizon_summary(db, table, since_ts, int(args.max_sample_rows)))
     observed_24h_tables = [
         row for row in table_reports
         if row.get("supported") and safe_int(row.get("max_observed_path_span_sec"), 0) >= target_horizon_sec
@@ -227,7 +245,14 @@ def self_test():
         db.commit()
         db.close()
         out = root / "out.json"
-        args = argparse.Namespace(raw_db=str(raw), paper_db=str(root / "paper.db"), hours=48, target_horizon_hours=24, out=str(out))
+        args = argparse.Namespace(
+            raw_db=str(raw),
+            paper_db=str(root / "paper.db"),
+            hours=48,
+            target_horizon_hours=24,
+            max_sample_rows=1000,
+            out=str(out),
+        )
         report = build_report(args)
         write_json(out, report)
         assert report["classification"] == "PATH_24H_OBSERVED_SHADOW_ONLY"
@@ -242,6 +267,7 @@ def parse_args():
     parser.add_argument("--paper-db", default=str(DEFAULT_PAPER_DB))
     parser.add_argument("--hours", default="24")
     parser.add_argument("--target-horizon-hours", default="24")
+    parser.add_argument("--max-sample-rows", default="20000")
     parser.add_argument("--out", default=str(DEFAULT_DATA_DIR / "agent_runs/latest/phase3_path_horizon_audit_24h.json"))
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
