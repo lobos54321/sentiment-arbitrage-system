@@ -42,6 +42,7 @@ Rules:
 | [post-freeze-oos-validation.md](post-freeze-oos-validation.md) | frozen definitions awaiting OOS; any `*_post_freeze_oos_validation` design change |
 | [token-motion-trace-spec.md](token-motion-trace-spec.md) | designing/extending per-token lifecycle recording; "why can't we see what the token did" |
 | [source-shadow-trial.md](source-shadow-trial.md) | adding or validating a shadow-only external signal/source trial such as pump.fun |
+| [phase3-real-paper-validation.md](phase3-real-paper-validation.md) | P7 OOS passed; Phase 3 real paper validation / wide-net paper proposal / Influence-KOL shadow source |
 
 ## Lifecycle: how experience gets in here
 

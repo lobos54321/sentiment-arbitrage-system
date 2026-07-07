@@ -2190,6 +2190,10 @@ def run_reports(run_dir, args):
     strategy_memory_delay_replay_summary_path = run_dir / "strategy_memory_delay_replay_summary.json"
     exit_policy_shadow_lab_path = run_dir / f"exit_policy_shadow_lab_{primary_hours}h.json"
     p7_exit_policy_oos_validation_path = run_dir / "p7_exit_policy_oos_validation.json"
+    phase3_goal_loop_path = run_dir / "phase3_goal_loop.json"
+    phase3_goal_loop_md_path = run_dir / "phase3_goal_loop.md"
+    p7_paper_proposal_checkpoint_path = run_dir / "p7_paper_proposal_checkpoint.json"
+    p7_paper_proposal_checkpoint_md_path = run_dir / "p7_paper_proposal_checkpoint.md"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -2647,6 +2651,29 @@ def run_reports(run_dir, args):
     ))
     if p7_exit_policy_oos_validation_path.exists():
         readiness_paths["p7_exit_policy_oos_validation"] = p7_exit_policy_oos_validation_path
+    diagnostics.append(run_report(
+        "phase3_goal_loop",
+        [
+            "scripts/phase3_goal_loop.py",
+            "--run-dir", str(run_dir),
+            "--p7", str(p7_exit_policy_oos_validation_path),
+            "--reviewer", str(run_dir / "reviewer_verdict.json"),
+            "--out", str(phase3_goal_loop_path),
+            "--out-md", str(phase3_goal_loop_md_path),
+            "--proposal-out", str(p7_paper_proposal_checkpoint_path),
+            "--proposal-md", str(p7_paper_proposal_checkpoint_md_path),
+        ],
+        phase3_goal_loop_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if phase3_goal_loop_path.exists():
+        readiness_paths["phase3_goal_loop"] = phase3_goal_loop_path
+    if phase3_goal_loop_md_path.exists():
+        readiness_paths["phase3_goal_loop_summary"] = phase3_goal_loop_md_path
+    if p7_paper_proposal_checkpoint_path.exists():
+        readiness_paths["p7_paper_proposal_checkpoint"] = p7_paper_proposal_checkpoint_path
+    if p7_paper_proposal_checkpoint_md_path.exists():
+        readiness_paths["p7_paper_proposal_checkpoint_md"] = p7_paper_proposal_checkpoint_md_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,
