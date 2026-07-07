@@ -10,6 +10,9 @@ Inputs:
 - `/app/data/agent_runs/latest/capture_stage_metrics.json`
 - `/app/data/agent_runs/latest/phase3_goal_loop.json`
 - `/app/data/agent_runs/latest/p7_paper_proposal_checkpoint.json`
+- `/app/data/agent_runs/latest/phase3_path_horizon_audit_24h.json`
+- `/app/data/agent_runs/latest/p9_metric_predictiveness_ledger.json`
+- `/app/data/agent_runs/latest/influence_kol_shadow_source_plan.json`
 
 Procedure:
 
@@ -26,6 +29,7 @@ Output contract:
 - `P3.1` must have `human_approval_required_before_enablement=true`.
 - `P3.3` must have `human_checkpoint_required=true` when P7 passed OOS.
 - `P3.5` must declare `acquisition_backend=agent_reach_x_twitter` and `production_impact=zero`.
+- P3.2/P3.4/P3.5 reports must remain read-only and `promotion_allowed=false`.
 - Every output must keep `promotion_allowed=false`.
 
 Acceptance:
@@ -41,10 +45,12 @@ Findings ledger:
 
 - source_doc: `docs/agents/codex-goal-capture60-phase3.md`
 - generator_script: `scripts/phase3_goal_loop.py`
+- path_horizon_audit: `scripts/phase3_path_horizon_audit.py`
+- metric_predictiveness_ledger: `scripts/p9_metric_predictiveness_ledger.py`
+- influence_kol_shadow_source_plan: `scripts/influence_kol_shadow_source_plan.py`
 - trigger: `P7_EXIT_POLICY_OOS_PASSED_PENDING_HUMAN_REVIEW`
 - active_theme: `real_quote_tail_validation`
 - P7_status: `paper_proposal_checkpoint_open`
 - wide_net_paper_status: `proposal_only_human_approval_required`
 - influence_kol_status: `shadow_only_agent_reach_acquisition_layer`
 - promotion_allowed: `false`
-

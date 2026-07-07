@@ -2194,6 +2194,9 @@ def run_reports(run_dir, args):
     phase3_goal_loop_md_path = run_dir / "phase3_goal_loop.md"
     p7_paper_proposal_checkpoint_path = run_dir / "p7_paper_proposal_checkpoint.json"
     p7_paper_proposal_checkpoint_md_path = run_dir / "p7_paper_proposal_checkpoint.md"
+    phase3_path_horizon_audit_path = run_dir / f"phase3_path_horizon_audit_{primary_hours}h.json"
+    p9_metric_predictiveness_ledger_path = run_dir / "p9_metric_predictiveness_ledger.json"
+    influence_kol_shadow_source_plan_path = run_dir / "influence_kol_shadow_source_plan.json"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -2674,6 +2677,47 @@ def run_reports(run_dir, args):
         readiness_paths["p7_paper_proposal_checkpoint"] = p7_paper_proposal_checkpoint_path
     if p7_paper_proposal_checkpoint_md_path.exists():
         readiness_paths["p7_paper_proposal_checkpoint_md"] = p7_paper_proposal_checkpoint_md_path
+    diagnostics.append(run_report(
+        "phase3_path_horizon_audit",
+        [
+            "scripts/phase3_path_horizon_audit.py",
+            "--raw-db", args.raw_db,
+            "--paper-db", args.paper_db,
+            "--hours", str(primary_hours),
+            "--target-horizon-hours", "24",
+            "--out", str(phase3_path_horizon_audit_path),
+        ],
+        phase3_path_horizon_audit_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if phase3_path_horizon_audit_path.exists():
+        readiness_paths["phase3_path_horizon_audit"] = phase3_path_horizon_audit_path
+    diagnostics.append(run_report(
+        "p9_metric_predictiveness_ledger",
+        [
+            "scripts/p9_metric_predictiveness_ledger.py",
+            "--run-dir", str(run_dir),
+            "--p7", str(p7_exit_policy_oos_validation_path),
+            "--capture-cross", str(capture_cross_validity_path),
+            "--out", str(p9_metric_predictiveness_ledger_path),
+        ],
+        p9_metric_predictiveness_ledger_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if p9_metric_predictiveness_ledger_path.exists():
+        readiness_paths["p9_metric_predictiveness_ledger"] = p9_metric_predictiveness_ledger_path
+    diagnostics.append(run_report(
+        "influence_kol_shadow_source_plan",
+        [
+            "scripts/influence_kol_shadow_source_plan.py",
+            "--doctor-json", str(Path(args.data_dir) / "agent_reach_doctor.json"),
+            "--out", str(influence_kol_shadow_source_plan_path),
+        ],
+        influence_kol_shadow_source_plan_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if influence_kol_shadow_source_plan_path.exists():
+        readiness_paths["influence_kol_shadow_source_plan"] = influence_kol_shadow_source_plan_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,
