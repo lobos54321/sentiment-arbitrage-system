@@ -112,7 +112,7 @@ def sample_recent_rows(db, table, cols, max_rows):
 
 def horizon_summary(db, table, since_ts, max_sample_rows):
     cols = columns(db, table)
-    ts_col = first_col(cols, ("ts", "event_ts", "observed_at", "created_at", "signal_ts", "bar_ts"))
+    ts_col = first_col(cols, ("ts", "timestamp", "event_ts", "observed_at", "created_at", "signal_ts", "bar_ts"))
     token_col = first_col(cols, ("token_ca", "token", "mint", "address", "token_address"))
     signal_col = first_col(cols, ("signal_id", "source_signal_id", "raw_signal_id"))
     if not ts_col:
@@ -267,7 +267,7 @@ def parse_args():
     parser.add_argument("--paper-db", default=str(DEFAULT_PAPER_DB))
     parser.add_argument("--hours", default="24")
     parser.add_argument("--target-horizon-hours", default="24")
-    parser.add_argument("--max-sample-rows", default="20000")
+    parser.add_argument("--max-sample-rows", default="2000")
     parser.add_argument("--out", default=str(DEFAULT_DATA_DIR / "agent_runs/latest/phase3_path_horizon_audit_24h.json"))
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
