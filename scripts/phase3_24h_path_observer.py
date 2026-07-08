@@ -111,31 +111,57 @@ def load_signals(raw_db, since_ts, limit):
         SELECT signal_id, token_ca, symbol, signal_ts, baseline_price, baseline_confidence,
                raw_sustained_tier, raw_primary_tier
         FROM raw_signal_outcomes
-        WHERE signal_ts >= ? AND token_ca IS NOT NULL
-        ORDER BY signal_ts DESC
+        WHERE token_ca IS NOT NULL
+        ORDER BY rowid DESC
         LIMIT ?
         """,
-        (int(since_ts), int(limit)),
+        (int(limit),),
     ).fetchall()
-    return [dict(row) for row in rows]
+    out = []
+    for row in rows:
+        item = dict(row)
+        ts = norm_ts(item.get("signal_ts"))
+        if ts and ts >= int(since_ts):
+            out.append(item)
+    return out
 
 
-def load_bars(raw_db, token_ca, start_ts, end_ts, max_bars):
+def load_recent_bars_by_token(raw_db, max_total_bars):
     if raw_db is None or not table_exists(raw_db, "raw_price_bars_1m"):
-        return []
+        return {}
     rows = raw_db.execute(
         """
-        SELECT timestamp, open, high, low, close, volume, provider, source_kind, source_family
+        SELECT token_ca, timestamp, open, high, low, close, volume, provider, source_kind, source_family
         FROM raw_price_bars_1m
-        WHERE lower(token_ca) = lower(?)
-          AND timestamp >= ?
-          AND timestamp <= ?
-        ORDER BY timestamp ASC
+        ORDER BY rowid DESC
         LIMIT ?
         """,
-        (str(token_ca), int(start_ts), int(end_ts), int(max_bars)),
+        (int(max_total_bars),),
     ).fetchall()
-    return [dict(row) for row in rows]
+    grouped = {}
+    for row in rows:
+        item = dict(row)
+        token = str(item.get("token_ca") or "").lower()
+        if not token:
+            continue
+        grouped.setdefault(token, []).append(item)
+    for token, bars in grouped.items():
+        bars.sort(key=lambda item: norm_ts(item.get("timestamp")) or 0)
+    return grouped
+
+
+def select_bars_for_signal(bars_by_token, token_ca, start_ts, end_ts, max_bars):
+    bars = bars_by_token.get(str(token_ca or "").lower()) or []
+    out = []
+    for row in bars:
+        ts = norm_ts(row.get("timestamp"))
+        if ts is None:
+            continue
+        if int(start_ts) <= ts <= int(end_ts):
+            out.append(row)
+            if len(out) >= int(max_bars):
+                break
+    return out
 
 
 def summarize_path(signal, bars, horizon_sec):
@@ -227,6 +253,7 @@ def run(args):
     raw_db = connect_raw(args.raw_db)
     phase3_db = connect_phase3(args.phase3_db)
     signals = load_signals(raw_db, since_ts, int(args.max_signals)) if raw_db else []
+    bars_by_token = load_recent_bars_by_token(raw_db, int(args.max_total_bars)) if raw_db else {}
     processed = 0
     with_bars = 0
     reached_target = 0
@@ -235,7 +262,13 @@ def run(args):
         token = signal.get("token_ca")
         if not signal_ts or not token:
             continue
-        bars = load_bars(raw_db, token, signal_ts, signal_ts + horizon_sec, int(args.max_bars_per_signal))
+        bars = select_bars_for_signal(
+            bars_by_token,
+            token,
+            signal_ts,
+            signal_ts + horizon_sec,
+            int(args.max_bars_per_signal),
+        )
         row = summarize_path(signal, bars, horizon_sec)
         upsert_observation(phase3_db, row)
         processed += 1
@@ -263,6 +296,7 @@ def run(args):
         "lookback_hours": float(args.lookback_hours),
         "horizon_hours": float(args.horizon_hours),
         "signals_loaded": len(signals),
+        "recent_bar_token_count": len(bars_by_token),
         "signals_processed": processed,
         "signals_with_bars": with_bars,
         "signals_reached_target_horizon": reached_target,
@@ -304,6 +338,7 @@ def self_test():
             lookback_hours=48,
             horizon_hours=24,
             max_signals=100,
+            max_total_bars=1000,
             max_bars_per_signal=2000,
             out=str(out),
         )
@@ -321,7 +356,8 @@ def parse_args():
     parser.add_argument("--phase3-db", default=str(DEFAULT_PHASE3_DB))
     parser.add_argument("--lookback-hours", default="48")
     parser.add_argument("--horizon-hours", default="24")
-    parser.add_argument("--max-signals", default="2000")
+    parser.add_argument("--max-signals", default="250")
+    parser.add_argument("--max-total-bars", default="50000")
     parser.add_argument("--max-bars-per-signal", default="2000")
     parser.add_argument("--out", default=str(DEFAULT_RUN_DIR / "phase3_24h_path_observer_summary.json"))
     parser.add_argument("--self-test", action="store_true")
