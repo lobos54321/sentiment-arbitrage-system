@@ -162,9 +162,12 @@ Every Phase 3 loop writes:
 - `phase3_goal_loop.md`
 - `p7_paper_proposal_checkpoint.json` when P7 has passed OOS
 - `p7_paper_proposal_checkpoint.md` when P7 has passed OOS
+- `phase3_wide_net_paper_contract.json`
+- `phase3_24h_path_observer_summary.json`
 - `phase3_path_horizon_audit_24h.json`
 - `p9_metric_predictiveness_ledger.json`
 - `influence_kol_shadow_source_plan.json`
+- `influence_kol_shadow_features_24h.json`
 
 Loop stages:
 
@@ -175,7 +178,7 @@ Loop stages:
 5. Emit P3.2 24h observer implementation task.
 6. Emit P3.4 metric predictiveness ledger task.
 7. Emit P3.5 influence/KOL shadow source plan using agent-reach acquisition.
-8. Materialize P3.2/P3.4/P3.5 read-only artifacts every AutoLoop run.
+8. Materialize P3.1/P3.2/P3.4/P3.5 read-only/shadow artifacts every AutoLoop run.
 8. Stop before any strategy, exit, gate, executor, canary, wallet, or risk change.
 
 ## Global Guardrails

@@ -20,6 +20,7 @@ SCHEMA_VERSION = "phase3_path_horizon_audit.v1"
 DEFAULT_DATA_DIR = Path("/app/data")
 DEFAULT_RAW_DB = DEFAULT_DATA_DIR / "raw_signal_outcomes.db"
 DEFAULT_PAPER_DB = DEFAULT_DATA_DIR / "paper_trades.db"
+DEFAULT_PHASE3_DB = DEFAULT_DATA_DIR / "phase3_path_observer.db"
 
 
 def utc_now() -> str:
@@ -166,9 +167,12 @@ def build_report(args):
     target_horizon_sec = int(float(args.target_horizon_hours) * 3600)
     raw_db = connect_readonly(args.raw_db)
     paper_db = connect_readonly(args.paper_db)
+    phase3_db = connect_readonly(args.phase3_db)
     raw_tables = tables(raw_db)
     paper_tables = tables(paper_db)
+    phase3_tables = tables(phase3_db)
     candidate_tables = [
+        "phase3_path_observations",
         "raw_path_observations",
         "raw_signal_path_observations",
         "token_path_observations",
@@ -178,7 +182,12 @@ def build_report(args):
     ]
     table_reports = []
     for table in candidate_tables:
-        db = raw_db if table in raw_tables else paper_db if table in paper_tables else None
+        db = (
+            phase3_db if table in phase3_tables
+            else raw_db if table in raw_tables
+            else paper_db if table in paper_tables
+            else None
+        )
         if db is None:
             table_reports.append({"table": table, "supported": False, "reason": "table_missing"})
         else:
@@ -205,6 +214,7 @@ def build_report(args):
         "target_horizon_hours": float(args.target_horizon_hours),
         "raw_db_available": raw_db is not None,
         "paper_db_available": paper_db is not None,
+        "phase3_db_available": phase3_db is not None,
         "table_reports": table_reports,
         "supported_path_table_count": len(partial_tables),
         "target_horizon_table_count": len(observed_24h_tables),
@@ -248,6 +258,7 @@ def self_test():
         args = argparse.Namespace(
             raw_db=str(raw),
             paper_db=str(root / "paper.db"),
+            phase3_db=str(root / "phase3.db"),
             hours=48,
             target_horizon_hours=24,
             max_sample_rows=1000,
@@ -265,6 +276,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Audit Phase 3 24h path observer readiness.")
     parser.add_argument("--raw-db", default=str(DEFAULT_RAW_DB))
     parser.add_argument("--paper-db", default=str(DEFAULT_PAPER_DB))
+    parser.add_argument("--phase3-db", default=str(DEFAULT_PHASE3_DB))
     parser.add_argument("--hours", default="24")
     parser.add_argument("--target-horizon-hours", default="24")
     parser.add_argument("--max-sample-rows", default="2000")

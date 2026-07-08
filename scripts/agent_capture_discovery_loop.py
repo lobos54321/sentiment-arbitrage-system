@@ -2194,9 +2194,13 @@ def run_reports(run_dir, args):
     phase3_goal_loop_md_path = run_dir / "phase3_goal_loop.md"
     p7_paper_proposal_checkpoint_path = run_dir / "p7_paper_proposal_checkpoint.json"
     p7_paper_proposal_checkpoint_md_path = run_dir / "p7_paper_proposal_checkpoint.md"
+    phase3_wide_net_paper_contract_path = run_dir / "phase3_wide_net_paper_contract.json"
+    phase3_24h_path_observer_summary_path = run_dir / "phase3_24h_path_observer_summary.json"
     phase3_path_horizon_audit_path = run_dir / f"phase3_path_horizon_audit_{primary_hours}h.json"
     p9_metric_predictiveness_ledger_path = run_dir / "p9_metric_predictiveness_ledger.json"
     influence_kol_shadow_source_plan_path = run_dir / "influence_kol_shadow_source_plan.json"
+    influence_kol_shadow_features_path = run_dir / "influence_kol_shadow_features_24h.json"
+    phase3_path_observer_db = Path(args.data_dir) / "phase3_path_observer.db"
     markov_paths = {
         profile: run_dir / f"candidate_virtual_markov_{profile}_{primary_hours}h.json"
         for profile in args.markov_profiles.split(",")
@@ -2678,11 +2682,41 @@ def run_reports(run_dir, args):
     if p7_paper_proposal_checkpoint_md_path.exists():
         readiness_paths["p7_paper_proposal_checkpoint_md"] = p7_paper_proposal_checkpoint_md_path
     diagnostics.append(run_report(
+        "phase3_wide_net_paper_contract",
+        [
+            "scripts/phase3_wide_net_paper_contract.py",
+            "--p7", str(p7_paper_proposal_checkpoint_path),
+            "--contract-db", str(Path(args.data_dir) / "phase3_wide_net_paper_contract.db"),
+            "--out", str(phase3_wide_net_paper_contract_path),
+            "--materialize-contract-db",
+        ],
+        phase3_wide_net_paper_contract_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if phase3_wide_net_paper_contract_path.exists():
+        readiness_paths["phase3_wide_net_paper_contract"] = phase3_wide_net_paper_contract_path
+    diagnostics.append(run_report(
+        "phase3_24h_path_observer",
+        [
+            "scripts/phase3_24h_path_observer.py",
+            "--raw-db", args.raw_db,
+            "--phase3-db", str(phase3_path_observer_db),
+            "--lookback-hours", "48",
+            "--horizon-hours", "24",
+            "--out", str(phase3_24h_path_observer_summary_path),
+        ],
+        phase3_24h_path_observer_summary_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if phase3_24h_path_observer_summary_path.exists():
+        readiness_paths["phase3_24h_path_observer_summary"] = phase3_24h_path_observer_summary_path
+    diagnostics.append(run_report(
         "phase3_path_horizon_audit",
         [
             "scripts/phase3_path_horizon_audit.py",
             "--raw-db", args.raw_db,
             "--paper-db", args.paper_db,
+            "--phase3-db", str(phase3_path_observer_db),
             "--hours", str(primary_hours),
             "--target-horizon-hours", "24",
             "--out", str(phase3_path_horizon_audit_path),
@@ -2718,6 +2752,19 @@ def run_reports(run_dir, args):
     ))
     if influence_kol_shadow_source_plan_path.exists():
         readiness_paths["influence_kol_shadow_source_plan"] = influence_kol_shadow_source_plan_path
+    diagnostics.append(run_report(
+        "influence_kol_shadow_collector",
+        [
+            "scripts/influence_kol_shadow_collector.py",
+            "--plan", str(influence_kol_shadow_source_plan_path),
+            "--raw-dir", str(Path(args.data_dir) / "influence_kol/raw"),
+            "--out", str(influence_kol_shadow_features_path),
+        ],
+        influence_kol_shadow_features_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if influence_kol_shadow_features_path.exists():
+        readiness_paths["influence_kol_shadow_features"] = influence_kol_shadow_features_path
     return {
         "capture_primary": capture_path,
         "pnl": pnl_path if pnl_path.exists() else None,

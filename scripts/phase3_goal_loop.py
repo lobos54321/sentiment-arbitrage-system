@@ -187,7 +187,7 @@ def build_phase3_loop(p7: dict, reviewer: dict) -> dict:
             task(
                 "P3.1",
                 "Wide-net paper experiment proposal",
-                "HUMAN_APPROVAL_REQUIRED_BEFORE_ENABLEMENT",
+                "CONTRACT_IMPLEMENTED_HUMAN_APPROVAL_REQUIRED_BEFORE_ENABLEMENT",
                 reason="Only real paper quotes can test whether lottery tails are capturable after replay evidence is exhausted.",
                 allowed_scope=["proposal", "dry_run_schema", "independent_paper_ledger_design", "self_tests"],
                 acceptance=[
@@ -212,7 +212,7 @@ def build_phase3_loop(p7: dict, reviewer: dict) -> dict:
             task(
                 "P3.2",
                 "Extend path observer horizon to 24h",
-                "READY_FOR_SHADOW_IMPLEMENTATION",
+                "IMPLEMENTED_SHADOW_ONLY",
                 reason="Late token behavior cannot be studied if observation stops too early.",
                 allowed_scope=["shadow_observer", "read_only_artifact", "storage_cap", "rate_limit", "self_tests"],
                 acceptance=[
@@ -240,7 +240,7 @@ def build_phase3_loop(p7: dict, reviewer: dict) -> dict:
             task(
                 "P3.4",
                 "P9 metric predictiveness ledger",
-                "READY_FOR_READ_ONLY_IMPLEMENTATION",
+                "IMPLEMENTED_READ_ONLY",
                 reason="Metrics must prove forward predictive value before they can influence promotion evidence.",
                 allowed_scope=["read_only_evaluator", "metric_ledger", "oos_statistics", "self_tests"],
                 acceptance=[
@@ -253,7 +253,7 @@ def build_phase3_loop(p7: dict, reviewer: dict) -> dict:
             task(
                 "P3.5",
                 "Influence/KOL shadow source plan",
-                "READY_FOR_SHADOW_DESIGN",
+                "IMPLEMENTED_SHADOW_ONLY",
                 reason="Price-external influence data is the remaining untested source family for tail continuation and market-cap ceiling calibration.",
                 allowed_scope=["agent_reach_x_twitter_sampling", "cached_shadow_features", "read_only_artifacts"],
                 acceptance=[
