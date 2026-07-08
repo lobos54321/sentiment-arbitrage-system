@@ -2195,6 +2195,8 @@ def run_reports(run_dir, args):
     p7_paper_proposal_checkpoint_path = run_dir / "p7_paper_proposal_checkpoint.json"
     p7_paper_proposal_checkpoint_md_path = run_dir / "p7_paper_proposal_checkpoint.md"
     phase3_wide_net_paper_contract_path = run_dir / "phase3_wide_net_paper_contract.json"
+    phase3_p7_human_review_packet_path = run_dir / "phase3_p7_human_review_packet.json"
+    phase3_p7_human_review_packet_md_path = run_dir / "phase3_p7_human_review_packet.md"
     phase3_24h_path_observer_summary_path = run_dir / "phase3_24h_path_observer_summary.json"
     phase3_path_horizon_audit_path = run_dir / f"phase3_path_horizon_audit_{primary_hours}h.json"
     p9_metric_predictiveness_ledger_path = run_dir / "p9_metric_predictiveness_ledger.json"
@@ -2695,6 +2697,23 @@ def run_reports(run_dir, args):
     ))
     if phase3_wide_net_paper_contract_path.exists():
         readiness_paths["phase3_wide_net_paper_contract"] = phase3_wide_net_paper_contract_path
+    diagnostics.append(run_report(
+        "phase3_p7_human_review_packet",
+        [
+            "scripts/phase3_p7_human_review_packet.py",
+            "--p7", str(p7_paper_proposal_checkpoint_path),
+            "--contract", str(phase3_wide_net_paper_contract_path),
+            "--phase3", str(phase3_goal_loop_path),
+            "--out", str(phase3_p7_human_review_packet_path),
+            "--out-md", str(phase3_p7_human_review_packet_md_path),
+        ],
+        phase3_p7_human_review_packet_path,
+        timeout=args.report_timeout_sec,
+    ))
+    if phase3_p7_human_review_packet_path.exists():
+        readiness_paths["phase3_p7_human_review_packet"] = phase3_p7_human_review_packet_path
+    if phase3_p7_human_review_packet_md_path.exists():
+        readiness_paths["phase3_p7_human_review_packet_md"] = phase3_p7_human_review_packet_md_path
     diagnostics.append(run_report(
         "phase3_24h_path_observer",
         [

@@ -163,6 +163,8 @@ Every Phase 3 loop writes:
 - `p7_paper_proposal_checkpoint.json` when P7 has passed OOS
 - `p7_paper_proposal_checkpoint.md` when P7 has passed OOS
 - `phase3_wide_net_paper_contract.json`
+- `phase3_p7_human_review_packet.json`
+- `phase3_p7_human_review_packet.md`
 - `phase3_24h_path_observer_summary.json`
 - `phase3_path_horizon_audit_24h.json`
 - `p9_metric_predictiveness_ledger.json`

@@ -11,6 +11,8 @@ Inputs:
 - `/app/data/agent_runs/latest/phase3_goal_loop.json`
 - `/app/data/agent_runs/latest/p7_paper_proposal_checkpoint.json`
 - `/app/data/agent_runs/latest/phase3_wide_net_paper_contract.json`
+- `/app/data/agent_runs/latest/phase3_p7_human_review_packet.json`
+- `/app/data/agent_runs/latest/phase3_p7_human_review_packet.md`
 - `/app/data/agent_runs/latest/phase3_24h_path_observer_summary.json`
 - `/app/data/agent_runs/latest/phase3_path_horizon_audit_24h.json`
 - `/app/data/agent_runs/latest/p9_metric_predictiveness_ledger.json`
@@ -49,6 +51,7 @@ Findings ledger:
 - source_doc: `docs/agents/codex-goal-capture60-phase3.md`
 - generator_script: `scripts/phase3_goal_loop.py`
 - wide_net_paper_contract: `scripts/phase3_wide_net_paper_contract.py`
+- p7_human_review_packet: `scripts/phase3_p7_human_review_packet.py`
 - path_observer_materializer: `scripts/phase3_24h_path_observer.py`
 - path_horizon_audit: `scripts/phase3_path_horizon_audit.py`
 - metric_predictiveness_ledger: `scripts/p9_metric_predictiveness_ledger.py`
