@@ -163,6 +163,7 @@ Every Phase 3 loop writes:
 - `p7_paper_proposal_checkpoint.json` when P7 has passed OOS
 - `p7_paper_proposal_checkpoint.md` when P7 has passed OOS
 - `phase3_wide_net_paper_contract.json`
+- `phase3_wide_net_paper_experiment_summary.json` when human approval marker enables the independent experiment ledger
 - `phase3_p7_human_review_packet.json`
 - `phase3_p7_human_review_packet.md`
 - `phase3_24h_path_observer_summary.json`
@@ -177,7 +178,12 @@ Loop stages:
 2. Check P7 OOS checkpoint status.
 3. Produce or update the P7 paper proposal checkpoint.
 4. Emit P3.1 wide-net paper proposal task, blocked on human approval.
-5. Emit P3.2 24h observer implementation task.
+5. If the explicit approval marker exists, run the independent wide-net paper experiment ledger worker.
+6. Emit P3.2 24h observer implementation task.
+
+The independent wide-net paper experiment ledger is not the production paper trader. It writes only
+`phase3_wide_net_paper_ledger` inside the Phase 3 contract DB and keeps
+`promotion_allowed=false`.
 6. Emit P3.4 metric predictiveness ledger task.
 7. Emit P3.5 influence/KOL shadow source plan using agent-reach acquisition.
 8. Materialize P3.1/P3.2/P3.4/P3.5 read-only/shadow artifacts every AutoLoop run.

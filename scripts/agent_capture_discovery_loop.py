@@ -2195,6 +2195,7 @@ def run_reports(run_dir, args):
     p7_paper_proposal_checkpoint_path = run_dir / "p7_paper_proposal_checkpoint.json"
     p7_paper_proposal_checkpoint_md_path = run_dir / "p7_paper_proposal_checkpoint.md"
     phase3_wide_net_paper_contract_path = run_dir / "phase3_wide_net_paper_contract.json"
+    phase3_wide_net_paper_experiment_summary_path = run_dir / "phase3_wide_net_paper_experiment_summary.json"
     phase3_p7_human_review_packet_path = run_dir / "phase3_p7_human_review_packet.json"
     phase3_p7_human_review_packet_md_path = run_dir / "phase3_p7_human_review_packet.md"
     phase3_24h_path_observer_summary_path = run_dir / "phase3_24h_path_observer_summary.json"
@@ -2697,6 +2698,22 @@ def run_reports(run_dir, args):
     ))
     if phase3_wide_net_paper_contract_path.exists():
         readiness_paths["phase3_wide_net_paper_contract"] = phase3_wide_net_paper_contract_path
+    diagnostics.append(run_report(
+        "phase3_wide_net_paper_worker",
+        [
+            "scripts/phase3_wide_net_paper_worker.py",
+            "--contract", str(phase3_wide_net_paper_contract_path),
+            "--raw-db", args.raw_db,
+            "--paper-db", args.paper_db,
+            "--ledger-db", str(Path(args.data_dir) / "phase3_wide_net_paper_contract.db"),
+            "--out", str(phase3_wide_net_paper_experiment_summary_path),
+            "--lookback-hours", str(primary_hours),
+        ],
+        phase3_wide_net_paper_experiment_summary_path,
+        timeout=max(60, int(args.report_timeout_sec)),
+    ))
+    if phase3_wide_net_paper_experiment_summary_path.exists():
+        readiness_paths["phase3_wide_net_paper_experiment_summary"] = phase3_wide_net_paper_experiment_summary_path
     diagnostics.append(run_report(
         "phase3_p7_human_review_packet",
         [

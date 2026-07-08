@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 SCHEMA_VERSION = "phase3_wide_net_paper_contract.v1"
 DEFAULT_DATA_DIR = Path("/app/data")
 DEFAULT_RUN_DIR = DEFAULT_DATA_DIR / "agent_runs/latest"
+DEFAULT_APPROVAL_MARKER = DEFAULT_DATA_DIR / "phase3_wide_net_paper_approval.json"
 P7_CHAMPION_POLICY_ID = "trail_a50_dd15_stop20"
 
 
@@ -43,6 +45,37 @@ def load_json(path):
         return data if isinstance(data, dict) else {}
     except Exception as exc:
         return {"error": str(exc), "path": str(path)}
+
+
+def truthy(value):
+    return str(value).lower() in {"1", "true", "yes", "approved", "enable", "enabled"}
+
+
+def write_approval_marker(path, approval_text):
+    marker = {
+        "schema_version": "phase3_wide_net_paper_approval.v1",
+        "approved_at": utc_now(),
+        "approval_text": str(approval_text or "").strip(),
+        "human_approved": True,
+        "enable_requested": True,
+        "allowed_scope": "independent_phase3_paper_experiment_ledger_only",
+        "promotion_allowed": False,
+        "production_strategy_change_allowed": False,
+        "entry_policy_change_allowed": False,
+        "gate_change_allowed": False,
+        "final_entry_contract_change_allowed": False,
+        "executor_change_allowed": False,
+        "canary_or_risk_change_allowed": False,
+    }
+    write_json(path, marker)
+    return marker
+
+
+def load_approval_marker(path):
+    marker = load_json(path)
+    if not marker:
+        return {}
+    return marker if isinstance(marker, dict) else {}
 
 
 def init_contract_db(path, contract):
@@ -107,18 +140,32 @@ def init_contract_db(path, contract):
 
 def build_contract(args):
     p7 = load_json(args.p7)
+    approval_marker = load_approval_marker(args.approval_marker)
     p7_open = p7.get("classification") == "P7_PAPER_PROPOSAL_CHECKPOINT_OPEN"
-    human_approved = str(args.human_approved).lower() in {"1", "true", "yes", "approved"}
-    enable_requested = str(args.enable_requested).lower() in {"1", "true", "yes", "enable"}
+    human_approved = (
+        truthy(args.human_approved)
+        or truthy(os.environ.get("PHASE3_WIDE_NET_PAPER_HUMAN_APPROVED", "0"))
+        or bool(approval_marker.get("human_approved"))
+    )
+    enable_requested = (
+        truthy(args.enable_requested)
+        or truthy(os.environ.get("PHASE3_WIDE_NET_PAPER_ENABLED", "0"))
+        or bool(approval_marker.get("enable_requested"))
+    )
     enablement_allowed = bool(p7_open and human_approved and enable_requested)
+    if enablement_allowed:
+        classification = "WIDE_NET_PAPER_ENABLED_BY_HUMAN_APPROVAL"
+        next_action = "run_phase3_wide_net_paper_worker"
+    elif p7_open:
+        classification = "WIDE_NET_PAPER_READY_BUT_DISABLED"
+        next_action = "wait_for_explicit_human_enablement"
+    else:
+        classification = "WIDE_NET_PAPER_BLOCKED_WAITING_FOR_P7_CHECKPOINT"
+        next_action = "wait_for_p7_paper_proposal_checkpoint"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
-        "classification": (
-            "WIDE_NET_PAPER_READY_BUT_DISABLED"
-            if p7_open
-            else "WIDE_NET_PAPER_BLOCKED_WAITING_FOR_P7_CHECKPOINT"
-        ),
+        "classification": classification,
         "proposal_source": {
             "p7_checkpoint_path": str(args.p7),
             "p7_checkpoint_open": p7_open,
@@ -139,11 +186,18 @@ def build_contract(args):
             "human_approved": human_approved,
             "enable_requested": enable_requested,
             "paper_experiment_enablement_allowed": enablement_allowed,
+            "approval_marker_path": str(args.approval_marker),
+            "approval_marker_present": bool(approval_marker),
+            "approval_marker_approved_at": approval_marker.get("approved_at"),
+            "approval_marker_allowed_scope": approval_marker.get("allowed_scope"),
             "required_env_flags": [
                 "PHASE3_WIDE_NET_PAPER_HUMAN_APPROVED=1",
                 "PHASE3_WIDE_NET_PAPER_ENABLED=1",
             ],
-            "note": "This script does not enable paper trading; it only records the contract.",
+            "note": (
+                "This script never enables production paper trading. When enabled, it only authorizes "
+                "the independent Phase 3 paper experiment ledger worker."
+            ),
         },
         "guardrails": {
             "promotion_allowed": False,
@@ -154,11 +208,7 @@ def build_contract(args):
             "executor_change_allowed": False,
             "canary_or_risk_change_allowed": False,
         },
-        "next_action": (
-            "human_may_enable_wide_net_paper_experiment"
-            if enablement_allowed
-            else "wait_for_explicit_human_enablement"
-        ),
+        "next_action": next_action,
     }
 
 
@@ -173,6 +223,7 @@ def self_test():
             p7=str(p7),
             contract_db=str(db_path),
             out=str(out),
+            approval_marker=str(root / "approval.json"),
             materialize_contract_db=True,
             human_approved="0",
             enable_requested="0",
@@ -184,6 +235,11 @@ def self_test():
         assert contract["enablement"]["paper_experiment_enablement_allowed"] is False
         assert contract["guardrails"]["promotion_allowed"] is False
         assert db_path.exists()
+        marker = write_approval_marker(root / "approval.json", "approved in self-test")
+        assert marker["human_approved"] is True
+        approved = build_contract(args)
+        assert approved["classification"] == "WIDE_NET_PAPER_ENABLED_BY_HUMAN_APPROVAL"
+        assert approved["enablement"]["paper_experiment_enablement_allowed"] is True
     print("SELF_TEST_PASS phase3_wide_net_paper_contract")
 
 
@@ -192,6 +248,8 @@ def parse_args():
     parser.add_argument("--p7", default=str(DEFAULT_RUN_DIR / "p7_paper_proposal_checkpoint.json"))
     parser.add_argument("--contract-db", default=str(DEFAULT_DATA_DIR / "phase3_wide_net_paper_contract.db"))
     parser.add_argument("--out", default=str(DEFAULT_RUN_DIR / "phase3_wide_net_paper_contract.json"))
+    parser.add_argument("--approval-marker", default=str(DEFAULT_APPROVAL_MARKER))
+    parser.add_argument("--record-approval", default="")
     parser.add_argument("--human-approved", default="0")
     parser.add_argument("--enable-requested", default="0")
     parser.add_argument("--materialize-contract-db", action="store_true")
@@ -204,6 +262,8 @@ def main():
     if args.self_test:
         self_test()
         return 0
+    if args.record_approval:
+        write_approval_marker(args.approval_marker, args.record_approval)
     contract = build_contract(args)
     write_json(args.out, contract)
     if args.materialize_contract_db:
