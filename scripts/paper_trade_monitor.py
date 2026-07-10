@@ -107,6 +107,7 @@ from entry_mode_registry import entry_mode_registry_entry, normalize_entry_mode
 from entry_mode_quality import evaluate_entry_mode_quality
 from v27_runtime_mode_gate import evaluate_runtime_mode_gate
 from external_alpha_shadow import init_external_alpha_shadow, lookup_external_alpha
+from sqlite_evidence_utils import open_sqlite_readonly
 
 SHUTDOWN_REQUESTED = threading.Event()
 
@@ -20879,7 +20880,7 @@ def print_all_stats(db, min_id=None):
 
 def init_kline_db():
     """Open kline cache DB."""
-    db = sqlite3.connect(KLINE_DB)
+    db = open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC)
     db.row_factory = sqlite3.Row
     return db
 
@@ -20914,7 +20915,7 @@ def fetch_kline_close_at_or_after(token_ca, target_ts, max_lag_sec=180):
     except (TypeError, ValueError):
         return None
     try:
-        with sqlite3.connect(KLINE_DB) as kdb:
+        with open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC) as kdb:
             kdb.row_factory = sqlite3.Row
             row = kdb.execute(
                 """
@@ -20951,7 +20952,7 @@ def fetch_kline_path_for_attribution(token_ca, start_ts, end_ts, max_points=90):
     if end_ts < start_ts:
         return []
     try:
-        with sqlite3.connect(KLINE_DB) as kdb:
+        with open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC) as kdb:
             kdb.row_factory = sqlite3.Row
             rows = kdb.execute(
                 """

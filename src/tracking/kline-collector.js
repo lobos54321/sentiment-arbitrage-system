@@ -9,11 +9,18 @@
 
 import Database from 'better-sqlite3';
 import path from 'path';
+import {
+  defaultKlineHealthArtifactPath,
+  openExistingHealthySqliteSync,
+} from '../market-data/sqlite-file-health.js';
 
 export class KlineCollector {
   constructor(options = {}) {
-    const dbPath = options.dbPath || path.join(process.cwd(), 'data', 'kline_cache.db');
-    this.db = new Database(dbPath);
+    const dbPath = path.resolve(options.dbPath || path.join(process.cwd(), 'data', 'kline_cache.db'));
+    const healthArtifactPath = options.healthArtifactPath
+      || process.env.KLINE_DB_HEALTH_ARTIFACT
+      || defaultKlineHealthArtifactPath(dbPath);
+    this.db = openExistingHealthySqliteSync(Database, dbPath, { healthArtifactPath });
     this.db.pragma('journal_mode = WAL');
 
     // 内存中的当前分钟 tick 聚合 Map<tokenCA, {open, high, low, close, volume, minute}>

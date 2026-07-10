@@ -13,6 +13,10 @@ import {
 } from '../src/analytics/raw-path-observer.js';
 import { MarketDataBackfillService } from '../src/market-data/market-data-backfill-service.js';
 import { SharedPoolOhlcvClient } from '../src/market-data/shared-pool-ohclv-client.js';
+import {
+  assertSqliteHeaderReadySync,
+  KlineDatabaseHealthError,
+} from '../src/market-data/sqlite-file-health.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -589,6 +593,7 @@ async function main() {
   }
 
   const signalDbPath = resolvePath(process.env.DB_PATH || autonomyConfig.dbPath || './data/sentiment_arb.db');
+  const klineDbPath = resolvePath(autonomyConfig.evaluator.klineCacheDbPath || './data/kline_cache.db');
   const lookbackHours = envInt('RAW_PATH_OBSERVER_LOOKBACK_HOURS', 24, 1, 168);
   const signalLimit = envInt('RAW_PATH_OBSERVER_SIGNAL_LIMIT', 5000, 1, 50000);
   const maxSignalsPerRun = envInt('RAW_PATH_OBSERVER_MAX_SIGNALS_PER_RUN', 25, 1, 500);
@@ -598,11 +603,13 @@ async function main() {
   const recentPriorityHours = envInt('RAW_PATH_OBSERVER_RECENT_PRIORITY_HOURS', 24, 0, 168);
   const now = nowSec();
 
+  // Reject an invalid cache before opening any writable observer database.
+  assertSqliteHeaderReadySync(klineDbPath);
+  const service = new MarketDataBackfillService(autonomyConfig);
   const signalDb = openSqlite(signalDbPath, { readonly: true, fileMustExist: true });
   const rawDb = openSqlite(rawDbPath());
   ensureRawPathObserverSchema(rawDb);
   ensureObserverStateSchema(rawDb);
-  const service = new MarketDataBackfillService(autonomyConfig);
   const indexedOhlcvClient = new SharedPoolOhlcvClient(autonomyConfig, {
     repository: service.repository,
     poolResolver: service.poolResolver,
@@ -614,6 +621,7 @@ async function main() {
     started_at: new Date().toISOString(),
     observe_only: true,
     signal_db_path: signalDbPath,
+    kline_db_path: klineDbPath,
     raw_db_path: rawDbPath(),
     lookback_hours: lookbackHours,
     signal_limit: signalLimit,
@@ -868,6 +876,17 @@ async function main() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((error) => {
+    if (error instanceof KlineDatabaseHealthError || error?.code === 'KLINE_DB_UNHEALTHY') {
+      console.error(JSON.stringify({
+        schema_version: 'raw_path_observer_startup_error.v1',
+        classification: 'KLINE_DB_UNHEALTHY_FAIL_CLOSED',
+        generated_at: new Date().toISOString(),
+        exit_code: 78,
+        retry_suppression_recommended: true,
+        details: error.details || null,
+      }));
+      process.exit(78);
+    }
     console.error(error.stack || error.message);
     process.exit(1);
   });

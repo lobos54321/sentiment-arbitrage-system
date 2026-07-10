@@ -1,13 +1,73 @@
+import { resolve } from 'node:path';
+
 import Database from 'better-sqlite3';
+
+import {
+  defaultKlineHealthArtifactPath,
+  openExistingHealthySqliteSync,
+} from './sqlite-file-health.js';
+
+const KLINE_SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS kline_1m (
+    token_ca TEXT NOT NULL,
+    pool_address TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL NOT NULL,
+    provider TEXT DEFAULT 'geckoterminal',
+    fetched_at INTEGER DEFAULT (strftime('%s','now')),
+    PRIMARY KEY (token_ca, timestamp)
+  );
+  CREATE INDEX IF NOT EXISTS idx_kline_1m_lookup ON kline_1m(token_ca, timestamp);
+  CREATE TABLE IF NOT EXISTS pool_mapping (
+    token_ca TEXT PRIMARY KEY,
+    pool_address TEXT,
+    provider TEXT,
+    fetched_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS helius_trades (
+    signature TEXT PRIMARY KEY,
+    slot INTEGER,
+    block_time INTEGER,
+    token_ca TEXT NOT NULL,
+    pool_address TEXT NOT NULL,
+    price REAL NOT NULL,
+    base_amount REAL,
+    quote_amount REAL,
+    volume REAL,
+    side TEXT,
+    source TEXT DEFAULT 'helius',
+    ingested_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_helius_trades_pool_time ON helius_trades(pool_address, block_time);
+  CREATE INDEX IF NOT EXISTS idx_helius_trades_token_time ON helius_trades(token_ca, block_time);
+  CREATE TABLE IF NOT EXISTS history_backfill_cursor (
+    pool_address TEXT PRIMARY KEY,
+    token_ca TEXT,
+    oldest_signature_seen TEXT,
+    newest_signature_seen TEXT,
+    oldest_block_time INTEGER,
+    newest_block_time INTEGER,
+    last_backfill_at INTEGER,
+    status TEXT,
+    error TEXT
+  );
+`;
 
 export class KlineRepository {
   hasColumn(tableName, columnName) {
     return this.db.prepare(`PRAGMA table_info(${tableName})`).all().some((row) => row.name === columnName);
   }
 
-  constructor(dbPath) {
-    this.dbPath = dbPath;
-    this.db = new Database(dbPath);
+  constructor(dbPath, options = {}) {
+    this.dbPath = resolve(dbPath);
+    const healthArtifactPath = options.healthArtifactPath
+      || process.env.KLINE_DB_HEALTH_ARTIFACT
+      || defaultKlineHealthArtifactPath(this.dbPath);
+    this.db = openExistingHealthySqliteSync(Database, this.dbPath, { healthArtifactPath });
     this.db.pragma('journal_mode = WAL');
     this.initSchema();
     const hasFetchedAt = this.hasColumn('kline_1m', 'fetched_at');
@@ -48,55 +108,7 @@ export class KlineRepository {
   }
 
   initSchema() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS kline_1m (
-        token_ca TEXT NOT NULL,
-        pool_address TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        open REAL NOT NULL,
-        high REAL NOT NULL,
-        low REAL NOT NULL,
-        close REAL NOT NULL,
-        volume REAL NOT NULL,
-        provider TEXT DEFAULT 'geckoterminal',
-        fetched_at INTEGER DEFAULT (strftime('%s','now')),
-        PRIMARY KEY (token_ca, timestamp)
-      );
-      CREATE INDEX IF NOT EXISTS idx_kline_1m_lookup ON kline_1m(token_ca, timestamp);
-      CREATE TABLE IF NOT EXISTS pool_mapping (
-        token_ca TEXT PRIMARY KEY,
-        pool_address TEXT,
-        provider TEXT,
-        fetched_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS helius_trades (
-        signature TEXT PRIMARY KEY,
-        slot INTEGER,
-        block_time INTEGER,
-        token_ca TEXT NOT NULL,
-        pool_address TEXT NOT NULL,
-        price REAL NOT NULL,
-        base_amount REAL,
-        quote_amount REAL,
-        volume REAL,
-        side TEXT,
-        source TEXT DEFAULT 'helius',
-        ingested_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_helius_trades_pool_time ON helius_trades(pool_address, block_time);
-      CREATE INDEX IF NOT EXISTS idx_helius_trades_token_time ON helius_trades(token_ca, block_time);
-      CREATE TABLE IF NOT EXISTS history_backfill_cursor (
-        pool_address TEXT PRIMARY KEY,
-        token_ca TEXT,
-        oldest_signature_seen TEXT,
-        newest_signature_seen TEXT,
-        oldest_block_time INTEGER,
-        newest_block_time INTEGER,
-        last_backfill_at INTEGER,
-        status TEXT,
-        error TEXT
-      );
-    `);
+    this.db.exec(KLINE_SCHEMA_SQL);
 
     try { this.db.exec(`ALTER TABLE kline_1m ADD COLUMN provider TEXT DEFAULT 'geckoterminal'`); } catch {}
     try { this.db.exec(`ALTER TABLE kline_1m ADD COLUMN fetched_at INTEGER`); } catch {}

@@ -41,18 +41,24 @@ function toNumber(value, fallback = 0) {
 export class FixedEvaluator {
   constructor(config = autonomyConfig) {
     this.config = config;
-    this.registry = new PaperStrategyRegistry();
     this.exportPath = this.config.exports.filePath;
-    this.sourceDb = new Database(this.config.dbPath);
-    this.klineDb = new Database(this.config.evaluator.klineCacheDbPath);
-    this.readOnlyKlineDbs = this.#openReadOnlyKlineDbs();
     this.marketDataBackfill = new MarketDataBackfillService(this.config);
-    this.sharedMarketData = new SharedMarketDataClient(this.config, {
-      repository: this.marketDataBackfill.repository,
-      poolResolver: this.marketDataBackfill.poolResolver,
-      backfillService: this.marketDataBackfill,
-    });
-    this.#initKlineTables();
+    try {
+      this.registry = new PaperStrategyRegistry();
+      this.sourceDb = new Database(this.config.dbPath);
+      this.klineDb = this.marketDataBackfill.repository.db;
+      this.readOnlyKlineDbs = this.#openReadOnlyKlineDbs();
+      this.sharedMarketData = new SharedMarketDataClient(this.config, {
+        repository: this.marketDataBackfill.repository,
+        poolResolver: this.marketDataBackfill.poolResolver,
+        backfillService: this.marketDataBackfill,
+      });
+      this.#initKlineTables();
+    } catch (error) {
+      try { this.sourceDb?.close(); } catch {}
+      try { this.marketDataBackfill.close(); } catch {}
+      throw error;
+    }
   }
 
   loadDataset() {
@@ -256,7 +262,7 @@ export class FixedEvaluator {
         continue;
       }
       try {
-        opened.push({ path: filePath, db: new Database(filePath, { readonly: true }) });
+        opened.push({ path: filePath, db: new Database(filePath, { readonly: true, fileMustExist: true }) });
       } catch {
         // ignore read-only cache open failures
       }
@@ -637,7 +643,6 @@ export class FixedEvaluator {
   close() {
     try { this.sourceDb.close(); } catch {}
     try { this.marketDataBackfill.close(); } catch {}
-    try { this.klineDb.close(); } catch {}
     for (const source of this.readOnlyKlineDbs) {
       try { source.db.close(); } catch {}
     }
