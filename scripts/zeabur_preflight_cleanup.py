@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 
 DATA_DIR = Path(os.environ.get("ZEABUR_DATA_DIR", "/app/data"))
@@ -33,10 +34,13 @@ QUARANTINE_MALFORMED_PAPER_DB = os.environ.get("ZEABUR_QUARANTINE_MALFORMED_PAPE
 RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DATA_DIR / "recovery")))
 QUICK_CHECK_MAX_BYTES = int(float(os.environ.get("ZEABUR_PREFLIGHT_QUICK_CHECK_MAX_MB", "64")) * 1024 * 1024)
 DB_CHECK_ENABLED = os.environ.get("ZEABUR_PREFLIGHT_DB_CHECK_ENABLED", "true").lower() != "false"
-PAPER_DB_BACKUP_ENABLED = os.environ.get("ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED", "true").lower() != "false"
+# A full paper DB snapshot is too large for the bounded startup preflight. Run
+# it explicitly outside the startup timeout instead of copying on every boot.
+PAPER_DB_BACKUP_ENABLED = os.environ.get("ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED", "false").lower() == "true"
 PAPER_DB_BACKUP_DIR = Path(os.environ.get("ZEABUR_PAPER_DB_BACKUP_DIR", str(DATA_DIR / "backup" / "paper-db-family")))
 PAPER_DB_BACKUP_KEEP = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_KEEP", "12"))
 PAPER_DB_BACKUP_MIN_INTERVAL_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_MIN_INTERVAL_SEC", "3600"))
+PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC", "86400"))
 
 LOG_NAMES = [
     "dashboard.log",
@@ -225,12 +229,77 @@ def quarantine_db_family(path: Path, reason: str) -> None:
     log(f"quarantined malformed {path.name} -> {dest_dir} files={len(moved)}")
 
 
+def complete_paper_db_backups() -> list[Path]:
+    if not PAPER_DB_BACKUP_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in PAPER_DB_BACKUP_DIR.glob("paper_trades_*")
+        if path.is_dir() and (path / "paper_trades.db").is_file() and (path / "manifest.json").is_file()
+    )
+
+
+def cleanup_stale_backup_partials() -> None:
+    if not PAPER_DB_BACKUP_DIR.exists():
+        return
+    now = time.time()
+    for partial in PAPER_DB_BACKUP_DIR.glob(".paper_trades_*.partial"):
+        try:
+            age_sec = now - partial.stat().st_mtime
+            if age_sec < max(0, PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC):
+                continue
+            shutil.rmtree(partial)
+            log(f"removed stale partial backup {partial} age_sec={int(age_sec)}")
+        except Exception as exc:
+            log(f"WARN partial backup cleanup failed {partial}: {exc}")
+
+
+def create_consistent_sqlite_snapshot(source: Path, destination: Path) -> dict:
+    source_before = source.stat()
+    source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
+    source_connection = sqlite3.connect(source_uri, uri=True, timeout=30)
+    destination_connection = sqlite3.connect(str(destination), timeout=30)
+    try:
+        source_connection.execute("PRAGMA query_only=ON")
+        source_connection.execute("PRAGMA busy_timeout=30000")
+        destination_connection.execute("PRAGMA busy_timeout=30000")
+        source_connection.backup(destination_connection, pages=4096, sleep=0.05)
+        destination_connection.commit()
+        quick_check = [str(row[0]) for row in destination_connection.execute("PRAGMA quick_check").fetchall()]
+        if quick_check != ["ok"]:
+            raise RuntimeError(f"snapshot quick_check failed: {quick_check[:20]}")
+    finally:
+        destination_connection.close()
+        source_connection.close()
+    source_after = source.stat()
+    return {
+        "method": "sqlite_online_backup",
+        "quick_check": ["ok"],
+        "source_size_before": source_before.st_size,
+        "source_size_after": source_after.st_size,
+        "source_mtime_before": source_before.st_mtime,
+        "source_mtime_after": source_after.st_mtime,
+        "source_changed_during_snapshot": (
+            source_before.st_size != source_after.st_size or source_before.st_mtime != source_after.st_mtime
+        ),
+        "snapshot_size_bytes": destination.stat().st_size,
+    }
+
+
+def prune_complete_paper_db_backups() -> None:
+    backups = complete_paper_db_backups()
+    for old in backups[: max(0, len(backups) - max(1, PAPER_DB_BACKUP_KEEP))]:
+        shutil.rmtree(old)
+        log(f"backup pruned {old}")
+
+
 def backup_db_family(path: Path) -> None:
     if not PAPER_DB_BACKUP_ENABLED or path.name != "paper_trades.db" or not path.exists():
         return
     try:
         PAPER_DB_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        existing = sorted(PAPER_DB_BACKUP_DIR.glob("paper_trades_*"))
+        cleanup_stale_backup_partials()
+        existing = complete_paper_db_backups()
         if existing and PAPER_DB_BACKUP_MIN_INTERVAL_SEC > 0:
             latest = existing[-1]
             try:
@@ -242,27 +311,20 @@ def backup_db_family(path: Path) -> None:
                 pass
         ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         dest_dir = PAPER_DB_BACKUP_DIR / f"paper_trades_{ts}"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        copied = []
-        for suffix in ("", "-wal", "-shm"):
-            src = Path(f"{path}{suffix}") if suffix else path
-            if not src.exists():
-                continue
-            dest = dest_dir / src.name
-            shutil.copy2(src, dest)
-            copied.append({"from": str(src), "to": str(dest), "size_bytes": dest.stat().st_size})
+        partial_dir = PAPER_DB_BACKUP_DIR / f".paper_trades_{ts}.{os.getpid()}.{time.time_ns()}.partial"
+        partial_dir.mkdir(parents=True, exist_ok=False)
+        snapshot_path = partial_dir / path.name
+        snapshot = create_consistent_sqlite_snapshot(path, snapshot_path)
         manifest = {
             "created_at": ts,
             "db": str(path),
-            "copied": copied,
-            "note": "Startup backup of paper DB family before checkpoint/quarantine.",
+            "snapshot": snapshot,
+            "note": "Explicit consistent paper DB snapshot created outside the bounded startup preflight.",
         }
-        (dest_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-        log(f"backup ok {path.name} -> {dest_dir} files={len(copied)}")
-        backups = sorted(PAPER_DB_BACKUP_DIR.glob("paper_trades_*"))
-        for old in backups[: max(0, len(backups) - max(1, PAPER_DB_BACKUP_KEEP))]:
-            shutil.rmtree(old, ignore_errors=True)
-            log(f"backup pruned {old}")
+        (partial_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(partial_dir, dest_dir)
+        log(f"backup ok {path.name} -> {dest_dir} method={snapshot['method']}")
+        prune_complete_paper_db_backups()
     except Exception as exc:
         log(f"WARN backup failed {path.name}: {exc}")
 
@@ -343,6 +405,7 @@ def checkpoint_db(path: Path) -> None:
 def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     disk_report("before")
+    cleanup_stale_backup_partials()
     for name in LOG_NAMES:
         trim_file(DATA_DIR / name)
     trim_runtime_jsonl_files()
