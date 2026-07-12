@@ -75,8 +75,23 @@ def sqlite_readonly_uri(path: str | os.PathLike[str]) -> str:
     return f"file:{quote(str(absolute), safe='/')}?mode=ro"
 
 
+def assert_sqlite_header_ready(path: str | os.PathLike[str]) -> Path:
+    absolute = Path(path).expanduser().resolve()
+    try:
+        with absolute.open("rb") as fh:
+            header = fh.read(len(SQLITE_HEADER))
+    except FileNotFoundError as error:
+        raise sqlite3.OperationalError(f"unable to open database file: {absolute}") from error
+    except OSError as error:
+        raise sqlite3.OperationalError(f"unable to read database file: {absolute}: {error}") from error
+    if header != SQLITE_HEADER:
+        raise sqlite3.DatabaseError(f"invalid SQLite header: {absolute}")
+    return absolute
+
+
 def open_sqlite_readonly(path: str | os.PathLike[str], *, timeout_sec: float = 5.0) -> sqlite3.Connection:
-    connection = sqlite3.connect(sqlite_readonly_uri(path), uri=True, timeout=timeout_sec)
+    absolute = assert_sqlite_header_ready(path)
+    connection = sqlite3.connect(sqlite_readonly_uri(absolute), uri=True, timeout=timeout_sec)
     connection.execute("PRAGMA query_only = ON")
     connection.execute(f"PRAGMA busy_timeout = {max(0, int(timeout_sec * 1000))}")
     return connection

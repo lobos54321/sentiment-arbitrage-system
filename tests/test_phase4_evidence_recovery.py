@@ -58,6 +58,17 @@ def test_readonly_kline_open_does_not_create_a_missing_database(tmp_path: Path) 
     assert not target.exists()
 
 
+def test_readonly_kline_open_rejects_invalid_header_without_opening_sidecars(tmp_path: Path) -> None:
+    target = tmp_path / "zero.db"
+    target.write_bytes(b"\x00" * 8192)
+    before = sha256_file(target)
+    with pytest.raises(sqlite3.DatabaseError, match="invalid SQLite header"):
+        open_sqlite_readonly(target)
+    assert sha256_file(target) == before
+    assert not Path(f"{target}-wal").exists()
+    assert not Path(f"{target}-shm").exists()
+
+
 def test_paper_monitor_has_no_creating_kline_connect_calls() -> None:
     source = (SCRIPTS / "paper_trade_monitor.py").read_text(encoding="utf-8")
     assert "sqlite3.connect(KLINE_DB)" not in source
