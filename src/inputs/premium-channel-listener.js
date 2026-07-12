@@ -14,6 +14,13 @@ import https from 'https';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import {
+  compareMessageIds,
+  mergeGapStaging,
+  normalizeTelegramMessage,
+  readWatermarkState,
+  writeWatermarkState,
+} from './premium-telegram-watermark.js';
 
 const DEFAULT_CHANNEL_ID = 3636518327;
 const DEDUP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
@@ -30,6 +37,18 @@ const WATCHDOG_DEAD_THRESHOLD_MS = 5 * 60 * 1000; // treat as dead if no ping fo
 const CHANNEL_CACHE_PATH = process.env.CHANNEL_CACHE_PATH ||
   path.join(process.env.DATA_DIR || '/app/data', 'tg-channel-cache.json');
 
+function envEnabled(name, defaultValue = true) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === null || raw === '') return defaultValue;
+  return !['0', 'false', 'no', 'off'].includes(String(raw).trim().toLowerCase());
+}
+
+function boundedInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export class PremiumChannelListener {
   constructor(config = {}) {
     this.config = config;
@@ -39,8 +58,32 @@ export class PremiumChannelListener {
     this.signalCallbacks = [];
     this.recentTokens = new Map(); // token_ca -> timestamp for dedup
     this._watchdogTimer = null;
+    this._watchdogBootstrapTimer = null;
     this._lastPingTs = Date.now();
     this._reconnecting = false;
+    const dataDir = process.env.DATA_DIR || '/app/data';
+    const channelId = parseInt(process.env.PREMIUM_CHANNEL_ID || String(DEFAULT_CHANNEL_ID));
+    this._watermarkEnabled = config.watermarkEnabled ?? envEnabled('TELEGRAM_WATERMARK_WATCHDOG_ENABLED', true);
+    this._watermarkStatePath = config.watermarkStatePath
+      || process.env.TELEGRAM_INGESTION_WATERMARK_PATH
+      || path.join(dataDir, 'recovery', 'telegram-ingestion-watermark.json');
+    this._gapStagingPath = config.gapStagingPath
+      || process.env.TELEGRAM_GAP_STAGING_PATH
+      || path.join(dataDir, 'recovery', 'telegram-gap-staging.json');
+    this._watermarkHistoryLimit = boundedInteger(
+      config.watermarkHistoryLimit ?? process.env.TELEGRAM_WATERMARK_HISTORY_LIMIT,
+      100,
+      10,
+      500,
+    );
+    this._watermarkLagThreshold = boundedInteger(
+      config.watermarkLagThreshold ?? process.env.TELEGRAM_WATERMARK_LAG_CHECKS,
+      2,
+      1,
+      10,
+    );
+    this._watermarkCheckInFlight = false;
+    this._watermarkState = readWatermarkState(this._watermarkStatePath, channelId);
     // Webhook URLs for real-time signal forwarding (comma-separated in env)
     this.webhookUrls = (process.env.SIGNAL_WEBHOOK_URLS || '')
       .split(',')
@@ -110,6 +153,7 @@ export class PremiumChannelListener {
             (event) => this._handleMessage(event),
             new NewMessage({})
           );
+          await this._primeUpdateStream();
           this.isRunning = true;
           this._lastPingTs = Date.now();
           this._startWatchdog();
@@ -125,6 +169,7 @@ export class PremiumChannelListener {
         (event) => this._handleMessage(event),
         new NewMessage({})
       );
+      await this._primeUpdateStream();
 
       this.isRunning = true;
       this._lastPingTs = Date.now();
@@ -165,12 +210,26 @@ export class PremiumChannelListener {
     setTimeout(attempt, RETRY_MS);
   }
 
+  async _primeUpdateStream() {
+    try {
+      await this.client.getMe(true);
+      await this.client.invoke(new Api.updates.GetState());
+      this._lastPingTs = Date.now();
+      console.log('✅ Telegram update stream primed');
+    } catch (error) {
+      console.warn(`⚠️ Telegram update stream prime failed: ${error.message}`);
+    }
+  }
+
   /**
    * Start watchdog timer — detects dead Telegram connection and reconnects
    */
   _startWatchdog() {
     if (this._watchdogTimer) clearInterval(this._watchdogTimer);
+    if (this._watchdogBootstrapTimer) clearTimeout(this._watchdogBootstrapTimer);
     this._watchdogTimer = setInterval(() => this._watchdogTick(), WATCHDOG_INTERVAL_MS);
+    this._watchdogBootstrapTimer = setTimeout(() => this._watchdogTick(), 10000);
+    this._watchdogBootstrapTimer.unref?.();
   }
 
   async _watchdogTick() {
@@ -187,10 +246,177 @@ export class PremiumChannelListener {
       } catch (err) {
         console.warn(`⚠️ [Watchdog] Telegram ping failed: ${err.message} — triggering reconnect`);
         await this._doReconnect();
+        return;
       }
     } else if (!connected || stale) {
       console.warn(`⚠️ [Watchdog] Telegram connection dead (connected=${connected}, stale=${stale}) — triggering reconnect`);
       await this._doReconnect();
+      return;
+    }
+
+    if (!this._watermarkEnabled || !this.channelEntity) return;
+    try {
+      const result = await this._checkMessageWatermark();
+      if (result?.reconnect) {
+        console.warn(
+          `⚠️ [Watchdog] Telegram history advanced to message ${result.latest_message_id} `
+          + `without a live event; staged=${result.staged_count}, reconnecting`,
+        );
+        await this._doReconnect();
+      }
+    } catch (error) {
+      this._recordWatermarkError(error);
+      console.warn(`⚠️ [Watchdog] Telegram watermark check failed: ${error.message}`);
+    }
+  }
+
+  _persistWatermark(patch = {}) {
+    this._watermarkState = writeWatermarkState(this._watermarkStatePath, {
+      ...this._watermarkState,
+      ...patch,
+    });
+    return this._watermarkState;
+  }
+
+  _recordWatermarkError(error) {
+    try {
+      this._persistWatermark({
+        status: 'watermark_check_error',
+        last_error: error?.message || String(error),
+      });
+    } catch {}
+  }
+
+  _recordLiveMessage(message) {
+    if (!this._watermarkEnabled) return;
+    const channelId = this._watermarkState.channel_id || String(DEFAULT_CHANNEL_ID);
+    const row = normalizeTelegramMessage(message, channelId);
+    if (!row) return;
+    if (compareMessageIds(row.message_id, this._watermarkState.last_live_message_id) < 0) return;
+
+    const patch = {
+      status: 'live_event_seen',
+      last_live_message_id: row.message_id,
+      last_live_message_ts: row.message_ts,
+      last_error: null,
+    };
+    if (
+      this._watermarkState.pending_history_message_id
+      && compareMessageIds(row.message_id, this._watermarkState.pending_history_message_id) >= 0
+    ) {
+      patch.pending_history_message_id = null;
+      patch.pending_lag_checks = 0;
+      patch.status = 'live_stream_healthy';
+    }
+    try {
+      this._persistWatermark(patch);
+    } catch (error) {
+      console.warn(`⚠️ [Watchdog] Could not persist live Telegram watermark: ${error.message}`);
+    }
+  }
+
+  async _checkMessageWatermark() {
+    if (this._watermarkCheckInFlight) return { skipped: 'check_in_flight' };
+    if (!this.client || !this.channelEntity) return { skipped: 'listener_not_ready' };
+    this._watermarkCheckInFlight = true;
+    try {
+      const messages = await this.client.getMessages(this.channelEntity, {
+        limit: this._watermarkHistoryLimit,
+      });
+      const rows = messages
+        .map((message) => normalizeTelegramMessage(message, this._watermarkState.channel_id))
+        .filter(Boolean)
+        .sort((left, right) => compareMessageIds(right.message_id, left.message_id));
+      if (rows.length === 0) return { skipped: 'history_empty' };
+
+      const latest = rows[0];
+      const previousHistoryId = this._watermarkState.last_history_message_id;
+      if (!previousHistoryId) {
+        this._persistWatermark({
+          status: 'history_baseline_initialized',
+          last_history_message_id: latest.message_id,
+          last_history_message_ts: latest.message_ts,
+          pending_history_message_id: null,
+          pending_lag_checks: 0,
+          last_error: null,
+        });
+        return { baseline_initialized: true, latest_message_id: latest.message_id };
+      }
+
+      const liveCaughtUp = compareMessageIds(
+        this._watermarkState.last_live_message_id,
+        latest.message_id,
+      ) >= 0;
+      if (liveCaughtUp) {
+        this._persistWatermark({
+          status: 'live_stream_healthy',
+          last_history_message_id: latest.message_id,
+          last_history_message_ts: latest.message_ts,
+          pending_history_message_id: null,
+          pending_lag_checks: 0,
+          last_error: null,
+        });
+        return { healthy: true, latest_message_id: latest.message_id };
+      }
+
+      const historyAdvanced = compareMessageIds(latest.message_id, previousHistoryId) > 0;
+      const samePending = compareMessageIds(
+        latest.message_id,
+        this._watermarkState.pending_history_message_id,
+      ) === 0;
+      if (!historyAdvanced && !samePending) {
+        return { healthy: null, latest_message_id: latest.message_id };
+      }
+
+      const pendingLagChecks = samePending
+        ? Number(this._watermarkState.pending_lag_checks || 0) + 1
+        : 1;
+      this._persistWatermark({
+        status: 'live_stream_lag_observed',
+        last_history_message_id: latest.message_id,
+        last_history_message_ts: latest.message_ts,
+        pending_history_message_id: latest.message_id,
+        pending_lag_checks: pendingLagChecks,
+        last_error: null,
+      });
+      if (pendingLagChecks < this._watermarkLagThreshold) {
+        return {
+          lag_observed: true,
+          lag_checks: pendingLagChecks,
+          latest_message_id: latest.message_id,
+        };
+      }
+
+      const lowerBound = compareMessageIds(
+        this._watermarkState.last_live_message_id,
+        this._watermarkState.last_staged_message_id,
+      ) >= 0
+        ? this._watermarkState.last_live_message_id
+        : this._watermarkState.last_staged_message_id;
+      const gapRows = rows.filter((row) => (
+        row.signal_kind
+        && compareMessageIds(row.message_id, lowerBound) > 0
+      ));
+      const staging = mergeGapStaging(this._gapStagingPath, gapRows, {
+        channel_id: this._watermarkState.channel_id,
+        reason: 'live_stream_watermark_gap',
+      });
+      this._persistWatermark({
+        status: 'gap_staged_reconnect_pending',
+        pending_history_message_id: null,
+        pending_lag_checks: 0,
+        last_staged_message_id: latest.message_id,
+        last_staged_at: new Date().toISOString(),
+        reconnect_count: Number(this._watermarkState.reconnect_count || 0) + 1,
+        last_error: null,
+      });
+      return {
+        reconnect: true,
+        latest_message_id: latest.message_id,
+        staged_count: staging.row_count,
+      };
+    } finally {
+      this._watermarkCheckInFlight = false;
     }
   }
 
@@ -319,6 +545,7 @@ export class PremiumChannelListener {
       const text = message.text || message.message || '';
       if (!text) return;
       const sourceMessageTs = message.date ? Number(message.date) * 1000 : null;
+      this._recordLiveMessage(message);
 
       // Process 🔥 New Trending OR 📈 ATH messages
       if (text.includes('🔥') && text.includes('New Trending')) {
@@ -714,6 +941,10 @@ export class PremiumChannelListener {
       clearInterval(this._watchdogTimer);
       this._watchdogTimer = null;
     }
+    if (this._watchdogBootstrapTimer) {
+      clearTimeout(this._watchdogBootstrapTimer);
+      this._watchdogBootstrapTimer = null;
+    }
     if (this.client && this.isRunning) {
       await this.client.disconnect();
       this.isRunning = false;
@@ -800,6 +1031,10 @@ export class PremiumChannelListener {
       channel_found: !!this.channelEntity,
       dedup_cache_size: this.recentTokens.size,
       callbacks_registered: this.signalCallbacks.length,
+      watermark_enabled: this._watermarkEnabled,
+      watermark_status: this._watermarkState?.status || null,
+      last_live_message_id: this._watermarkState?.last_live_message_id || null,
+      last_history_message_id: this._watermarkState?.last_history_message_id || null,
     };
   }
 }

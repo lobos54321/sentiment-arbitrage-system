@@ -5054,6 +5054,12 @@ function signalSourceFreshnessHealthPath(env = process.env) {
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
 }
 
+function telegramIngestionWatermarkPath(env = process.env) {
+  const raw = env.TELEGRAM_INGESTION_WATERMARK_PATH
+    || join(env.DATA_DIR || '/app/data', 'recovery', 'telegram-ingestion-watermark.json');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
 function runtimeFinalEvidencePath(env = process.env) {
   const raw = env.RUNTIME_FINAL_EVIDENCE_LOG || '/app/data/runtime_final_evidence.jsonl';
   return isAbsolute(raw) ? raw : join(projectRoot, raw);
@@ -5124,6 +5130,45 @@ export function readSignalSourceFreshnessHealth(options = {}) {
       available: false,
       path: healthPath,
       status: 'signal_source_freshness_health_parse_failed',
+      error: error?.message || String(error),
+    };
+  }
+}
+
+export function readTelegramIngestionHealth(options = {}) {
+  const healthPath = options.healthPath || telegramIngestionWatermarkPath(options.env || process.env);
+  try {
+    if (!fs.existsSync(healthPath)) {
+      return {
+        available: false,
+        path: healthPath,
+        status: 'telegram_ingestion_watermark_missing',
+      };
+    }
+    const payload = JSON.parse(fs.readFileSync(healthPath, 'utf8'));
+    return {
+      available: true,
+      path: healthPath,
+      schema_version: payload.schema_version || null,
+      status: payload.status || 'unknown',
+      updated_at: payload.updated_at || null,
+      channel_id: payload.channel_id || null,
+      last_live_message_id: payload.last_live_message_id || null,
+      last_live_message_ts: payload.last_live_message_ts || null,
+      last_history_message_id: payload.last_history_message_id || null,
+      last_history_message_ts: payload.last_history_message_ts || null,
+      pending_history_message_id: payload.pending_history_message_id || null,
+      pending_lag_checks: Number(payload.pending_lag_checks || 0),
+      last_staged_message_id: payload.last_staged_message_id || null,
+      last_staged_at: payload.last_staged_at || null,
+      reconnect_count: Number(payload.reconnect_count || 0),
+      last_error: payload.last_error || null,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      path: healthPath,
+      status: 'telegram_ingestion_watermark_parse_failed',
       error: error?.message || String(error),
     };
   }
@@ -11227,6 +11272,7 @@ const server = http.createServer(async (req, res) => {
     const paperDbHealth = readPaperDbRuntimeHealth();
     const paperReviewSnapshotHealth = readPaperReviewSnapshotHealth();
     const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
+    const telegramIngestionHealth = readTelegramIngestionHealth();
     const runtimeFinalEvidenceHealth = readRuntimeFinalEvidenceHealth();
     const degraded = Boolean(
       global.__startupError
@@ -11259,6 +11305,7 @@ const server = http.createServer(async (req, res) => {
       paper_db_health: paperDbHealth,
       runtime_final_evidence: runtimeFinalEvidenceHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
+      telegram_ingestion_health: telegramIngestionHealth,
       raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
       raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || null,
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
@@ -11276,6 +11323,11 @@ const server = http.createServer(async (req, res) => {
     if (!checkAuth(req, url, res)) return;
     res.writeHead(200, apiJsonHeaders());
     res.end(JSON.stringify(requestMetricsSnapshot(), null, 2));
+    return;
+  } else if (url.pathname === '/api/telegram-ingestion-health') {
+    if (!checkAuth(req, url, res)) return;
+    res.writeHead(200, apiJsonHeaders());
+    res.end(JSON.stringify(readTelegramIngestionHealth(), null, 2));
     return;
   } else if (url.pathname === '/api/runtime/events') {
     if (!checkAuth(req, url, res)) return;
