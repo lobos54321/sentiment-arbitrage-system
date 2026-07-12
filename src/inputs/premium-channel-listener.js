@@ -52,6 +52,8 @@ function boundedInteger(value, fallback, min, max) {
 export class PremiumChannelListener {
   constructor(config = {}) {
     this.config = config;
+    this.captureOnly = config.captureOnly === true;
+    this.captureOnlyReason = config.captureOnlyReason || null;
     this.client = null;
     this.isRunning = false;
     this.channelEntity = null;
@@ -85,7 +87,7 @@ export class PremiumChannelListener {
     this._watermarkCheckInFlight = false;
     this._watermarkState = readWatermarkState(this._watermarkStatePath, channelId);
     // Webhook URLs for real-time signal forwarding (comma-separated in env)
-    this.webhookUrls = (process.env.SIGNAL_WEBHOOK_URLS || '')
+    this.webhookUrls = (this.captureOnly ? '' : (process.env.SIGNAL_WEBHOOK_URLS || ''))
       .split(',')
       .map(u => u.trim())
       .filter(u => u.length > 0);
@@ -115,6 +117,18 @@ export class PremiumChannelListener {
         console.error('   Please run: node scripts/authenticate-telegram.js');
         this.isRunning = false;
         return false;
+      }
+
+      if (this.captureOnly && this._watermarkEnabled) {
+        this._persistWatermark({
+          status: 'capture_only_starting',
+          capture_only: true,
+          degraded_reason: this.captureOnlyReason,
+          execution_allowed: false,
+          emitted_to_signal_callbacks: false,
+          written_to_premium_signals: false,
+          last_error: null,
+        });
       }
 
       const channelId = parseInt(process.env.PREMIUM_CHANNEL_ID || String(DEFAULT_CHANNEL_ID));
@@ -157,6 +171,7 @@ export class PremiumChannelListener {
           this.isRunning = true;
           this._lastPingTs = Date.now();
           this._startWatchdog();
+          this._recordListenerStarted();
           this._scheduleChannelRetry(channelId);
           return true;
         }
@@ -174,14 +189,31 @@ export class PremiumChannelListener {
       this.isRunning = true;
       this._lastPingTs = Date.now();
       this._startWatchdog();
+      this._recordListenerStarted();
       console.log('✅ Premium channel listener started');
       return true;
 
     } catch (error) {
       this.isRunning = false;
+      if (this.captureOnly && this._watermarkEnabled) {
+        this._recordWatermarkError(error, 'capture_only_start_failed');
+      }
       console.error('❌ Failed to start premium channel listener:', error.message);
       return false;
     }
+  }
+
+  _recordListenerStarted() {
+    if (!this._watermarkEnabled) return;
+    this._persistWatermark({
+      status: this.captureOnly ? 'capture_only_listening' : 'listener_started',
+      capture_only: this.captureOnly,
+      degraded_reason: this.captureOnly ? this.captureOnlyReason : null,
+      execution_allowed: this.captureOnly ? false : null,
+      emitted_to_signal_callbacks: this.captureOnly ? false : null,
+      written_to_premium_signals: this.captureOnly ? false : null,
+      last_error: null,
+    });
   }
 
   /**
@@ -278,10 +310,10 @@ export class PremiumChannelListener {
     return this._watermarkState;
   }
 
-  _recordWatermarkError(error) {
+  _recordWatermarkError(error, status = 'watermark_check_error') {
     try {
       this._persistWatermark({
-        status: 'watermark_check_error',
+        status,
         last_error: error?.message || String(error),
       });
     } catch {}
@@ -292,13 +324,43 @@ export class PremiumChannelListener {
     const channelId = this._watermarkState.channel_id || String(DEFAULT_CHANNEL_ID);
     const row = normalizeTelegramMessage(message, channelId);
     if (!row) return;
-    if (compareMessageIds(row.message_id, this._watermarkState.last_live_message_id) < 0) return;
+
+    let capturePatch = null;
+    if (this.captureOnly && row.signal_kind) {
+      const staging = mergeGapStaging(this._gapStagingPath, [row], {
+        channel_id: channelId,
+        reason: 'runtime_degraded_capture_only',
+      });
+      const lastStagedMessageId = compareMessageIds(
+        row.message_id,
+        this._watermarkState.last_staged_message_id,
+      ) >= 0
+        ? row.message_id
+        : this._watermarkState.last_staged_message_id;
+      capturePatch = {
+        status: 'capture_only_live_signal_staged',
+        last_staged_message_id: lastStagedMessageId,
+        last_staged_at: new Date().toISOString(),
+        staged_row_count: staging.row_count,
+      };
+    }
+
+    if (compareMessageIds(row.message_id, this._watermarkState.last_live_message_id) < 0) {
+      if (capturePatch) {
+        this._persistWatermark({
+          ...capturePatch,
+          status: 'capture_only_out_of_order_signal_staged',
+        });
+      }
+      return;
+    }
 
     const patch = {
       status: 'live_event_seen',
       last_live_message_id: row.message_id,
       last_live_message_ts: row.message_ts,
       last_error: null,
+      ...(capturePatch || {}),
     };
     if (
       this._watermarkState.pending_history_message_id
@@ -306,7 +368,9 @@ export class PremiumChannelListener {
     ) {
       patch.pending_history_message_id = null;
       patch.pending_lag_checks = 0;
-      patch.status = 'live_stream_healthy';
+      patch.status = this.captureOnly
+        ? 'capture_only_live_signal_staged'
+        : 'live_stream_healthy';
     }
     try {
       this._persistWatermark(patch);
@@ -860,6 +924,11 @@ export class PremiumChannelListener {
    * Emit signal to all registered callbacks
    */
   _emitSignal(signal) {
+    if (this.captureOnly) {
+      console.log(`📥 [TelegramCaptureOnly] staged $${signal.symbol || 'UNKNOWN'}; execution disabled`);
+      return;
+    }
+
     console.log(`\n🔔 PREMIUM SIGNAL: $${signal.symbol} (${signal.token_ca.substring(0, 8)}...) MC: $${signal.market_cap}`);
 
     for (const cb of this.signalCallbacks) {
@@ -1031,10 +1100,25 @@ export class PremiumChannelListener {
       channel_found: !!this.channelEntity,
       dedup_cache_size: this.recentTokens.size,
       callbacks_registered: this.signalCallbacks.length,
+      capture_only: this.captureOnly,
       watermark_enabled: this._watermarkEnabled,
       watermark_status: this._watermarkState?.status || null,
       last_live_message_id: this._watermarkState?.last_live_message_id || null,
       last_history_message_id: this._watermarkState?.last_history_message_id || null,
     };
   }
+}
+
+export async function startPremiumTelegramCaptureOnlyDegraded(error, options = {}) {
+  if (error?.code !== 'KLINE_DB_UNHEALTHY') {
+    return { handled: false, started: false, listener: null };
+  }
+  const ListenerClass = options.ListenerClass || PremiumChannelListener;
+  const listener = new ListenerClass({
+    watermarkEnabled: true,
+    captureOnly: true,
+    captureOnlyReason: 'kline_db_unhealthy',
+  });
+  const started = await listener.start();
+  return { handled: true, started, listener };
 }

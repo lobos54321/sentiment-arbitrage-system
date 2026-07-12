@@ -4,7 +4,10 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { PremiumChannelListener } from '../src/inputs/premium-channel-listener.js';
+import {
+  PremiumChannelListener,
+  startPremiumTelegramCaptureOnlyDegraded,
+} from '../src/inputs/premium-channel-listener.js';
 import {
   GAP_STAGING_SCHEMA_VERSION,
   mergeGapStaging,
@@ -141,4 +144,116 @@ test('listener primes Telegram update state after registering the event handler'
     ['getMe', true],
     ['invoke', 'updates.GetState'],
   ]);
+});
+
+test('capture-only listener stages live signals and suppresses every emission path', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-capture-only-'));
+  const priorSseClients = global.__sseClients;
+  try {
+    const statePath = path.join(dir, 'watermark.json');
+    const stagingPath = path.join(dir, 'staging.json');
+    const listener = new PremiumChannelListener({
+      captureOnly: true,
+      watermarkEnabled: true,
+      watermarkStatePath: statePath,
+      gapStagingPath: stagingPath,
+    });
+    let callbackCount = 0;
+    let webhookCount = 0;
+    let sseCount = 0;
+    listener.onSignal(() => { callbackCount += 1; });
+    listener._forwardToWebhooks = () => { webhookCount += 1; };
+    global.__sseClients = new Set([{ write: () => { sseCount += 1; } }]);
+
+    listener._recordListenerStarted();
+    const message = telegramMessage(401, '2026-07-12T05:30:00Z');
+    listener._recordLiveMessage(message);
+    listener._emitSignal({
+      symbol: 'TEST',
+      token_ca: 'So11111111111111111111111111111111111111112',
+      market_cap: 10_000,
+    });
+
+    const staging = JSON.parse(fs.readFileSync(stagingPath, 'utf8'));
+    const watermark = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    assert.equal(staging.row_count, 1);
+    assert.equal(staging.execution_allowed, false);
+    assert.equal(staging.emitted_to_signal_callbacks, false);
+    assert.equal(staging.written_to_premium_signals, false);
+    assert.equal(staging.rows[0].message_id, '401');
+    assert.equal(watermark.status, 'capture_only_live_signal_staged');
+    assert.equal(watermark.capture_only, true);
+    assert.equal(watermark.execution_allowed, false);
+    assert.equal(watermark.emitted_to_signal_callbacks, false);
+    assert.equal(watermark.written_to_premium_signals, false);
+    assert.equal(callbackCount, 0);
+    assert.equal(webhookCount, 0);
+    assert.equal(sseCount, 0);
+  } finally {
+    global.__sseClients = priorSseClients;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture-only listener stages out-of-order signal delivery idempotently', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-capture-order-'));
+  try {
+    const listener = new PremiumChannelListener({
+      captureOnly: true,
+      watermarkEnabled: true,
+      watermarkStatePath: path.join(dir, 'watermark.json'),
+      gapStagingPath: path.join(dir, 'staging.json'),
+    });
+    listener._recordListenerStarted();
+    listener._recordLiveMessage(telegramMessage(402, '2026-07-12T05:32:00Z'));
+    listener._recordLiveMessage(telegramMessage(401, '2026-07-12T05:31:00Z'));
+    listener._recordLiveMessage(telegramMessage(401, '2026-07-12T05:31:00Z'));
+
+    const staging = JSON.parse(fs.readFileSync(listener._gapStagingPath, 'utf8'));
+    const watermark = JSON.parse(fs.readFileSync(listener._watermarkStatePath, 'utf8'));
+    assert.deepEqual(staging.rows.map((row) => row.message_id), ['401', '402']);
+    assert.equal(staging.row_count, 2);
+    assert.equal(watermark.status, 'capture_only_out_of_order_signal_staged');
+    assert.equal(watermark.last_live_message_id, '402');
+    assert.equal(watermark.last_staged_message_id, '402');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Kline fail-closed starts only the non-executing Telegram capture fallback', async () => {
+  let receivedConfig = null;
+  let startCount = 0;
+  class FakeListener {
+    constructor(config) {
+      receivedConfig = config;
+      this.signalCallbacks = [];
+    }
+
+    async start() {
+      startCount += 1;
+      return true;
+    }
+  }
+
+  const result = await startPremiumTelegramCaptureOnlyDegraded(
+    { code: 'KLINE_DB_UNHEALTHY' },
+    { ListenerClass: FakeListener },
+  );
+  assert.equal(result.handled, true);
+  assert.equal(result.started, true);
+  assert.equal(startCount, 1);
+  assert.deepEqual(receivedConfig, {
+    watermarkEnabled: true,
+    captureOnly: true,
+    captureOnlyReason: 'kline_db_unhealthy',
+  });
+  assert.equal(result.listener.signalCallbacks.length, 0);
+
+  const ignored = await startPremiumTelegramCaptureOnlyDegraded(
+    { code: 'UNRELATED_STARTUP_ERROR' },
+    { ListenerClass: FakeListener },
+  );
+  assert.equal(ignored.handled, false);
+  assert.equal(startCount, 1);
 });

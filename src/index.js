@@ -29,7 +29,10 @@ import { GMGNTelegramExecutor } from './execution/gmgn-telegram-executor.js';
 import { PositionMonitor } from './execution/position-monitor.js';
 import GrokTwitterClient from './social/grok-twitter-client.js';
 import { PermanentBlacklistService } from './database/permanent-blacklist.js';
-import { PremiumChannelListener } from './inputs/premium-channel-listener.js';
+import {
+  PremiumChannelListener,
+  startPremiumTelegramCaptureOnlyDegraded,
+} from './inputs/premium-channel-listener.js';
 import { PremiumSignalEngine } from './engines/premium-signal-engine.js';
 import { JupiterUltraExecutor } from './execution/jupiter-ultra-executor.js';
 import { ParityExecutor } from './execution/parity-executor.js';
@@ -2803,6 +2806,18 @@ export async function main() {
     };
     console.error('❌ Runtime construction failed:', error);
     if (mode === 'premium') {
+      const degradedCapture = await startPremiumTelegramCaptureOnlyDegraded(error);
+      if (degradedCapture.handled) {
+        global.__telegramCaptureOnlyListener = degradedCapture.listener;
+        if (degradedCapture.started) {
+          console.error(
+            '📥 Telegram capture-only degraded mode is active; '
+            + 'signals are staged for research and cannot reach callbacks, webhooks, premium_signals, or trading.',
+          );
+        } else {
+          console.error('❌ Telegram capture-only degraded mode failed to start; check watermark health.');
+        }
+      }
       console.error('⚠️  Dashboard-only degraded mode is active; check /health and /api/logs.');
       return;
     }
