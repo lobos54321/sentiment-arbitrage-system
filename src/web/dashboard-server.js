@@ -11324,11 +11324,6 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, apiJsonHeaders());
     res.end(JSON.stringify(requestMetricsSnapshot(), null, 2));
     return;
-  } else if (url.pathname === '/api/telegram-ingestion-health') {
-    if (!checkAuth(req, url, res)) return;
-    res.writeHead(200, apiJsonHeaders());
-    res.end(JSON.stringify(readTelegramIngestionHealth(), null, 2));
-    return;
   } else if (url.pathname === '/api/runtime/events') {
     if (!checkAuth(req, url, res)) return;
     res.writeHead(200, apiJsonHeaders());
