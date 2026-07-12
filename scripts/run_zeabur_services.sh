@@ -131,6 +131,15 @@ DASHBOARD_PID=$!
 echo "[STARTUP] Starting runtime volume/log maintenance..."
 (
   while true; do
+    if [ "${PAPER_DB_SNAPSHOT_REQUEST_WORKER_ENABLED:-true}" != "false" ]; then
+      python3 scripts/paper_db_snapshot_request_worker.py \
+        --source /app/data/paper_trades.db \
+        --request /app/data/recovery/paper_db_snapshot_request.json \
+        --status /app/data/recovery/paper_db_snapshot_status.json \
+        --recovery-dir /app/data/recovery \
+        --archive-dir /app/data/recovery/paper_db_snapshot_requests \
+        >> /app/data/paper-db-snapshot-worker.log 2>&1 || true
+    fi
     sleep "$ZEABUR_MAINTENANCE_INTERVAL_SEC"
     echo "[maintenance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') running log trim" | tee -a /app/data/maintenance.log
     if [ -f "$PAPER_DB_INTEGRITY_MARKER" ]; then
