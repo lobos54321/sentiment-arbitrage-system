@@ -24,13 +24,35 @@ def create_source(path):
     connection.close()
 
 
-def write_request(path, request_id="cleanup-20260713"):
+def add_orphan_page_corruption(path):
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE disposable_pages (payload BLOB)")
+    connection.executemany(
+        "INSERT INTO disposable_pages(payload) VALUES (?)",
+        [(b"x" * 8192,) for _ in range(128)],
+    )
+    connection.commit()
+    connection.execute("DELETE FROM disposable_pages")
+    connection.commit()
+    freelist_count = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+    connection.close()
+    assert freelist_count > 0
+    with path.open("r+b") as handle:
+        handle.seek(32)
+        handle.write(b"\x00" * 8)
+        handle.flush()
+        os.fsync(handle.fileno())
+    assert worker.snapshot_quick_check_result(path) != ["ok"]
+
+
+def write_request(path, request_id="cleanup-20260713", **extra):
     path.write_text(
         json.dumps(
             {
                 "schema_version": worker.REQUEST_SCHEMA_VERSION,
                 "request_id": request_id,
                 "reason": "approved_cleanup_after_verified_snapshot",
+                **extra,
             }
         ),
         encoding="utf-8",
@@ -93,6 +115,331 @@ def test_snapshot_request_creates_verified_snapshot_and_archives_request(tmp_pat
     assert not request.exists()
     assert (archive / "completed_cleanup-20260713.json").is_file()
     assert json.loads(status.read_text())["state"] == "completed"
+
+
+def test_vacuum_rebuild_requires_explicit_approval_flag(tmp_path):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="repair-without-approval", repair_mode="vacuum_rebuild")
+
+    with pytest.raises(ValueError, match="allow_rebuild_corrupt_snapshot=true"):
+        worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+        )
+    assert worker.sha256_file(source)
+    assert not recovery.exists()
+
+
+def test_vacuum_rebuild_runs_only_on_snapshot_and_preserves_required_counts(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    local_verify = tmp_path / "local-verify"
+    create_source(source)
+    add_orphan_page_corruption(source)
+    source_sha256 = worker.sha256_file(source)
+    write_request(
+        request,
+        request_id="approved-vacuum-rebuild",
+        repair_mode="vacuum_rebuild",
+        allow_rebuild_corrupt_snapshot=True,
+        required_tables=list(worker.CRITICAL_TABLES),
+    )
+    real_rebuild = worker.vacuum_rebuild_snapshot
+
+    def same_filesystem_rebuild(snapshot, **kwargs):
+        assert snapshot != source
+        return real_rebuild(snapshot, require_distinct_filesystem=False, **kwargs)
+
+    monkeypatch.setattr(worker, "vacuum_rebuild_snapshot", same_filesystem_rebuild)
+    result = None
+    states = []
+    for _ in range(10):
+        result = worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+            local_verify_dir=local_verify if len(states) < 2 else None,
+        )
+        states.append(result["state"])
+        if result["state"] == "completed":
+            break
+
+    assert result["state"] == "completed"
+    assert states == [
+        "running_snapshot_copied",
+        "running_vacuum_rebuild_complete",
+        "running_quick_check_complete",
+        "running_sha256_complete",
+        "running_critical_counts_complete",
+        "completed",
+    ]
+    assert worker.sha256_file(source) == source_sha256
+    manifest = json.loads(
+        (recovery / "paper_trades_verified_approved-vacuum-rebuild" / "manifest.json").read_text()
+    )
+    snapshot = manifest["snapshot"]
+    assert snapshot["method"] == "sqlite_online_backup_then_vacuum_rebuild"
+    assert snapshot["repair"]["repair_mode"] == "vacuum_rebuild"
+    assert snapshot["repair"]["source_quick_check"] != ["ok"]
+    assert snapshot["repair"]["persistent_rebuilt_quick_check"] == ["ok"]
+    assert snapshot["repair"]["source_required_table_counts"] == {
+        "candidate_shadow_observations": 1,
+        "candidate_shadow_virtual_trades": 1,
+        "paper_trades": 1,
+    }
+    assert snapshot["critical_table_counts"] == snapshot["repair"]["source_required_table_counts"]
+    assert list(local_verify.iterdir()) == []
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
+def test_repair_rejects_snapshot_aliases_without_mutating_live_source(tmp_path, alias_kind):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    source_sha256 = worker.sha256_file(source)
+    write_request(
+        request,
+        request_id=f"reject-{alias_kind}-alias",
+        repair_mode="vacuum_rebuild",
+        allow_rebuild_corrupt_snapshot=True,
+    )
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    partial = recovery / f".paper_trades_verified_reject-{alias_kind}-alias.partial"
+    snapshot = partial / "paper_trades.db"
+    snapshot.unlink()
+    if alias_kind == "symlink":
+        snapshot.symlink_to(source)
+    else:
+        os.link(source, snapshot)
+
+    failed = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        local_verify_dir=tmp_path / "local-verify",
+    )
+    assert failed["state"] == "failed"
+    assert "regular file" in failed["error"] or "single-link" in failed["error"]
+    assert worker.sha256_file(source) == source_sha256
+    assert not partial.exists()
+
+
+@pytest.mark.parametrize(
+    "forged_stage",
+    ["rebuild_complete", "quick_check_complete", "sha256_complete", "critical_counts_complete"],
+)
+def test_forged_post_rebuild_checkpoint_cannot_skip_repair(tmp_path, forged_stage):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(
+        request,
+        request_id=f"forged-{forged_stage}",
+        repair_mode="vacuum_rebuild",
+        allow_rebuild_corrupt_snapshot=True,
+    )
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    partial = recovery / f".paper_trades_verified_forged-{forged_stage}.partial"
+    checkpoint_path = partial / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["stage"] = forged_stage
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+
+    failed = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert failed["state"] == "failed"
+    assert "rebuild evidence is missing" in failed["error"]
+    assert not partial.exists()
+
+
+def test_existing_standard_snapshot_cannot_satisfy_repair_request(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="request-id-reuse")
+    real_replace = worker.os.replace
+
+    def preserve_request(source_path, destination_path):
+        if Path(source_path) == request:
+            raise OSError("preserve request for reuse test")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(worker.os, "replace", preserve_request)
+    completed, _states = run_to_terminal(
+        request=request,
+        status=status,
+        source=source,
+        recovery=recovery,
+        archive=archive,
+    )
+    assert completed["state"] == "completed"
+    write_request(
+        request,
+        request_id="request-id-reuse",
+        repair_mode="vacuum_rebuild",
+        allow_rebuild_corrupt_snapshot=True,
+    )
+    with pytest.raises(RuntimeError, match="manifest does not match"):
+        worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+        )
+
+
+def test_persistent_rebuild_collision_is_not_overwritten_or_deleted(tmp_path):
+    snapshot_dir = tmp_path / "private-partial"
+    snapshot_dir.mkdir(mode=0o700)
+    os.chmod(snapshot_dir, 0o700)
+    snapshot = snapshot_dir / "paper_trades.db"
+    create_source(snapshot)
+    collision = snapshot_dir / ".paper_trades.db.rebuilt"
+    collision.write_bytes(b"preserve-me")
+    local_verify = tmp_path / "local-verify"
+
+    with pytest.raises(FileExistsError):
+        worker.vacuum_rebuild_snapshot(
+            snapshot,
+            local_verify_dir=local_verify,
+            required_tables=worker.CRITICAL_TABLES,
+            require_distinct_filesystem=False,
+        )
+    assert collision.read_bytes() == b"preserve-me"
+    assert list(local_verify.iterdir()) == []
+
+
+def test_repair_snapshot_is_revalidated_immediately_before_promotion(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    local_verify = tmp_path / "local-verify"
+    create_source(source)
+    add_orphan_page_corruption(source)
+    write_request(
+        request,
+        request_id="tamper-before-promotion",
+        repair_mode="vacuum_rebuild",
+        allow_rebuild_corrupt_snapshot=True,
+    )
+    real_rebuild = worker.vacuum_rebuild_snapshot
+
+    def same_filesystem_rebuild(snapshot, **kwargs):
+        return real_rebuild(snapshot, require_distinct_filesystem=False, **kwargs)
+
+    monkeypatch.setattr(worker, "vacuum_rebuild_snapshot", same_filesystem_rebuild)
+    states = []
+    for _ in range(5):
+        result = worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+            local_verify_dir=local_verify if len(states) < 2 else None,
+        )
+        states.append(result["state"])
+    assert states[-1] == "running_critical_counts_complete"
+    partial = recovery / ".paper_trades_verified_tamper-before-promotion.partial"
+    snapshot = partial / "paper_trades.db"
+    with snapshot.open("r+b") as handle:
+        handle.seek(100)
+        original = handle.read(1)
+        handle.seek(100)
+        handle.write(bytes([original[0] ^ 0x01]))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    failed = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert failed["state"] == "failed"
+    assert "SHA-256 mismatch" in failed["error"]
+    assert not (recovery / "paper_trades_verified_tamper-before-promotion").exists()
+
+
+def test_required_tables_rejects_sql_identifiers_and_checkpoint_mutation(tmp_path):
+    with pytest.raises(ValueError, match="unsafe required table name"):
+        worker.request_required_tables({"required_tables": ["paper_trades; DROP TABLE paper_trades"]})
+
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="required-table-mutation")
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    write_request(
+        request,
+        request_id="required-table-mutation",
+        required_tables=["paper_trades"],
+    )
+    with pytest.raises(ValueError, match="checkpoint request fingerprint mismatch"):
+        worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+        )
 
 
 def test_snapshot_request_stops_after_bounded_failures(tmp_path, monkeypatch):
@@ -387,6 +734,34 @@ def test_local_verification_infrastructure_block_preserves_snapshot_checkpoint(t
     assert (partial_dir / "paper_trades.db").is_file()
     assert json.loads((partial_dir / "checkpoint.json").read_text())["stage"] == "snapshot_copied"
     assert request.is_file()
+
+    blocked_again = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert blocked_again["state"] == "blocked_local_verification"
+    exhausted = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert exhausted["state"] == "attempts_exhausted"
+    assert exhausted["infrastructure_retry_count"] == 3
+    assert json.loads((partial_dir / "checkpoint.json").read_text())["stage"] == "infrastructure_exhausted"
+    still_exhausted = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert still_exhausted["state"] == "attempts_exhausted"
+    assert (partial_dir / "paper_trades.db").is_file()
 
 
 def test_missing_local_copy_after_copy_call_preserves_snapshot_checkpoint(tmp_path, monkeypatch):
