@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 test('startup supervises v27 read model refresh worker', () => {
   const source = fs.readFileSync('src/index.js', 'utf8');
+  const zeaburSupervisor = fs.readFileSync('scripts/run_zeabur_services.sh', 'utf8');
 
   assert.match(source, /function startPaperReviewSnapshotSidecar/);
   assert.match(source, /review snapshot worker remains managed separately/);
@@ -11,6 +12,13 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED/);
   assert.match(source, /PAPER_DB_WRITE_SIDECARS_ENABLED/);
   assert.match(source, /paper DB write sidecars disabled/);
+  assert.match(source, /function startPaperDbSnapshotRequestWorker/);
+  assert.match(source, /PAPER_DB_SNAPSHOT_REQUEST_WORKER_ENABLED/);
+  assert.match(source, /scripts\/paper_db_snapshot_request_worker\.py/);
+  assert.match(source, /name:\s*'paper-db-snapshot-request'/);
+  assert.match(source, /markerGuard:\s*false/);
+  assert.match(source, /startPaperDbSnapshotRequestWorker\(\)/);
+  assert.match(zeaburSupervisor, /scripts\/paper_db_snapshot_request_worker\.py/);
   assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);

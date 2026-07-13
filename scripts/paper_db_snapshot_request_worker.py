@@ -120,19 +120,8 @@ def run_once(
         except Exception:
             previous = {}
     previous_attempts = int(previous.get("attempt_count") or 0) if previous.get("request_id") == request_id else 0
-    if previous_attempts >= max(1, int(max_attempts)) and previous.get("state") == "failed":
-        exhausted = status_payload(
-            request_id=request_id,
-            state="attempts_exhausted",
-            attempt_count=previous_attempts,
-            error=previous.get("error"),
-        )
-        atomic_write_json(status_path, exhausted)
-        return exhausted
-
     recovery_dir.mkdir(parents=True, exist_ok=True)
     archive_dir.mkdir(parents=True, exist_ok=True)
-    attempt_count = previous_attempts + 1
     final_dir = recovery_dir / f"paper_trades_verified_{request_id}"
     snapshot_path = final_dir / "paper_trades.db"
     manifest_path = final_dir / "manifest.json"
@@ -153,9 +142,29 @@ def run_once(
         )
         atomic_write_json(status_path, completed)
         return completed
+    if previous_attempts >= max(1, int(max_attempts)):
+        exhausted = status_payload(
+            request_id=request_id,
+            state="attempts_exhausted",
+            attempt_count=previous_attempts,
+            error=previous.get("error"),
+        )
+        atomic_write_json(status_path, exhausted)
+        return exhausted
+    integrity_marker = Path(f"{source_path}.integrity_error")
+    if integrity_marker.exists():
+        blocked = status_payload(
+            request_id=request_id,
+            state="blocked_source_integrity_marker",
+            attempt_count=previous_attempts,
+            integrity_marker=str(integrity_marker),
+        )
+        atomic_write_json(status_path, blocked)
+        return blocked
     if final_dir.exists():
         raise RuntimeError(f"snapshot destination exists without complete manifest: {final_dir}")
 
+    attempt_count = previous_attempts + 1
     partial_dir = recovery_dir / f".paper_trades_verified_{request_id}.{os.getpid()}.{time.time_ns()}.partial"
     running = status_payload(
         request_id=request_id,
@@ -225,6 +234,8 @@ def main() -> int:
     parser.add_argument("--archive-dir", default=str(DEFAULT_RECOVERY_DIR / "paper_db_snapshot_requests"))
     parser.add_argument("--lock-file", default="/tmp/paper_db_snapshot_request_worker.lock")
     parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--interval", type=float, default=300.0)
     args = parser.parse_args()
 
     lock_handle = acquire_lock(Path(args.lock_file))
@@ -232,16 +243,19 @@ def main() -> int:
         print(json.dumps(status_payload(request_id=None, state="lock_held", attempt_count=0), sort_keys=True))
         return 0
     try:
-        result = run_once(
-            request_path=Path(args.request),
-            status_path=Path(args.status),
-            source_path=Path(args.source),
-            recovery_dir=Path(args.recovery_dir),
-            archive_dir=Path(args.archive_dir),
-            max_attempts=args.max_attempts,
-        )
-        print(json.dumps(result, sort_keys=True))
-        return 1 if result.get("state") in {"failed", "attempts_exhausted"} else 0
+        while True:
+            result = run_once(
+                request_path=Path(args.request),
+                status_path=Path(args.status),
+                source_path=Path(args.source),
+                recovery_dir=Path(args.recovery_dir),
+                archive_dir=Path(args.archive_dir),
+                max_attempts=args.max_attempts,
+            )
+            print(json.dumps(result, sort_keys=True), flush=True)
+            if not args.loop:
+                return 1 if result.get("state") in {"failed", "attempts_exhausted"} else 0
+            time.sleep(max(30.0, float(args.interval)))
     finally:
         lock_handle.close()
 
