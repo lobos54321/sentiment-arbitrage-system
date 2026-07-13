@@ -1152,6 +1152,7 @@ function startPaperDbSnapshotRequestWorker() {
         '--status', join(recoveryDir, 'paper_db_snapshot_status.json'),
         '--recovery-dir', recoveryDir,
         '--archive-dir', join(recoveryDir, 'paper_db_snapshot_requests'),
+        '--local-verify-dir', process.env.PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR || '/tmp/paper-db-snapshot-verify',
         '--lock-file', process.env.PAPER_DB_SNAPSHOT_WORKER_LOCK_FILE || '/tmp/paper_db_snapshot_request_worker.lock',
         '--max-attempts', process.env.PAPER_DB_SNAPSHOT_MAX_ATTEMPTS || '3',
       ],
@@ -1159,6 +1160,7 @@ function startPaperDbSnapshotRequestWorker() {
         PAPER_DB: runtimePaperDbPath(),
         ZEABUR_DATA_DIR: dataDir,
         ZEABUR_RECOVERY_DIR: recoveryDir,
+        PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR: process.env.PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR || '/tmp/paper-db-snapshot-verify',
       },
     }),
   ];

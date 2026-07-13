@@ -33,6 +33,11 @@ CRITICAL_TABLES = (
     "candidate_shadow_virtual_trades",
     "paper_trades",
 )
+LOCAL_VERIFY_FREE_SPACE_MARGIN_BYTES = 4 * 1024 * 1024 * 1024
+
+
+class LocalVerificationUnavailable(RuntimeError):
+    """Local verification could not run; the persistent snapshot remains reusable."""
 
 
 def utc_now_iso() -> str:
@@ -100,6 +105,90 @@ def snapshot_quick_check(path: Path) -> list[str]:
     return result
 
 
+def snapshot_quick_check_evidence(
+    path: Path,
+    *,
+    local_verify_dir: Path | None = None,
+    require_distinct_filesystem: bool = True,
+) -> dict:
+    if local_verify_dir is None:
+        return {
+            "quick_check": snapshot_quick_check(path),
+            "quick_check_method": "direct_snapshot_full_quick_check",
+        }
+
+    try:
+        local_verify_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise LocalVerificationUnavailable(f"cannot create local verify directory: {exc}") from exc
+    source_stat = path.stat()
+    try:
+        local_dir_stat = local_verify_dir.stat()
+    except OSError as exc:
+        raise LocalVerificationUnavailable(f"cannot inspect local verify directory: {exc}") from exc
+    distinct_filesystem = source_stat.st_dev != local_dir_stat.st_dev
+    if require_distinct_filesystem and not distinct_filesystem:
+        raise LocalVerificationUnavailable(
+            "local verify directory must be on a different filesystem from the snapshot"
+        )
+    safe_parent = re.sub(r"[^A-Za-z0-9_.-]+", "-", path.parent.name).strip("-.") or "snapshot"
+    local_copy = local_verify_dir / f"{safe_parent}-{path.name}.verify"
+    try:
+        local_copy.unlink(missing_ok=True)
+        free_bytes = shutil.disk_usage(local_verify_dir).free
+    except OSError as exc:
+        raise LocalVerificationUnavailable(f"cannot prepare local verify directory: {exc}") from exc
+    required_bytes = source_stat.st_size + LOCAL_VERIFY_FREE_SPACE_MARGIN_BYTES
+    if free_bytes < required_bytes:
+        raise LocalVerificationUnavailable(
+            f"local verify directory has insufficient space: free={free_bytes} required={required_bytes}"
+        )
+
+    evidence = None
+    primary_error: BaseException | None = None
+    try:
+        try:
+            shutil.copyfile(path, local_copy)
+        except OSError as exc:
+            raise LocalVerificationUnavailable(f"cannot create local verification copy: {exc}") from exc
+        try:
+            local_size = local_copy.stat().st_size
+        except OSError as exc:
+            raise LocalVerificationUnavailable(f"cannot inspect local verification copy: {exc}") from exc
+        if local_size != source_stat.st_size:
+            raise LocalVerificationUnavailable(
+                f"local verification copy size mismatch: source={source_stat.st_size} local={local_size}"
+            )
+        try:
+            quick_check = snapshot_quick_check(local_copy)
+        except sqlite3.OperationalError as exc:
+            raise LocalVerificationUnavailable(f"local quick_check I/O failure: {exc}") from exc
+        try:
+            local_sha256 = sha256_file(local_copy)
+        except OSError as exc:
+            raise LocalVerificationUnavailable(f"cannot hash local verification copy: {exc}") from exc
+        evidence = {
+            "quick_check": quick_check,
+            "quick_check_method": "ephemeral_local_copy_full_quick_check",
+            "quick_check_local_copy_sha256": local_sha256,
+            "quick_check_local_copy_size_bytes": local_size,
+            "quick_check_snapshot_device": source_stat.st_dev,
+            "quick_check_local_device": local_dir_stat.st_dev,
+            "quick_check_distinct_filesystem": distinct_filesystem,
+        }
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            local_copy.unlink(missing_ok=True)
+        except OSError as exc:
+            if primary_error is None:
+                raise LocalVerificationUnavailable(f"cannot remove local verification copy: {exc}") from exc
+    evidence["quick_check_local_copy_removed"] = not local_copy.exists()
+    return evidence
+
+
 def checkpoint_payload(*, request_id: str, attempt_count: int, stage: str, snapshot: dict) -> dict:
     return {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
@@ -146,6 +235,7 @@ def run_once(
     recovery_dir: Path,
     archive_dir: Path,
     max_attempts: int = 3,
+    local_verify_dir: Path | None = None,
 ) -> dict:
     if not request_path.exists():
         return status_payload(request_id=None, state="idle_no_request", attempt_count=0)
@@ -282,7 +372,12 @@ def run_once(
                 **running_fields,
             )
             atomic_write_json(status_path, running)
-            snapshot["quick_check"] = snapshot_quick_check(partial_snapshot)
+            snapshot.update(
+                snapshot_quick_check_evidence(
+                    partial_snapshot,
+                    local_verify_dir=local_verify_dir,
+                )
+            )
             checkpoint = checkpoint_payload(
                 request_id=request_id,
                 attempt_count=attempt_count,
@@ -308,6 +403,14 @@ def run_once(
             )
             atomic_write_json(status_path, running)
             snapshot["sha256"] = sha256_file(partial_snapshot)
+            local_copy_sha256 = snapshot.get("quick_check_local_copy_sha256")
+            if local_copy_sha256 is not None and local_copy_sha256 != snapshot["sha256"]:
+                raise RuntimeError(
+                    "snapshot sha256 does not match the byte-identical local copy used for quick_check"
+                )
+            snapshot["quick_check_sha256_match"] = (
+                local_copy_sha256 == snapshot["sha256"] if local_copy_sha256 is not None else None
+            )
             checkpoint = checkpoint_payload(
                 request_id=request_id,
                 attempt_count=attempt_count,
@@ -385,6 +488,17 @@ def run_once(
         )
         atomic_write_json(status_path, completed)
         return completed
+    except LocalVerificationUnavailable as exc:
+        blocked = status_payload(
+            request_id=request_id,
+            state="blocked_local_verification",
+            stage=stage,
+            attempt_count=attempt_count,
+            partial_dir=str(partial_dir),
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        atomic_write_json(status_path, blocked)
+        return blocked
     except Exception as exc:
         shutil.rmtree(partial_dir, ignore_errors=True)
         failed = status_payload(
@@ -404,6 +518,7 @@ def main() -> int:
     parser.add_argument("--source", default=os.environ.get("PAPER_DB", str(DEFAULT_DATA_DIR / "paper_trades.db")))
     parser.add_argument("--recovery-dir", default=str(DEFAULT_RECOVERY_DIR))
     parser.add_argument("--archive-dir", default=str(DEFAULT_RECOVERY_DIR / "paper_db_snapshot_requests"))
+    parser.add_argument("--local-verify-dir", default=os.environ.get("PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR"))
     parser.add_argument("--lock-file", default="/tmp/paper_db_snapshot_request_worker.lock")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--loop", action="store_true")
@@ -424,6 +539,7 @@ def main() -> int:
                 recovery_dir=Path(args.recovery_dir),
                 archive_dir=Path(args.archive_dir),
                 max_attempts=args.max_attempts,
+                local_verify_dir=Path(args.local_verify_dir) if args.local_verify_dir else None,
             )
             print(json.dumps(result, sort_keys=True), flush=True)
             if not args.loop:

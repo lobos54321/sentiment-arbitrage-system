@@ -17,8 +17,12 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /scripts\/paper_db_snapshot_request_worker\.py/);
   assert.match(source, /name:\s*'paper-db-snapshot-request'/);
   assert.match(source, /markerGuard:\s*false/);
+  assert.match(source, /PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR/);
+  assert.match(source, /\/tmp\/paper-db-snapshot-verify/);
   assert.match(source, /startPaperDbSnapshotRequestWorker\(\)/);
   assert.match(zeaburSupervisor, /scripts\/paper_db_snapshot_request_worker\.py/);
+  assert.match(zeaburSupervisor, /PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR/);
+  assert.match(zeaburSupervisor, /\/tmp\/paper-db-snapshot-verify/);
   assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);

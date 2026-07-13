@@ -138,6 +138,7 @@ echo "[STARTUP] Starting runtime volume/log maintenance..."
         --status /app/data/recovery/paper_db_snapshot_status.json \
         --recovery-dir /app/data/recovery \
         --archive-dir /app/data/recovery/paper_db_snapshot_requests \
+        --local-verify-dir "${PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR:-/tmp/paper-db-snapshot-verify}" \
         >> /app/data/paper-db-snapshot-worker.log 2>&1 || true
     fi
     sleep "$ZEABUR_MAINTENANCE_INTERVAL_SEC"
