@@ -880,6 +880,7 @@ function startIndexRuntimeSupervisor() {
   startDashboardOnce();
   startRuntimeMaintenanceLoop();
   global.__shadowDataSidecars = [
+    ...startPaperDbSnapshotRequestWorker(),
     ...startCandidateShadowObserver({}),
     ...startAgentCaptureDiscoveryLoop({}),
     ...startAutoloopOosRefreshWorker({}),
@@ -893,7 +894,7 @@ function startIndexRuntimeSupervisor() {
   startIndexRuntimeChild();
 }
 
-function startPythonSidecar({ name, args, env = {}, logPath }) {
+function startPythonSidecar({ name, args, env = {}, logPath, markerGuard = true }) {
   let child = null;
   let stopped = false;
   let maxRuntimeTimer = null;
@@ -918,7 +919,7 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
   const launch = () => {
     if (stopped) return;
     const sidecarPaperDb = env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath();
-    if (envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(sidecarPaperDb)) {
+    if (markerGuard && envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(sidecarPaperDb)) {
       status.running = false;
       status.pid = null;
       status.marker_guard_count += 1;
@@ -985,7 +986,7 @@ function startPythonSidecar({ name, args, env = {}, logPath }) {
       status.last_exit_signal = signal;
       logStream.write(`[node-supervisor] ${new Date().toISOString()} ${name} exited code=${code} signal=${signal}\n`);
       if (!stopped) {
-        if (envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath())) {
+        if (markerGuard && envFlag('NODE_SIDECAR_MARKER_GUARD_ENABLED', true) && paperDbIntegrityMarkerPresent(env.PAPER_DB || process.env.PAPER_DB || runtimePaperDbPath())) {
           runMarkerAwarePreflight(`${name}_exit_guard`, {
             logPrefix: 'node-sidecar-preflight',
             backup: false,
@@ -1128,6 +1129,39 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
       PAPER_REVIEW_LIVE_DIR: process.env.PAPER_REVIEW_LIVE_DIR || './data/review-artifacts/live',
     },
   });
+}
+
+function startPaperDbSnapshotRequestWorker() {
+  if (!envFlag('PAPER_DB_SNAPSHOT_REQUEST_WORKER_ENABLED', true)) {
+    console.log('[PaperDbSnapshot] request worker disabled');
+    return [];
+  }
+  const dataDir = runtimeDataDir();
+  const recoveryDir = process.env.ZEABUR_RECOVERY_DIR || join(dataDir, 'recovery');
+  return [
+    startPythonSidecar({
+      name: 'paper-db-snapshot-request',
+      markerGuard: false,
+      logPath: process.env.PAPER_DB_SNAPSHOT_WORKER_LOG || join(dataDir, 'paper-db-snapshot-worker.log'),
+      args: [
+        'scripts/paper_db_snapshot_request_worker.py',
+        '--loop',
+        '--interval', process.env.PAPER_DB_SNAPSHOT_REQUEST_INTERVAL_SEC || '300',
+        '--source', runtimePaperDbPath(),
+        '--request', join(recoveryDir, 'paper_db_snapshot_request.json'),
+        '--status', join(recoveryDir, 'paper_db_snapshot_status.json'),
+        '--recovery-dir', recoveryDir,
+        '--archive-dir', join(recoveryDir, 'paper_db_snapshot_requests'),
+        '--lock-file', process.env.PAPER_DB_SNAPSHOT_WORKER_LOCK_FILE || '/tmp/paper_db_snapshot_request_worker.lock',
+        '--max-attempts', process.env.PAPER_DB_SNAPSHOT_MAX_ATTEMPTS || '3',
+      ],
+      env: {
+        PAPER_DB: runtimePaperDbPath(),
+        ZEABUR_DATA_DIR: dataDir,
+        ZEABUR_RECOVERY_DIR: recoveryDir,
+      },
+    }),
+  ];
 }
 
 function startPumpFunShadowWorker(config) {

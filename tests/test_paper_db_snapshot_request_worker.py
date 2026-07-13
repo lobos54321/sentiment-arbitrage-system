@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -93,6 +94,8 @@ def test_snapshot_request_stops_after_bounded_failures(tmp_path, monkeypatch):
         assert result["attempt_count"] == expected_attempt
         assert list(recovery.glob(".paper_trades_verified_*.partial")) == []
 
+    marker = tmp_path / "paper_trades.db.integrity_error"
+    marker.write_text("synthetic marker after third failure", encoding="utf-8")
     exhausted = worker.run_once(
         request_path=request,
         status_path=status,
@@ -103,4 +106,91 @@ def test_snapshot_request_stops_after_bounded_failures(tmp_path, monkeypatch):
     )
     assert exhausted["state"] == "attempts_exhausted"
     assert exhausted["attempt_count"] == 3
+    marker.unlink()
+    still_exhausted = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        max_attempts=3,
+    )
+    assert still_exhausted["state"] == "attempts_exhausted"
+    assert still_exhausted["attempt_count"] == 3
     assert request.exists()
+
+
+def test_snapshot_request_blocks_without_attempt_when_integrity_marker_exists(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="marked-source")
+    marker = tmp_path / "paper_trades.db.integrity_error"
+    marker.write_text("database disk image is malformed", encoding="utf-8")
+
+    def must_not_snapshot(*_args, **_kwargs):
+        raise AssertionError("snapshot must not run while integrity marker exists")
+
+    monkeypatch.setattr(worker, "create_consistent_sqlite_snapshot", must_not_snapshot)
+    result = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+
+    assert result["state"] == "blocked_source_integrity_marker"
+    assert result["attempt_count"] == 0
+    assert result["integrity_marker"] == str(marker)
+    assert request.exists()
+    assert list(recovery.glob(".paper_trades_verified_*.partial")) == []
+
+
+def test_completed_final_attempt_wins_over_request_archive_retry(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="final-attempt-archive-retry")
+    real_replace = worker.os.replace
+    archive_failures = 0
+
+    def fail_first_request_archive(source_path, destination_path):
+        nonlocal archive_failures
+        if Path(source_path) == request and archive_failures == 0:
+            archive_failures += 1
+            raise OSError("synthetic request archive failure")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(worker.os, "replace", fail_first_request_archive)
+    completed = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        max_attempts=1,
+    )
+    assert completed["state"] == "completed"
+    assert completed["attempt_count"] == 1
+    assert completed["request_archive_error"]
+    assert request.exists()
+
+    recovered = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        max_attempts=1,
+    )
+    assert recovered["state"] == "completed_existing"
+    assert recovered["attempt_count"] == 1
+    assert recovered["request_archive_error"] is None
+    assert not request.exists()
