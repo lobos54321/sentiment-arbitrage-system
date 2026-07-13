@@ -255,7 +255,7 @@ def cleanup_stale_backup_partials() -> None:
             log(f"WARN partial backup cleanup failed {partial}: {exc}")
 
 
-def create_consistent_sqlite_snapshot(source: Path, destination: Path) -> dict:
+def create_consistent_sqlite_snapshot(source: Path, destination: Path, *, verify: bool = True) -> dict:
     source_before = source.stat()
     source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
     source_connection = sqlite3.connect(source_uri, uri=True, timeout=30)
@@ -266,16 +266,27 @@ def create_consistent_sqlite_snapshot(source: Path, destination: Path) -> dict:
         destination_connection.execute("PRAGMA busy_timeout=30000")
         source_connection.backup(destination_connection, pages=4096, sleep=0.05)
         destination_connection.commit()
-        quick_check = [str(row[0]) for row in destination_connection.execute("PRAGMA quick_check").fetchall()]
-        if quick_check != ["ok"]:
-            raise RuntimeError(f"snapshot quick_check failed: {quick_check[:20]}")
     finally:
         destination_connection.close()
         source_connection.close()
+    quick_check = None
+    if verify:
+        verify_uri = f"file:{quote(str(destination.resolve()), safe='/')}?mode=ro"
+        verify_connection = sqlite3.connect(verify_uri, uri=True, timeout=30)
+        try:
+            verify_connection.execute("PRAGMA query_only=ON")
+            verify_connection.execute("PRAGMA busy_timeout=30000")
+            verify_connection.execute("PRAGMA mmap_size=0")
+            verify_connection.execute("PRAGMA cache_size=-8192")
+            quick_check = [str(row[0]) for row in verify_connection.execute("PRAGMA quick_check").fetchall()]
+            if quick_check != ["ok"]:
+                raise RuntimeError(f"snapshot quick_check failed: {quick_check[:20]}")
+        finally:
+            verify_connection.close()
     source_after = source.stat()
     return {
         "method": "sqlite_online_backup",
-        "quick_check": ["ok"],
+        "quick_check": quick_check,
         "source_size_before": source_before.st_size,
         "source_size_after": source_after.st_size,
         "source_mtime_before": source_before.st_mtime,
