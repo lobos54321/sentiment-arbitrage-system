@@ -3,6 +3,9 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -314,3 +317,244 @@ def test_checkpoint_continues_after_copy_at_attempt_limit(tmp_path):
     )
     assert completed["state"] == "completed"
     assert completed["attempt_count"] == 3
+
+
+def test_local_copy_runs_full_quick_check_and_removes_ephemeral_file(tmp_path):
+    source = tmp_path / "paper_trades.db"
+    local_verify_dir = tmp_path / "local-verify"
+    create_source(source)
+
+    evidence = worker.snapshot_quick_check_evidence(
+        source,
+        local_verify_dir=local_verify_dir,
+        require_distinct_filesystem=False,
+    )
+
+    assert evidence["quick_check"] == ["ok"]
+    assert evidence["quick_check_method"] == "ephemeral_local_copy_full_quick_check"
+    assert evidence["quick_check_local_copy_sha256"] == worker.sha256_file(source)
+    assert evidence["quick_check_local_copy_size_bytes"] == source.stat().st_size
+    assert evidence["quick_check_local_copy_removed"] is True
+    assert list(local_verify_dir.iterdir()) == []
+
+
+def test_local_copy_requires_enough_free_space(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    local_verify_dir = tmp_path / "local-verify"
+    create_source(source)
+    monkeypatch.setattr(worker.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+
+    with pytest.raises(RuntimeError, match="insufficient space"):
+        worker.snapshot_quick_check_evidence(
+            source,
+            local_verify_dir=local_verify_dir,
+            require_distinct_filesystem=False,
+        )
+
+
+def test_local_verification_infrastructure_block_preserves_snapshot_checkpoint(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="local-verify-blocked")
+
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    partial_dir = recovery / ".paper_trades_verified_local-verify-blocked.partial"
+
+    def local_unavailable(*_args, **_kwargs):
+        raise worker.LocalVerificationUnavailable("synthetic local disk outage")
+
+    monkeypatch.setattr(worker, "snapshot_quick_check_evidence", local_unavailable)
+    blocked = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+
+    assert blocked["state"] == "blocked_local_verification"
+    assert (partial_dir / "paper_trades.db").is_file()
+    assert json.loads((partial_dir / "checkpoint.json").read_text())["stage"] == "snapshot_copied"
+    assert request.is_file()
+
+
+def test_missing_local_copy_after_copy_call_preserves_snapshot_checkpoint(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    local_verify_dir = tmp_path / "local-verify"
+    create_source(source)
+    write_request(request, request_id="local-copy-stat-failure")
+
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    partial_dir = recovery / ".paper_trades_verified_local-copy-stat-failure.partial"
+    real_evidence = worker.snapshot_quick_check_evidence
+
+    def same_filesystem_test_evidence(path, **_kwargs):
+        return real_evidence(
+            path,
+            local_verify_dir=local_verify_dir,
+            require_distinct_filesystem=False,
+        )
+
+    monkeypatch.setattr(worker, "snapshot_quick_check_evidence", same_filesystem_test_evidence)
+    monkeypatch.setattr(worker.shutil, "copyfile", lambda _source, _destination: None)
+    blocked = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        local_verify_dir=local_verify_dir,
+    )
+
+    assert blocked["state"] == "blocked_local_verification"
+    assert "cannot inspect local verification copy" in blocked["error"]
+    assert (partial_dir / "paper_trades.db").is_file()
+    assert json.loads((partial_dir / "checkpoint.json").read_text())["stage"] == "snapshot_copied"
+
+
+def test_local_sqlite_io_error_preserves_snapshot_checkpoint(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    local_verify_dir = tmp_path / "local-verify"
+    create_source(source)
+    write_request(request, request_id="local-sqlite-io")
+
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    partial_dir = recovery / ".paper_trades_verified_local-sqlite-io.partial"
+    real_evidence = worker.snapshot_quick_check_evidence
+
+    def same_filesystem_test_evidence(path, **_kwargs):
+        return real_evidence(
+            path,
+            local_verify_dir=local_verify_dir,
+            require_distinct_filesystem=False,
+        )
+
+    monkeypatch.setattr(worker, "snapshot_quick_check_evidence", same_filesystem_test_evidence)
+    monkeypatch.setattr(
+        worker,
+        "snapshot_quick_check",
+        lambda _path: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")),
+    )
+    blocked = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        local_verify_dir=local_verify_dir,
+    )
+
+    assert blocked["state"] == "blocked_local_verification"
+    assert "local quick_check I/O failure" in blocked["error"]
+    assert (partial_dir / "paper_trades.db").is_file()
+    assert json.loads((partial_dir / "checkpoint.json").read_text())["stage"] == "snapshot_copied"
+
+
+def test_cleanup_failure_does_not_mask_genuine_quick_check_failure(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    local_verify_dir = tmp_path / "local-verify"
+    create_source(source)
+    monkeypatch.setattr(
+        worker,
+        "snapshot_quick_check",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("genuine quick_check corruption")),
+    )
+    real_unlink = Path.unlink
+    verify_unlink_calls = 0
+
+    def fail_final_verify_unlink(path, *args, **kwargs):
+        nonlocal verify_unlink_calls
+        if str(path).endswith(".verify"):
+            verify_unlink_calls += 1
+            if verify_unlink_calls == 2:
+                raise OSError("synthetic local cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_final_verify_unlink)
+    with pytest.raises(RuntimeError, match="genuine quick_check corruption"):
+        worker.snapshot_quick_check_evidence(
+            source,
+            local_verify_dir=local_verify_dir,
+            require_distinct_filesystem=False,
+        )
+
+
+def test_local_quick_check_hash_must_match_persisted_snapshot(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="local-hash-mismatch")
+
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+
+    monkeypatch.setattr(
+        worker,
+        "snapshot_quick_check_evidence",
+        lambda *_args, **_kwargs: {
+            "quick_check": ["ok"],
+            "quick_check_method": "ephemeral_local_copy_full_quick_check",
+            "quick_check_local_copy_sha256": "0" * 64,
+        },
+    )
+    checked = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert checked["state"] == "running_quick_check_complete"
+
+    failed = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert failed["state"] == "failed"
+    assert "does not match" in failed["error"]
+    assert list(recovery.glob(".paper_trades_verified_*.partial")) == []
