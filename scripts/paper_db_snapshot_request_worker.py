@@ -25,6 +25,7 @@ except ImportError:
 
 SCHEMA_VERSION = "paper_db_snapshot_request_worker.v1"
 REQUEST_SCHEMA_VERSION = "paper_db_snapshot_request.v1"
+CHECKPOINT_SCHEMA_VERSION = "paper_db_snapshot_checkpoint.v1"
 DEFAULT_DATA_DIR = Path(os.environ.get("ZEABUR_DATA_DIR", "/app/data"))
 DEFAULT_RECOVERY_DIR = Path(os.environ.get("ZEABUR_RECOVERY_DIR", str(DEFAULT_DATA_DIR / "recovery")))
 CRITICAL_TABLES = (
@@ -83,6 +84,46 @@ def snapshot_table_counts(path: Path) -> dict[str, int | None]:
     return counts
 
 
+def snapshot_quick_check(path: Path) -> list[str]:
+    uri = f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute("PRAGMA mmap_size=0")
+        connection.execute("PRAGMA cache_size=-8192")
+        result = [str(row[0]) for row in connection.execute("PRAGMA quick_check").fetchall()]
+    finally:
+        connection.close()
+    if result != ["ok"]:
+        raise RuntimeError(f"snapshot quick_check failed: {result[:20]}")
+    return result
+
+
+def checkpoint_payload(*, request_id: str, attempt_count: int, stage: str, snapshot: dict) -> dict:
+    return {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "generated_at": utc_now_iso(),
+        "request_id": request_id,
+        "attempt_count": attempt_count,
+        "stage": stage,
+        "snapshot": snapshot,
+    }
+
+
+def read_checkpoint(path: Path, *, request_id: str) -> dict | None:
+    if not path.is_file():
+        return None
+    checkpoint = read_json_object(path)
+    if checkpoint.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"unsupported checkpoint schema: {checkpoint.get('schema_version')}")
+    if checkpoint.get("request_id") != request_id:
+        raise ValueError("checkpoint request_id mismatch")
+    if not isinstance(checkpoint.get("snapshot"), dict):
+        raise ValueError("checkpoint snapshot metadata missing")
+    return checkpoint
+
+
 def status_payload(*, request_id: str | None, state: str, attempt_count: int, **extra) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -125,6 +166,9 @@ def run_once(
     final_dir = recovery_dir / f"paper_trades_verified_{request_id}"
     snapshot_path = final_dir / "paper_trades.db"
     manifest_path = final_dir / "manifest.json"
+    partial_dir = recovery_dir / f".paper_trades_verified_{request_id}.partial"
+    partial_snapshot = partial_dir / "paper_trades.db"
+    checkpoint_path = partial_dir / "checkpoint.json"
     if snapshot_path.is_file() and manifest_path.is_file():
         archive_path = archive_dir / f"completed_{request_id}.json"
         archive_error = None
@@ -142,7 +186,8 @@ def run_once(
         )
         atomic_write_json(status_path, completed)
         return completed
-    if previous_attempts >= max(1, int(max_attempts)):
+    checkpoint = read_checkpoint(checkpoint_path, request_id=request_id) if partial_dir.exists() else None
+    if checkpoint is None and previous_attempts >= max(1, int(max_attempts)):
         exhausted = status_payload(
             request_id=request_id,
             state="attempts_exhausted",
@@ -152,7 +197,7 @@ def run_once(
         atomic_write_json(status_path, exhausted)
         return exhausted
     integrity_marker = Path(f"{source_path}.integrity_error")
-    if integrity_marker.exists():
+    if checkpoint is None and integrity_marker.exists():
         blocked = status_payload(
             request_id=request_id,
             state="blocked_source_integrity_marker",
@@ -164,25 +209,152 @@ def run_once(
     if final_dir.exists():
         raise RuntimeError(f"snapshot destination exists without complete manifest: {final_dir}")
 
-    attempt_count = previous_attempts + 1
-    partial_dir = recovery_dir / f".paper_trades_verified_{request_id}.{os.getpid()}.{time.time_ns()}.partial"
-    running = status_payload(
-        request_id=request_id,
-        state="running",
-        attempt_count=attempt_count,
-        source_path=str(source_path),
-        partial_dir=str(partial_dir),
-        snapshot_path=str(snapshot_path),
-        manifest_path=str(manifest_path),
-        reason=request.get("reason"),
-    )
-    atomic_write_json(status_path, running)
-    partial_dir.mkdir(parents=True, exist_ok=False)
+    if checkpoint is None:
+        attempt_count = previous_attempts + 1
+        if partial_dir.exists():
+            shutil.rmtree(partial_dir)
+        running = status_payload(
+            request_id=request_id,
+            state="running_snapshot_copy",
+            stage="snapshot_copy",
+            attempt_count=attempt_count,
+            source_path=str(source_path),
+            partial_dir=str(partial_dir),
+            snapshot_path=str(snapshot_path),
+            manifest_path=str(manifest_path),
+            reason=request.get("reason"),
+        )
+        atomic_write_json(status_path, running)
+        partial_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            snapshot = create_consistent_sqlite_snapshot(source_path, partial_snapshot, verify=False)
+            checkpoint = checkpoint_payload(
+                request_id=request_id,
+                attempt_count=attempt_count,
+                stage="snapshot_copied",
+                snapshot=snapshot,
+            )
+            atomic_write_json(checkpoint_path, checkpoint)
+            copied = status_payload(
+                request_id=request_id,
+                state="running_snapshot_copied",
+                stage="snapshot_copied",
+                attempt_count=attempt_count,
+                source_path=str(source_path),
+                partial_dir=str(partial_dir),
+                snapshot_path=str(snapshot_path),
+                manifest_path=str(manifest_path),
+                reason=request.get("reason"),
+            )
+            atomic_write_json(status_path, copied)
+            return copied
+        except Exception as exc:
+            shutil.rmtree(partial_dir, ignore_errors=True)
+            failed = status_payload(
+                request_id=request_id,
+                state="failed",
+                attempt_count=attempt_count,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            atomic_write_json(status_path, failed)
+            return failed
+
+    attempt_count = max(previous_attempts, int(checkpoint.get("attempt_count") or 0))
+    snapshot = dict(checkpoint["snapshot"])
+    stage = str(checkpoint.get("stage") or "")
+    if not partial_snapshot.is_file():
+        raise RuntimeError(f"checkpoint snapshot missing: {partial_snapshot}")
+
+    running_fields = {
+        "attempt_count": attempt_count,
+        "source_path": str(source_path),
+        "partial_dir": str(partial_dir),
+        "snapshot_path": str(snapshot_path),
+        "manifest_path": str(manifest_path),
+        "reason": request.get("reason"),
+    }
     try:
-        partial_snapshot = partial_dir / "paper_trades.db"
-        snapshot = create_consistent_sqlite_snapshot(source_path, partial_snapshot)
-        snapshot["sha256"] = sha256_file(partial_snapshot)
-        snapshot["critical_table_counts"] = snapshot_table_counts(partial_snapshot)
+        if stage == "snapshot_copied":
+            running = status_payload(
+                request_id=request_id,
+                state="running_quick_check",
+                stage="quick_check",
+                **running_fields,
+            )
+            atomic_write_json(status_path, running)
+            snapshot["quick_check"] = snapshot_quick_check(partial_snapshot)
+            checkpoint = checkpoint_payload(
+                request_id=request_id,
+                attempt_count=attempt_count,
+                stage="quick_check_complete",
+                snapshot=snapshot,
+            )
+            atomic_write_json(checkpoint_path, checkpoint)
+            completed_stage = status_payload(
+                request_id=request_id,
+                state="running_quick_check_complete",
+                stage="quick_check_complete",
+                **running_fields,
+            )
+            atomic_write_json(status_path, completed_stage)
+            return completed_stage
+
+        if stage == "quick_check_complete":
+            running = status_payload(
+                request_id=request_id,
+                state="running_sha256",
+                stage="sha256",
+                **running_fields,
+            )
+            atomic_write_json(status_path, running)
+            snapshot["sha256"] = sha256_file(partial_snapshot)
+            checkpoint = checkpoint_payload(
+                request_id=request_id,
+                attempt_count=attempt_count,
+                stage="sha256_complete",
+                snapshot=snapshot,
+            )
+            atomic_write_json(checkpoint_path, checkpoint)
+            completed_stage = status_payload(
+                request_id=request_id,
+                state="running_sha256_complete",
+                stage="sha256_complete",
+                **running_fields,
+            )
+            atomic_write_json(status_path, completed_stage)
+            return completed_stage
+
+        if stage == "sha256_complete":
+            running = status_payload(
+                request_id=request_id,
+                state="running_critical_counts",
+                stage="critical_counts",
+                **running_fields,
+            )
+            atomic_write_json(status_path, running)
+            snapshot["critical_table_counts"] = snapshot_table_counts(partial_snapshot)
+            missing = [name for name, count in snapshot["critical_table_counts"].items() if count is None]
+            if missing:
+                raise RuntimeError(f"critical tables missing from snapshot: {missing}")
+            checkpoint = checkpoint_payload(
+                request_id=request_id,
+                attempt_count=attempt_count,
+                stage="critical_counts_complete",
+                snapshot=snapshot,
+            )
+            atomic_write_json(checkpoint_path, checkpoint)
+            completed_stage = status_payload(
+                request_id=request_id,
+                state="running_critical_counts_complete",
+                stage="critical_counts_complete",
+                **running_fields,
+            )
+            atomic_write_json(status_path, completed_stage)
+            return completed_stage
+
+        if stage != "critical_counts_complete":
+            raise ValueError(f"unsupported checkpoint stage: {stage}")
+
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "generated_at": utc_now_iso(),
@@ -236,6 +408,7 @@ def main() -> int:
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--interval", type=float, default=300.0)
+    parser.add_argument("--active-interval", type=float, default=5.0)
     args = parser.parse_args()
 
     lock_handle = acquire_lock(Path(args.lock_file))
@@ -254,8 +427,11 @@ def main() -> int:
             )
             print(json.dumps(result, sort_keys=True), flush=True)
             if not args.loop:
+                if str(result.get("state") or "").startswith("running_"):
+                    continue
                 return 1 if result.get("state") in {"failed", "attempts_exhausted"} else 0
-            time.sleep(max(30.0, float(args.interval)))
+            sleep_seconds = args.active_interval if str(result.get("state") or "").startswith("running_") else args.interval
+            time.sleep(max(1.0, float(sleep_seconds)))
     finally:
         lock_handle.close()
 

@@ -34,6 +34,23 @@ def write_request(path, request_id="cleanup-20260713"):
     )
 
 
+def run_to_terminal(*, request, status, source, recovery, archive, max_attempts=3):
+    states = []
+    for _ in range(8):
+        result = worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+            max_attempts=max_attempts,
+        )
+        states.append(result["state"])
+        if result["state"] in {"completed", "completed_existing", "failed", "attempts_exhausted"}:
+            return result, states
+    raise AssertionError(f"snapshot did not reach a terminal state: {states}")
+
+
 def test_snapshot_request_creates_verified_snapshot_and_archives_request(tmp_path):
     source = tmp_path / "paper_trades.db"
     request = tmp_path / "request.json"
@@ -43,15 +60,22 @@ def test_snapshot_request_creates_verified_snapshot_and_archives_request(tmp_pat
     create_source(source)
     write_request(request)
 
-    result = worker.run_once(
-        request_path=request,
-        status_path=status,
-        source_path=source,
-        recovery_dir=recovery,
-        archive_dir=archive,
+    result, states = run_to_terminal(
+        request=request,
+        status=status,
+        source=source,
+        recovery=recovery,
+        archive=archive,
     )
 
     assert result["state"] == "completed"
+    assert states == [
+        "running_snapshot_copied",
+        "running_quick_check_complete",
+        "running_sha256_complete",
+        "running_critical_counts_complete",
+        "completed",
+    ]
     assert result["quick_check"] == ["ok"]
     assert result["critical_table_counts"] == {
         "candidate_shadow_observations": 1,
@@ -169,12 +193,12 @@ def test_completed_final_attempt_wins_over_request_archive_retry(tmp_path, monke
         return real_replace(source_path, destination_path)
 
     monkeypatch.setattr(worker.os, "replace", fail_first_request_archive)
-    completed = worker.run_once(
-        request_path=request,
-        status_path=status,
-        source_path=source,
-        recovery_dir=recovery,
-        archive_dir=archive,
+    completed, _states = run_to_terminal(
+        request=request,
+        status=status,
+        source=source,
+        recovery=recovery,
+        archive=archive,
         max_attempts=1,
     )
     assert completed["state"] == "completed"
@@ -194,3 +218,99 @@ def test_completed_final_attempt_wins_over_request_archive_retry(tmp_path, monke
     assert recovered["attempt_count"] == 1
     assert recovered["request_archive_error"] is None
     assert not request.exists()
+
+
+def test_snapshot_resumes_validation_without_recopy_after_external_stop(tmp_path, monkeypatch):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="resume-after-stop")
+    real_create = worker.create_consistent_sqlite_snapshot
+    create_calls = 0
+
+    def counted_create(*args, **kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "create_consistent_sqlite_snapshot", counted_create)
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+
+    real_quick_check = worker.snapshot_quick_check
+
+    def externally_stopped(_path):
+        raise KeyboardInterrupt("synthetic external stop")
+
+    monkeypatch.setattr(worker, "snapshot_quick_check", externally_stopped)
+    try:
+        worker.run_once(
+            request_path=request,
+            status_path=status,
+            source_path=source,
+            recovery_dir=recovery,
+            archive_dir=archive,
+        )
+    except KeyboardInterrupt:
+        pass
+    else:
+        raise AssertionError("synthetic external stop did not propagate")
+
+    checkpoint = json.loads(
+        (recovery / ".paper_trades_verified_resume-after-stop.partial" / "checkpoint.json").read_text()
+    )
+    assert checkpoint["stage"] == "snapshot_copied"
+    monkeypatch.setattr(worker, "snapshot_quick_check", real_quick_check)
+    completed, states = run_to_terminal(
+        request=request,
+        status=status,
+        source=source,
+        recovery=recovery,
+        archive=archive,
+    )
+    assert completed["state"] == "completed"
+    assert completed["attempt_count"] == 1
+    assert states[0] == "running_quick_check_complete"
+    assert create_calls == 1
+
+
+def test_checkpoint_continues_after_copy_at_attempt_limit(tmp_path):
+    source = tmp_path / "paper_trades.db"
+    request = tmp_path / "request.json"
+    status = tmp_path / "status.json"
+    recovery = tmp_path / "recovery"
+    archive = tmp_path / "requests"
+    create_source(source)
+    write_request(request, request_id="resume-at-limit")
+
+    copied = worker.run_once(
+        request_path=request,
+        status_path=status,
+        source_path=source,
+        recovery_dir=recovery,
+        archive_dir=archive,
+        max_attempts=3,
+    )
+    assert copied["state"] == "running_snapshot_copied"
+    copied["attempt_count"] = 3
+    status.write_text(json.dumps(copied), encoding="utf-8")
+
+    completed, _states = run_to_terminal(
+        request=request,
+        status=status,
+        source=source,
+        recovery=recovery,
+        archive=archive,
+        max_attempts=3,
+    )
+    assert completed["state"] == "completed"
+    assert completed["attempt_count"] == 3
