@@ -36,6 +36,7 @@ import logging
 import urllib.request
 import urllib.parse
 import threading
+from contextlib import closing
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import Counter, defaultdict, deque
@@ -20915,7 +20916,7 @@ def fetch_kline_close_at_or_after(token_ca, target_ts, max_lag_sec=180):
     except (TypeError, ValueError):
         return None
     try:
-        with open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC) as kdb:
+        with closing(open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC)) as kdb:
             kdb.row_factory = sqlite3.Row
             row = kdb.execute(
                 """
@@ -20952,7 +20953,7 @@ def fetch_kline_path_for_attribution(token_ca, start_ts, end_ts, max_points=90):
     if end_ts < start_ts:
         return []
     try:
-        with open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC) as kdb:
+        with closing(open_sqlite_readonly(KLINE_DB, timeout_sec=PAPER_SQLITE_TIMEOUT_SEC)) as kdb:
             kdb.row_factory = sqlite3.Row
             rows = kdb.execute(
                 """

@@ -73,6 +73,7 @@ def test_paper_monitor_has_no_creating_kline_connect_calls() -> None:
     source = (SCRIPTS / "paper_trade_monitor.py").read_text(encoding="utf-8")
     assert "sqlite3.connect(KLINE_DB)" not in source
     assert "open_sqlite_readonly(KLINE_DB" in source
+    assert source.count("with closing(open_sqlite_readonly(KLINE_DB") == 2
 
 
 def test_consistent_snapshot_preserves_source(tmp_path: Path) -> None:
