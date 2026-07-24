@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 
@@ -14,6 +17,7 @@ import {
   fetchIndexedRawRows,
   getProviderBackoff,
   isProviderRateLimitError,
+  openSqlite,
   rankSignalsForBackfill,
   selectUniqueSignals,
   setProviderBackoff,
@@ -25,6 +29,27 @@ const signal = (overrides = {}) => ({
   symbol: overrides.symbol ?? 'DOG',
   timestamp_sec: overrides.signal_ts ?? 1000,
   ...overrides,
+});
+
+test('raw-path SQLite connections use the bounded observer busy timeout', () => {
+  const root = mkdtempSync(join(tmpdir(), 'raw-path-sqlite-timeout-'));
+  const dbPath = join(root, 'raw.db');
+  const previous = process.env.RAW_PATH_OBSERVER_SQLITE_BUSY_TIMEOUT_MS;
+  process.env.RAW_PATH_OBSERVER_SQLITE_BUSY_TIMEOUT_MS = '12345';
+
+  let db;
+  try {
+    db = openSqlite(dbPath);
+    assert.equal(db.pragma('busy_timeout', { simple: true }), 12345);
+  } finally {
+    try { db?.close(); } catch {}
+    if (previous == null) {
+      delete process.env.RAW_PATH_OBSERVER_SQLITE_BUSY_TIMEOUT_MS;
+    } else {
+      process.env.RAW_PATH_OBSERVER_SQLITE_BUSY_TIMEOUT_MS = previous;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('aggregates bonding-curve swaps into raw 1m bars with source kind preserved', () => {
