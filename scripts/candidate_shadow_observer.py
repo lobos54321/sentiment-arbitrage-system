@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from sqlite_write_coordinator import configure_paper_sqlite_connection, sqlite_single_writer
+
 
 CANDIDATE_VERSION = "candidate-shadow-v1"
 CONTEXT_SCHEMA_VERSION = "candidate-shadow-context-v2.no_signal_price_quote_inference"
@@ -343,6 +345,8 @@ def open_sqlite(path, label):
         conn = sqlite3.connect(path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000")
+        if label == "out_db":
+            configure_paper_sqlite_connection(conn)
         return conn
     except sqlite3.Error as exc:
         raise RuntimeError(f"{label}_connect_error path={path}: {exc}") from exc
@@ -1938,7 +1942,8 @@ def run_once(args):
     signal_conn = open_sqlite(args.signal_db, "signal_db")
     out_conn = open_sqlite(args.out_db, "out_db")
     try:
-        ensure_schema(out_conn)
+        with sqlite_single_writer("candidate_shadow_observer:ensure_schema"):
+            ensure_schema(out_conn)
     except sqlite3.Error as exc:
         raise RuntimeError(f"out_db_schema_error path={args.out_db}: {exc}") from exc
     kline_conn = None
@@ -2050,14 +2055,16 @@ def run_once(args):
                 fetched_count, fetch_reason = 0, "kline_db_error"
             kline_fallback_fetches += 1
             kline_fallback_bars += fetched_count
-            record_kline_fetch_attempt(
-                out_conn,
-                row["token_ca"],
-                observed_at,
-                "ok" if fetched_count else "failed",
-                fetched_count,
-                fetch_reason,
-            )
+            with sqlite_single_writer("candidate_shadow_observer:kline_fetch_attempt"):
+                record_kline_fetch_attempt(
+                    out_conn,
+                    row["token_ca"],
+                    observed_at,
+                    "ok" if fetched_count else "failed",
+                    fetched_count,
+                    fetch_reason,
+                )
+                out_conn.commit()
             if fetched_count:
                 bars = load_kline_bars(kline_conn, row["token_ca"], signal_ts, args.kline_limit)
         kline_features = compute_kline_features(bars, signal_ts, observed_at)
@@ -2066,9 +2073,18 @@ def run_once(args):
         signal_features = extract_signal_features(row, kline_features, source_features)
         signal_features.update(build_shadow_markov_features(out_conn, signal_features, observed_at))
         try:
-            written, matched, evaluations = write_observations(out_conn, signal_features, catalog, observed_at)
-            virtual_summary = write_virtual_trades(out_conn, signal_features, evaluations, bars, observed_at, args)
+            with sqlite_single_writer(
+                f"candidate_shadow_observer:signal:{signal_features.get('signal_id')}"
+            ):
+                written, matched, evaluations = write_observations(
+                    out_conn, signal_features, catalog, observed_at
+                )
+                virtual_summary = write_virtual_trades(
+                    out_conn, signal_features, evaluations, bars, observed_at, args
+                )
+                out_conn.commit()
         except sqlite3.Error as exc:
+            out_conn.rollback()
             raise RuntimeError(
                 f"out_db_write_error path={args.out_db} signal_id={signal_features.get('signal_id')}: {exc}"
             ) from exc
@@ -2079,8 +2095,6 @@ def run_once(args):
         virtual_closed += virtual_summary["virtual_closed"]
         virtual_open += virtual_summary["virtual_open"]
         virtual_waiting += virtual_summary["virtual_waiting"]
-    out_conn.commit()
-
     for row in out_conn.execute(
         """
         SELECT candidate_id, SUM(matched) AS matched_n, COUNT(*) AS total_n
@@ -2436,6 +2450,8 @@ def self_test():
         )
         summary = run_once(args)
         out = sqlite3.connect(out_db)
+        expected_journal = os.environ.get("PAPER_SQLITE_JOURNAL_MODE", "DELETE").strip().lower()
+        assert out.execute("PRAGMA journal_mode").fetchone()[0].lower() == expected_journal
         total = out.execute("SELECT COUNT(*) FROM candidate_shadow_observations").fetchone()[0]
         virtual_total = out.execute("SELECT COUNT(*) FROM candidate_shadow_virtual_trades").fetchone()[0]
         closed_total = out.execute(
