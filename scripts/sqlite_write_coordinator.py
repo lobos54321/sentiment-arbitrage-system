@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Cross-process SQLite write coordination for paper services.
+"""Cross-process SQLite durability and write coordination for paper services.
 
-SQLite WAL allows concurrent readers, but only one writer can commit at a
-time. The paper trader has several Python workers, so process-local locks are
-not enough. This module provides one file-lock-backed writer gate that can be
-used as a drop-in context manager around short write transactions.
+The production paper database lives on a mounted volume.  Rollback-journal
+mode is the safe default there; WAL relies on shared-memory semantics that are
+not reliable on network filesystems.  The file lock also serializes the short
+write transactions issued by separate paper workers.
 """
 
 from __future__ import annotations
@@ -21,6 +21,55 @@ DEFAULT_LOCK_FILE = Path(os.environ.get("PAPER_SQLITE_WRITER_LOCK_FILE", "/tmp/p
 DEFAULT_TIMEOUT_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_TIMEOUT_SEC", "90"))
 POLL_SEC = float(os.environ.get("PAPER_SQLITE_WRITER_LOCK_POLL_SEC", "0.025"))
 _PROCESS_WRITE_LOCK = threading.RLock()
+ALLOWED_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+ALLOWED_SYNCHRONOUS_MODES = {"OFF", "NORMAL", "FULL", "EXTRA"}
+
+
+def configure_paper_sqlite_connection(
+    db,
+    *,
+    journal_mode: str | None = None,
+    synchronous: str | None = None,
+    busy_timeout_ms: int | None = None,
+):
+    """Apply and verify the durability contract for a writable paper DB."""
+
+    requested_journal = str(
+        journal_mode or os.environ.get("PAPER_SQLITE_JOURNAL_MODE", "DELETE")
+    ).strip().upper()
+    requested_sync = str(
+        synchronous or os.environ.get("PAPER_SQLITE_SYNCHRONOUS", "FULL")
+    ).strip().upper()
+    if requested_journal not in ALLOWED_JOURNAL_MODES:
+        raise ValueError(f"unsupported paper SQLite journal mode: {requested_journal}")
+    if requested_sync not in ALLOWED_SYNCHRONOUS_MODES:
+        raise ValueError(f"unsupported paper SQLite synchronous mode: {requested_sync}")
+
+    timeout_ms = int(
+        busy_timeout_ms
+        if busy_timeout_ms is not None
+        else os.environ.get("PAPER_SQLITE_BUSY_TIMEOUT_MS", "30000")
+    )
+    db.execute(f"PRAGMA busy_timeout = {max(0, timeout_ms)}")
+    try:
+        db.execute("PRAGMA mmap_size = 0")
+    except Exception:
+        pass
+
+    row = db.execute(f"PRAGMA journal_mode = {requested_journal}").fetchone()
+    applied_journal = str(row[0] if row else "").strip().upper()
+    if applied_journal != requested_journal:
+        raise RuntimeError(
+            "paper SQLite journal mode mismatch: "
+            f"requested={requested_journal} applied={applied_journal or 'unknown'}"
+        )
+    db.execute(f"PRAGMA synchronous = {requested_sync}")
+    applied_sync = int(db.execute("PRAGMA synchronous").fetchone()[0])
+    return {
+        "journal_mode": applied_journal,
+        "synchronous": applied_sync,
+        "busy_timeout_ms": max(0, timeout_ms),
+    }
 
 
 class SQLiteSingleWriterLock:

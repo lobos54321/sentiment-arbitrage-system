@@ -98,7 +98,7 @@ from entry_readiness_policy import (
 )
 from provider_budget import provider_request_allowed, record_provider_result
 from paper_db_integrity_guard import require_unmarked_paper_db
-from sqlite_write_coordinator import sqlite_single_writer
+from sqlite_write_coordinator import configure_paper_sqlite_connection, sqlite_single_writer
 from phase_policy import evaluate_phase_policy
 from signal_router import route_signal
 from gmgn_readonly import fetch_gmgn_token_enrichment, gmgn_readonly_runtime_status
@@ -17483,15 +17483,10 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 def connect_paper_db(path):
     require_unmarked_paper_db(path, component="paper_trade_monitor")
     db = sqlite3.connect(path, timeout=PAPER_SQLITE_TIMEOUT_SEC)
-    db.execute(f"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}")
-    try:
-        db.execute("PRAGMA mmap_size = 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        db.execute("PRAGMA journal_mode = WAL")
-    except sqlite3.OperationalError:
-        pass
+    configure_paper_sqlite_connection(
+        db,
+        busy_timeout_ms=PAPER_SQLITE_BUSY_TIMEOUT_MS,
+    )
     return db
 
 
