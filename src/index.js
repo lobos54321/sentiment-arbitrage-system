@@ -489,6 +489,8 @@ function startRawPathObserverSupervisor() {
       last_start_attempt_at: startedAt,
       command: `${process.execPath} ${args.join(' ')}`,
       next_run_at: null,
+      retry_suppressed: false,
+      retry_suppression_reason: null,
     });
     appendRawPathObserverOutput(`[raw-path-observer-supervisor] ${startedAt} starting: ${args.join(' ')}\n`);
     rawPathObserverChild = spawn(process.execPath, args, {
@@ -561,6 +563,7 @@ function startRawPathObserverSupervisor() {
       childSettled = true;
       if (runTimeoutTimer) clearTimeout(runTimeoutTimer);
       const exitedAt = new Date().toISOString();
+      const retrySuppressed = code === 78;
       let lastSummary = null;
       const jsonStart = stdoutBuffer.indexOf('{');
       if (jsonStart >= 0) {
@@ -577,12 +580,22 @@ function startRawPathObserverSupervisor() {
         last_completed_at: code === 0 ? exitedAt : global.__rawPathObserverWorkerStatus?.last_completed_at || null,
         last_summary: lastSummary,
         last_error: code === 0 ? null : `raw_path_observer_exit_${code ?? signal ?? 'unknown'}`,
+        retry_suppressed: retrySuppressed,
+        retry_suppression_reason: retrySuppressed ? 'kline_db_unhealthy' : null,
+        next_run_at: null,
         error_count: code === 0
           ? Number(global.__rawPathObserverWorkerStatus?.error_count || 0)
           : Number(global.__rawPathObserverWorkerStatus?.error_count || 0) + 1,
       });
-      appendRawPathObserverOutput(`[raw-path-observer-supervisor] ${exitedAt} exited code=${code} signal=${signal || ''}; next run in ${Math.floor(rawPathObserverIntervalMs() / 1000)}s\n`);
       rawPathObserverChild = null;
+      if (retrySuppressed) {
+        appendRawPathObserverOutput(
+          `[raw-path-observer-supervisor] ${exitedAt} exited code=78; retry suppressed until service restart because kline DB is unhealthy\n`,
+          process.stderr,
+        );
+        return;
+      }
+      appendRawPathObserverOutput(`[raw-path-observer-supervisor] ${exitedAt} exited code=${code} signal=${signal || ''}; next run in ${Math.floor(rawPathObserverIntervalMs() / 1000)}s\n`);
       scheduleNext();
     });
   };

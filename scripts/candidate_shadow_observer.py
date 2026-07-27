@@ -27,6 +27,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from kline_sqlite_durability import (
+    configure_kline_sqlite_connection,
+    kline_single_writer,
+)
 from sqlite_write_coordinator import configure_paper_sqlite_connection, sqlite_single_writer
 
 
@@ -962,15 +966,16 @@ def fetch_kline_fallback(conn, token_ca):
         rows.append((token_ca, pool, int(candle[0]), float(candle[1]), float(candle[2]), float(candle[3]), float(candle[4]), float(candle[5] or 0)))
     if not rows:
         return 0, "ohlcv_invalid"
-    conn.executemany(
-        """
-        INSERT OR IGNORE INTO kline_1m
-          (token_ca, pool_address, timestamp, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    conn.commit()
+    with kline_single_writer("candidate_shadow_observer:kline_fallback"):
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO kline_1m
+              (token_ca, pool_address, timestamp, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
     return len(rows), "ok"
 
 
@@ -1950,7 +1955,9 @@ def run_once(args):
     if args.kline_db:
         try:
             kline_conn = open_sqlite(args.kline_db, "kline_db")
-            ensure_kline_schema(kline_conn)
+            with kline_single_writer("candidate_shadow_observer:kline_initialize"):
+                configure_kline_sqlite_connection(kline_conn)
+                ensure_kline_schema(kline_conn)
         except sqlite3.Error as exc:
             warn_json(
                 warning="kline_db_disabled",
