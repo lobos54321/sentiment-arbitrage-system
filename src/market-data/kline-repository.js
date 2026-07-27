@@ -6,6 +6,11 @@ import {
   defaultKlineHealthArtifactPath,
   openExistingHealthySqliteSync,
 } from './sqlite-file-health.js';
+import {
+  configureKlineSqliteSync,
+  defaultKlineWriterLockPath,
+  withKlineWriterLockSync,
+} from './kline-sqlite-durability.js';
 
 const KLINE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS kline_1m (
@@ -64,47 +69,65 @@ export class KlineRepository {
 
   constructor(dbPath, options = {}) {
     this.dbPath = resolve(dbPath);
+    this.writerLockPath = options.writerLockPath
+      || process.env.KLINE_SQLITE_WRITER_LOCK_FILE
+      || defaultKlineWriterLockPath(this.dbPath);
+    this.writerLockTimeoutMs = options.writerLockTimeoutMs;
     const healthArtifactPath = options.healthArtifactPath
       || process.env.KLINE_DB_HEALTH_ARTIFACT
       || defaultKlineHealthArtifactPath(this.dbPath);
     this.db = openExistingHealthySqliteSync(Database, this.dbPath, { healthArtifactPath });
-    this.db.pragma('journal_mode = WAL');
-    this.initSchema();
-    const hasFetchedAt = this.hasColumn('kline_1m', 'fetched_at');
-    this.insertBarStmt = hasFetchedAt
-      ? this.db.prepare(`
-          INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, provider, fetched_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-      : this.db.prepare(`
-          INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, provider)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-    this.insertTradeStmt = this.db.prepare(`
-      INSERT OR IGNORE INTO helius_trades (signature, slot, block_time, token_ca, pool_address, price, base_amount, quote_amount, volume, side, source, ingested_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    this.upsertPoolStmt = this.db.prepare(`
-      INSERT INTO pool_mapping (token_ca, pool_address, provider, fetched_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(token_ca) DO UPDATE SET
-        pool_address = excluded.pool_address,
-        provider = excluded.provider,
-        fetched_at = excluded.fetched_at
-    `);
-    this.upsertCursorStmt = this.db.prepare(`
-      INSERT INTO history_backfill_cursor (pool_address, token_ca, oldest_signature_seen, newest_signature_seen, oldest_block_time, newest_block_time, last_backfill_at, status, error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(pool_address) DO UPDATE SET
-        token_ca = excluded.token_ca,
-        oldest_signature_seen = COALESCE(excluded.oldest_signature_seen, history_backfill_cursor.oldest_signature_seen),
-        newest_signature_seen = COALESCE(excluded.newest_signature_seen, history_backfill_cursor.newest_signature_seen),
-        oldest_block_time = COALESCE(excluded.oldest_block_time, history_backfill_cursor.oldest_block_time),
-        newest_block_time = COALESCE(excluded.newest_block_time, history_backfill_cursor.newest_block_time),
-        last_backfill_at = excluded.last_backfill_at,
-        status = excluded.status,
-        error = excluded.error
-    `);
+    this.withWriterLock('initialize', () => {
+      this.sqliteDurability = configureKlineSqliteSync(this.db);
+      this.initSchema();
+      const hasFetchedAt = this.hasColumn('kline_1m', 'fetched_at');
+      this.insertBarStmt = hasFetchedAt
+        ? this.db.prepare(`
+            INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, provider, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `)
+        : this.db.prepare(`
+            INSERT OR REPLACE INTO kline_1m (token_ca, pool_address, timestamp, open, high, low, close, volume, provider)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+      this.insertTradeStmt = this.db.prepare(`
+        INSERT OR IGNORE INTO helius_trades (signature, slot, block_time, token_ca, pool_address, price, base_amount, quote_amount, volume, side, source, ingested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.upsertPoolStmt = this.db.prepare(`
+        INSERT INTO pool_mapping (token_ca, pool_address, provider, fetched_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(token_ca) DO UPDATE SET
+          pool_address = excluded.pool_address,
+          provider = excluded.provider,
+          fetched_at = excluded.fetched_at
+      `);
+      this.upsertCursorStmt = this.db.prepare(`
+        INSERT INTO history_backfill_cursor (pool_address, token_ca, oldest_signature_seen, newest_signature_seen, oldest_block_time, newest_block_time, last_backfill_at, status, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pool_address) DO UPDATE SET
+          token_ca = excluded.token_ca,
+          oldest_signature_seen = COALESCE(excluded.oldest_signature_seen, history_backfill_cursor.oldest_signature_seen),
+          newest_signature_seen = COALESCE(excluded.newest_signature_seen, history_backfill_cursor.newest_signature_seen),
+          oldest_block_time = COALESCE(excluded.oldest_block_time, history_backfill_cursor.oldest_block_time),
+          newest_block_time = COALESCE(excluded.newest_block_time, history_backfill_cursor.newest_block_time),
+          last_backfill_at = excluded.last_backfill_at,
+          status = excluded.status,
+          error = excluded.error
+      `);
+    });
+  }
+
+  withWriterLock(operation, callback) {
+    return withKlineWriterLockSync(
+      `KlineRepository:${operation}`,
+      callback,
+      {
+        dbPath: this.dbPath,
+        lockPath: this.writerLockPath,
+        timeoutMs: this.writerLockTimeoutMs,
+      },
+    );
   }
 
   initSchema() {
@@ -159,7 +182,9 @@ export class KlineRepository {
   }
 
   upsertPoolMapping(tokenCa, poolAddress, provider = 'unknown') {
-    this.upsertPoolStmt.run(tokenCa, poolAddress, provider, Math.floor(Date.now() / 1000));
+    this.withWriterLock('upsertPoolMapping', () => {
+      this.upsertPoolStmt.run(tokenCa, poolAddress, provider, Math.floor(Date.now() / 1000));
+    });
   }
 
   getBars(tokenCa, startTs, endTs) {
@@ -224,7 +249,7 @@ export class KlineRepository {
         }
       }
     });
-    tx(bars);
+    this.withWriterLock('upsertBars', () => tx(bars));
     return bars.length;
   }
 
@@ -251,7 +276,7 @@ export class KlineRepository {
         inserted += info.changes || 0;
       }
     });
-    tx(trades);
+    this.withWriterLock('upsertTrades', () => tx(trades));
     return inserted;
   }
 
@@ -287,17 +312,19 @@ export class KlineRepository {
   }
 
   updateCursor(cursor) {
-    this.upsertCursorStmt.run(
-      cursor.poolAddress,
-      cursor.tokenCa || null,
-      cursor.oldestSignatureSeen || null,
-      cursor.newestSignatureSeen || null,
-      cursor.oldestBlockTime || null,
-      cursor.newestBlockTime || null,
-      Math.floor(Date.now() / 1000),
-      cursor.status || 'ok',
-      cursor.error || null
-    );
+    this.withWriterLock('updateCursor', () => {
+      this.upsertCursorStmt.run(
+        cursor.poolAddress,
+        cursor.tokenCa || null,
+        cursor.oldestSignatureSeen || null,
+        cursor.newestSignatureSeen || null,
+        cursor.oldestBlockTime || null,
+        cursor.newestBlockTime || null,
+        Math.floor(Date.now() / 1000),
+        cursor.status || 'ok',
+        cursor.error || null
+      );
+    });
   }
 
   getStats() {

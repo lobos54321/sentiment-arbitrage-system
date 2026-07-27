@@ -13,15 +13,24 @@ import {
   defaultKlineHealthArtifactPath,
   openExistingHealthySqliteSync,
 } from '../market-data/sqlite-file-health.js';
+import {
+  configureKlineSqliteSync,
+  defaultKlineWriterLockPath,
+  withKlineWriterLockSync,
+} from '../market-data/kline-sqlite-durability.js';
 
 export class KlineCollector {
   constructor(options = {}) {
     const dbPath = path.resolve(options.dbPath || path.join(process.cwd(), 'data', 'kline_cache.db'));
+    this.dbPath = dbPath;
+    this.writerLockPath = options.writerLockPath
+      || process.env.KLINE_SQLITE_WRITER_LOCK_FILE
+      || defaultKlineWriterLockPath(dbPath);
+    this.writerLockTimeoutMs = options.writerLockTimeoutMs;
     const healthArtifactPath = options.healthArtifactPath
       || process.env.KLINE_DB_HEALTH_ARTIFACT
       || defaultKlineHealthArtifactPath(dbPath);
     this.db = openExistingHealthySqliteSync(Database, dbPath, { healthArtifactPath });
-    this.db.pragma('journal_mode = WAL');
 
     // 内存中的当前分钟 tick 聚合 Map<tokenCA, {open, high, low, close, volume, minute}>
     this.currentBars = new Map();
@@ -33,7 +42,22 @@ export class KlineCollector {
     // 统计
     this.stats = { ticks: 0, bars_written: 0, tokens_active: 0 };
 
-    this._initDB();
+    this._withWriterLock('initialize', () => {
+      this.sqliteDurability = configureKlineSqliteSync(this.db);
+      this._initDB();
+    });
+  }
+
+  _withWriterLock(operation, callback) {
+    return withKlineWriterLockSync(
+      `KlineCollector:${operation}`,
+      callback,
+      {
+        dbPath: this.dbPath,
+        lockPath: this.writerLockPath,
+        timeoutMs: this.writerLockTimeoutMs,
+      },
+    );
   }
 
   _initDB() {
@@ -140,7 +164,9 @@ export class KlineCollector {
 
   _writeBar(tokenCA, bar) {
     try {
-      this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0, null, null, null, null, null);
+      this._withWriterLock('writeBar', () => {
+        this._insertStmt.run(tokenCA, bar.minute, bar.open, bar.high, bar.low, bar.close, bar.volume || 0, null, null, null, null, null);
+      });
       this.stats.bars_written++;
     } catch (e) {
       console.error(`❌ [KlineCollector] 写入 K 线失败 ${tokenCA}@${bar.minute}: ${e.message}`);
