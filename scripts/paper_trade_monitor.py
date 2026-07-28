@@ -18428,18 +18428,15 @@ def run_due_missed_attribution_update(
     if not _MISSED_ATTRIBUTION_WRITE_LOCK.acquire(blocking=False):
         return {'updated': 0, 'skipped': True, 'reason': 'writer_busy'}
     try:
-        with sqlite_single_writer(
-            "paper_trade_monitor:missed_attribution_update",
-            timeout_sec=MISSED_ATTRIBUTION_SINGLE_WRITER_TIMEOUT_SEC,
-        ):
-            updated = update_due_missed_attributions(
-                db,
-                historical_price_fetcher=historical_price_fetcher,
-                historical_path_fetcher=historical_path_fetcher,
-                live_price_fetcher=live_price_fetcher,
-                now=now,
-                limit=limit,
-            )
+        updated = update_due_missed_attributions(
+            db,
+            historical_price_fetcher=historical_price_fetcher,
+            historical_path_fetcher=historical_path_fetcher,
+            live_price_fetcher=live_price_fetcher,
+            now=now,
+            limit=limit,
+            write_lock_timeout_sec=MISSED_ATTRIBUTION_SINGLE_WRITER_TIMEOUT_SEC,
+        )
         _MISSED_ATTRIBUTION_LOCK_FAILURES = 0
         _MISSED_ATTRIBUTION_BACKOFF_UNTIL = 0.0
         return {'updated': updated, 'skipped': False, 'reason': 'updated'}
