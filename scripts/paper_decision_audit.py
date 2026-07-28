@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS paper_missed_signal_attribution (
     entry_bias TEXT,
     lifecycle_features_json TEXT,
     payload_json TEXT,
+    attribution_revision INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
@@ -241,6 +242,7 @@ def init_decision_audit(db):
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_ts INTEGER",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_horizon TEXT",
         "ALTER TABLE paper_missed_signal_attribution ADD COLUMN first_tradable_pnl REAL",
+        "ALTER TABLE paper_missed_signal_attribution ADD COLUMN attribution_revision INTEGER NOT NULL DEFAULT 0",
     ]:
         try:
             db.execute(column_sql)
@@ -914,6 +916,7 @@ def update_due_missed_attributions(
     live_price_fetcher=None,
     now=None,
     limit=50,
+    write_lock_timeout_sec=None,
 ):
     """Fill missed-signal outcomes from non-shadow price data.
 
@@ -940,10 +943,9 @@ def update_due_missed_attributions(
         (limit,),
     ).fetchall()
 
-    updated = 0
-    touched = 0
     pending_updates = []
     for row in rows:
+        expected_revision = int(row["attribution_revision"] or 0)
         token_ca = row["token_ca"]
         base_ts = row["baseline_ts"] or row["signal_ts"] or int(row["created_event_ts"])
         baseline_price = row["baseline_price"]
@@ -966,17 +968,21 @@ def update_due_missed_attributions(
                 changes["status"] = "baseline_missing"
                 changes["baseline_source"] = baseline_source or "missing:no_price_source"
             changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            count_as_updated = len(changes) > 1
             set_clause = ", ".join(f"{key} = ?" for key in changes)
             pending_updates.append(
                 (
-                    f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
-                    [*changes.values(), row["id"]],
+                    f"""
+                    UPDATE paper_missed_signal_attribution
+                    SET {set_clause},
+                        attribution_revision = attribution_revision + 1
+                    WHERE id = ?
+                      AND attribution_revision = ?
+                    """,
+                    [*changes.values(), row["id"], expected_revision],
+                    count_as_updated,
                 )
             )
-            if len(changes) > 1:
-                updated += 1
-            else:
-                touched += 1
             continue
 
         changes = {}
@@ -1064,29 +1070,51 @@ def update_due_missed_attributions(
         if not changes:
             pending_updates.append(
                 (
-                    "UPDATE paper_missed_signal_attribution SET updated_at = ? WHERE id = ?",
-                    (time.strftime("%Y-%m-%d %H:%M:%S"), row["id"]),
+                    """
+                    UPDATE paper_missed_signal_attribution
+                    SET updated_at = ?,
+                        attribution_revision = attribution_revision + 1
+                    WHERE id = ?
+                      AND attribution_revision = ?
+                    """,
+                    (
+                        time.strftime("%Y-%m-%d %H:%M:%S"),
+                        row["id"],
+                        expected_revision,
+                    ),
+                    False,
                 )
             )
-            touched += 1
             continue
         changes["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         set_clause = ", ".join(f"{key} = ?" for key in changes)
         pending_updates.append(
             (
-                f"UPDATE paper_missed_signal_attribution SET {set_clause} WHERE id = ?",
-                [*changes.values(), row["id"]],
+                f"""
+                UPDATE paper_missed_signal_attribution
+                SET {set_clause},
+                    attribution_revision = attribution_revision + 1
+                WHERE id = ?
+                  AND attribution_revision = ?
+                """,
+                [*changes.values(), row["id"], expected_revision],
+                True,
             )
         )
-        updated += 1
 
+    applied_updates = 0
     if pending_updates:
-        with sqlite_single_writer("paper_decision_audit:missed_attribution_update"):
-            for sql, params in pending_updates:
-                db.execute(sql, params)
+        with sqlite_single_writer(
+            "paper_decision_audit:missed_attribution_update",
+            timeout_sec=write_lock_timeout_sec,
+        ):
+            for sql, params, count_as_updated in pending_updates:
+                cursor = db.execute(sql, params)
+                if count_as_updated and cursor.rowcount > 0:
+                    applied_updates += 1
             db.commit()
-    return updated
+    return applied_updates
 
 
 def missed_attribution_coverage(db, *, since_ts=None):
