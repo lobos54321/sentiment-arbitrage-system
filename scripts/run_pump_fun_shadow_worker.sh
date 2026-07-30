@@ -19,6 +19,9 @@ SOURCE_URL="${PUMP_FUN_SHADOW_SOURCE_URL:-}"
 DURATION_SEC="${PUMP_FUN_SHADOW_DURATION_SEC:-300}"
 LIMIT="${PUMP_FUN_SHADOW_LIMIT:-2000}"
 INTERVAL_SEC="${PUMP_FUN_SHADOW_INTERVAL_SEC:-5}"
+RETENTION_DAYS="${PUMP_FUN_SHADOW_RETENTION_DAYS:-30}"
+AUTO_VACUUM_MIGRATION_MAX_MB="${PUMP_FUN_SHADOW_AUTO_VACUUM_MIGRATION_MAX_MB:-256}"
+NODE_BIN="${PUMP_FUN_SHADOW_NODE_BIN:-node}"
 COMPARE_30D_EVERY_N="${PUMP_FUN_SHADOW_COMPARE_30D_EVERY_N:-12}"
 SIGNAL_DB="${SENTIMENT_DB:-$DATA_DIR/sentiment_arb.db}"
 RAW_DB="${RAW_SIGNAL_OUTCOMES_DB:-$DATA_DIR/raw_signal_outcomes.db}"
@@ -27,6 +30,8 @@ WORKER_PARENT_PID="${PUMP_FUN_SHADOW_SUPERVISOR_PID:-${PPID:-}}"
 SUPERVISOR_KIND="${PUMP_FUN_SHADOW_SUPERVISOR_KIND:-unknown}"
 DEPLOYMENT_COMMIT="${PUMP_FUN_SHADOW_DEPLOYMENT_COMMIT:-${ZEABUR_GIT_COMMIT_SHA:-${ZEABUR_GIT_COMMIT:-${GIT_COMMIT:-${SOURCE_VERSION:-}}}}}"
 LOOP_COUNT=0
+ACTIVE_CHILD_PID=""
+ACTIVE_CHILD_PGID=""
 
 write_status() {
   local state="$1"
@@ -102,7 +107,60 @@ os.replace(tmp, path)
 PY
 }
 
+active_child_alive() {
+  if [[ -n "$ACTIVE_CHILD_PGID" ]]; then
+    kill -0 -- "-$ACTIVE_CHILD_PGID" 2>/dev/null
+  elif [[ -n "$ACTIVE_CHILD_PID" ]]; then
+    kill -0 "$ACTIVE_CHILD_PID" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+terminate_active_child() {
+  if [[ -z "$ACTIVE_CHILD_PID" ]]; then
+    return
+  fi
+  if [[ -n "$ACTIVE_CHILD_PGID" ]]; then
+    kill -TERM -- "-$ACTIVE_CHILD_PGID" 2>/dev/null || true
+  else
+    kill -TERM "$ACTIVE_CHILD_PID" 2>/dev/null || true
+  fi
+  for _ in $(seq 1 50); do
+    active_child_alive || break
+    sleep 0.1
+  done
+  if active_child_alive; then
+    if [[ -n "$ACTIVE_CHILD_PGID" ]]; then
+      kill -KILL -- "-$ACTIVE_CHILD_PGID" 2>/dev/null || true
+    else
+      kill -KILL "$ACTIVE_CHILD_PID" 2>/dev/null || true
+    fi
+  fi
+  wait "$ACTIVE_CHILD_PID" 2>/dev/null || true
+  ACTIVE_CHILD_PID=""
+  ACTIVE_CHILD_PGID=""
+}
+
+run_logged_command() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >> "$LOG_PATH" 2>&1 &
+    ACTIVE_CHILD_PID=$!
+    ACTIVE_CHILD_PGID=$ACTIVE_CHILD_PID
+  else
+    "$@" >> "$LOG_PATH" 2>&1 &
+    ACTIVE_CHILD_PID=$!
+    ACTIVE_CHILD_PGID=""
+  fi
+  wait "$ACTIVE_CHILD_PID"
+  local exit_code=$?
+  ACTIVE_CHILD_PID=""
+  ACTIVE_CHILD_PGID=""
+  return "$exit_code"
+}
+
 stop_worker() {
+  terminate_active_child
   echo "[pump-fun-shadow-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') stopping" | tee -a "$LOG_PATH"
   write_status "stopped" "received_stop_signal" ""
   exit 0
@@ -121,21 +179,25 @@ while true; do
 
   set +e
   if [[ -n "$SOURCE_URL" ]]; then
-    node scripts/pump_fun_shadow_observer.js \
+    run_logged_command "$NODE_BIN" scripts/pump_fun_shadow_observer.js \
       --source-url "$SOURCE_URL" \
       --duration-sec "$DURATION_SEC" \
       --limit "$LIMIT" \
+      --retention-days "$RETENTION_DAYS" \
+      --auto-vacuum-migration-max-mb "$AUTO_VACUUM_MIGRATION_MAX_MB" \
       --out "$LATEST_DIR/pump_fun_shadow_observer_summary.json" \
-      --db "$PUMP_DB" 2>&1 | tee -a "$LOG_PATH"
-    OBS_EXIT=${PIPESTATUS[0]}
+      --db "$PUMP_DB"
+    OBS_EXIT=$?
   else
-    node scripts/pump_fun_shadow_observer.js \
+    run_logged_command "$NODE_BIN" scripts/pump_fun_shadow_observer.js \
       --websocket-url "$WEBSOCKET_URL" \
       --duration-sec "$DURATION_SEC" \
       --limit "$LIMIT" \
+      --retention-days "$RETENTION_DAYS" \
+      --auto-vacuum-migration-max-mb "$AUTO_VACUUM_MIGRATION_MAX_MB" \
       --out "$LATEST_DIR/pump_fun_shadow_observer_summary.json" \
-      --db "$PUMP_DB" 2>&1 | tee -a "$LOG_PATH"
-    OBS_EXIT=${PIPESTATUS[0]}
+      --db "$PUMP_DB"
+    OBS_EXIT=$?
   fi
   set -e
 
@@ -147,24 +209,24 @@ while true; do
   fi
 
   set +e
-  python3 scripts/pump_fun_shadow_source_comparison.py \
+  run_logged_command python3 scripts/pump_fun_shadow_source_comparison.py \
     --pump-db "$PUMP_DB" \
     --signal-db "$SIGNAL_DB" \
     --raw-db "$RAW_DB" \
     --hours 24 \
     --out "$LATEST_DIR/pump_fun_shadow_source_comparison_24h.json" \
-    --quiet 2>&1 | tee -a "$LOG_PATH"
-  CMP24_EXIT=${PIPESTATUS[0]}
+    --quiet
+  CMP24_EXIT=$?
   CMP30_EXIT=0
   if [[ "$LOOP_COUNT" -eq 1 || $((LOOP_COUNT % COMPARE_30D_EVERY_N)) -eq 0 ]]; then
-    python3 scripts/pump_fun_shadow_source_comparison.py \
+    run_logged_command python3 scripts/pump_fun_shadow_source_comparison.py \
       --pump-db "$PUMP_DB" \
       --signal-db "$SIGNAL_DB" \
       --raw-db "$RAW_DB" \
       --hours 720 \
       --out "$LATEST_DIR/pump_fun_shadow_source_comparison_30d.json" \
-      --quiet 2>&1 | tee -a "$LOG_PATH"
-    CMP30_EXIT=${PIPESTATUS[0]}
+      --quiet
+    CMP30_EXIT=$?
   else
     echo "[pump-fun-shadow-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') skipping 30d comparison loop=$LOOP_COUNT cadence=$COMPARE_30D_EVERY_N" | tee -a "$LOG_PATH"
   fi

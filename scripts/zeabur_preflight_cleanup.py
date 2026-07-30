@@ -56,6 +56,11 @@ LOG_NAMES = [
     "gmgn-scout.log",
     "lifecycle.log",
     "social-service.log",
+    "raw-path-observer.log",
+    "raw-dog-discovery-observer.log",
+    "candidate-shadow-observer.log",
+    "agent-capture-discovery.log",
+    "pump-fun-shadow-worker.log",
 ]
 
 DB_NAMES = [
@@ -63,6 +68,8 @@ DB_NAMES = [
     "sentiment_arb.db",
     "kline_cache.db",
     "lifecycle_tracks.db",
+    "raw_signal_outcomes.db",
+    "pump_fun_shadow_signals.db",
 ]
 
 

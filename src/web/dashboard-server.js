@@ -1706,17 +1706,40 @@ function handleDashboardShutdownSignal(signalName) {
   writeDashboardRequestMetricsSnapshot();
   if (dashboardShutdownStarted) return;
   dashboardShutdownStarted = true;
+  stopRawPathObserverScheduler();
+  stopAgentCaptureDiscoveryScheduler();
+  try {
+    if (agentCaptureLoopRunner?.running && agentCaptureLoopRunner.pid) {
+      signalProcessTree(agentCaptureLoopRunner.pid, 'SIGTERM');
+    }
+  } catch {}
   const forceExitMs = Math.max(1000, parseInt(process.env.DASHBOARD_SHUTDOWN_FORCE_EXIT_MS || '8000', 10) || 8000);
   const timer = setTimeout(() => {
     appendDashboardRuntimeEvent({ event_type: 'dashboard_process_force_exit', signal: signalName, after_ms: forceExitMs });
-    process.exit(0);
+    const runnerPid = agentCaptureLoopRunner?.pid;
+    try {
+      if (runnerPid && processGroupIsAlive(runnerPid)) {
+        signalProcessTree(runnerPid, 'SIGKILL');
+      }
+    } catch {}
+    const killDeadline = Date.now() + 2000;
+    const waitForKilledGroup = () => {
+      if (!runnerPid || !processGroupIsAlive(runnerPid) || Date.now() >= killDeadline) {
+        process.exit(0);
+        return;
+      }
+      setTimeout(waitForKilledGroup, 50);
+    };
+    waitForKilledGroup();
   }, forceExitMs);
   try { timer.unref?.(); } catch {}
   try {
     server.close(() => {
       appendDashboardRuntimeEvent({ event_type: 'dashboard_process_graceful_exit', signal: signalName });
       writeDashboardRequestMetricsSnapshot();
-      process.exit(0);
+      if (!agentCaptureLoopRunner?.pid || !processGroupIsAlive(agentCaptureLoopRunner.pid)) {
+        process.exit(0);
+      }
     });
   } catch {
     process.exit(0);
@@ -2175,38 +2198,88 @@ function processIsAlive(pid) {
   }
 }
 
+function signalProcessTree(pid, signal = 'SIGTERM') {
+  if (!pid) return false;
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-pid, signal);
+      return true;
+    } catch {}
+  }
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processGroupIsAlive(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') return processIsAlive(pid);
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let agentCaptureLoopRunner = {
   running: false,
   pid: null,
   started_at: null,
   run_id: null,
+  process_group_managed: false,
+};
+let agentCaptureSchedulerTimer = null;
+const agentCaptureSchedulerState = {
+  schema_version: 'agent_capture_loop_scheduler.v1',
+  enabled: false,
+  running: false,
+  interval_sec: null,
+  initial_delay_sec: null,
+  capture_hours: null,
+  last_attempt_at: null,
+  last_result: null,
+  last_error: null,
+  error_count: 0,
+  next_run_at: null,
 };
 
 function readAgentCaptureLoopRunnerStatus() {
   const paths = agentCaptureArtifactPaths();
   const status = safeReadAgentJson(paths.runner_status);
   if (!status || status.error_code) {
+    const runnerAlive = agentCaptureLoopRunner.process_group_managed
+      ? processGroupIsAlive(agentCaptureLoopRunner.pid)
+      : processIsAlive(agentCaptureLoopRunner.pid);
     return {
       schema_version: 'agent_capture_loop_runner_status.v1',
       available: false,
-      running: Boolean(agentCaptureLoopRunner.running && processIsAlive(agentCaptureLoopRunner.pid)),
+      running: Boolean(agentCaptureLoopRunner.running && runnerAlive),
       pid: agentCaptureLoopRunner.pid || null,
+      pid_alive: processIsAlive(agentCaptureLoopRunner.pid),
+      process_group_alive: runnerAlive,
+      process_group_managed: Boolean(agentCaptureLoopRunner.process_group_managed),
     };
   }
   const startedMs = Date.parse(status.started_at || '');
   const ageMs = Number.isFinite(startedMs) ? Date.now() - startedMs : null;
   const pidAlive = processIsAlive(status.pid);
+  const processGroupManaged = Boolean(status.process_group_managed);
+  const runnerAlive = processGroupManaged ? processGroupIsAlive(status.pid) : pidAlive;
   const newlyStaleRunning = Boolean(
     status.running
     && (
-      !pidAlive
+      !runnerAlive
       || (ageMs != null && ageMs > 3 * 60 * 60 * 1000)
     )
   );
   const staleRunning = Boolean(newlyStaleRunning || status.stale_running_status);
   const staleReason = status.stale_running_reason
-    || (newlyStaleRunning ? (!pidAlive ? 'pid_not_alive' : 'age_exceeded_3h') : null);
-  const running = Boolean(status.running && !staleRunning && pidAlive);
+    || (newlyStaleRunning ? (!runnerAlive ? 'runner_process_group_not_alive' : 'age_exceeded_3h') : null);
+  const running = Boolean(status.running && !staleRunning && runnerAlive);
   const normalized = {
     ...status,
     available: true,
@@ -2215,6 +2288,8 @@ function readAgentCaptureLoopRunnerStatus() {
     stale_running_reason: staleRunning ? staleReason : null,
     age_minutes: ageMs == null ? null : +(ageMs / 60000).toFixed(2),
     pid_alive: pidAlive,
+    process_group_alive: runnerAlive,
+    process_group_managed: processGroupManaged,
   };
   if (staleRunning && (status.running || !status.reconciled_at)) {
     normalized.reconciled_at = status.reconciled_at || new Date().toISOString();
@@ -2427,7 +2502,9 @@ function sanitizeCaptureHours(value, primaryHours) {
   return out.length ? out.join(',') : fallback;
 }
 
-function triggerAgentCaptureDiscoveryLoop(url) {
+function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
+  const trigger = options.trigger || 'dashboard_api';
+  const endpoint = trigger === 'dashboard_api' ? '/api/agent/capture-discovery/run' : null;
   const paths = agentCaptureArtifactPaths();
   const current = readAgentCaptureLoopRunnerStatus();
   if (current.running) {
@@ -2453,7 +2530,8 @@ function triggerAgentCaptureDiscoveryLoop(url) {
     .replace(/[^0-9.,]/g, '')
     .slice(0, 80) || '0.25,0.5,1';
   const timeoutMs = boundedIntParam(url, 'timeout_sec', 1800, 60, 7200) * 1000;
-  const runId = `api_${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}_${randomUUID().slice(0, 8)}`;
+  const runPrefix = trigger === 'dashboard_scheduler' ? 'scheduled' : 'api';
+  const runId = `${runPrefix}_${new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')}_${randomUUID().slice(0, 8)}`;
   const startedAt = new Date().toISOString();
   const args = [
     'scripts/agent_capture_discovery_loop.py',
@@ -2486,27 +2564,30 @@ function triggerAgentCaptureDiscoveryLoop(url) {
       PYTHONUNBUFFERED: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
   agentCaptureLoopRunner = {
     running: true,
     pid: child.pid,
     started_at: startedAt,
     run_id: runId,
+    process_group_managed: process.platform !== 'win32',
   };
   const baseStatus = {
     schema_version: 'agent_capture_loop_runner_status.v1',
     run_id: runId,
     running: true,
     pid: child.pid,
+    process_group_managed: process.platform !== 'win32',
     started_at: startedAt,
     finished_at: null,
     command: ['python3', ...args],
     log_path: paths.log,
     latest_dir: join(getAgentRunsRoot(), 'latest'),
     scheduler: {
-      trigger: 'dashboard_api',
-      endpoint: '/api/agent/capture-discovery/run',
-      cadence_policy: 'manual_or_external_scheduler',
+      trigger,
+      endpoint,
+      cadence_policy: trigger === 'dashboard_scheduler' ? 'bounded_internal_scheduler' : 'manual_or_external_scheduler',
       requested_hours: hours,
       requested_capture_hours: captureHours,
       timeout_sec: Math.floor(timeoutMs / 1000),
@@ -2518,7 +2599,7 @@ function triggerAgentCaptureDiscoveryLoop(url) {
     exec_run_provenance: {
       schema_version: 'agent_capture_loop_exec_run_provenance.v1',
       run_id: runId,
-      trigger: 'dashboard_api',
+      trigger,
       started_at: startedAt,
       working_dir: projectRoot,
       command: ['python3', ...args],
@@ -2548,10 +2629,15 @@ function triggerAgentCaptureDiscoveryLoop(url) {
   child.stderr.on('data', (chunk) => writeRedactedLogStream(logStream, chunk));
 
   let finished = false;
-  const finish = (error, code, signal, timedOut = false) => {
+  let timedOut = false;
+  let forceKillTimer = null;
+  let groupExitPollTimer = null;
+  const finish = (error, code, signal) => {
     if (finished) return;
     finished = true;
     clearTimeout(timeoutHandle);
+    if (forceKillTimer) clearTimeout(forceKillTimer);
+    if (groupExitPollTimer) clearTimeout(groupExitPollTimer);
     const finishedAt = new Date().toISOString();
     const status = {
       ...baseStatus,
@@ -2559,34 +2645,60 @@ function triggerAgentCaptureDiscoveryLoop(url) {
       finished_at: finishedAt,
       exit_code: code ?? null,
       signal: signal || null,
-      timed_out: Boolean(timedOut),
+      timed_out: timedOut,
       error: error ? error.message : null,
       exec_run_provenance: {
         ...baseStatus.exec_run_provenance,
         finished_at: finishedAt,
         exit_code: code ?? null,
         signal: signal || null,
-        timed_out: Boolean(timedOut),
+        timed_out: timedOut,
         error: error ? error.message : null,
       },
     };
-    agentCaptureLoopRunner = {
-      running: false,
-      pid: child.pid,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      run_id: runId,
-    };
-    writeRedactedLogStream(logStream, `[agent-capture-loop] ${finishedAt} finish run_id=${runId} code=${code ?? ''} signal=${signal || ''} timed_out=${Boolean(timedOut)} error=${error?.message || ''}\n`);
-    try { safeWriteAgentJson(paths.runner_status, status); } catch {}
+    const ownsCurrentRunner = agentCaptureLoopRunner.run_id === runId;
+    if (ownsCurrentRunner) {
+      agentCaptureLoopRunner = {
+        running: false,
+        pid: child.pid,
+        started_at: startedAt,
+        finished_at: finishedAt,
+        run_id: runId,
+        process_group_managed: process.platform !== 'win32',
+      };
+    }
+    writeRedactedLogStream(logStream, `[agent-capture-loop] ${finishedAt} finish run_id=${runId} code=${code ?? ''} signal=${signal || ''} timed_out=${timedOut} error=${error?.message || ''}\n`);
+    if (ownsCurrentRunner) {
+      try { safeWriteAgentJson(paths.runner_status, status); } catch {}
+    }
     try { logStream.end(); } catch {}
   };
   const timeoutHandle = setTimeout(() => {
-    try { child.kill('SIGTERM'); } catch {}
-    finish(new Error(`timeout_after_${Math.floor(timeoutMs / 1000)}s`), null, 'SIGTERM', true);
+    timedOut = true;
+    signalProcessTree(child.pid, 'SIGTERM');
+    forceKillTimer = setTimeout(() => {
+      signalProcessTree(child.pid, 'SIGKILL');
+    }, 5000);
+    try { forceKillTimer.unref?.(); } catch {}
   }, timeoutMs);
-  child.on('error', (error) => finish(error, null, null, false));
-  child.on('exit', (code, signal) => finish(code === 0 ? null : new Error(`exit_${code ?? signal}`), code, signal, false));
+  child.on('error', (error) => finish(error, null, null));
+  child.on('exit', (code, signal) => {
+    const error = timedOut
+      ? new Error(`timeout_after_${Math.floor(timeoutMs / 1000)}s`)
+      : (code === 0 ? null : new Error(`exit_${code ?? signal}`));
+    if (!timedOut) {
+      finish(error, code, signal);
+      return;
+    }
+    const finishAfterProcessGroupExit = () => {
+      if (!processGroupIsAlive(child.pid)) {
+        finish(error, code, signal);
+        return;
+      }
+      groupExitPollTimer = setTimeout(finishAfterProcessGroupExit, 100);
+    };
+    finishAfterProcessGroupExit();
+  });
 
   return {
     accepted: true,
@@ -2600,6 +2712,86 @@ function triggerAgentCaptureDiscoveryLoop(url) {
     automatic_runtime_change_allowed: false,
     paper_enablement_allowed: false,
   };
+}
+
+function agentCaptureSchedulerStatus() {
+  return {
+    ...agentCaptureSchedulerState,
+    running: Boolean(agentCaptureSchedulerTimer),
+  };
+}
+
+function stopAgentCaptureDiscoveryScheduler() {
+  if (agentCaptureSchedulerTimer) clearTimeout(agentCaptureSchedulerTimer);
+  agentCaptureSchedulerTimer = null;
+  agentCaptureSchedulerState.running = false;
+  agentCaptureSchedulerState.next_run_at = null;
+}
+
+function startAgentCaptureDiscoveryScheduler() {
+  if (agentCaptureSchedulerTimer) {
+    return agentCaptureSchedulerStatus();
+  }
+  if (!envBool('AGENT_CAPTURE_DISCOVERY_SCHEDULER_ENABLED', false)) {
+    agentCaptureSchedulerState.enabled = false;
+    agentCaptureSchedulerState.last_error = 'disabled_by_AGENT_CAPTURE_DISCOVERY_SCHEDULER_ENABLED';
+    return agentCaptureSchedulerStatus();
+  }
+
+  const initialDelaySec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_INITIAL_DELAY_SEC', 300, 30, 3600);
+  const intervalSec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_INTERVAL_SEC', 21600, 3600, 86400);
+  const timeoutSec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_TIMEOUT_SEC', 3600, 300, 7200);
+  const reportTimeoutSec = envInt('AGENT_CAPTURE_REPORT_TIMEOUT_SEC', 300, 30, 3600);
+  const testTimeoutSec = envInt('AGENT_CAPTURE_TEST_TIMEOUT_SEC', 180, 30, 600);
+  const maxScanRows = envInt('AGENT_CAPTURE_MAX_SCAN_ROWS', 250000, 1000, 5000000);
+  const captureHours = sanitizeCaptureHours(
+    process.env.AGENT_CAPTURE_DISCOVERY_SCHEDULER_CAPTURE_HOURS || '24,48,72',
+    24
+  );
+  const scheduleNext = (delaySec) => {
+    agentCaptureSchedulerState.next_run_at = new Date(Date.now() + delaySec * 1000).toISOString();
+    agentCaptureSchedulerTimer = setTimeout(() => {
+      agentCaptureSchedulerTimer = null;
+      runOnce();
+      scheduleNext(intervalSec);
+    }, delaySec * 1000);
+    if (typeof agentCaptureSchedulerTimer.unref === 'function') {
+      agentCaptureSchedulerTimer.unref();
+    }
+  };
+
+  agentCaptureSchedulerState.enabled = true;
+  agentCaptureSchedulerState.interval_sec = intervalSec;
+  agentCaptureSchedulerState.initial_delay_sec = initialDelaySec;
+  agentCaptureSchedulerState.capture_hours = captureHours;
+  agentCaptureSchedulerState.last_error = null;
+  const runOnce = () => {
+    agentCaptureSchedulerState.last_attempt_at = new Date().toISOString();
+    agentCaptureSchedulerState.last_error = null;
+    try {
+      const url = new URL('http://127.0.0.1/api/agent/capture-discovery/run');
+      url.searchParams.set('hours', '24');
+      url.searchParams.set('capture_hours', captureHours);
+      url.searchParams.set('expected_candidates', '84');
+      url.searchParams.set('report_timeout_sec', String(reportTimeoutSec));
+      url.searchParams.set('test_timeout_sec', String(testTimeoutSec));
+      url.searchParams.set('max_scan_rows', String(maxScanRows));
+      url.searchParams.set('timeout_sec', String(timeoutSec));
+      const result = triggerAgentCaptureDiscoveryLoop(url, { trigger: 'dashboard_scheduler' });
+      agentCaptureSchedulerState.last_result = {
+        accepted: Boolean(result.accepted),
+        status: result.status || null,
+        run_id: result.runner?.run_id || null,
+        observed_at: new Date().toISOString(),
+      };
+    } catch (error) {
+      agentCaptureSchedulerState.error_count += 1;
+      agentCaptureSchedulerState.last_error = error?.message || String(error);
+    }
+  };
+
+  scheduleNext(initialDelaySec);
+  return agentCaptureSchedulerStatus();
 }
 
 function buildAgentCaptureDiscoveryLatestSnapshot(options = {}) {
@@ -4571,6 +4763,159 @@ function envInt(name, defaultValue, minValue, maxValue) {
   const raw = parseInt(String(process.env[name] ?? defaultValue), 10);
   const value = Number.isFinite(raw) ? raw : defaultValue;
   return Math.max(minValue, Math.min(maxValue, value));
+}
+
+let rawPathObserverTimer = null;
+let rawPathObserverChild = null;
+let rawPathObserverTimeoutTimer = null;
+let rawPathObserverStopping = false;
+const rawPathObserverState = {
+  schema_version: 'raw_path_observer_worker.v1',
+  enabled: false,
+  observe_only: true,
+  running: false,
+  pid: null,
+  interval_sec: null,
+  run_timeout_sec: null,
+  run_count: 0,
+  error_count: 0,
+  timeout_count: 0,
+  last_started_at: null,
+  last_completed_at: null,
+  last_exit_code: null,
+  last_exit_signal: null,
+  last_error: null,
+  next_run_at: null,
+  retry_suppressed: false,
+  retry_suppression_reason: null,
+};
+
+function rawPathObserverSchedulerStatus() {
+  return {
+    ...rawPathObserverState,
+    running: Boolean(rawPathObserverChild && processIsAlive(rawPathObserverChild.pid)),
+    pid: rawPathObserverChild?.pid || null,
+  };
+}
+
+function appendRawPathObserverLog(chunk) {
+  const logPath = process.env.RAW_PATH_OBSERVER_LOG || join(dirname(getPaperDbPath()), 'raw-path-observer.log');
+  try {
+    fs.mkdirSync(dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, Buffer.isBuffer(chunk) ? chunk : String(chunk || ''), 'utf8');
+  } catch {}
+}
+
+function stopRawPathObserverScheduler() {
+  rawPathObserverStopping = true;
+  if (rawPathObserverTimer) clearTimeout(rawPathObserverTimer);
+  rawPathObserverTimer = null;
+  if (rawPathObserverTimeoutTimer) clearTimeout(rawPathObserverTimeoutTimer);
+  rawPathObserverTimeoutTimer = null;
+  try { rawPathObserverChild?.kill('SIGTERM'); } catch {}
+}
+
+function startRawPathObserverScheduler() {
+  if (rawPathObserverTimer || rawPathObserverChild) return rawPathObserverSchedulerStatus();
+  if (!envBool('RAW_PATH_OBSERVER_ENABLED', false)) {
+    rawPathObserverState.enabled = false;
+    rawPathObserverState.last_error = 'disabled_by_RAW_PATH_OBSERVER_ENABLED';
+    return rawPathObserverSchedulerStatus();
+  }
+  const intervalSec = envInt('RAW_PATH_OBSERVER_INTERVAL_SEC', 120, 30, 3600);
+  const timeoutSec = envInt('RAW_PATH_OBSERVER_RUN_TIMEOUT_SEC', 900, 30, 900);
+  const initialDelaySec = envInt('RAW_PATH_OBSERVER_INITIAL_DELAY_SEC', 30, 0, 300);
+  rawPathObserverState.enabled = true;
+  rawPathObserverStopping = false;
+  rawPathObserverState.interval_sec = intervalSec;
+  rawPathObserverState.run_timeout_sec = timeoutSec;
+  rawPathObserverState.last_error = null;
+
+  const scheduleNext = (delaySec = intervalSec) => {
+    if (rawPathObserverStopping) return;
+    rawPathObserverState.next_run_at = new Date(Date.now() + delaySec * 1000).toISOString();
+    rawPathObserverTimer = setTimeout(runOnce, delaySec * 1000);
+    if (typeof rawPathObserverTimer.unref === 'function') rawPathObserverTimer.unref();
+  };
+  const runOnce = () => {
+    rawPathObserverTimer = null;
+    if (rawPathObserverChild && processIsAlive(rawPathObserverChild.pid)) {
+      scheduleNext();
+      return;
+    }
+    const startedAt = new Date().toISOString();
+    let settled = false;
+    let timedOut = false;
+    let forceKillTimer = null;
+    rawPathObserverState.last_started_at = startedAt;
+    rawPathObserverState.next_run_at = null;
+    rawPathObserverState.retry_suppressed = false;
+    rawPathObserverState.retry_suppression_reason = null;
+    rawPathObserverState.last_error = null;
+    rawPathObserverState.run_count += 1;
+    appendRawPathObserverLog(`[raw-path-observer-supervisor] ${startedAt} starting observe-only run\n`);
+    const child = spawn(process.execPath, ['scripts/run-raw-path-observer.js'], {
+      cwd: projectRoot,
+      env: {
+        ...process.env,
+        RAW_SIGNAL_OUTCOMES_DB: process.env.RAW_SIGNAL_OUTCOMES_DB || getRawSignalOutcomesDbPath(),
+        DB_PATH: process.env.DB_PATH || process.env.SENTIMENT_DB || join(dirname(getPaperDbPath()), 'sentiment_arb.db'),
+        SENTIMENT_DB: process.env.SENTIMENT_DB || process.env.DB_PATH || join(dirname(getPaperDbPath()), 'sentiment_arb.db'),
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    rawPathObserverChild = child;
+    rawPathObserverState.running = true;
+    rawPathObserverState.pid = child.pid || null;
+    child.stdout.on('data', appendRawPathObserverLog);
+    child.stderr.on('data', appendRawPathObserverLog);
+
+    const finish = (error, code, signal, timedOut = false) => {
+      if (settled) return;
+      settled = true;
+      if (rawPathObserverTimeoutTimer) clearTimeout(rawPathObserverTimeoutTimer);
+      rawPathObserverTimeoutTimer = null;
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      const completedAt = new Date().toISOString();
+      const retrySuppressed = code === 78;
+      rawPathObserverState.running = false;
+      rawPathObserverState.pid = null;
+      rawPathObserverState.last_completed_at = code === 0 ? completedAt : rawPathObserverState.last_completed_at;
+      rawPathObserverState.last_exit_code = code ?? null;
+      rawPathObserverState.last_exit_signal = signal || null;
+      rawPathObserverState.last_error = error ? error.message : null;
+      rawPathObserverState.retry_suppressed = retrySuppressed;
+      rawPathObserverState.retry_suppression_reason = retrySuppressed ? 'kline_db_unhealthy' : null;
+      if (error) rawPathObserverState.error_count += 1;
+      if (timedOut) rawPathObserverState.timeout_count += 1;
+      rawPathObserverChild = null;
+      appendRawPathObserverLog(
+        `[raw-path-observer-supervisor] ${completedAt} exit=${code ?? ''} signal=${signal || ''} timed_out=${timedOut} error=${error?.message || ''}\n`
+      );
+      if (!retrySuppressed) scheduleNext();
+    };
+    rawPathObserverTimeoutTimer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGTERM'); } catch {}
+      forceKillTimer = setTimeout(() => {
+        if (!settled && processIsAlive(child.pid)) {
+          try { child.kill('SIGKILL'); } catch {}
+        }
+      }, 5000);
+      if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref();
+    }, timeoutSec * 1000);
+    if (typeof rawPathObserverTimeoutTimer.unref === 'function') rawPathObserverTimeoutTimer.unref();
+    child.on('error', (error) => finish(error, null, null, timedOut));
+    child.on('exit', (code, signal) => {
+      const error = timedOut
+        ? new Error(`raw_path_observer_timeout_${timeoutSec}s`)
+        : (code === 0 ? null : new Error(`raw_path_observer_exit_${code ?? signal}`));
+      finish(error, code, signal, timedOut);
+    });
+  };
+
+  scheduleNext(initialDelaySec);
+  return rawPathObserverSchedulerStatus();
 }
 
 let rawDogDiscoveryObserverTimer = null;
@@ -11309,9 +11654,10 @@ const server = http.createServer(async (req, res) => {
       runtime_final_evidence: runtimeFinalEvidenceHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
       telegram_ingestion_health: telegramIngestionHealth,
-      raw_path_observer_worker: global.__rawPathObserverWorkerStatus || null,
-      raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || null,
+      raw_path_observer_worker: rawPathObserverSchedulerStatus(),
+      raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || rawDogDiscoveryObserverStatus(),
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
+      agent_capture_scheduler: agentCaptureSchedulerStatus(),
       dashboard_request_metrics: {
         active_count: dashboardRequestMetrics.active.size,
         recent_count: dashboardRequestMetrics.recent.length,
@@ -18645,7 +18991,9 @@ export function startDashboardServer(attempt = 0) {
   try {
     server.listen(targetPort, '0.0.0.0', () => {
       console.log(`🌐 Dashboard server running at http://0.0.0.0:${targetPort}`);
+      startRawPathObserverScheduler();
       startRawDogDiscoveryObserver();
+      startAgentCaptureDiscoveryScheduler();
     });
   } catch (error) {
     console.error(`❌ Sync listen error:`, error);

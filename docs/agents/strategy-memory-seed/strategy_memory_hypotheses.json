@@ -1,0 +1,704 @@
+{
+  "allowed_use": "shadow_only",
+  "evidence_level": "historical_notes_shadow_only",
+  "generated_at": "2026-06-30T13:27:18Z",
+  "historical_pnl_is_promotion_evidence": false,
+  "hypotheses": [
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "ATH#1, MC 20K-75K, Super(signal)>=80, SuperDelta>=15, TradeDelta>=1.",
+      "evidence_source": "historical_strategy_doc: V17.4 backtest and live failure notes",
+      "exit_definition": "Shadow only: TP100 fast-exit variants and no live exit change.",
+      "future_or_posthoc_features": [
+        "future_ath_count",
+        "max_peak_pct",
+        "held_to_tp_label"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-ATH1-EARLY-SCOUT-V17D4",
+      "known_risks": [
+        "ATH#1 is execution-delay sensitive",
+        "MC peak estimates overstate real kline fills",
+        "same-window PnL is not promotion evidence"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "ATH#1 early scout with delta confirmation",
+      "next_validation_required": "Run execution-delay-adjusted replay at 0/5/10/20/30/60s before any candidate proposal.",
+      "priority": 88,
+      "promotion_allowed": false,
+      "required_features": [
+        "ath_stage",
+        "market_cap",
+        "super_index_signal",
+        "super_delta",
+        "trade_delta"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "【问题4】ATH计数器持久化风险 → 当前SQLite在Zeabur重启时会清空 → 丢失ATH计数 = 可能在ATH#1就误入场 → 这是整个策略的致命弱点 ✅ 修正：ATH计数必须用文件存储或外部数据库，确保跨重启保持",
+        "🔑 核心发现: 你的DCA方案(ATH#1小仓+ATH#2加仓)是正确方向！",
+        "1️⃣ ATH#1全仓(0.07): 58笔, 37.9%WR, +1.46SOL(+33.6%) 2️⃣ 等ATH#2全仓(0.07): 27笔, 44.4%WR, +0.64SOL(+31.4%) 3️⃣ DCA(0.02+0.05)无过滤: 27笔DCA, 51.9%WR, +0.65SOL"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "V17\\.4",
+          "ATH#1",
+          "Sup.?Δ",
+          "T.?Δ",
+          "延迟"
+        ]
+      },
+      "source_section": "V17.3/V17.4 ATH#1 delta notes",
+      "strategy_family": "ATH1 early scout",
+      "time_legal_features": [
+        "ath_stage_at_signal",
+        "mc_at_signal",
+        "index_delta_available_before_decision"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "ATH#2, TradeDelta>=2, MC in 50K-100K or 50K-150K, SecurityDelta<8/10.",
+      "evidence_source": "historical_strategy_doc: V18 sensitivity and MC sweet-zone analysis",
+      "exit_definition": "Shadow only: compare TP75/100/150/200 with SL25/30; PnL secondary.",
+      "future_or_posthoc_features": [
+        "top50_label",
+        "max_ath",
+        "future_peak_mc"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-ATH2-CONFIRMATION-V18-MC50-100",
+      "known_risks": [
+        "20K-50K low-MC bucket was described as noisy",
+        "needs real kline/quote validation",
+        "depends on clean delta extraction"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "ATH#2 confirmation with MC bucket and Security Delta",
+      "next_validation_required": "Evaluate by MC bucket and delay; reject future Top50/max_ath features as labels only.",
+      "priority": 90,
+      "promotion_allowed": false,
+      "required_features": [
+        "ath_stage",
+        "trade_delta",
+        "security_delta",
+        "market_cap_bucket"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "或者: 在ATH#2就入场(更早, MC更低, 更大空间)",
+        "你觉得我应该进一步分析哪个方向？ A) 测试不同入场时机(ATH#2, #3, #4, #5) B) 反转信心评分模型(低Security/AI = 加分) C) 用你提出的环比增长+频率momentum重设评分 D) 全部都做",
+        "═══════════════════════════════════════ 🚨 核心发现: ATH#2→#3之间92%是涨的！ ═══════════════════════════════════════ 63个token分析:"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "V18",
+          "ATH#2",
+          "T.?Δ",
+          "Security Delta",
+          "MC ?50"
+        ]
+      },
+      "source_section": "V18 ATH#2 delta/MC bucket notes",
+      "strategy_family": "ATH2 confirmation",
+      "time_legal_features": [
+        "ath_stage_at_signal",
+        "index_deltas_before_decision",
+        "mc_at_signal_or_quote"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "ATH#3, Security<=20, Address>=15, cumulative MCG>=1.5/2.0 when time-legal.",
+      "evidence_source": "historical_strategy_doc: ATH#3 Sec<=20 + Addr>=15 scans",
+      "exit_definition": "Shadow only: DynSL 15/35/55 and DynSL 20/40/60 plus TP/SL comparisons.",
+      "future_or_posthoc_features": [
+        "future_ath_count",
+        "future_peak",
+        "posthoc_winner_bucket"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-ATH3-CONTINUATION-SEC20-ADDR15",
+      "known_risks": [
+        "sample sizes were small in several runs",
+        "ATH#3/4 conclusions changed across windows",
+        "MC comparison can overstate kline exit"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "ATH#3 continuation with low Security and Address confirmation",
+      "next_validation_required": "Use index lifecycle snapshot plus real kline replay; keep as shadow-only until repeated OOS windows agree.",
+      "priority": 86,
+      "promotion_allowed": false,
+      "required_features": [
+        "ath_stage",
+        "security_index",
+        "address_index",
+        "cumulative_mc_gain"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "【问题3】S级信号极其稀少 → GainX<3 在 ATH#3时很难满足（平均已涨2.76x） → 所以S级样本只有8个 — 因为条件本身就很罕见 → 实际运行中可能几天才出现一次S级 ✅ 修正：认识到这是现实，大部分交易是A级和B级",
+        "═══════════════════════════════════════ 📊 发现3: 根本问题是二元结局 ═══════════════════════════════════════ 26个ATH#3入场: 8个达到TP(+100%以上), 18个暴跌(-25%+) 没有中间地带！赢家大赢(+100%~+241%), 输家全死(-25%) R/R ratio = 4.64:1, 只需18%胜率就盈利",
+        "═══════════════════════════════════════ 💡 新思路: 改变入场时机 ═══════════════════════════════════════ ATH#3入场时MC已经很高($47K-$466K)，很多上涨已被消费。 更好的策略可能是："
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "ATH#3",
+          "Sec.?≤?20",
+          "Addr.?≥?15",
+          "DynSL"
+        ]
+      },
+      "source_section": "ATH#3 continuation / v14.9C notes",
+      "strategy_family": "ATH3 continuation",
+      "time_legal_features": [
+        "ath_stage_at_signal",
+        "security_current_at_signal",
+        "address_current_at_signal",
+        "mc_gain_from_prior_ath_if_observed"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "ATH#4+ late continuation; compare cumulative MCG and maturity rather than one-size thresholds.",
+      "evidence_source": "historical_strategy_doc: conflicting ATH#4 findings and late continuation cautions",
+      "exit_definition": "Shadow only: no entry; measure if late ATH stages are posthoc labels or viable time-legal contexts.",
+      "future_or_posthoc_features": [
+        "knowing_later_ath_count",
+        "max_ath",
+        "matured_snapshot_after_entry"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-ATH4-LATE-CONTINUATION-AUDIT",
+      "known_risks": [
+        "high future-data risk",
+        "late entries may be near exhaustion",
+        "matured snapshots must not leak into entry"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "ATH#4+ late continuation lifecycle audit",
+      "next_validation_required": "Classify ATH#4+ features into time-legal vs posthoc labels before any candidate conversion.",
+      "priority": 60,
+      "promotion_allowed": false,
+      "required_features": [
+        "ath_stage",
+        "cumulative_mc_gain",
+        "trade_index",
+        "security_index",
+        "address_index"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "证据： • CAINE ATH#5: Super=2283, AI=2150, Trade=26 → 2150+26+107≈2283 • billion ATH#6: Super=1120, AI=980, Trade=24 → 980+24+116≈1120• BRUH ATH#6: Super=214, AI=85, Trade=21 → 85+21+108≈214",
+        "【问题9】遗漏了其他4个子指数 → Viral Index增长快(0→6=+600%)可能是社区爆发信号 → Address Index增长代表持仓分散化（健康信号） → Security Index稳定=安全，下降=危险 → 目前只用了Super/AI/Trade，浪费了数据 → 但样本量太少，暂时无法验证其他子指数的预测力 💡 建议：先运行当前策略收集数据，后续再深入分析",
+        "ATH#4/5时根据momentum决定是否入场"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "ATH#4",
+          "ATH#5",
+          "后续"
+        ]
+      },
+      "source_section": "ATH#4/5 late continuation notes",
+      "strategy_family": "ATH4+ late continuation",
+      "time_legal_features": [
+        "ath_stage_at_signal",
+        "prior_ath_snapshots_available_before_decision"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "ATH#3+ with Super(current)>=200 or stronger high-consensus bucket.",
+      "evidence_source": "historical_strategy_doc: S13_Super200 and Super 200+ analysis",
+      "exit_definition": "Shadow only: TP75/SL20, TP75/SL25, DynSL grids.",
+      "future_or_posthoc_features": [
+        "future_peak_mc",
+        "future_best_exit"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-SUPER200-HIGH-CONSENSUS",
+      "known_risks": [
+        "Super can be a composite of AI/Trade and may duplicate features",
+        "same-window discovery is not promotion evidence"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "Super200 high consensus continuation",
+      "next_validation_required": "Map to current candidate context and 2D slices; require OOS kline evidence.",
+      "priority": 84,
+      "promotion_allowed": false,
+      "required_features": [
+        "ath_stage",
+        "super_index",
+        "market_cap",
+        "trade_index"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "Super 0-50: 195个, 涨50%+仅4个(2.1%), avg 0.24x Super 80-120: 45个, 涨50%+仅2个(4.4%), avg 0.28x Super 120-200: 91个, 涨50%+: 0个(0%!), avg 0.31x Super 200+: 49个, 涨50%+: 13个(26.5%!), avg 5.18x ⭐⭐⭐",
+        "⚠️ Super 200+ 是超级强信号！26.5%的代币涨了50%以上",
+        "Super 200+ = 超级过滤器 (26.5%涨50%+)"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "Super ?200",
+          "Super>=200",
+          "S13_Super200"
+        ]
+      },
+      "source_section": "S13 Super200 / high consensus notes",
+      "strategy_family": "Super200 / high consensus",
+      "time_legal_features": [
+        "super_index_available_at_signal",
+        "ath_stage_at_signal"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Use SuperDelta, TradeDelta, AddressDelta, ViralDelta, AIDelta, SecurityDelta as 2D context, not production rules.",
+      "evidence_source": "historical_strategy_doc: index lifecycle and delta analysis",
+      "exit_definition": "Not an exit policy; pair with existing shadow candidate virtual trades.",
+      "future_or_posthoc_features": [
+        "delta_to_peak",
+        "delta_to_matured_snapshot",
+        "winner_after_the_fact"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-INDEX-DELTA-COMPOSITE",
+      "known_risks": [
+        "delta windows can be posthoc",
+        "different indexes mature at different ATH stages",
+        "missing snapshot timing creates bias"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "Index delta composite context",
+      "next_validation_required": "Emit index lifecycle snapshots with feature_available_at_ts and time_legal flags.",
+      "priority": 82,
+      "promotion_allowed": false,
+      "required_features": [
+        "super_delta",
+        "ai_delta",
+        "trade_delta",
+        "security_delta",
+        "address_delta",
+        "viral_delta",
+        "media_delta"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "用6个 Index数的发展势头来判断，环比增长，下跌，速度，还有相对时间区间. 以及什么时段. 主抓量，和频率这两个点 其实我在想一个币都是有生命周期的 那我们是根据这个币的生命周期来判断现在的位置和潜力的. 我们能否通过这个视角来打一个预测点 通过刚才的多维度来预测这个币的生命周期和高度 然后来做出推荐这个币的买入点和信心指数 ✡Super Index：(signal)116🔮 --> (current)x124🔮 🔺6% AI Index：(signal)35🔮 --> （current)35🔮 🔺0% Trade Index：(signal)1🔮 --> (current)2🔮 🔺100% Security Index：(si",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 📊 7. Super Index分析:",
+        "═══════════════════════════════════════ 🔑 核心发现：Super Index 的本质 ═══════════════════════════════════════ Super Index ≈ AI Index + Trade Index + 基础值(~100-120)"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "Super.?Δ",
+          "T.?Δ",
+          "Addr.?Δ",
+          "Viral.?Δ",
+          "Index"
+        ]
+      },
+      "source_section": "Super/AI/Trade/Security/Address/Viral/Media delta notes",
+      "strategy_family": "Index delta strategies",
+      "time_legal_features": [
+        "delta_computed_between_signal_and_decision_or_prior_snapshot"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Evaluate MC buckets 15K-30K, 30K-50K, 50K-80K, 80K-100K, 100K-150K, 150K-200K, 200K-300K, 300K+ by ATH stage.",
+      "evidence_source": "historical_strategy_doc: MC sweet-zone and skipped winner analysis",
+      "exit_definition": "Not an exit policy; bucket is candidate context only.",
+      "future_or_posthoc_features": [
+        "future_peak_mc",
+        "current_mc_after_signal"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-MC-BUCKET-LIFECYCLE",
+      "known_risks": [
+        "MC parser bugs were documented",
+        "signal MC and executable quote MC must be separated",
+        "bucket conclusions differed by phase"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "MC bucket lifecycle sweet-zone audit",
+      "next_validation_required": "Produce per-bucket recall/precision and mark MC peak estimates separately from real kline/quote.",
+      "priority": 80,
+      "promotion_allowed": false,
+      "required_features": [
+        "market_cap",
+        "ath_stage",
+        "signal_type"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "===== 6. SKIP信号分析 ===== 最近日志中3个SKIP信号: • $Nodie: 5m下跌-58.7% → 正确SKIP • $你好: MC=$14.6K，评分70<75 → SKIP • $CAT: MC=$21.5K过高 → SKIP • $呸: MC=$12.9K，评分65<75 → SKIP （日志有限，只能看到最近几个SKIP）",
+        "===== 7. 策略改善建议 ===== 优先级1: DYN_FLOOR捕获率太低 → 提高floor比例让利润跑更久 优先级2: 36%入场即跌 → 加强入场过滤（MC/评分/时间） 优先级3: 盈亏比只有0.70 → 让赢的交易赚更多（提高捕获率）",
+        "MC解析问题已定位: 376个New Trending信号全部MC=0"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "MC",
+          "50K",
+          "80K",
+          "甜点",
+          "黑洞"
+        ]
+      },
+      "source_section": "MC bucket / black-hole zone notes",
+      "strategy_family": "MC bucket strategies",
+      "time_legal_features": [
+        "mc_at_signal_or_executable_quote"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Find tokens filtered out but later gold/silver or 100%+; classify top blocker and downstream dropoff.",
+      "evidence_source": "historical_strategy_doc: MC>=50K and SKIP wrong-kill analysis",
+      "exit_definition": "Not an exit policy; dossier only.",
+      "future_or_posthoc_features": [
+        "later_peak",
+        "later_gold_silver_label"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-FILTERED-WINNER-RELAXATION",
+      "known_risks": [
+        "relaxation can increase noise",
+        "missed winners are labels not entry rules",
+        "needs denominator discipline"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "Filtered winner relaxation dossier",
+      "next_validation_required": "Generate filtered_winner_dossier_24h/72h and compare blockers against current 84-candidate mesh.",
+      "priority": 92,
+      "promotion_allowed": false,
+      "required_features": [
+        "raw_tier",
+        "candidate_matches",
+        "decision_status",
+        "pending_status",
+        "final_entry_status"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "===== 6. SKIP信号分析 ===== 最近日志中3个SKIP信号: • $Nodie: 5m下跌-58.7% → 正确SKIP • $你好: MC=$14.6K，评分70<75 → SKIP • $CAT: MC=$21.5K过高 → SKIP • $呸: MC=$12.9K，评分65<75 → SKIP （日志有限，只能看到最近几个SKIP）",
+        "MC解析必须修复 — 目前New Trending信号全部MC=0，实盘会直接被SKIP",
+        "A. 修复MC解析bug → 至少让New Trending信号能正常评分 B. 废弃或收紧ATH_RE → 当前版本太aggressive C. 考虑是否调整MC范围 → 但$5-15K被skip的都是正确的 D. 看看赢家的共同特征？CHINACOIN和万麗都是CORE/AUX低MC信号"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "SKIP",
+          "错杀",
+          "MC>=50K"
+        ]
+      },
+      "source_section": "SKIP/filtered winner notes",
+      "strategy_family": "Filtered winner relaxation strategies",
+      "time_legal_features": [
+        "filter_reason_at_decision",
+        "candidate_match_at_signal"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Entry unchanged; after TP1, move remaining stop to breakeven in shadow simulation only.",
+      "evidence_source": "historical_strategy_doc: V4 beat V5 in later exit scan",
+      "exit_definition": "V4: TP1 then breakeven/0% stop on remainder.",
+      "future_or_posthoc_features": [
+        "best_exit_after_peak"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-EXIT-V4-BREAKEVEN-AFTER-TP1",
+      "known_risks": [
+        "exit-only simulation must not alter live-position-monitor",
+        "peak-only proxy can overstate capture"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "V4 breakeven after TP1",
+      "next_validation_required": "Run shadow simulator on real kline when available; keep live monitor untouched.",
+      "priority": 76,
+      "promotion_allowed": false,
+      "required_features": [
+        "entry_price",
+        "peak_pct",
+        "time_path_or_kline"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "【卖出策略（不变）】 止损: -25% → 全部卖 TP1: +80% → 卖40% TP2: +200% → 卖30% 追踪: 从高点回撤30% → 卖剩余30% 时间: >24h → 全部卖",
+        "【问题2】滑点模型过于乐观 → 10%买入滑点是理想情况 → ATH信号时大量人抢买，实际可能15-25% → 三明治攻击（sandwich）额外吃3-5% ✅ 修正：按15%买入滑点、10%卖出滑点计算 → 往返成本从25%上调到~30-35% → TP1从+80%上调到 +100%（确保扣成本后有利润）",
+        "卖出（修正后）： 止损: -25% → 全卖 TP1: +100% (从+80%上调) → 卖40% TP2: +250% (从+200%上调) → 卖30% 追踪: 回撤25% (从30%收紧) → 卖剩余30% 时间: >24h → 全卖"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "V4",
+          "保本",
+          "breakeven",
+          "TP1"
+        ]
+      },
+      "source_section": "V4 vs V5 exit notes",
+      "strategy_family": "Exit policy variants",
+      "time_legal_features": [
+        "post_entry_kline_only_for_exit_simulation"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Entry unchanged; simulate TP1 60 sell50, TP2 100 sell20, TP3 150 sell10, TP4 200 sell10, TP5 500 sell10 with SL -30.",
+      "evidence_source": "historical_strategy_doc: V5 120h backtest and V4/V5/Hybrid comparison",
+      "exit_definition": "V5 multi-TP shadow simulator only.",
+      "future_or_posthoc_features": [
+        "peak_capture_after_full_path"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-EXIT-V5-MULTI-TP",
+      "known_risks": [
+        "V5 later lost to V4 in expanded scan",
+        "multi-TP needs path ordering not just peak"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "V5 multi-TP with original hard stop",
+      "next_validation_required": "Compare against V4/Hybrid with same entries and real kline order.",
+      "priority": 72,
+      "promotion_allowed": false,
+      "required_features": [
+        "entry_price",
+        "peak_pct",
+        "time_path_or_kline"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "【卖出规则 - 分批止盈】 止损: -25% → 全部卖出（实际亏损65%） TP2: +200% → 卖30%（净收益~179%） 追踪: 从最高点回撤30% → 卖剩余30% 时间: 持仓>24小时 → 全部卖出",
+        "【卖出策略（不变）】 止损: -25% → 全部卖 TP1: +80% → 卖40% TP2: +200% → 卖30% 追踪: 从高点回撤30% → 卖剩余30% 时间: >24h → 全部卖",
+        "【问题2】滑点模型过于乐观 → 10%买入滑点是理想情况 → ATH信号时大量人抢买，实际可能15-25% → 三明治攻击（sandwich）额外吃3-5% ✅ 修正：按15%买入滑点、10%卖出滑点计算 → 往返成本从25%上调到~30-35% → TP1从+80%上调到 +100%（确保扣成本后有利润）"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "V5",
+          "TP1",
+          "TP2",
+          "TP5",
+          "永保"
+        ]
+      },
+      "source_section": "V5 multi-TP notes",
+      "strategy_family": "Exit policy variants",
+      "time_legal_features": [
+        "post_entry_kline_only_for_exit_simulation"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Entry unchanged; simulate DynSL 15/35/55, DynSL 20/40/60, no trailing, and time-stop variants.",
+      "evidence_source": "historical_strategy_doc: v14.9/v17 exit scans",
+      "exit_definition": "Shadow exit simulator only.",
+      "future_or_posthoc_features": [
+        "future_best_floor"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-EXIT-DYNSL-GRID",
+      "known_risks": [
+        "trail can damage DynSL breakeven behavior",
+        "needs path not just peak",
+        "live-position-monitor must remain unchanged"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "DynSL grid variants",
+      "next_validation_required": "Emit variant metrics; do not recommend live exit changes from same-window data.",
+      "priority": 74,
+      "promotion_allowed": false,
+      "required_features": [
+        "entry_price",
+        "peak_pct",
+        "time_path_or_kline"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "DynSL25(峰值36%)",
+        "DynSL25(峰值29%)",
+        "DynSL25(峰值29%)"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "DynSL",
+          "15/35/55",
+          "20/40/60"
+        ]
+      },
+      "source_section": "DynSL 15/35/55 and 20/40/60 notes",
+      "strategy_family": "Exit policy variants",
+      "time_legal_features": [
+        "post_entry_kline_only_for_exit_simulation"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Replay each historical entry definition with entry_delay in 0,5,10,20,30,60 seconds.",
+      "evidence_source": "historical_strategy_doc: Telegram parse/quote/signing/balance delay problem",
+      "exit_definition": "Exit policy paired per hypothesis; PnL secondary only.",
+      "future_or_posthoc_features": [
+        "instant_entry_fill",
+        "future_best_price"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-EXECUTION-DELAY-SENSITIVITY",
+      "known_risks": [
+        "0s-only strategies are not executable",
+        "ATH#1 is most delay sensitive",
+        "quote/kline coverage can block replay"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "Execution delay adjusted replay",
+      "next_validation_required": "Reject or keep posthoc-only any strategy that only works at 0s.",
+      "priority": 94,
+      "promotion_allowed": false,
+      "required_features": [
+        "signal_ts",
+        "decision_ts",
+        "quote_ts",
+        "kline_or_quote_path"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "===== 1. 持有时间分布 ===== • 平均持有: 77秒 (1.3分钟) • 赢的平均: 66秒 | 亏的平均: 86秒 • 78%交易在2分钟内退出 • 最佳时段: 10-30秒(60% WR), 1-2分钟(66.7% WR)",
+        "关于Jupiter实时报价: 可以在ATH#2后用Jupiter quote API检测低点再加仓，但92%的token从ATH1到ATH2是上涨的，\"低吸\"机会其实很少。建议ATH#2到达后直接加仓更实际。",
+        "- **频道**: Telegram \"Egeye AI Gems 100X Vip\" (Channel ID: 3636518327)"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "延迟",
+          "10-30秒",
+          "Telegram",
+          "quote"
+        ]
+      },
+      "source_section": "v17 execution delay failure notes",
+      "strategy_family": "Execution delay sensitivity tests",
+      "time_legal_features": [
+        "entry_delay_applied_after_signal",
+        "price_available_at_delayed_ts"
+      ]
+    },
+    {
+      "allowed_use": "shadow_only",
+      "entry_definition": "Join historical families with x_narrative_stage, mention velocity, KOL score, rug warning, and source quality only if x_narrative_context exists.",
+      "evidence_source": "placeholder: x_narrative_context_24h.json if produced by X observer",
+      "exit_definition": "Not an exit policy.",
+      "future_or_posthoc_features": [
+        "post_decision_social_mentions",
+        "viral_after_peak"
+      ],
+      "historical_pnl_is_promotion_evidence": false,
+      "id": "SM-X-NARRATIVE-PLACEHOLDER",
+      "known_risks": [
+        "X data must be read-only",
+        "ambiguous tickers create false positives",
+        "posthoc social activity must be excluded"
+      ],
+      "machine_action_allowed": "shadow_report_only",
+      "name": "X narrative variant placeholder",
+      "next_validation_required": "Join only after X observer emits time-legal coverage with promotion_allowed=false.",
+      "priority": 52,
+      "promotion_allowed": false,
+      "required_features": [
+        "x_narrative_stage",
+        "x_mention_velocity",
+        "x_kol_score",
+        "x_rug_warning",
+        "x_source_quality_bucket"
+      ],
+      "same_window_discovery_is_promotion_evidence": false,
+      "source_excerpts": [
+        "高AI = 叙事已经被市场消化 = 潜力有限"
+      ],
+      "source_presence": {
+        "found": true,
+        "patterns": [
+          "叙事"
+        ]
+      },
+      "source_section": "X narrative shadow context placeholder",
+      "strategy_family": "X narrative variants placeholder",
+      "time_legal_features": [
+        "x_context_query_end_lte_decision_ts",
+        "is_time_legal_for_decision"
+      ]
+    }
+  ],
+  "hypotheses_count": 13,
+  "mc_buckets": [
+    {
+      "label": "15K-30K",
+      "max": 30000,
+      "min": 15000
+    },
+    {
+      "label": "30K-50K",
+      "max": 50000,
+      "min": 30000
+    },
+    {
+      "label": "50K-80K",
+      "max": 80000,
+      "min": 50000
+    },
+    {
+      "label": "80K-100K",
+      "max": 100000,
+      "min": 80000
+    },
+    {
+      "label": "100K-150K",
+      "max": 150000,
+      "min": 100000
+    },
+    {
+      "label": "150K-200K",
+      "max": 200000,
+      "min": 150000
+    },
+    {
+      "label": "200K-300K",
+      "max": 300000,
+      "min": 200000
+    },
+    {
+      "label": "300K+",
+      "max": null,
+      "min": 300000
+    }
+  ],
+  "notes": [
+    "Historical PnL is not promotion evidence.",
+    "Same-window discovery is not promotion evidence.",
+    "Future features such as max_ath or later peak are labels only.",
+    "All hypotheses are shadow-only."
+  ],
+  "phase": "discovery_readiness_shadow_only",
+  "promotion_allowed": false,
+  "registry_schema_version": "strategy_memory_registry.v1",
+  "rejected_future_data_hypotheses_count": 13,
+  "report_type": "strategy_memory_hypotheses",
+  "same_window_discovery_is_promotion_evidence": false,
+  "schema_version": "strategy_memory_hypotheses.v1",
+  "source": {
+    "bytes": 173927,
+    "source_path": "user_provided_strategy_record.docx",
+    "source_type": "docx"
+  },
+  "strategy_change_allowed": false
+}

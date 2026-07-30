@@ -1,0 +1,1259 @@
+{
+  "allowed_use": "shadow_only",
+  "exit_policy_variants_tested": 11,
+  "generated_at": "2026-06-30T13:27:35Z",
+  "gold_silver_sample_count": 134,
+  "hours": 24,
+  "live_position_monitor_changed": false,
+  "promotion_allowed": false,
+  "raw_meta": {
+    "available": true,
+    "db_path": "data/strategy_memory_local/raw_signal_outcomes.db",
+    "missing_reason": null,
+    "rows": 630,
+    "since_ts": 1782739655,
+    "table": "raw_signal_outcomes",
+    "until_ts": 1782826055
+  },
+  "report_type": "exit_policy_shadow_simulator_24h",
+  "sample_count": 591,
+  "schema_version": "exit_policy_shadow_simulator.v1",
+  "variants": [
+    {
+      "avg_net_pnl_pct": 32.568883,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.79,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 66.7913,
+            "net_pnl_pct": 50.0,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 1.27,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 26.37,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 24.29,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 2.97,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.57,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 39.64,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": 40.31,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "time_stop_proxy": 582
+      },
+      "variant_id": "time_stop_4h",
+      "variant_name": "Time stop 4h proxy",
+      "win_rate": 0.984772
+    },
+    {
+      "avg_net_pnl_pct": 22.446345,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.79,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 40.0748,
+            "net_pnl_pct": 30.0,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 1.27,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 26.37,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 24.29,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 2.97,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.57,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": 75.6811,
+            "net_pnl_pct": 30.0,
+            "status": "time_stop_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": 30.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "time_stop_proxy": 582
+      },
+      "variant_id": "time_stop_1h",
+      "variant_name": "Time stop 1h proxy",
+      "win_rate": 0.984772
+    },
+    {
+      "avg_net_pnl_pct": 19.402555,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.79,
+            "status": "timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 33.3957,
+            "net_pnl_pct": 25.0,
+            "status": "timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 1.27,
+            "status": "timeout_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": 94.8047,
+            "net_pnl_pct": 25.0,
+            "status": "timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 24.29,
+            "status": "timeout_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 2.97,
+            "status": "timeout_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": 100.0,
+            "net_pnl_pct": 11.57,
+            "status": "timeout_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": 63.0676,
+            "net_pnl_pct": 25.0,
+            "status": "timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": 25.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "timeout_proxy": 582
+      },
+      "variant_id": "no_trailing",
+      "variant_name": "No trailing",
+      "win_rate": 0.984772
+    },
+    {
+      "avg_net_pnl_pct": 15.617597,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": -254.4529,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 80.1496,
+            "net_pnl_pct": 60.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": -2362.2047,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": -113.7656,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": -123.5076,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": -1010.101,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": -259.2913,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": -75.6811,
+            "net_pnl_pct": -30.0,
+            "status": "multi_tp_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -30.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "multi_tp_proxy": 582,
+        "stop": 9
+      },
+      "variant_id": "v5_multi_tp",
+      "variant_name": "V5 multi-TP",
+      "win_rate": 0.390863
+    },
+    {
+      "avg_net_pnl_pct": 8.671743,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -25.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "stop_or_timeout_proxy": 383,
+        "tp": 199
+      },
+      "variant_id": "tp75_sl25",
+      "variant_name": "TP75/SL25",
+      "win_rate": 0.336717
+    },
+    {
+      "avg_net_pnl_pct": 8.22335,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 80.1496,
+            "net_pnl_pct": 60.0,
+            "status": "tp"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -25.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "stop_or_timeout_proxy": 351,
+        "tp": 231
+      },
+      "variant_id": "tp60_sell50_protect",
+      "variant_name": "TP60 sell50 protect",
+      "win_rate": 0.390863
+    },
+    {
+      "avg_net_pnl_pct": 8.113367,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 40.0748,
+            "net_pnl_pct": 30,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": 0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": 0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": 37.8406,
+            "net_pnl_pct": 15,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": 15,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "dynsl_floor_proxy": 582,
+        "stop": 9
+      },
+      "variant_id": "dynsl_15_35_55",
+      "variant_name": "DynSL 15/35/55",
+      "win_rate": 0.544839
+    },
+    {
+      "avg_net_pnl_pct": 7.1489,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "stop_or_timeout_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -25.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 9,
+        "stop_or_timeout_proxy": 430,
+        "tp": 152
+      },
+      "variant_id": "tp100_sl25",
+      "variant_name": "TP100/SL25",
+      "win_rate": 0.257191
+    },
+    {
+      "avg_net_pnl_pct": 5.465313,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 40.0748,
+            "net_pnl_pct": 30,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": 0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": 0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -25.0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": 0,
+            "status": "dynsl_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": 15,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "dynsl_floor_proxy": 582,
+        "stop": 9
+      },
+      "variant_id": "dynsl_20_40_60",
+      "variant_name": "DynSL 20/40/60",
+      "win_rate": 0.500846
+    },
+    {
+      "avg_net_pnl_pct": -10.253807,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 53.4331,
+            "net_pnl_pct": 40.0,
+            "status": "tp1_breakeven_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -50.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 330,
+        "tp1_breakeven_proxy": 261
+      },
+      "variant_id": "v4_breakeven_after_tp1",
+      "variant_name": "V4 TP1 breakeven",
+      "win_rate": 0.441624
+    },
+    {
+      "avg_net_pnl_pct": -11.57868,
+      "examples": [
+        {
+          "peak_pct": 11.79,
+          "signal_id": "47922",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "sub25",
+          "token_ca": "ewYnnGDFwA7wVS6Dmiq9ts1SeJXcUkKgjB3GGmypump"
+        },
+        {
+          "peak_pct": 74.86,
+          "signal_id": "47921",
+          "simulated": {
+            "capture_pct": 49.4256,
+            "net_pnl_pct": 37.0,
+            "status": "tp1_floor_proxy"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "unknown",
+          "token_ca": "3oyexxE5TRe2e4i3GLmwUQZY5cstizG2jFtYYg7xJzpX"
+        },
+        {
+          "peak_pct": 1.27,
+          "signal_id": "47920",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "CS",
+          "tier": "sub25",
+          "token_ca": "9qwxahBxcgKyn5X7kZvkN7qxKZg6pkVD8Lo4URtopump"
+        },
+        {
+          "peak_pct": 26.37,
+          "signal_id": "47919",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "8oVV6ncd6D6BCkp1GAab9ueut8XbJrjGB6NSHWKspump"
+        },
+        {
+          "peak_pct": 24.29,
+          "signal_id": "47918",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "MATADOR",
+          "tier": "sub25",
+          "token_ca": "EsCqgWukh25N1WagbdYhwEDv3YhikxPgzrHXJVtCpump"
+        },
+        {
+          "peak_pct": 2.97,
+          "signal_id": "47917",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "HAHA",
+          "tier": "sub25",
+          "token_ca": "FnNhwfDdHyr5pKFGTgybKNerhqCUcTr6vCE3daLhpump"
+        },
+        {
+          "peak_pct": 11.57,
+          "signal_id": "47916",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "PP",
+          "tier": "sub25",
+          "token_ca": "GhJEm8rN1nffqZiWxWRXjvkxPvhZg2YGzdJ7FKibpump"
+        },
+        {
+          "peak_pct": 39.64,
+          "signal_id": "47915",
+          "simulated": {
+            "capture_pct": null,
+            "net_pnl_pct": -50.0,
+            "status": "stop"
+          },
+          "symbol": "UNKNOWN",
+          "tier": "bronze",
+          "token_ca": "GbtihnBEwRX7dM1mjuY2XVHgzzdyDZJ1aNcoPdrhJnU7"
+        }
+      ],
+      "median_net_pnl_pct": -50.0,
+      "n": 591,
+      "promotion_allowed": false,
+      "simulation_basis": "peak_only_shadow_proxy_unless_real_kline_path_is_joined_later",
+      "status_counts": {
+        "stop": 330,
+        "tp1_floor_proxy": 261
+      },
+      "variant_id": "hybrid_tp1_floor",
+      "variant_name": "Hybrid TP1 floor",
+      "win_rate": 0.441624
+    }
+  ],
+  "warning": "Peak-only simulation is not execution evidence; use real kline path before interpreting exit ordering."
+}

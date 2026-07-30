@@ -1,0 +1,378 @@
+{
+  "allowed_use": "shadow_only",
+  "blocked_context_counts": {
+    "execution_delay_replay_required": 1,
+    "future_data_features_must_be_labels_only": 7,
+    "kline_or_exit_path_required": 12,
+    "quote_path_required": 1,
+    "x_narrative_context_required": 1
+  },
+  "candidate_catalog": {
+    "count": 84,
+    "error": null,
+    "expected_candidates": 84,
+    "source": "candidate_shadow_observer"
+  },
+  "candidate_catalog_count": 84,
+  "hypotheses_count": 13,
+  "mapped_to_existing_candidates": 13,
+  "mapping_status_counts": {
+    "missing_delay_replay_only": 1,
+    "missing_exit_shadow_sim_only": 3,
+    "partial_existing_context": 9
+  },
+  "mappings": [
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "notath_mc_lt_30k",
+        "notath_mc_5k_30k",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "entry_mode_registry:ath_high_mc_tiny_probe",
+        "lifecycle:stage1_notath_selective_v1",
+        "old_filter:top10_ai_conf_holders",
+        "historical:smart_backtest_76wr",
+        "historical:walk_forward_68wr",
+        "historical:peak_exit_72wr",
+        "historical:take_profit_30_72wr",
+        "historical:take_profit_50_72wr",
+        "historical:strategy_c_exit_shape"
+      ],
+      "hypothesis_id": "SM-ATH1-EARLY-SCOUT-V17D4",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "ATH1 early scout"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "notath_mc_lt_30k",
+        "notath_mc_5k_30k",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "entry_mode_registry:ath_high_mc_tiny_probe",
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red"
+      ],
+      "hypothesis_id": "SM-ATH2-CONFIRMATION-V18-MC50-100",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "ATH2 confirmation"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "notath_mc_lt_30k",
+        "notath_mc_5k_30k",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "entry_mode_registry:ath_high_mc_tiny_probe",
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red"
+      ],
+      "hypothesis_id": "SM-ATH3-CONTINUATION-SEC20-ADDR15",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "ATH3 continuation"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "notath_mc_lt_30k",
+        "notath_mc_5k_30k",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "entry_mode_registry:ath_high_mc_tiny_probe",
+        "lifecycle:stage1_notath_selective_v1",
+        "lifecycle:stage2a_stop_loss_recovery",
+        "lifecycle:stage3_signal_awakening",
+        "historical:smart_backtest_76wr",
+        "historical:walk_forward_68wr",
+        "historical:peak_exit_72wr",
+        "historical:take_profit_30_72wr",
+        "historical:take_profit_50_72wr"
+      ],
+      "hypothesis_id": "SM-ATH4-LATE-CONTINUATION-AUDIT",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "ATH4+ late continuation"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "lifecycle:stage1_notath_selective_v1",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "old_filter:top10_ai_conf_holders",
+        "historical:smart_backtest_76wr",
+        "historical:walk_forward_68wr",
+        "historical:peak_exit_72wr",
+        "historical:take_profit_30_72wr",
+        "historical:take_profit_50_72wr",
+        "historical:strategy_c_exit_shape",
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1"
+      ],
+      "hypothesis_id": "SM-SUPER200-HIGH-CONSENSUS",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Super200 / high consensus"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "lifecycle:stage1_notath_selective_v1",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "old_filter:top10_ai_conf_holders",
+        "historical:smart_backtest_76wr",
+        "historical:walk_forward_68wr",
+        "historical:peak_exit_72wr",
+        "historical:take_profit_30_72wr",
+        "historical:take_profit_50_72wr",
+        "historical:strategy_c_exit_shape",
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1"
+      ],
+      "hypothesis_id": "SM-INDEX-DELTA-COMPOSITE",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Index delta strategies"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "notath_mc_lt_30k",
+        "notath_mc_5k_30k",
+        "old_filter:mc_si_ai_velocity_utc_pre3m",
+        "entry_mode_registry:ath_high_mc_tiny_probe",
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red"
+      ],
+      "hypothesis_id": "SM-MC-BUCKET-LIFECYCLE",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "MC bucket strategies"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-FILTERED-WINNER-RELAXATION",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Filtered winner relaxation strategies"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-EXIT-V4-BREAKEVEN-AFTER-TP1",
+      "mapping_status": "missing_exit_shadow_sim_only",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Exit policy variants"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-EXIT-V5-MULTI-TP",
+      "mapping_status": "missing_exit_shadow_sim_only",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Exit policy variants"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-EXIT-DYNSL-GRID",
+      "mapping_status": "missing_exit_shadow_sim_only",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Exit policy variants"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "execution_delay_replay_required",
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required",
+        "quote_path_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-EXECUTION-DELAY-SENSITIVITY",
+      "mapping_status": "missing_delay_replay_only",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "Execution delay sensitivity tests"
+    },
+    {
+      "allowed_use": "shadow_only",
+      "blocked_contexts": [
+        "kline_or_exit_path_required",
+        "x_narrative_context_required"
+      ],
+      "could_become_shadow_only_candidate": true,
+      "existing_candidate_ids": [
+        "kline:first_bar_return_filters",
+        "kline:fbr_ge_0",
+        "kline:fbr_ge_1",
+        "kline:fbr_ge_2",
+        "kline:fbr_ge_3",
+        "kline:fbr_ge_5",
+        "kline:first_bar_green",
+        "kline:first_bar_red",
+        "kline:bar4_low_volume",
+        "kline:vol_accel",
+        "kline:candle_pattern",
+        "kline:volume_profile"
+      ],
+      "hypothesis_id": "SM-X-NARRATIVE-PLACEHOLDER",
+      "mapping_status": "partial_existing_context",
+      "promotion_allowed": false,
+      "requires_future_data_conversion": true,
+      "strategy_family": "X narrative variants placeholder"
+    }
+  ],
+  "missing_shadow_candidates": 4,
+  "promotion_allowed": false,
+  "rejected_future_data_hypotheses": 13,
+  "report_type": "strategy_memory_candidate_mapping",
+  "schema_version": "strategy_memory_candidate_mapping.v1",
+  "source_hypotheses": "data/strategy_memory_local/strategy_memory_hypotheses.json"
+}

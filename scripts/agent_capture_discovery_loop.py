@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -2602,6 +2603,18 @@ def run_reports(run_dir, args):
     ))
     if runtime_health_snapshot_path.exists():
         readiness_paths["runtime_health_snapshot"] = runtime_health_snapshot_path
+    filtered_winner_source = (
+        find_strategy_memory_artifact(args, "filtered_winner_dossier_24h.json")
+        or Path(args.data_dir) / "filtered_winner_dossier_24h.json"
+    )
+    exit_policy_source = (
+        find_strategy_memory_artifact(args, "exit_policy_shadow_simulator_24h.json")
+        or Path(args.data_dir) / "exit_policy_shadow_simulator_24h.json"
+    )
+    delay_replay_source = (
+        find_strategy_memory_artifact(args, "execution_delay_adjusted_replay_24h.json")
+        or Path(args.data_dir) / "execution_delay_adjusted_replay_24h.json"
+    )
     diagnostics.append(run_report(
         "strategy_memory_validation",
         [
@@ -2614,9 +2627,9 @@ def run_reports(run_dir, args):
             "--downstream", str(candidate_downstream_path),
             "--a-class", str(a_class_fastlane_path),
             "--pnl", str(pnl_path),
-            "--filtered-winner", str(Path(args.data_dir) / "filtered_winner_dossier_24h.json"),
-            "--exit-report", str(Path(args.data_dir) / "exit_policy_shadow_simulator_24h.json"),
-            "--delay-report", str(Path(args.data_dir) / "execution_delay_adjusted_replay_24h.json"),
+            "--filtered-winner", str(filtered_winner_source),
+            "--exit-report", str(exit_policy_source),
+            "--delay-report", str(delay_replay_source),
             "--out", str(strategy_memory_validation_path),
             "--filtered-bridge-out", str(strategy_memory_filtered_winner_bridge_path),
             "--exit-summary-out", str(strategy_memory_exit_shadow_summary_path),
@@ -5097,6 +5110,131 @@ def sync_latest(run_dir, latest_dir, handoff_dir, verdict_path, summary_path, ha
         shutil.copy2(handoff_json_path, handoff_dir / "latest_codex_handoff.json")
 
 
+COMPLETED_RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z$")
+AUTOLOOP_MANAGED_ROOT_MARKER = ".autoloop-managed-root.json"
+AUTOLOOP_MANAGED_ROOT_SCHEMA = "autoloop_managed_run_root.v1"
+AUTOLOOP_RUN_COMPLETE_MARKER = ".autoloop-run-complete.json"
+AUTOLOOP_RUN_COMPLETE_SCHEMA = "autoloop_run_complete.v1"
+
+
+def ensure_managed_run_root(out_root):
+    root = Path(out_root)
+    if root.is_symlink():
+        raise ValueError(f"AutoLoop output root must not be a symlink: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    resolved = root.resolve()
+    if resolved in {Path("/"), Path.home().resolve()}:
+        raise ValueError(f"Unsafe AutoLoop output root: {resolved}")
+    marker = root / AUTOLOOP_MANAGED_ROOT_MARKER
+    if marker.exists():
+        payload = load_json(marker)
+        if payload.get("schema_version") != AUTOLOOP_MANAGED_ROOT_SCHEMA:
+            raise ValueError(f"Invalid AutoLoop managed-root marker: {marker}")
+    else:
+        write_json(marker, {
+            "schema_version": AUTOLOOP_MANAGED_ROOT_SCHEMA,
+            "created_at": utc_now(),
+            "purpose": "bounded_autoloop_report_retention",
+        })
+    return root
+
+
+def mark_run_complete(run_dir, rid, verdict):
+    path = Path(run_dir)
+    required = ["reviewer_verdict.json", "run_summary.md", "tests.json", "codex_handoff.md"]
+    missing = [name for name in required if not (path / name).is_file()]
+    if missing:
+        raise ValueError(f"Cannot mark incomplete AutoLoop run complete: {missing}")
+    marker = path / AUTOLOOP_RUN_COMPLETE_MARKER
+    write_json(marker, {
+        "schema_version": AUTOLOOP_RUN_COMPLETE_SCHEMA,
+        "state": "final",
+        "run_id": rid,
+        "completed_at": utc_now(),
+        "classification": verdict.get("classification"),
+        "required_artifacts": required,
+    })
+    return marker
+
+
+def prune_completed_run_dirs(out_root, current_run_dir, keep_limit=8):
+    """Remove only old, fully materialized AutoLoop run directories."""
+    root = Path(out_root)
+    current = Path(current_run_dir).resolve()
+    try:
+        parsed_limit = int(keep_limit)
+    except (TypeError, ValueError):
+        parsed_limit = 8
+    limit = max(1, min(parsed_limit, 100))
+    completed = []
+    if not root.exists():
+        return {"keep_limit": limit, "kept": [], "removed": [], "errors": []}
+    try:
+        resolved_root = root.resolve()
+        marker = load_json(root / AUTOLOOP_MANAGED_ROOT_MARKER)
+        if (
+            root.is_symlink()
+            or resolved_root in {Path("/"), Path.home().resolve()}
+            or current.parent != resolved_root
+            or marker.get("schema_version") != AUTOLOOP_MANAGED_ROOT_SCHEMA
+        ):
+            raise ValueError("managed_root_identity_check_failed")
+    except Exception as error:
+        return {
+            "keep_limit": limit,
+            "kept": [],
+            "removed": [],
+            "errors": [{"path": str(root), "error": str(error)}],
+            "blocked_reason": "unsafe_or_unmanaged_autoloop_root",
+        }
+    for path in root.iterdir():
+        if (
+            not path.is_dir()
+            or path.is_symlink()
+            or not COMPLETED_RUN_DIR_RE.fullmatch(path.name)
+        ):
+            continue
+        if not (path / "reviewer_verdict.json").is_file():
+            continue
+        if not (path / "run_summary.md").is_file():
+            continue
+        try:
+            completion = load_json(path / AUTOLOOP_RUN_COMPLETE_MARKER)
+        except Exception:
+            continue
+        if (
+            completion.get("schema_version") != AUTOLOOP_RUN_COMPLETE_SCHEMA
+            or completion.get("state") != "final"
+            or completion.get("run_id") != path.name
+        ):
+            continue
+        completed.append(path)
+    completed.sort(key=lambda path: path.name, reverse=True)
+
+    protected = {current}
+    for path in completed:
+        if len(protected) >= limit:
+            break
+        protected.add(path.resolve())
+
+    removed = []
+    errors = []
+    for path in completed:
+        if path.resolve() in protected:
+            continue
+        try:
+            shutil.rmtree(path)
+            removed.append(str(path))
+        except OSError as error:
+            errors.append({"path": str(path), "error": str(error)})
+    return {
+        "keep_limit": limit,
+        "kept": [str(path) for path in completed if path.resolve() in protected],
+        "removed": removed,
+        "errors": errors,
+    }
+
+
 def write_materialized_artifacts(
     args,
     *,
@@ -5540,7 +5678,7 @@ def write_materialized_artifacts(
 
 def run_once(args):
     rid = run_id()
-    out_root = Path(args.out_root)
+    out_root = ensure_managed_run_root(args.out_root)
     run_dir = out_root / rid
     latest_dir = out_root / "latest"
     handoff_dir = Path(args.handoff_dir)
@@ -5593,6 +5731,12 @@ def run_once(args):
         state="final",
         refresh_oos_after_registry=True,
     )
+    mark_run_complete(run_dir, rid, verdict)
+    retention = prune_completed_run_dirs(
+        out_root,
+        run_dir,
+        keep_limit=os.getenv("AGENT_CAPTURE_RUN_HISTORY_LIMIT", "8"),
+    )
     log_event("run_end", run_id=rid, classification=verdict.get("classification"), blockers=verdict.get("blockers") or [])
 
     return {
@@ -5606,6 +5750,7 @@ def run_once(args):
         "hypothesis_registry": str(args.registry),
         "tests_passed": tests.get("passed"),
         "registry_updated_at": registry.get("updated_at"),
+        "run_history_retention": retention,
     }
 
 
@@ -5819,6 +5964,42 @@ def create_self_test_dbs(root):
 def self_test():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
+        prune_root = root / "prune-runs"
+        completed_names = [
+            "20260101T000000Z",
+            "20260102T000000Z",
+            "20260103T000000Z",
+            "20260104T000000Z",
+        ]
+        for name in completed_names:
+            path = prune_root / name
+            path.mkdir(parents=True)
+            (path / "reviewer_verdict.json").write_text("{}\n", encoding="utf-8")
+            (path / "run_summary.md").write_text("ok\n", encoding="utf-8")
+            (path / "tests.json").write_text("{}\n", encoding="utf-8")
+            (path / "codex_handoff.md").write_text("ok\n", encoding="utf-8")
+            write_json(path / AUTOLOOP_RUN_COMPLETE_MARKER, {
+                "schema_version": AUTOLOOP_RUN_COMPLETE_SCHEMA,
+                "state": "final",
+                "run_id": name,
+            })
+        incomplete = prune_root / "20251231T000000Z"
+        incomplete.mkdir(parents=True)
+        (incomplete / "reviewer_verdict.json").write_text("{}\n", encoding="utf-8")
+        latest = prune_root / "latest"
+        latest.mkdir(parents=True)
+        ensure_managed_run_root(prune_root)
+        retention = prune_completed_run_dirs(
+            prune_root,
+            prune_root / "20260104T000000Z",
+            keep_limit=2,
+        )
+        assert len(retention["removed"]) == 2
+        assert (prune_root / "20260104T000000Z").exists()
+        assert (prune_root / "20260103T000000Z").exists()
+        assert incomplete.exists()
+        assert latest.exists()
+
         paper, raw, kline = create_self_test_dbs(root)
         args = argparse.Namespace(
             paper_db=str(paper),
@@ -5844,6 +6025,10 @@ def self_test():
         assert Path(result["latest_summary"]).exists()
         assert Path(result["latest_handoff"]).exists()
         assert Path(result["hypothesis_registry"]).exists()
+        completed_run = Path(args.out_root) / result["run_id"]
+        completion = load_json(completed_run / AUTOLOOP_RUN_COMPLETE_MARKER)
+        assert completion["state"] == "final"
+        assert completion["run_id"] == result["run_id"]
         verdict = load_json(result["latest_verdict"])
         assert verdict["candidate_count_expected"] == 2
         assert verdict["promotion_allowed"] is False
@@ -5901,6 +6086,12 @@ def self_test():
         assert verdict["oos_readiness_summary"]["available_probe_count"] >= 3
         assert verdict["oos_readiness_summary"]["promotion_allowed"] is False
         latest_dir = Path(result["latest_verdict"]).parent
+        filtered_bridge = load_json(latest_dir / "strategy_memory_filtered_winner_bridge.json")
+        exit_summary = load_json(latest_dir / "strategy_memory_exit_shadow_summary.json")
+        delay_summary = load_json(latest_dir / "strategy_memory_delay_replay_summary.json")
+        assert filtered_bridge["filtered_winner_count"] == 3
+        assert exit_summary["exit_policy_variants_tested"] == 2
+        assert delay_summary["delay_replay_done"] is True
         registry = load_json(result["hypothesis_registry"])
         assert registry["schema_version"] == "hypothesis_registry.v2"
         assert "shadow_only_matured_volume_watch" in registry

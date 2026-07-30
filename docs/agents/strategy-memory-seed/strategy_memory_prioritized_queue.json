@@ -1,0 +1,140 @@
+{
+  "allowed_use": "shadow_only",
+  "delay_replay_done": true,
+  "exit_policy_variants_tested": 11,
+  "filtered_winner_count": 100,
+  "forbidden_file_scan": {
+    "error": "xcode-select: note: No developer tools were found, requesting install.\nIf developer tools are located at a non-default location on disk, use `sudo xcode-select --switch path/to/Xcode.app` to specify the Xcode that you wish to use for command line developer tools, and cancel the installation dialog.\nSee `man xcode-select` for more details.",
+    "status": "unavailable"
+  },
+  "forbidden_files_changed": [],
+  "generated_at": "2026-06-30T13:28:15Z",
+  "mapped_to_existing_candidates": 13,
+  "missing_shadow_candidates": 4,
+  "next_action": "Feed artifacts into AutoLoop as discovery-only context after clean window; do not promote or edit production strategy.",
+  "promotion_allowed": false,
+  "rejected_future_data_hypotheses": 13,
+  "schema_version": "offline_strategy_memory_audit.v1",
+  "strategy_memory_hypotheses_count": 13,
+  "top_10_shadow_hypotheses": [
+    {
+      "blocked_contexts": [
+        "execution_delay_replay_required",
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required",
+        "quote_path_required"
+      ],
+      "id": "SM-EXECUTION-DELAY-SENSITIVITY",
+      "mapping_status": "missing_delay_replay_only",
+      "name": "Execution delay adjusted replay",
+      "priority": 94,
+      "promotion_allowed": false,
+      "strategy_family": "Execution delay sensitivity tests"
+    },
+    {
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-FILTERED-WINNER-RELAXATION",
+      "mapping_status": "partial_existing_context",
+      "name": "Filtered winner relaxation dossier",
+      "priority": 92,
+      "promotion_allowed": false,
+      "strategy_family": "Filtered winner relaxation strategies"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-ATH2-CONFIRMATION-V18-MC50-100",
+      "mapping_status": "partial_existing_context",
+      "name": "ATH#2 confirmation with MC bucket and Security Delta",
+      "priority": 90,
+      "promotion_allowed": false,
+      "strategy_family": "ATH2 confirmation"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-ATH1-EARLY-SCOUT-V17D4",
+      "mapping_status": "partial_existing_context",
+      "name": "ATH#1 early scout with delta confirmation",
+      "priority": 88,
+      "promotion_allowed": false,
+      "strategy_family": "ATH1 early scout"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-ATH3-CONTINUATION-SEC20-ADDR15",
+      "mapping_status": "partial_existing_context",
+      "name": "ATH#3 continuation with low Security and Address confirmation",
+      "priority": 86,
+      "promotion_allowed": false,
+      "strategy_family": "ATH3 continuation"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-SUPER200-HIGH-CONSENSUS",
+      "mapping_status": "partial_existing_context",
+      "name": "Super200 high consensus continuation",
+      "priority": 84,
+      "promotion_allowed": false,
+      "strategy_family": "Super200 / high consensus"
+    },
+    {
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-INDEX-DELTA-COMPOSITE",
+      "mapping_status": "partial_existing_context",
+      "name": "Index delta composite context",
+      "priority": 82,
+      "promotion_allowed": false,
+      "strategy_family": "Index delta strategies"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-MC-BUCKET-LIFECYCLE",
+      "mapping_status": "partial_existing_context",
+      "name": "MC bucket lifecycle sweet-zone audit",
+      "priority": 80,
+      "promotion_allowed": false,
+      "strategy_family": "MC bucket strategies"
+    },
+    {
+      "blocked_contexts": [
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-EXIT-V4-BREAKEVEN-AFTER-TP1",
+      "mapping_status": "missing_exit_shadow_sim_only",
+      "name": "V4 breakeven after TP1",
+      "priority": 76,
+      "promotion_allowed": false,
+      "strategy_family": "Exit policy variants"
+    },
+    {
+      "blocked_contexts": [
+        "future_data_features_must_be_labels_only",
+        "kline_or_exit_path_required"
+      ],
+      "id": "SM-EXIT-DYNSL-GRID",
+      "mapping_status": "missing_exit_shadow_sim_only",
+      "name": "DynSL grid variants",
+      "priority": 74,
+      "promotion_allowed": false,
+      "strategy_family": "Exit policy variants"
+    }
+  ]
+}

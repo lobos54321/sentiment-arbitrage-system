@@ -48,6 +48,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     subscribeJson: process.env.PUMP_FUN_SHADOW_SUBSCRIBE_JSON || '{"method":"subscribeNewToken"}',
     durationSec: Number.parseInt(process.env.PUMP_FUN_SHADOW_DURATION_SEC || '60', 10),
     limit: Number.parseInt(process.env.PUMP_FUN_SHADOW_LIMIT || '1000', 10),
+    retentionDays: Number.parseInt(process.env.PUMP_FUN_SHADOW_RETENTION_DAYS || '30', 10),
+    autoVacuumMigrationMaxMb: Number.parseInt(process.env.PUMP_FUN_SHADOW_AUTO_VACUUM_MIGRATION_MAX_MB || '256', 10),
     provider: process.env.PUMP_FUN_SHADOW_PROVIDER || 'pump_fun',
     selfTest: false,
   };
@@ -62,6 +64,8 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === '--subscribe-json') args.subscribeJson = next();
     else if (arg === '--duration-sec') args.durationSec = Number.parseInt(next(), 10);
     else if (arg === '--limit') args.limit = Number.parseInt(next(), 10);
+    else if (arg === '--retention-days') args.retentionDays = Number.parseInt(next(), 10);
+    else if (arg === '--auto-vacuum-migration-max-mb') args.autoVacuumMigrationMaxMb = Number.parseInt(next(), 10);
     else if (arg === '--provider') args.provider = next();
     else if (arg === '--self-test') args.selfTest = true;
     else if (arg === '--help' || arg === '-h') {
@@ -76,6 +80,11 @@ function parseArgs(argv = process.argv.slice(2)) {
   args.inputJson = args.inputJson ? resolvePath(args.inputJson) : '';
   args.durationSec = Math.max(1, Math.min(Number.isFinite(args.durationSec) ? args.durationSec : 60, 3600));
   args.limit = Math.max(1, Math.min(Number.isFinite(args.limit) ? args.limit : 1000, 100000));
+  args.retentionDays = Math.max(3, Math.min(Number.isFinite(args.retentionDays) ? args.retentionDays : 30, 365));
+  args.autoVacuumMigrationMaxMb = Math.max(
+    0,
+    Math.min(Number.isFinite(args.autoVacuumMigrationMaxMb) ? args.autoVacuumMigrationMaxMb : 256, 2048)
+  );
   return args;
 }
 
@@ -93,6 +102,9 @@ Options:
   --subscribe-json JSON   Optional websocket subscribe payload
   --duration-sec N        Bounded live collection duration, default 60
   --limit N               Max events to ingest this run
+  --retention-days N      Retain isolated shadow rows, default 30 days
+  --auto-vacuum-migration-max-mb N
+                          One-time legacy DB compaction cap, default 256 MB
   --provider NAME         Provider label, default pump_fun
   --self-test             Run isolated self-test
 `);
@@ -142,13 +154,125 @@ function ensureSchema(db) {
   `);
 }
 
-function openDb(dbPath) {
+function availableBytes(path) {
+  try {
+    const stat = fs.statfsSync(path);
+    return Number(stat.bavail || 0) * Number(stat.bsize || 0);
+  } catch {
+    return null;
+  }
+}
+
+function openDb(dbPath, options = {}) {
   fs.mkdirSync(dirname(dbPath), { recursive: true });
+  const existed = fs.existsSync(dbPath) && fs.statSync(dbPath).size > 0;
+  const sizeBefore = existed ? fs.statSync(dbPath).size : 0;
   const db = new Database(dbPath);
+  const migration = {
+    attempted: false,
+    migrated: false,
+    reason: null,
+    size_before_bytes: sizeBefore,
+    size_after_bytes: null,
+    free_bytes_before: availableBytes(dirname(dbPath)),
+    max_bytes: Math.max(0, Number(options.autoVacuumMigrationMaxMb || 0)) * 1024 * 1024,
+    mode_before: Number(db.pragma('auto_vacuum', { simple: true }) || 0),
+    mode_after: null,
+  };
+  const tableCount = Number(
+    db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'").get()?.n || 0
+  );
+  if (migration.mode_before === 0 && tableCount === 0) {
+    try {
+      db.pragma('auto_vacuum = INCREMENTAL');
+      migration.migrated = Number(db.pragma('auto_vacuum', { simple: true }) || 0) === 2;
+      migration.reason = migration.migrated ? 'new_or_empty_database_enabled' : 'new_database_enable_failed';
+    } catch (error) {
+      migration.reason = `new_database_enable_failed:${error.message}`;
+    }
+  } else if (migration.mode_before === 0) {
+    const requiredFreeBytes = Math.max(64 * 1024 * 1024, sizeBefore * 2);
+    if (migration.max_bytes <= 0) {
+      migration.reason = 'legacy_migration_disabled';
+    } else if (sizeBefore > migration.max_bytes) {
+      migration.reason = 'legacy_database_above_migration_cap';
+    } else if (migration.free_bytes_before == null || migration.free_bytes_before < requiredFreeBytes) {
+      migration.reason = 'insufficient_free_space_for_bounded_vacuum';
+    } else {
+      migration.attempted = true;
+      try {
+        try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
+        try { db.pragma('journal_mode = DELETE'); } catch {}
+        db.pragma('auto_vacuum = INCREMENTAL');
+        db.exec('VACUUM');
+        migration.migrated = Number(db.pragma('auto_vacuum', { simple: true }) || 0) === 2;
+        migration.reason = migration.migrated ? 'legacy_database_migrated' : 'legacy_migration_did_not_persist';
+      } catch (error) {
+        migration.reason = `legacy_migration_failed:${error.message}`;
+      }
+    }
+  } else {
+    migration.reason = 'already_auto_vacuum_enabled';
+  }
   try { db.pragma('journal_mode = WAL'); } catch {}
   try { db.pragma('mmap_size = 0'); } catch {}
   ensureSchema(db);
-  return db;
+  migration.mode_after = Number(db.pragma('auto_vacuum', { simple: true }) || 0);
+  migration.size_after_bytes = fs.statSync(dbPath).size;
+  return { db, migration };
+}
+
+function sqliteStorageStats(db) {
+  const pageSize = Number(db.pragma('page_size', { simple: true }) || 0);
+  const pageCount = Number(db.pragma('page_count', { simple: true }) || 0);
+  const freelistCount = Number(db.pragma('freelist_count', { simple: true }) || 0);
+  const autoVacuumMode = Number(db.pragma('auto_vacuum', { simple: true }) || 0);
+  return {
+    page_size: pageSize,
+    page_count: pageCount,
+    freelist_count: freelistCount,
+    reusable_bytes: pageSize * freelistCount,
+    auto_vacuum_mode: autoVacuumMode,
+    auto_vacuum_mode_name: autoVacuumMode === 2 ? 'incremental' : (autoVacuumMode === 1 ? 'full' : 'none'),
+  };
+}
+
+function pruneExpiredRows(db, retentionDays, now = nowSec()) {
+  const cutoff = now - retentionDays * 86400;
+  const storageBefore = sqliteStorageStats(db);
+  const prune = db.transaction(() => {
+    const signalResult = db.prepare(`
+      DELETE FROM pump_fun_shadow_signals
+      WHERE observed_at < ?
+    `).run(cutoff);
+    const runResult = db.prepare(`
+      DELETE FROM pump_fun_shadow_runs
+      WHERE CAST(strftime('%s', started_at) AS INTEGER) < ?
+    `).run(cutoff);
+    return {
+      deleted_signal_rows: Number(signalResult.changes || 0),
+      deleted_run_rows: Number(runResult.changes || 0),
+    };
+  });
+  const deleted = prune();
+  let incrementalVacuumPages = 0;
+  if (
+    storageBefore.auto_vacuum_mode === 2
+    && (deleted.deleted_signal_rows > 0 || deleted.deleted_run_rows > 0)
+  ) {
+    incrementalVacuumPages = 1000;
+    try { db.pragma(`incremental_vacuum(${incrementalVacuumPages})`); } catch {
+      incrementalVacuumPages = 0;
+    }
+  }
+  return {
+    retention_days: retentionDays,
+    cutoff_ts: cutoff,
+    ...deleted,
+    incremental_vacuum_pages_requested: incrementalVacuumPages,
+    storage_before: storageBefore,
+    storage_after: sqliteStorageStats(db),
+  };
 }
 
 function writeJson(path, payload) {
@@ -440,7 +564,9 @@ function writeRunRow(db, runId, summary) {
 
 async function run(args) {
   const startedAt = utcNow();
-  const db = openDb(args.db);
+  const opened = openDb(args.db, args);
+  const db = opened.db;
+  const retention = pruneExpiredRows(db, args.retentionDays);
   const runId = `pumpfun_${startedAt.replace(/[-:]/g, '').replace(/\..+/, 'Z')}`;
   let mode = 'none';
   let sourceStatus = 'P8_SOURCE_NOT_CONFIGURED';
@@ -508,6 +634,8 @@ async function run(args) {
     seen_count: collection.seen,
     examples: collection.examples,
     cumulative: counts,
+    retention,
+    auto_vacuum_migration: opened.migration,
     production_impact: 'zero_shadow_only',
     promotion_allowed: false,
     strategy_change_allowed: false,
@@ -543,6 +671,9 @@ async function selfTest() {
       { nope: true },
     ],
   }), 'utf8');
+  const legacyDb = new Database(dbPath);
+  legacyDb.exec('CREATE TABLE legacy_shadow_seed(id INTEGER PRIMARY KEY)');
+  legacyDb.close();
   const summary = await run({
     db: dbPath,
     out: outPath,
@@ -552,12 +683,42 @@ async function selfTest() {
     subscribeJson: '',
     durationSec: 1,
     limit: 100,
+    retentionDays: 30,
+    autoVacuumMigrationMaxMb: 256,
     provider: 'self_test',
   });
   if (summary.inserted_count !== 2) throw new Error(`expected 2 inserted, got ${summary.inserted_count}`);
   if (summary.duplicate_count !== 1) throw new Error(`expected 1 duplicate, got ${summary.duplicate_count}`);
+  if (!summary.auto_vacuum_migration.migrated) {
+    throw new Error(`legacy shadow DB migration failed: ${summary.auto_vacuum_migration.reason}`);
+  }
   const payload = JSON.parse(fs.readFileSync(outPath, 'utf8'));
   if (payload.production_impact !== 'zero_shadow_only') throw new Error('guardrail summary missing');
+  const testDb = new Database(dbPath);
+  testDb.prepare('UPDATE pump_fun_shadow_signals SET observed_at = ?').run(nowSec() - 31 * 86400);
+  testDb.close();
+  const retainedSummary = await run({
+    db: dbPath,
+    out: outPath,
+    inputJson: inputPath,
+    sourceUrl: '',
+    websocketUrl: '',
+    subscribeJson: '',
+    durationSec: 1,
+    limit: 100,
+    retentionDays: 30,
+    autoVacuumMigrationMaxMb: 256,
+    provider: 'self_test',
+  });
+  if (retainedSummary.retention.deleted_signal_rows !== 2) {
+    throw new Error(`expected 2 retained rows pruned, got ${retainedSummary.retention.deleted_signal_rows}`);
+  }
+  if (retainedSummary.retention.storage_after.auto_vacuum_mode_name !== 'incremental') {
+    throw new Error('new shadow DB must use incremental auto-vacuum');
+  }
+  if (!Number.isFinite(retainedSummary.retention.storage_after.reusable_bytes)) {
+    throw new Error('retention storage telemetry missing');
+  }
   console.log(JSON.stringify({ ok: true, summary_path: outPath, db_path: dbPath }, null, 2));
 }
 
