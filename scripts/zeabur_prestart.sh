@@ -16,6 +16,8 @@ if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ]; then
   PAPER_DB="${PAPER_DB:-$DATA_DIR/paper_trades.db}" \
   PAPER_DB_RETENTION_MODE="${PAPER_DB_RETENTION_MODE:-apply}" \
   PAPER_DB_RETENTION_ARCHIVE_DIR="${PAPER_DB_RETENTION_ARCHIVE_DIR:-$DATA_DIR/archive/paper-db-retention}" \
+  PAPER_DB_RETENTION_STATUS_PATH="${PAPER_DB_RETENTION_STATUS_PATH:-$DATA_DIR/paper-db-retention-status.json}" \
+  PAPER_DB_RETENTION_HISTORY_PATH="${PAPER_DB_RETENTION_HISTORY_PATH:-$DATA_DIR/paper-db-retention-history.jsonl}" \
   python3 scripts/run_with_timeout.py \
     --timeout-sec "${PAPER_DB_RETENTION_TIMEOUT_SEC:-90}" \
     --log "$DATA_DIR/paper-db-retention.log" \

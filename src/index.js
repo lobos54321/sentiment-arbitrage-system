@@ -228,6 +228,8 @@ function runPaperDbRetentionPreflightOnce() {
         PAPER_DB: process.env.PAPER_DB || join(dataDir, 'paper_trades.db'),
         PAPER_DB_RETENTION_MODE: process.env.PAPER_DB_RETENTION_MODE || 'apply',
         PAPER_DB_RETENTION_ARCHIVE_DIR: process.env.PAPER_DB_RETENTION_ARCHIVE_DIR || join(dataDir, 'archive', 'paper-db-retention'),
+        PAPER_DB_RETENTION_STATUS_PATH: process.env.PAPER_DB_RETENTION_STATUS_PATH || join(dataDir, 'paper-db-retention-status.json'),
+        PAPER_DB_RETENTION_HISTORY_PATH: process.env.PAPER_DB_RETENTION_HISTORY_PATH || join(dataDir, 'paper-db-retention-history.jsonl'),
         PYTHONUNBUFFERED: '1',
       },
       encoding: 'utf8',

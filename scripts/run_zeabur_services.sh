@@ -10,6 +10,10 @@ export PORT="${PORT:-8080}"
 export ZEABUR_LOG_TRIM_MAX_MB="${ZEABUR_LOG_TRIM_MAX_MB:-64}"
 export ZEABUR_LOG_TRIM_KEEP_MB="${ZEABUR_LOG_TRIM_KEEP_MB:-16}"
 export ZEABUR_MAINTENANCE_INTERVAL_SEC="${ZEABUR_MAINTENANCE_INTERVAL_SEC:-300}"
+export PAPER_DB_RETENTION_INTERVAL_SEC="${PAPER_DB_RETENTION_INTERVAL_SEC:-3600}"
+case "$PAPER_DB_RETENTION_INTERVAL_SEC" in
+  ''|*[!0-9]*) export PAPER_DB_RETENTION_INTERVAL_SEC=3600 ;;
+esac
 
 # A_CLASS is paper-only tiny canary by construction.  The Zeabur service had
 # A_CLASS_ENABLED=false from the shadow phase, so use a separate force switch to
@@ -96,7 +100,14 @@ if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ]; then
   PAPER_DB=/app/data/paper_trades.db \
   PAPER_DB_RETENTION_MODE="${PAPER_DB_RETENTION_MODE:-apply}" \
   PAPER_DB_RETENTION_ARCHIVE_DIR="${PAPER_DB_RETENTION_ARCHIVE_DIR:-/app/data/archive/paper-db-retention}" \
-  python3 scripts/paper_db_retention.py 2>&1 | tee -a /app/data/paper-db-retention.log || true
+  PAPER_DB_RETENTION_STATUS_PATH="${PAPER_DB_RETENTION_STATUS_PATH:-/app/data/paper-db-retention-status.json}" \
+  PAPER_DB_RETENTION_HISTORY_PATH="${PAPER_DB_RETENTION_HISTORY_PATH:-/app/data/paper-db-retention-history.jsonl}" \
+  PAPER_DB_RETENTION_MAX_SECONDS="${PAPER_DB_RETENTION_STARTUP_MAX_SECONDS:-20}" \
+  PAPER_DB_RETENTION_MAX_ROWS_TOTAL="${PAPER_DB_RETENTION_STARTUP_MAX_ROWS_TOTAL:-50000}" \
+    python3 scripts/run_with_timeout.py \
+      --timeout-sec "${PAPER_DB_RETENTION_STARTUP_TIMEOUT_SEC:-30}" \
+      --log /app/data/paper-db-retention.log \
+      -- python3 scripts/paper_db_retention.py || true
 else
   echo "[STARTUP] Paper DB retention disabled."
 fi
@@ -130,6 +141,7 @@ DASHBOARD_PID=$!
 
 echo "[STARTUP] Starting runtime volume/log maintenance..."
 (
+  LAST_RETENTION_TS="$(date +%s)"
   while true; do
     if [ "${PAPER_DB_SNAPSHOT_REQUEST_WORKER_ENABLED:-true}" != "false" ]; then
       python3 scripts/paper_db_snapshot_request_worker.py \
@@ -152,6 +164,23 @@ echo "[STARTUP] Starting runtime volume/log maintenance..."
       ZEABUR_PREFLIGHT_DB_CHECK_ENABLED="${ZEABUR_RUNTIME_DB_CHECK_ENABLED:-false}" \
       ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
         python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+    fi
+    NOW_TS="$(date +%s)"
+    if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ] \
+      && [ ! -f "$PAPER_DB_INTEGRITY_MARKER" ] \
+      && [ $((NOW_TS - LAST_RETENTION_TS)) -ge "$PAPER_DB_RETENTION_INTERVAL_SEC" ]; then
+      echo "[maintenance] $(date -u '+%Y-%m-%dT%H:%M:%SZ') running bounded paper DB retention" | tee -a /app/data/maintenance.log
+      PAPER_DB=/app/data/paper_trades.db \
+      PAPER_DB_RETENTION_MODE="${PAPER_DB_RETENTION_MODE:-apply}" \
+      PAPER_DB_RETENTION_ARCHIVE_DIR="${PAPER_DB_RETENTION_ARCHIVE_DIR:-/app/data/archive/paper-db-retention}" \
+      PAPER_DB_RETENTION_STATUS_PATH="${PAPER_DB_RETENTION_STATUS_PATH:-/app/data/paper-db-retention-status.json}" \
+      PAPER_DB_RETENTION_HISTORY_PATH="${PAPER_DB_RETENTION_HISTORY_PATH:-/app/data/paper-db-retention-history.jsonl}" \
+      PYTHONUNBUFFERED=1 \
+        python3 scripts/run_with_timeout.py \
+          --timeout-sec "${PAPER_DB_RETENTION_TIMEOUT_SEC:-120}" \
+          --log /app/data/paper-db-retention.log \
+          -- python3 scripts/paper_db_retention.py || true
+      LAST_RETENTION_TS="$NOW_TS"
     fi
   done
 ) &

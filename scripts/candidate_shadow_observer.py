@@ -264,6 +264,10 @@ def ensure_schema(conn):
         "ON candidate_shadow_observations(candidate_id, observed_at)"
     )
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_shadow_obs_observed "
+        "ON candidate_shadow_observations(observed_at)"
+    )
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS candidate_shadow_virtual_trades (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,6 +300,10 @@ def ensure_schema(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_candidate_shadow_virtual_candidate "
         "ON candidate_shadow_virtual_trades(candidate_id, status, observed_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_candidate_shadow_virtual_observed "
+        "ON candidate_shadow_virtual_trades(observed_at)"
     )
     conn.execute(
         """
@@ -2491,6 +2499,12 @@ def self_test():
             },
             signal_ts,
         )
+        indexes = {
+            row[0]
+            for row in out.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_candidate_shadow_%_observed'"
+            ).fetchall()
+        }
         out.close()
         assert summary["candidate_count"] == EXPECTED_CANDIDATE_COUNT
         assert summary["kline_refetch_target_bars"] == CANDIDATE_SHADOW_CONTEXT_TARGET_KLINE_BARS
@@ -2511,6 +2525,8 @@ def self_test():
         assert shadow_markov["markov_available"] is True
         assert shadow_markov["markov_source"] == "shadow_lotto_reclaim_forecast"
         assert shadow_markov["markov_bucket"] in {"insufficient", "green", "yellow", "red"}
+        assert "idx_candidate_shadow_obs_observed" in indexes
+        assert "idx_candidate_shadow_virtual_observed" in indexes
     print("SELF_TEST_PASS candidate_shadow_observer")
 
 

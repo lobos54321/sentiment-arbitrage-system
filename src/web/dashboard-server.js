@@ -5443,6 +5443,9 @@ export function buildStorageHealthSnapshot(options = {}) {
     integrity_error: includeFileStats ? readTinyText(`${paperDbPath}.integrity_error`) : null,
     preflight_tail: includePreflightTail ? readTinyText(join(dataDir, 'preflight.log'), 4000) : null,
     retention_tail: includePreflightTail ? readTinyText(join(dataDir, 'paper-db-retention.log'), 4000) : null,
+    retention_status: safeReadAgentJson(
+      process.env.PAPER_DB_RETENTION_STATUS_PATH || join(dataDir, 'paper-db-retention-status.json'),
+    ),
   };
 }
 
