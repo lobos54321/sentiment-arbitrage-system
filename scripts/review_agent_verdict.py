@@ -1416,6 +1416,8 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     runtime_health_snapshot = readiness_reports.get("runtime_health_snapshot") or {}
     runtime_health_blockers = list(runtime_health_snapshot.get("blockers") or [])
     runtime_health_warnings = list(runtime_health_snapshot.get("warnings") or [])
+    telegram_identity_audit = readiness_reports.get("telegram_signal_identity_audit") or {}
+    runtime_v27_topology_audit = readiness_reports.get("runtime_v27_writer_topology_audit") or {}
     context_dimension_eligibility = readiness_reports.get("context_dimension_eligibility") or {}
     context_dimension_eligibility_summary = summarize_context_dimension_eligibility(
         context_dimension_eligibility
@@ -1436,6 +1438,16 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
     blockers = list(report_health.get("promotion_blockers") or [])
     blockers.extend(runtime_health_blockers)
     blockers.extend(context_dimension_blockers)
+    if (
+        telegram_identity_audit
+        and (telegram_identity_audit.get("acceptance") or {}).get("passed") is not True
+    ):
+        blockers.append("telegram_identity_contract_not_ready")
+    if (
+        runtime_v27_topology_audit
+        and (runtime_v27_topology_audit.get("acceptance") or {}).get("passed") is not True
+    ):
+        blockers.append("runtime_v27_topology_contract_incomplete")
 
     candidate_expected = capture.get("candidate_count_expected") or coverage.get("candidate_count_expected")
     candidate_observed = coverage.get("candidate_count_observed")
@@ -1611,6 +1623,9 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         "runtime_paper_db_unavailable",
         "runtime_paper_db_integrity_marker_exists",
         "runtime_final_evidence_missing",
+        "telegram_identity_contract_not_ready",
+        "runtime_v27_topology_contract_incomplete",
+        "evaluation_foundation_not_ready",
     }
     context_blockers = {
         "source_quote_clean_coverage_below_80pct",
@@ -2728,6 +2743,36 @@ def build_verdict(capture, pnl=None, markov_reports=None, *, tests=None, oos_gat
         },
         "blocked_subtype": blocked_subtype,
         "promotion_allowed": promotion_allowed,
+        "evaluation_foundation": {
+            "active_stage": "A1+A2",
+            "next_stage": "A3",
+            "passed": bool(
+                (telegram_identity_audit.get("acceptance") or {}).get("passed") is True
+                and (runtime_v27_topology_audit.get("acceptance") or {}).get("passed") is True
+            ),
+            "telegram_identity": {
+                "available": bool(telegram_identity_audit),
+                "schema_version": telegram_identity_audit.get("schema_version"),
+                "outcome_schema_version": telegram_identity_audit.get("outcome_schema_version"),
+                "acceptance": telegram_identity_audit.get("acceptance") or {},
+                "identity_namespace_report": telegram_identity_audit.get("identity_namespace_report") or {},
+                "denominators": telegram_identity_audit.get("denominators") or {},
+                "raw_outcome_join": telegram_identity_audit.get("raw_outcome_join") or {},
+                "frozen_cross_db_snapshot": (
+                    (telegram_identity_audit.get("inputs") or {}).get("frozen_cross_db_snapshot")
+                ),
+            },
+            "runtime_v27_topology": {
+                "available": bool(runtime_v27_topology_audit),
+                "schema_version": runtime_v27_topology_audit.get("schema_version"),
+                "classification": runtime_v27_topology_audit.get("classification"),
+                "acceptance": runtime_v27_topology_audit.get("acceptance") or {},
+                "runtime_observation": runtime_v27_topology_audit.get("runtime_observation") or {},
+                "v27_pipeline": runtime_v27_topology_audit.get("v27_pipeline") or {},
+            },
+            "strategy_changes_allowed": False,
+            "promotion_allowed": False,
+        },
         "human_action_required": human_action_required,
         "current_capture_stage": current_capture_stage,
         "mode_status": final_entry.get("mode_status") or stage2_flat.get("mode_status"),

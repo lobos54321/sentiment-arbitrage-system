@@ -14,20 +14,33 @@ REPORT_TIMEOUT_SEC="${AGENT_CAPTURE_REPORT_TIMEOUT_SEC:-300}"
 TEST_TIMEOUT_SEC="${AGENT_CAPTURE_TEST_TIMEOUT_SEC:-180}"
 MAX_SCAN_ROWS="${AGENT_CAPTURE_MAX_SCAN_ROWS:-250000}"
 LOG_PATH="${AGENT_CAPTURE_DISCOVERY_LOG:-$DATA_DIR/agent-capture-discovery.log}"
+EVIDENCE_ROOT="${AGENT_CAPTURE_EVIDENCE_ROOT:-$DATA_DIR/agent_evidence/current}"
+EVIDENCE_DB="${AGENT_CAPTURE_EVIDENCE_DB:-$EVIDENCE_ROOT/paper_evidence.db}"
+EVIDENCE_SIGNAL_DB="${AGENT_CAPTURE_EVIDENCE_SIGNAL_DB:-$EVIDENCE_ROOT/signal.db}"
+EVIDENCE_RAW_DB="${AGENT_CAPTURE_EVIDENCE_RAW_DB:-$EVIDENCE_ROOT/raw.db}"
+EVIDENCE_KLINE_DB="${AGENT_CAPTURE_EVIDENCE_KLINE_DB:-$EVIDENCE_ROOT/kline.db}"
+EVIDENCE_MANIFEST="${AGENT_CAPTURE_EVIDENCE_MANIFEST:-$EVIDENCE_ROOT/manifest.json}"
 
 echo "[agent-capture-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting dedicated worker" | tee -a "$LOG_PATH"
 
 while true; do
   echo "[agent-capture-worker] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting bounded run" | tee -a "$LOG_PATH"
   set +e
-  PAPER_DB="${PAPER_DB:-$DATA_DIR/paper_trades.db}" \
-  RAW_SIGNAL_OUTCOMES_DB="${RAW_SIGNAL_OUTCOMES_DB:-$DATA_DIR/raw_signal_outcomes.db}" \
-  SENTIMENT_DB="${SENTIMENT_DB:-$DATA_DIR/sentiment_arb.db}" \
-  KLINE_DB="${KLINE_DB:-$DATA_DIR/kline_cache.db}" \
+  PAPER_DB="$EVIDENCE_DB" \
+  AGENT_CAPTURE_EVIDENCE_DB="$EVIDENCE_DB" \
+  RAW_SIGNAL_OUTCOMES_DB="$EVIDENCE_RAW_DB" \
+  SENTIMENT_DB="$EVIDENCE_SIGNAL_DB" \
+  KLINE_DB="$EVIDENCE_KLINE_DB" \
   PYTHONUNBUFFERED=1 \
   python3 scripts/agent_capture_discovery_loop.py \
-    --paper-db "${PAPER_DB:-$DATA_DIR/paper_trades.db}" \
-    --raw-db "${RAW_SIGNAL_OUTCOMES_DB:-$DATA_DIR/raw_signal_outcomes.db}" \
+    --signal-db "$EVIDENCE_SIGNAL_DB" \
+    --paper-db "$EVIDENCE_DB" \
+    --raw-db "$EVIDENCE_RAW_DB" \
+    --kline-db "$EVIDENCE_KLINE_DB" \
+    --evidence-manifest "$EVIDENCE_MANIFEST" \
+    --evidence-max-age-sec "${EVALUATOR_SNAPSHOT_MAX_AGE_SEC:-28800}" \
+    --evidence-lock-file "${EVALUATOR_SNAPSHOT_LOCK_FILE:-/tmp/cross-db-evaluator-snapshot.lock}" \
+    --evidence-lock-timeout-sec "${EVALUATOR_SNAPSHOT_LOCK_TIMEOUT_SEC:-300}" \
     --hours "$HOURS" \
     --expected-candidates "$EXPECTED_CANDIDATES" \
     --out-root "${AGENT_CAPTURE_RUNS_DIR:-$DATA_DIR/agent_runs}" \

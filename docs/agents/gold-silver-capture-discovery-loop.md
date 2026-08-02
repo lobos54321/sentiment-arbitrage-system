@@ -8,8 +8,11 @@ settings.
 
 ```bash
 python scripts/agent_capture_discovery_loop.py \
-  --paper-db /app/data/paper_trades.db \
-  --raw-db /app/data/raw_signal_outcomes.db \
+  --signal-db /app/data/agent_evidence/current/signal.db \
+  --paper-db /app/data/agent_evidence/current/paper_evidence.db \
+  --raw-db /app/data/agent_evidence/current/raw.db \
+  --kline-db /app/data/agent_evidence/current/kline.db \
+  --evidence-manifest /app/data/agent_evidence/current/manifest.json \
   --hours 24 \
   --expected-candidates 84 \
   --out-root /app/data/agent_runs \
@@ -39,8 +42,10 @@ AGENT_CAPTURE_MAX_SCAN_ROWS=250000
 
 The dashboard/API entrypoints intentionally do not autostart this worker. A
 main-service autostart previously proved too heavy for the dashboard container.
-The worker only reads the paper/raw DBs and writes agent artifacts; it does not
-change strategy, gates, executor, canary size, wallet config, or risk settings.
+The worker only reads the validated cross-database snapshot bundle and writes
+agent artifacts. It fails closed if the snapshot is missing, stale, incomplete,
+or resolves to any active source database. It does not change strategy, gates,
+executor, canary size, wallet config, or risk settings.
 
 ## Required Artifacts
 

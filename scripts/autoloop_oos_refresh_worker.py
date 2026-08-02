@@ -113,6 +113,8 @@ def build_stage_command(args: argparse.Namespace) -> list[str]:
         str(run_dir),
         "--run-id",
         run_dir.name,
+        "--signal-db",
+        str(args.signal_db),
         "--paper-db",
         str(args.paper_db),
         "--raw-db",
@@ -121,6 +123,14 @@ def build_stage_command(args: argparse.Namespace) -> list[str]:
         str(args.kline_db),
         "--data-dir",
         str(args.data_dir),
+        "--evidence-manifest",
+        str(args.evidence_manifest),
+        "--evidence-max-age-sec",
+        str(args.evidence_max_age_sec),
+        "--evidence-lock-file",
+        str(args.evidence_lock_file),
+        "--evidence-lock-timeout-sec",
+        str(args.evidence_lock_timeout_sec),
         "--hours",
         str(args.hours),
         "--capture-hours",
@@ -292,9 +302,14 @@ def self_test() -> None:
         root = Path(td)
         run_dir = root / "agent_runs" / "latest"
         args = argparse.Namespace(
+            signal_db=root / "signal.db",
             paper_db=root / "paper.db",
             raw_db=root / "raw.db",
             kline_db=root / "kline.db",
+            evidence_manifest=root / "manifest.json",
+            evidence_max_age_sec=28800,
+            evidence_lock_file=root / "snapshot.lock",
+            evidence_lock_timeout_sec=300,
             data_dir=root,
             hours=24,
             capture_hours="24",
@@ -337,9 +352,14 @@ def self_test() -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
-    parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
-    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
+    parser.add_argument("--signal-db", default="/app/data/agent_evidence/current/signal.db")
+    parser.add_argument("--paper-db", default="/app/data/agent_evidence/current/paper_evidence.db")
+    parser.add_argument("--raw-db", default="/app/data/agent_evidence/current/raw.db")
+    parser.add_argument("--kline-db", default="/app/data/agent_evidence/current/kline.db")
+    parser.add_argument("--evidence-manifest", default="/app/data/agent_evidence/current/manifest.json")
+    parser.add_argument("--evidence-max-age-sec", type=float, default=28800)
+    parser.add_argument("--evidence-lock-file", default="/tmp/cross-db-evaluator-snapshot.lock")
+    parser.add_argument("--evidence-lock-timeout-sec", type=float, default=300)
     parser.add_argument("--data-dir", default="/app/data")
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--capture-hours", default="24")

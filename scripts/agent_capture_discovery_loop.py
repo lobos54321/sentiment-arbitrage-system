@@ -30,6 +30,7 @@ from generate_codex_handoff import (
     build_machine_readable_handoff,
     write_text as write_handoff_text,
 )
+from evaluator_db_contract import evaluator_snapshot_bundle_lease
 from review_agent_verdict import build_verdict, write_json
 
 
@@ -42,6 +43,8 @@ SHADOW_DECISION_MIRROR_EVENT_LIMIT = 200
 SHADOW_DECISION_MIRROR_EXAMPLE_LIMIT = 20
 SHADOW_DECISION_BRIDGE_TABLE = "shadow_decision_bridge_events"
 REPORT_TEST_COMMANDS = (
+    ("telegram_signal_identity_self_test", ["scripts/telegram_signal_identity_audit.py", "--self-test"]),
+    ("runtime_v27_writer_topology_self_test", ["scripts/runtime_v27_writer_topology_audit.py", "--self-test"]),
     ("capture_self_test", ["scripts/offline_candidate_capture_discovery.py", "--self-test"]),
     ("raw_gold_silver_funnel_self_test", ["scripts/offline_raw_gold_silver_funnel_audit.py", "--self-test"]),
     ("pnl_cross_self_test", ["scripts/offline_candidate_cross_eval.py", "--self-test"]),
@@ -842,8 +845,37 @@ def _shadow_decision_bridge_schema(conn):
     )
 
 
-def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candidates=DEFAULT_EXPECTED_CANDIDATES):
-    """Persist bridge mirror events to an evaluator-only SQLite table.
+def database_write_target_blocker(target, forbidden):
+    if target in forbidden:
+        return "evaluator_database_write_forbidden"
+    if not target.exists():
+        return None
+    if not target.is_file():
+        return "evaluator_research_db_not_regular_file"
+    for protected in forbidden:
+        if not protected.exists():
+            continue
+        try:
+            if os.path.samefile(target, protected):
+                return "evaluator_database_inode_forbidden"
+        except OSError:
+            return "evaluator_database_identity_check_failed"
+    try:
+        if target.stat().st_nlink != 1:
+            return "evaluator_research_db_hardlink_forbidden"
+    except OSError:
+        return "evaluator_database_identity_check_failed"
+    return None
+
+
+def persist_shadow_decision_bridge_events(
+    db_path,
+    bridge_audit,
+    expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
+    forbidden_db_paths=(),
+    allowed_root=None,
+):
+    """Persist bridge mirror events to a separate evaluator research database.
 
     The table is explicitly separate from paper_decision_events/final_entry_contract
     and carries only EVIDENCE rows. It must never create pending entries, paper
@@ -874,10 +906,42 @@ def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candid
     if not events:
         result["reason"] = "no_mirror_events"
         return result
-    if not db_path or not Path(db_path).exists():
-        result["reason"] = "paper_db_missing"
+    if not db_path:
+        result["reason"] = "research_db_path_missing"
         return result
-    conn = sqlite3.connect(db_path, timeout=10)
+    target = Path(db_path).expanduser().resolve()
+    if not allowed_root:
+        result["reason"] = "evaluator_research_root_required"
+        return result
+    root = Path(allowed_root).expanduser().resolve()
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        result["reason"] = "evaluator_research_db_outside_run_dir"
+        result["forbidden_path_detected"] = True
+        return result
+    if len(relative.parts) != 1 or target.suffix.lower() != ".db":
+        result["reason"] = "evaluator_research_db_must_be_direct_run_child"
+        result["forbidden_path_detected"] = True
+        return result
+    forbidden = {
+        Path(path).expanduser().resolve()
+        for path in forbidden_db_paths or ()
+        if path
+    }
+    target_blocker = database_write_target_blocker(target, forbidden)
+    if target_blocker:
+        result["reason"] = target_blocker
+        result["forbidden_path_detected"] = True
+        return result
+    target.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(target, timeout=10)
+    target_blocker = database_write_target_blocker(target, forbidden)
+    if target_blocker:
+        conn.close()
+        result["reason"] = target_blocker
+        result["forbidden_path_detected"] = True
+        return result
     try:
         conn.execute("PRAGMA busy_timeout=10000")
         _shadow_decision_bridge_schema(conn)
@@ -955,6 +1019,32 @@ def persist_shadow_decision_bridge_events(db_path, bridge_audit, expected_candid
         return result
     finally:
         conn.close()
+
+
+def resolve_evaluator_research_db(requested_path, run_dir):
+    root = Path(run_dir).expanduser().resolve()
+    target = Path(requested_path).expanduser().resolve() if requested_path else root / "autoloop_research.db"
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(f"evaluator_research_db_outside_run_dir:{target}") from exc
+    if len(relative.parts) != 1 or target.suffix.lower() != ".db":
+        raise RuntimeError(f"evaluator_research_db_must_be_direct_run_child:{target}")
+    return target
+
+
+def evaluator_forbidden_database_paths(args):
+    data_root = Path(args.data_dir).expanduser().resolve()
+    return (
+        args.signal_db,
+        args.paper_db,
+        args.raw_db,
+        args.kline_db,
+        data_root / "sentiment_arb.db",
+        data_root / "paper_trades.db",
+        data_root / "raw_signal_outcomes.db",
+        data_root / "kline_cache.db",
+    )
 
 
 def build_shadow_decision_bridge_audit(raw_funnel):
@@ -2168,6 +2258,10 @@ def run_reports(run_dir, args):
     pnl_path = run_dir / f"pnl_cross_secondary_{primary_hours}h.json"
     raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{primary_hours}h.json"
     shadow_decision_bridge_path = run_dir / f"shadow_decision_bridge_audit_{primary_hours}h.json"
+    research_db_path = resolve_evaluator_research_db(
+        getattr(args, "research_db", None),
+        run_dir,
+    )
     candidate_downstream_path = run_dir / f"candidate_downstream_readiness_{primary_hours}h.json"
     context_coverage_path = run_dir / f"context_coverage_audit_{primary_hours}h.json"
     candidate_effectiveness_path = run_dir / f"candidate_effectiveness_{primary_hours}h.json"
@@ -2176,6 +2270,8 @@ def run_reports(run_dir, args):
     capture_cross_validity_path = run_dir / f"capture_cross_validity_{primary_hours}h.json"
     a_class_fastlane_path = run_dir / f"a_class_fastlane_mode_audit_{primary_hours}h.json"
     runtime_health_snapshot_path = run_dir / f"runtime_health_snapshot_{primary_hours}h.json"
+    telegram_identity_path = run_dir / f"telegram_signal_identity_audit_{primary_hours}h.json"
+    runtime_v27_topology_path = run_dir / f"runtime_v27_writer_topology_audit_{primary_hours}h.json"
     context_blocker_monitor_path = run_dir / f"context_blocker_monitor_{primary_hours}h.json"
     volume_kline_audit_path = run_dir / f"volume_kline_coverage_audit_{primary_hours}h.json"
     matured_kline_recheck_path = run_dir / f"matured_kline_volume_recheck_audit_{primary_hours}h.json"
@@ -2212,6 +2308,92 @@ def run_reports(run_dir, args):
     }
     diagnostics = []
     readiness_paths = {}
+    identity_command = [
+        "scripts/telegram_signal_identity_audit.py",
+        "--signal-db", args.signal_db,
+        "--raw-db", args.raw_db,
+        "--hours", str(primary_hours),
+        "--limit", str(args.max_scan_rows),
+        "--out", str(telegram_identity_path),
+    ]
+    topology_command = [
+        "scripts/runtime_v27_writer_topology_audit.py",
+        "--repo-root", args.repo_root,
+        "--data-dir", args.data_dir,
+        "--proc-root", args.proc_root,
+        "--out", str(runtime_v27_topology_path),
+    ]
+    if args.health_json:
+        topology_command.extend(["--health-json", args.health_json])
+    foundation_rows = [
+        run_report(
+            "telegram_signal_identity_audit",
+            identity_command,
+            telegram_identity_path,
+            timeout=args.report_timeout_sec,
+        ),
+        run_report(
+            "runtime_v27_writer_topology_audit",
+            topology_command,
+            runtime_v27_topology_path,
+            timeout=args.report_timeout_sec,
+        ),
+    ]
+    diagnostics.extend(foundation_rows)
+    foundation_reports = {}
+    for name, path in (
+        ("telegram_signal_identity_audit", telegram_identity_path),
+        ("runtime_v27_writer_topology_audit", runtime_v27_topology_path),
+    ):
+        if path.exists():
+            readiness_paths[name] = path
+            try:
+                foundation_reports[name] = load_json(path)
+            except Exception:
+                foundation_reports[name] = {}
+    foundation_passed = bool(
+        all(row.get("ok") for row in foundation_rows)
+        and len(foundation_reports) == 2
+        and all(
+            (report.get("acceptance") or {}).get("passed") is True
+            for report in foundation_reports.values()
+        )
+    )
+    if not foundation_passed:
+        capture = blocked_capture_report(
+            "evaluation_foundation_not_ready",
+            args.paper_db,
+            args.raw_db,
+            primary_hours,
+            args.expected_candidates,
+        )
+        capture["evaluation_foundation"] = {
+            "passed": False,
+            "reports": {
+                name: {
+                    "available": bool(report),
+                    "acceptance": report.get("acceptance") or {},
+                    "blockers": report.get("blockers") or [],
+                }
+                for name, report in foundation_reports.items()
+            },
+            "expensive_stages_skipped": True,
+            "promotion_allowed": False,
+        }
+        write_json(capture_path, capture)
+        diagnostics.append({
+            "name": "evaluation_foundation_guard",
+            "ok": False,
+            "reason": "evaluation_foundation_not_ready",
+            "expensive_stages_skipped": True,
+        })
+        return {
+            "capture_primary": capture_path,
+            "pnl": None,
+            "markov": {},
+            "readiness": readiness_paths,
+            "diagnostics": diagnostics,
+        }
     try:
         build_strategy_memory_ingestion_summary(args, strategy_memory_ingestion_path)
         readiness_paths["strategy_memory_ingestion_summary"] = strategy_memory_ingestion_path
@@ -2294,6 +2476,7 @@ def run_reports(run_dir, args):
             "scripts/offline_raw_gold_silver_funnel_audit.py",
             "--db", args.paper_db,
             "--raw-db", args.raw_db,
+            "--bridge-db", str(research_db_path),
             "--hours", str(primary_hours),
             "--expected-candidates", str(args.expected_candidates),
             "--out", str(raw_funnel_path),
@@ -2371,9 +2554,11 @@ def run_reports(run_dir, args):
             raw_funnel = {}
         shadow_bridge_audit = build_shadow_decision_bridge_audit(raw_funnel)
         bridge_persistence = persist_shadow_decision_bridge_events(
-            args.paper_db,
+            research_db_path,
             shadow_bridge_audit,
             expected_candidates=args.expected_candidates,
+            forbidden_db_paths=evaluator_forbidden_database_paths(args),
+            allowed_root=run_dir,
         )
         shadow_bridge_audit["read_only_evidence_mirror"]["persistence"] = bridge_persistence
         if bridge_persistence.get("upserted_event_count", 0) > 0:
@@ -2383,6 +2568,7 @@ def run_reports(run_dir, args):
                     "scripts/offline_raw_gold_silver_funnel_audit.py",
                     "--db", args.paper_db,
                     "--raw-db", args.raw_db,
+                    "--bridge-db", str(research_db_path),
                     "--hours", str(primary_hours),
                     "--expected-candidates", str(args.expected_candidates),
                     "--out", str(raw_funnel_path),
@@ -2578,6 +2764,7 @@ def run_reports(run_dir, args):
         [
             "scripts/a_class_fastlane_mode_readiness_audit.py",
             "--db", args.paper_db,
+            "--read-only",
             "--raw-funnel", str(raw_funnel_path),
             "--context-coverage", str(context_coverage_path),
             "--volume-kline-audit", str(volume_kline_audit_path),
@@ -5806,13 +5993,15 @@ def create_self_test_dbs(root):
           raw_primary_tier TEXT, raw_sustained_tier TEXT,
           max_sustained_peak_pct REAL, time_to_sustained_peak_sec INTEGER,
           raw_dog_entered INTEGER, raw_dog_realized INTEGER, did_enter INTEGER,
-          held_to_silver INTEGER, held_to_gold INTEGER, exit_reason TEXT
+          held_to_silver INTEGER, held_to_gold INTEGER, exit_reason TEXT,
+          right_censored INTEGER, horizon_sec INTEGER,
+          max_wick_peak_pct REAL, executable_quote_return_pct REAL
         );
         """
     )
     raw_db.execute(
-        "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("1", "DOG", "DOG", now - 120, "matured", 1, "high", 1, 0, 1, "silver", "silver", 80.0, 600, 0, 0, 0, 0, 0, None),
+        "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("1", "DOG", "DOG", now - 120, "matured", 1, "high", 1, 0, 1, "silver", "silver", 80.0, 60, 0, 0, 0, 0, 0, None, 0, 60, 85.0, 70.0),
     )
     raw_db.commit()
     raw_db.close()
@@ -6001,11 +6190,35 @@ def self_test():
         assert latest.exists()
 
         paper, raw, kline = create_self_test_dbs(root)
+        signal_db = root / "signal.db"
+        signal = sqlite3.connect(signal_db)
+        signal.execute(
+            """
+            CREATE TABLE premium_signals(
+              id INTEGER PRIMARY KEY,
+              token_ca TEXT,
+              source_message_ts INTEGER,
+              signal_type TEXT,
+              source_event_id TEXT,
+              downstream_lifecycle_id TEXT
+            )
+            """
+        )
+        signal.execute(
+            "INSERT INTO premium_signals VALUES (?,?,?,?,?,?)",
+            (1, "DOG", int(time.time()) - 120, "ATH", "self-test-event-1", "life-a"),
+        )
+        signal.commit()
+        signal.close()
         args = argparse.Namespace(
+            signal_db=str(signal_db),
             paper_db=str(paper),
             raw_db=str(raw),
             kline_db=str(kline),
             data_dir=str(root),
+            repo_root=str(PROJECT_ROOT),
+            health_json=None,
+            proc_root=str(root / "missing-proc"),
             hours=24,
             expected_candidates=2,
             out_root=str(root / "agent_runs"),
@@ -6054,6 +6267,7 @@ def self_test():
             "runtime_health_status",
             "runtime_health_blockers",
             "runtime_health_warnings",
+            "evaluation_foundation",
             "A_CLASS_mode_status",
             "final_entry_contract_blocker_breakdown",
             "per_candidate_effectiveness_summary",
@@ -6510,10 +6724,23 @@ def self_test():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
-    parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
-    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
+    parser.add_argument("--signal-db", default="/app/data/agent_evidence/current/signal.db")
+    parser.add_argument("--paper-db", default="/app/data/agent_evidence/current/paper_evidence.db")
+    parser.add_argument("--raw-db", default="/app/data/agent_evidence/current/raw.db")
+    parser.add_argument("--kline-db", default="/app/data/agent_evidence/current/kline.db")
+    parser.add_argument("--evidence-manifest", default="/app/data/agent_evidence/current/manifest.json")
+    parser.add_argument("--evidence-max-age-sec", type=float, default=28800)
+    parser.add_argument("--evidence-lock-file", default="/tmp/cross-db-evaluator-snapshot.lock")
+    parser.add_argument("--evidence-lock-timeout-sec", type=float, default=300)
+    parser.add_argument(
+        "--research-db",
+        default=None,
+        help="Writable evaluator-only DB directly inside this run directory; external paths are rejected.",
+    )
     parser.add_argument("--data-dir", default="/app/data")
+    parser.add_argument("--repo-root", default=str(PROJECT_ROOT))
+    parser.add_argument("--health-json", default=None)
+    parser.add_argument("--proc-root", default="/proc")
     parser.add_argument(
         "--strategy-memory-dir",
         default=None,
@@ -6552,6 +6779,15 @@ def main():
     if args.self_test:
         self_test()
         return
+    requested_bundle = {
+        "signal_db": args.signal_db,
+        "paper_db": args.paper_db,
+        "raw_db": args.raw_db,
+        "kline_db": args.kline_db,
+        "data_dir": args.data_dir,
+        "manifest_path": args.evidence_manifest,
+        "max_age_sec": args.evidence_max_age_sec,
+    }
     outputs = []
     runs = max(1, args.max_runs)
     initial_delay = max(0, args.initial_delay_sec)
@@ -6560,7 +6796,17 @@ def main():
         time.sleep(initial_delay)
         log_event("initial_delay_done", delay_sec=initial_delay)
     for index in range(runs):
-        outputs.append(run_once(args))
+        with evaluator_snapshot_bundle_lease(
+            lock_file=args.evidence_lock_file,
+            lock_timeout_sec=args.evidence_lock_timeout_sec,
+            **requested_bundle,
+        ) as evidence:
+            args.signal_db = evidence["databases"]["signal"]
+            args.paper_db = evidence["databases"]["paper"]
+            args.raw_db = evidence["databases"]["raw"]
+            args.kline_db = evidence["databases"]["kline"]
+            args.evidence_manifest = evidence["manifest_path"]
+            outputs.append(run_once(args))
         if index + 1 < runs:
             time.sleep(max(1, args.interval_sec))
     print(json.dumps({"schema_version": SCHEMA_VERSION, "runs": outputs}, indent=2, sort_keys=True))

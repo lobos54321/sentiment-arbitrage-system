@@ -2041,6 +2041,104 @@ function getPaperDbPath() {
   return isAbsolute(paperDbPath) ? paperDbPath : join(projectRoot, paperDbPath);
 }
 
+function getAgentCaptureEvidenceRoot() {
+  const raw = process.env.AGENT_CAPTURE_EVIDENCE_ROOT
+    || join(dirname(getPaperDbPath()), 'agent_evidence', 'current');
+  return isAbsolute(raw) ? raw : join(projectRoot, raw);
+}
+
+function getAgentCaptureEvidenceDbPath() {
+  return process.env.AGENT_CAPTURE_EVIDENCE_DB || join(getAgentCaptureEvidenceRoot(), 'paper_evidence.db');
+}
+
+function getAgentCaptureEvidenceSignalDbPath() {
+  return process.env.AGENT_CAPTURE_EVIDENCE_SIGNAL_DB || join(getAgentCaptureEvidenceRoot(), 'signal.db');
+}
+
+function getAgentCaptureEvidenceRawDbPath() {
+  return process.env.AGENT_CAPTURE_EVIDENCE_RAW_DB || join(getAgentCaptureEvidenceRoot(), 'raw.db');
+}
+
+function getAgentCaptureEvidenceKlineDbPath() {
+  return process.env.AGENT_CAPTURE_EVIDENCE_KLINE_DB || join(getAgentCaptureEvidenceRoot(), 'kline.db');
+}
+
+function getAgentCaptureEvidenceManifestPath() {
+  return process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST || join(getAgentCaptureEvidenceRoot(), 'manifest.json');
+}
+
+function safeRealpath(pathname) {
+  try { return fs.realpathSync(pathname); } catch { return resolve(pathname); }
+}
+
+function agentCaptureEvidenceDbPreflight() {
+  const candidates = {
+    signal: resolve(getAgentCaptureEvidenceSignalDbPath()),
+    paper: resolve(getAgentCaptureEvidenceDbPath()),
+    raw: resolve(getAgentCaptureEvidenceRawDbPath()),
+    kline: resolve(getAgentCaptureEvidenceKlineDbPath()),
+  };
+  const live = {
+    signal: resolve(resolvedDbPath),
+    paper: resolve(getPaperDbPath()),
+    raw: resolve(getRawSignalOutcomesDbPath()),
+    kline: resolve(getKlineCacheDbPath()),
+  };
+  const manifestPath = resolve(getAgentCaptureEvidenceManifestPath());
+  const blockers = [];
+  for (const [name, candidate] of Object.entries(candidates)) {
+    const exists = fs.existsSync(candidate) && fs.statSync(candidate).isFile();
+    if (!exists) blockers.push(`evaluator_snapshot_${name}_db_missing`);
+    if (safeRealpath(candidate) === safeRealpath(live[name])) {
+      blockers.push(`active_${name}_db_forbidden_for_evaluator`);
+    }
+  }
+  let manifest = null;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch {
+    blockers.push(fs.existsSync(manifestPath)
+      ? 'evaluator_snapshot_manifest_invalid_json'
+      : 'evaluator_snapshot_manifest_missing');
+  }
+  if (manifest) {
+    if (manifest.schema_version !== 'cross_db_evaluator_snapshot.v1') blockers.push('evaluator_snapshot_schema_version_invalid');
+    if (manifest.accepted !== true) blockers.push('evaluator_snapshot_not_accepted');
+    if (manifest.quick_checks_passed !== true) blockers.push('evaluator_snapshot_quick_check_not_passed');
+    if (manifest.required_tables_present !== true) blockers.push('evaluator_snapshot_required_tables_missing');
+    if (manifest.cross_database_time_skew_passed !== true) blockers.push('evaluator_snapshot_cross_database_time_skew_failed');
+    if (manifest.read_views_pinned_before_copy !== true) blockers.push('evaluator_snapshot_read_views_not_pinned');
+    if (manifest.source_mutation_free !== true) blockers.push('evaluator_snapshot_source_mutation_contract_failed');
+    const snapshotAgeSec = Date.now() / 1000 - Number(manifest.snapshot_ts || 0);
+    const maxSnapshotAgeSec = Number(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || 28800);
+    if (!Number.isFinite(snapshotAgeSec) || Number(manifest.snapshot_ts || 0) <= 0) blockers.push('evaluator_snapshot_timestamp_missing');
+    else if (snapshotAgeSec < -60) blockers.push('evaluator_snapshot_timestamp_in_future');
+    else if (maxSnapshotAgeSec > 0 && snapshotAgeSec > maxSnapshotAgeSec) blockers.push('evaluator_snapshot_stale');
+    for (const [name, candidate] of Object.entries(candidates)) {
+      const report = manifest.databases?.[name] || {};
+      if (!report.snapshot_path || safeRealpath(report.snapshot_path) !== safeRealpath(candidate)) {
+        blockers.push(`evaluator_snapshot_${name}_path_mismatch`);
+      }
+      if (!report.snapshot_sha256) blockers.push(`evaluator_snapshot_${name}_sha256_missing`);
+      if (report.quick_check?.length !== 1 || report.quick_check[0] !== 'ok') {
+        blockers.push(`evaluator_snapshot_${name}_quick_check_invalid`);
+      }
+    }
+  }
+  return {
+    schema_version: 'evaluator_snapshot_bundle_contract.v1',
+    evidence_db: candidates.paper,
+    evidence_databases: candidates,
+    live_databases: live,
+    evidence_manifest: manifestPath,
+    snapshot_id: manifest?.snapshot_id || null,
+    snapshot_ts: manifest?.snapshot_ts || null,
+    accepted: blockers.length === 0,
+    blockers: [...new Set(blockers)],
+    promotion_allowed: false,
+  };
+}
+
 function getRawSignalOutcomesDbPath() {
   const rawDbPath = process.env.RAW_SIGNAL_OUTCOMES_DB || './data/raw_signal_outcomes.db';
   return isAbsolute(rawDbPath) ? rawDbPath : join(projectRoot, rawDbPath);
@@ -2519,6 +2617,19 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
     };
   }
 
+  const evaluatorDb = agentCaptureEvidenceDbPreflight();
+  if (!evaluatorDb.accepted) {
+    return {
+      accepted: false,
+      status: 'blocked_evaluator_snapshot_required',
+      evaluator_db: evaluatorDb,
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    };
+  }
+
   const hours = boundedIntParam(url, 'hours', 24, 1, 168);
   const captureHours = sanitizeCaptureHours(url.searchParams.get('capture_hours') || url.searchParams.get('capture-hours'), hours);
   const expectedCandidates = boundedIntParam(url, 'expected_candidates', 84, 1, 200);
@@ -2535,10 +2646,16 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
   const startedAt = new Date().toISOString();
   const args = [
     'scripts/agent_capture_discovery_loop.py',
-    '--paper-db', getPaperDbPath(),
-    '--raw-db', getRawSignalOutcomesDbPath(),
-    '--kline-db', getKlineCacheDbPath(),
+    '--signal-db', evaluatorDb.evidence_databases.signal,
+    '--paper-db', evaluatorDb.evidence_db,
+    '--raw-db', evaluatorDb.evidence_databases.raw,
+    '--kline-db', evaluatorDb.evidence_databases.kline,
+    '--evidence-manifest', evaluatorDb.evidence_manifest,
+    '--evidence-max-age-sec', String(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || '28800'),
+    '--evidence-lock-file', process.env.EVALUATOR_SNAPSHOT_LOCK_FILE || '/tmp/cross-db-evaluator-snapshot.lock',
+    '--evidence-lock-timeout-sec', String(process.env.EVALUATOR_SNAPSHOT_LOCK_TIMEOUT_SEC || '300'),
     '--data-dir', dirname(getPaperDbPath()),
+    '--repo-root', projectRoot,
     '--hours', String(hours),
     '--capture-hours', captureHours,
     '--expected-candidates', String(expectedCandidates),
@@ -2707,6 +2824,7 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
     command: ['python3', ...args],
     log_path: paths.log,
     status_path: paths.runner_status,
+    evaluator_db: evaluatorDb,
     promotion_allowed: false,
     strategy_change_allowed: false,
     automatic_runtime_change_allowed: false,

@@ -1,0 +1,77 @@
+{
+  "contract_schema_version": "telegram_outcome_contract.v1",
+  "outcome_schema_version": "telegram_signal_outcome.v1",
+  "evidence_role": "discovery_only",
+  "promotion_allowed": false,
+  "business_source": "telegram_premium_signals",
+  "denominators": {
+    "primary": "unique_token",
+    "secondary": "signal_event",
+    "rules": [
+      "Keep distinct Telegram signal events for timing evaluation.",
+      "Count one business capture per token at its earliest legal captured event.",
+      "Do not let later ATH events claim a token already captured by an earlier legal event.",
+      "Report event and unique-token recall and precision together."
+    ]
+  },
+  "thresholds": {
+    "unit": "return_pct_from_time_legal_signal_baseline",
+    "bronze": {
+      "min_return_pct": 25.0
+    },
+    "silver": {
+      "min_return_pct": 50.0
+    },
+    "gold": {
+      "min_return_pct": 100.0
+    },
+    "10x": {
+      "min_return_pct": 900.0
+    },
+    "100x": {
+      "min_return_pct": 9900.0
+    }
+  },
+  "tier_views": {
+    "wick_tier": {
+      "source_metric": "max_wick_peak_pct",
+      "allowed_use": "exploratory_only",
+      "note": "A transient high is not assumed executable."
+    },
+    "sustained_tier": {
+      "source_metric": "max_sustained_peak_pct",
+      "allowed_use": "capture_evaluation",
+      "note": "Requires the canonical sustained-price rule and a time-legal baseline."
+    },
+    "executable_tier": {
+      "source_metric": "executable_quote_return_pct",
+      "allowed_use": "paper_or_execution_evidence",
+      "note": "Requires executable buy and exit quotes at the configured size; never infer from wick or OHLCV high."
+    }
+  },
+  "evaluation_horizons_sec": [
+    900,
+    7200,
+    86400,
+    259200,
+    604800
+  ],
+  "right_censoring": {
+    "rule": "A signal is excluded from a horizon denominator until signal_ts + horizon_sec <= snapshot_ts.",
+    "pending_label": "right_censored_pending"
+  },
+  "earliest_legal_capture": {
+    "contract_schema_version": "earliest_legal_capture.v1",
+    "required": [
+      "feature_available_at <= decision_at",
+      "quote_available_at <= decision_at",
+      "route_available_at <= decision_at",
+      "quote_executable_at <= decision_at",
+      "telegram_or_deterministic_source_identity_present",
+      "signal_id_present",
+      "token_ca_present"
+    ],
+    "selection_rule": "For each token, choose the earliest event satisfying every required condition; break exact timestamp ties by canonical signal identity.",
+    "later_event_rule": "Later ATH or lifecycle events remain timing evidence but cannot add another unique-token capture."
+  }
+}

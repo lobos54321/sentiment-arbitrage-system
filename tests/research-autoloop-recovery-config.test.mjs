@@ -8,6 +8,8 @@ const startup = fs.readFileSync(path.join(root, 'scripts/run_zeabur_services.sh'
 const dashboard = fs.readFileSync(path.join(root, 'src/web/dashboard-server.js'), 'utf8');
 const pumpObserver = fs.readFileSync(path.join(root, 'scripts/pump_fun_shadow_observer.js'), 'utf8');
 const pumpWorker = fs.readFileSync(path.join(root, 'scripts/run_pump_fun_shadow_worker.sh'), 'utf8');
+const indexRuntime = fs.readFileSync(path.join(root, 'src/index.js'), 'utf8');
+const captureWorker = fs.readFileSync(path.join(root, 'scripts/run_capture_discovery_worker.sh'), 'utf8');
 
 test('Zeabur startup restores bounded research-only workers', () => {
   assert.match(startup, /RAW_DOG_DISCOVERY_OBSERVER_ENABLED.*:-true/);
@@ -31,6 +33,9 @@ test('dashboard scheduler is guarded, observable, and reuses the read-only runne
   assert.match(dashboard, /promotion_allowed: false/);
   assert.match(dashboard, /strategy_change_allowed: false/);
   assert.match(dashboard, /paper_enablement_allowed: false/);
+  assert.match(dashboard, /blocked_evaluator_snapshot_required/);
+  assert.match(dashboard, /AGENT_CAPTURE_EVIDENCE_DB/);
+  assert.match(dashboard, /'--paper-db', evaluatorDb\.evidence_db/);
   assert.doesNotMatch(dashboard, /runtimeDataDir\(\)/);
   assert.match(dashboard, /detached: process\.platform !== 'win32'/);
   assert.match(dashboard, /signalProcessTree\(child\.pid, 'SIGTERM'\)/);
@@ -47,6 +52,38 @@ test('dashboard scheduler is guarded, observable, and reuses the read-only runne
     1,
     'AutoLoop scheduler must create one initial timer'
   );
+});
+
+test('every AutoLoop launcher uses the separate evidence DB', () => {
+  assert.match(indexRuntime, /startEvaluatorSnapshotWorker/);
+  assert.match(indexRuntime, /cross_db_evaluator_snapshot\.py/);
+  assert.match(indexRuntime, /'--keep-previous', '0'/);
+  assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_DB/);
+  assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_SIGNAL_DB/);
+  assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_RAW_DB/);
+  assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_KLINE_DB/);
+  assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_MANIFEST/);
+  assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_AGE_SEC/);
+  assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_LOCK_FILE/);
+  assert.match(indexRuntime, /'--paper-db', evidenceDb/);
+  assert.doesNotMatch(
+    indexRuntime,
+    /'scripts\/agent_capture_discovery_loop\.py',[\s\S]{0,180}'--paper-db', paperDb/,
+  );
+  assert.match(startup, /--paper-db "\$AGENT_CAPTURE_EVIDENCE_DB"/);
+  assert.match(startup, /cross_db_evaluator_snapshot\.py/);
+  assert.match(startup, /--signal-db "\$AGENT_CAPTURE_EVIDENCE_SIGNAL_DB"/);
+  assert.match(startup, /--raw-db "\$AGENT_CAPTURE_EVIDENCE_RAW_DB"/);
+  assert.match(startup, /--kline-db "\$AGENT_CAPTURE_EVIDENCE_KLINE_DB"/);
+  assert.match(startup, /--evidence-manifest "\$AGENT_CAPTURE_EVIDENCE_MANIFEST"/);
+  assert.match(startup, /--evidence-lock-file "\$\{EVALUATOR_SNAPSHOT_LOCK_FILE/);
+  assert.match(captureWorker, /--paper-db "\$EVIDENCE_DB"/);
+  assert.match(captureWorker, /--signal-db "\$EVIDENCE_SIGNAL_DB"/);
+  assert.match(captureWorker, /--raw-db "\$EVIDENCE_RAW_DB"/);
+  assert.match(captureWorker, /--kline-db "\$EVIDENCE_KLINE_DB"/);
+  assert.match(captureWorker, /--evidence-manifest "\$EVIDENCE_MANIFEST"/);
+  assert.match(captureWorker, /--evidence-lock-file "\$\{EVALUATOR_SNAPSHOT_LOCK_FILE/);
+  assert.doesNotMatch(captureWorker, /--paper-db "\$\{PAPER_DB:-\$DATA_DIR\/paper_trades\.db\}"/);
 });
 
 test('P8 remains isolated and prunes only its own expired shadow rows', () => {

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only A_CLASS_FASTLANE mode/final-entry readiness audit.
+"""A_CLASS_FASTLANE mode/final-entry readiness audit.
+
+The historical CLI also owns the explicitly enabled paper auto-recovery writer.
+Evaluator callers must pass ``--read-only`` so frozen evidence databases can
+never be used as runtime state stores.
 
 This report explains whether A_CLASS remaining in SHADOW is expected or stuck.
 It reads runtime safety state, final_entry_contract decision events, and the
-current context/coverage reports. It never resets SHADOW, enables A_CLASS,
-changes final_entry_contract, enables paper/live execution, or changes risk.
+current context/coverage reports. Read-only evaluator mode never resets SHADOW,
+enables A_CLASS, changes final_entry_contract, enables paper/live execution, or
+changes risk.
 """
 
 from __future__ import annotations
@@ -1880,6 +1885,63 @@ def persist_paper_auto_resume_if_eligible(db_path, runtime, paper_readiness, rec
         db.close()
 
 
+def projected_read_only_persistence(runtime, paper_readiness, recovery_sla, counter):
+    should_execute, eligibility_reason = paper_auto_resume_should_execute(
+        runtime,
+        paper_readiness,
+        recovery_sla,
+    )
+    common = {
+        "attempted": False,
+        "available": True,
+        "reason": "read_only_audit",
+        "promotion_allowed": False,
+        "changes_runtime_mode": False,
+        "changes_circuit_breaker": False,
+    }
+    return (
+        {
+            **common,
+            "schema_version": CLEAN_WINDOW_COUNTER_SCHEMA_VERSION,
+            "mode_key": MODE_KEY,
+            "counter": counter,
+        },
+        {
+            **common,
+            "mode_key": MODE_KEY,
+            "tracker": None,
+        },
+        {
+            **common,
+            "schema_version": "a_class_paper_auto_resume_writer.v1",
+            "mode_key": MODE_KEY,
+            "operator": SYSTEM_PAPER_AUTO_RESUME_OPERATOR,
+            "executed": False,
+            "would_execute_if_runtime_writer": bool(should_execute),
+            "eligibility_reason": eligibility_reason,
+            "action": "paper_auto_resume",
+            "strategy_change_allowed": False,
+            "gate_change_allowed": False,
+            "executor_change_allowed": False,
+            "canary_increase_allowed": False,
+            "risk_change_allowed": False,
+            "live_enablement_allowed": False,
+            "live_auto_reenable_allowed": False,
+        },
+    )
+
+
+def open_audit_db(db_path, read_only=False):
+    if read_only:
+        resolved = Path(db_path).expanduser().resolve()
+        db = sqlite3.connect(f"{resolved.as_uri()}?mode=ro&immutable=1", uri=True)
+        db.execute("PRAGMA query_only=ON")
+    else:
+        db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    return db
+
+
 def build_paper_entry_proposal_readiness(classification, capture_stage_rates, failed_conditions, clean_counter, recovery_sla=None):
     mode_adjusted = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility") or {}
     rate_value = capture_stage_rates.get("mode_disabled_adjusted_final_eligibility_rate")
@@ -2076,30 +2138,42 @@ def build_stage2_flat_summary(runtime, classification, failed_conditions, captur
 def build_report(args):
     now_ts = int(args.now_ts or time.time())
     since_ts = now_ts - int(float(args.hours) * 3600)
+    read_only = bool(getattr(args, "read_only", False))
     raw_funnel = load_json(args.raw_funnel)
     context = load_json(args.context_coverage)
     volume_kline = load_json(args.volume_kline_audit)
     context_monitor = load_json(args.context_blocker_monitor)
-    db = sqlite3.connect(args.db)
-    db.row_factory = sqlite3.Row
+    db = open_audit_db(args.db, read_only=read_only)
     try:
         runtime = load_runtime_state(db, now_ts)
         runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
         final_contract = load_final_entry_contract_events(db, since_ts, now_ts)
         failed = context_failed_conditions(context, volume_kline, context_monitor)
         current_clean_passed = not failed
-        clean_counter_persistence = persist_clean_window_counter(
-            db,
-            runtime.get("mode_state") or {},
-            current_clean_passed,
-            failed,
-            now_ts,
-        )
-        runtime = load_runtime_state(db, now_ts)
-        runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
+        if read_only:
+            projected_counter = clean_window_counter_summary(
+                runtime.get("mode_state") or {},
+                current_clean_passed,
+                failed,
+                now_ts,
+            )
+            clean_counter_persistence = None
+        else:
+            projected_counter = None
+            clean_counter_persistence = persist_clean_window_counter(
+                db,
+                runtime.get("mode_state") or {},
+                current_clean_passed,
+                failed,
+                now_ts,
+            )
+            runtime = load_runtime_state(db, now_ts)
+            runtime, recovery_sla = apply_recovery_sla_to_runtime(runtime, now_ts)
     finally:
         db.close()
-    clean_counter = clean_window_counter_from_detail((runtime.get("mode_state") or {}).get("detail") or {})
+    clean_counter = projected_counter or clean_window_counter_from_detail(
+        (runtime.get("mode_state") or {}).get("detail") or {}
+    )
     if not clean_counter and clean_counter_persistence.get("counter"):
         clean_counter = clean_counter_persistence.get("counter") or {}
     quote_reconciliation = quote_window_pending_reconciliation(context_monitor)
@@ -2114,18 +2188,30 @@ def build_report(args):
         clean_counter,
         recovery_sla,
     )
-    paper_tracker_persistence = persist_paper_ready_tracker(
-        args.db,
-        paper_proposal_readiness.get("status"),
-        now_ts,
-    )
-    paper_auto_resume_execution = persist_paper_auto_resume_if_eligible(
-        args.db,
-        runtime,
-        paper_proposal_readiness,
-        recovery_sla,
-        now_ts,
-    )
+    if read_only:
+        (
+            clean_counter_persistence,
+            paper_tracker_persistence,
+            paper_auto_resume_execution,
+        ) = projected_read_only_persistence(
+            runtime,
+            paper_proposal_readiness,
+            recovery_sla,
+            clean_counter,
+        )
+    else:
+        paper_tracker_persistence = persist_paper_ready_tracker(
+            args.db,
+            paper_proposal_readiness.get("status"),
+            now_ts,
+        )
+        paper_auto_resume_execution = persist_paper_auto_resume_if_eligible(
+            args.db,
+            runtime,
+            paper_proposal_readiness,
+            recovery_sla,
+            now_ts,
+        )
     if paper_auto_resume_execution.get("executed"):
         db = sqlite3.connect(args.db)
         db.row_factory = sqlite3.Row
@@ -2161,6 +2247,7 @@ def build_report(args):
         "window": {"hours": args.hours, "since_ts": since_ts, "until_ts": now_ts},
         "inputs": {
             "paper_db": args.db,
+            "read_only": read_only,
             "raw_funnel": args.raw_funnel,
             "context_coverage": args.context_coverage,
             "volume_kline_audit": args.volume_kline_audit,
@@ -2774,6 +2861,11 @@ def parse_args(argv=None):
     parser.add_argument("--context-blocker-monitor", default=None)
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--now-ts", type=int, default=None)
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Evaluate a frozen DB without persisting counters, trackers, or paper auto-resume state.",
+    )
     parser.add_argument("--out")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)

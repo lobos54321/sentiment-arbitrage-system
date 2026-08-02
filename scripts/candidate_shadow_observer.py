@@ -1949,11 +1949,13 @@ def write_virtual_trades(out_conn, signal_features, catalog_evaluations, bars, o
     }
 
 
-def run_once(args):
+def _run_once(args, managed_connections):
     registry, modes = load_registry(args.registry)
     catalog = build_candidate_catalog(modes)
     signal_conn = open_sqlite(args.signal_db, "signal_db")
+    managed_connections.append(signal_conn)
     out_conn = open_sqlite(args.out_db, "out_db")
+    managed_connections.append(out_conn)
     try:
         with sqlite_single_writer("candidate_shadow_observer:ensure_schema"):
             ensure_schema(out_conn)
@@ -1963,6 +1965,7 @@ def run_once(args):
     if args.kline_db:
         try:
             kline_conn = open_sqlite(args.kline_db, "kline_db")
+            managed_connections.append(kline_conn)
             with kline_single_writer("candidate_shadow_observer:kline_initialize"):
                 configure_kline_sqlite_connection(kline_conn)
                 ensure_kline_schema(kline_conn)
@@ -2148,6 +2151,28 @@ def run_once(args):
     }
     print(json.dumps(summary, sort_keys=True))
     return summary
+
+
+def close_managed_connections(connections):
+    """Release every per-run SQLite handle, including partially opened runs."""
+    for conn in reversed(connections):
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except sqlite3.Error:
+            pass
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def run_once(args):
+    managed_connections = []
+    try:
+        return _run_once(args, managed_connections)
+    finally:
+        close_managed_connections(managed_connections)
 
 
 def self_test():

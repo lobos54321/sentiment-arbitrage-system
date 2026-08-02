@@ -18,6 +18,7 @@ import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from urllib.parse import quote
 
 
 SCHEMA_VERSION = "offline_raw_gold_silver_funnel_audit.v4"
@@ -93,6 +94,15 @@ def columns(db, table):
     if not table_exists(db, table):
         return set()
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def readonly_connection(path):
+    uri = f"file:{quote(str(Path(path).expanduser().resolve()), safe='/')}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA busy_timeout=30000")
+    return connection
 
 
 def optional(cols, name, fallback="NULL"):
@@ -306,7 +316,7 @@ def load_candidate_observations(paper_db, raw_signal_ids, since_ts):
     return out, {"available": True, "loaded_rows": len(out)}
 
 
-def load_paper_decisions(paper_db, tokens, since_ts, until_ts):
+def load_paper_decisions(paper_db, tokens, since_ts, until_ts, bridge_db=None):
     if not tokens:
         return []
     token_set = set(tokens)
@@ -381,9 +391,10 @@ def load_paper_decisions(paper_db, tokens, since_ts, until_ts):
             [since_ts - 60, until_ts + 900],
         ).fetchall()
         out.extend(dict(row) for row in rows if str(row["token_ca"] or "") in token_set)
-    if table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE):
-        cols = columns(paper_db, SHADOW_DECISION_BRIDGE_TABLE)
-        rows = paper_db.execute(
+    bridge_source = bridge_db if bridge_db is not None else paper_db
+    if table_exists(bridge_source, SHADOW_DECISION_BRIDGE_TABLE):
+        cols = columns(bridge_source, SHADOW_DECISION_BRIDGE_TABLE)
+        rows = bridge_source.execute(
             f"""
             SELECT rowid AS id, 'shadow_decision_bridge_events' AS source_kind,
                    {expr(cols, 'event_ts', 'created_at')} AS event_ts,
@@ -965,8 +976,10 @@ def load_raw_signal_decision_bridge(
     raw_rows=None,
     observations=None,
     token_time_decisions=None,
+    bridge_db=None,
     expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
 ):
+    bridge_source = bridge_db if bridge_db is not None else paper_db
     result = {
         "raw_signal_ids": len(raw_signal_ids or []),
         "decision_records_by_signal_id": 0,
@@ -997,7 +1010,7 @@ def load_raw_signal_decision_bridge(
         "pending_without_final_entry_examples": [],
         "raw_scoped_final_entry_hard_blockers": {},
         "component_decision_reason_counts": [],
-        "shadow_decision_bridge_events_available": table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE),
+        "shadow_decision_bridge_events_available": table_exists(bridge_source, SHADOW_DECISION_BRIDGE_TABLE),
         "shadow_decision_bridge_records_by_signal_id": 0,
     }
     if not raw_signal_ids:
@@ -1030,9 +1043,9 @@ def load_raw_signal_decision_bridge(
             [since_ts - 60, until_ts + 900],
         ).fetchall()
         rows.extend([row for row in window_rows if signal_id_key(row["signal_id"]) in raw_id_set])
-    if table_exists(paper_db, SHADOW_DECISION_BRIDGE_TABLE):
-        cols = columns(paper_db, SHADOW_DECISION_BRIDGE_TABLE)
-        shadow_window_rows = paper_db.execute(
+    if table_exists(bridge_source, SHADOW_DECISION_BRIDGE_TABLE):
+        cols = columns(bridge_source, SHADOW_DECISION_BRIDGE_TABLE)
+        shadow_window_rows = bridge_source.execute(
             f"""
             SELECT event_ts, signal_id,
                    {expr(cols, 'source_component', "'shadow_decision_bridge_mirror'")} AS component,
@@ -1254,6 +1267,7 @@ def load_entry_bridge_summary(
     raw_rows=None,
     observations=None,
     token_time_decisions=None,
+    bridge_db=None,
     expected_candidates=DEFAULT_EXPECTED_CANDIDATES,
 ):
     """Lightweight operational entry bridge audit.
@@ -1273,6 +1287,7 @@ def load_entry_bridge_summary(
             raw_rows=raw_rows or [],
             observations=observations or [],
             token_time_decisions=token_time_decisions or [],
+            bridge_db=bridge_db,
             expected_candidates=expected_candidates,
         ),
         "components": {},
@@ -1729,16 +1744,22 @@ def summarize(audits, raw_rows, observations, decisions, trades, expected_candid
 def build_report(args):
     now_ts = int(time.time())
     since_ts = now_ts - int(args.hours * 3600)
-    raw_db = sqlite3.connect(args.raw_db)
-    raw_db.row_factory = sqlite3.Row
-    paper_db = sqlite3.connect(args.db)
-    paper_db.row_factory = sqlite3.Row
+    raw_db = readonly_connection(args.raw_db)
+    paper_db = readonly_connection(args.db)
+    bridge_path = getattr(args, "bridge_db", None)
+    bridge_db = readonly_connection(bridge_path) if bridge_path and Path(bridge_path).is_file() else None
     try:
         raw_rows = load_raw_dogs(raw_db, since_ts)
         signal_ids, tokens, _, _ = make_raw_indexes(raw_rows)
         observations, obs_meta = load_candidate_observations(paper_db, signal_ids, since_ts)
         until_ts = max([row.get("signal_ts_norm") or since_ts for row in raw_rows] + [now_ts])
-        decisions = [] if args.skip_decisions else load_paper_decisions(paper_db, tokens, since_ts, until_ts)
+        decisions = [] if args.skip_decisions else load_paper_decisions(
+            paper_db,
+            tokens,
+            since_ts,
+            until_ts,
+            bridge_db=bridge_db,
+        )
         trades = [] if args.skip_trades else load_paper_trades(paper_db, tokens, since_ts, until_ts)
         entry_bridge = load_entry_bridge_summary(
             paper_db,
@@ -1749,6 +1770,7 @@ def build_report(args):
             raw_rows=raw_rows,
             observations=observations,
             token_time_decisions=decisions,
+            bridge_db=bridge_db,
             expected_candidates=args.expected_candidates,
         )
         audits = attach_records(raw_rows, observations, decisions, trades, args.expected_candidates)
@@ -1787,7 +1809,7 @@ def build_report(args):
             "report_type": "raw_gold_silver_entry_funnel_audit",
             "generated_at": now_ts,
             "window": {"hours": args.hours, "since_ts": since_ts, "until_ts": now_ts},
-            "inputs": {"paper_db": args.db, "raw_db": args.raw_db},
+            "inputs": {"paper_db": args.db, "raw_db": args.raw_db, "bridge_db": bridge_path},
             "load_options": {
                 "skip_decisions": args.skip_decisions,
                 "skip_trades": args.skip_trades,
@@ -1805,6 +1827,8 @@ def build_report(args):
     finally:
         raw_db.close()
         paper_db.close()
+        if bridge_db is not None:
+            bridge_db.close()
 
 
 def compact_stdout_summary(report, out_path=None):
@@ -1947,6 +1971,7 @@ def self_test():
         args = argparse.Namespace(
             db=str(paper),
             raw_db=str(raw),
+            bridge_db=None,
             hours=1,
             expected_candidates=2,
             limit=10,
@@ -1997,6 +2022,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--db", default="/app/data/paper_trades.db")
     ap.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
+    ap.add_argument("--bridge-db", default=None, help="Optional evaluator-only shadow bridge database")
     ap.add_argument("--hours", type=float, default=72)
     ap.add_argument("--expected-candidates", type=int, default=DEFAULT_EXPECTED_CANDIDATES)
     ap.add_argument("--limit", type=int, default=80, help="number of top missed examples to include")

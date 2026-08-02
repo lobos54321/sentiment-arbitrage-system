@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 import time
@@ -37,9 +38,11 @@ from agent_capture_discovery_loop import (
     build_shadow_decision_bridge_audit,
     build_strategy_memory_ingestion_summary,
     create_self_test_dbs,
+    evaluator_forbidden_database_paths,
     load_json,
     parse_capture_hours,
     persist_shadow_decision_bridge_events,
+    resolve_evaluator_research_db,
     run_report,
     run_self_tests,
     sync_latest,
@@ -48,10 +51,13 @@ from agent_capture_discovery_loop import (
     write_json,
     write_materialized_artifacts,
 )
+from evaluator_db_contract import evaluator_snapshot_bundle_lease
 
 
 SCHEMA_VERSION = "agent_autoloop_stage_runner.v1"
 REQUIRED_FINAL_ARTIFACTS = (
+    "telegram_signal_identity_audit_24h.json",
+    "runtime_v27_writer_topology_audit_24h.json",
     "capture_60_gap_report.json",
     "capture_stage_metrics.json",
     "context_dimension_eligibility.json",
@@ -107,6 +113,10 @@ def run_dir_for(args):
     if args.run_dir:
         return Path(args.run_dir)
     return Path(args.out_root) / args.run_id
+
+
+def research_db_for(args, run_dir):
+    return resolve_evaluator_research_db(getattr(args, "research_db", None), run_dir)
 
 
 def stage_state_path(run_dir):
@@ -185,10 +195,14 @@ def final_publish_eligibility(run_dir):
 
 def args_namespace(args):
     return argparse.Namespace(
+        signal_db=args.signal_db,
         paper_db=args.paper_db,
         raw_db=args.raw_db,
         kline_db=args.kline_db,
         data_dir=args.data_dir,
+        repo_root=args.repo_root,
+        health_json=args.health_json,
+        proc_root=args.proc_root,
         strategy_memory_dir=args.strategy_memory_dir,
         hours=args.hours,
         capture_hours=args.capture_hours,
@@ -213,6 +227,82 @@ def stage_init(args, run_dir):
     build_strategy_memory_ingestion_summary(args_namespace(args), ingestion_path)
     update_stage_state(run_dir, "init", strategy_memory_ingestion_summary=str(ingestion_path))
     return {"stage": "init", "run_dir": str(run_dir), "strategy_memory_ingestion_summary": str(ingestion_path)}
+
+
+def evaluation_foundation_status(run_dir, hours):
+    reports = {}
+    for name, filename in (
+        ("telegram_signal_identity_audit", f"telegram_signal_identity_audit_{hours}h.json"),
+        ("runtime_v27_writer_topology_audit", f"runtime_v27_writer_topology_audit_{hours}h.json"),
+    ):
+        path = Path(run_dir) / filename
+        reports[name] = load_json_default(path, {})
+    blockers = [
+        name
+        for name, report in reports.items()
+        if (report.get("acceptance") or {}).get("passed") is not True
+    ]
+    return {
+        "passed": not blockers,
+        "blockers": blockers,
+        "reports": reports,
+        "promotion_allowed": False,
+    }
+
+
+def stage_foundation(args, run_dir):
+    hours = int(args.hours)
+    identity_path = run_dir / f"telegram_signal_identity_audit_{hours}h.json"
+    topology_path = run_dir / f"runtime_v27_writer_topology_audit_{hours}h.json"
+    identity_path.unlink(missing_ok=True)
+    topology_path.unlink(missing_ok=True)
+    identity_command = [
+        "scripts/telegram_signal_identity_audit.py",
+        "--signal-db", args.signal_db,
+        "--raw-db", args.raw_db,
+        "--hours", str(hours),
+        "--limit", str(args.max_scan_rows),
+        "--out", str(identity_path),
+    ]
+    topology_command = [
+        "scripts/runtime_v27_writer_topology_audit.py",
+        "--repo-root", args.repo_root,
+        "--data-dir", args.data_dir,
+        "--proc-root", args.proc_root,
+        "--out", str(topology_path),
+    ]
+    if args.health_json:
+        topology_command.extend(["--health-json", args.health_json])
+    rows = [
+        run_report(
+            "telegram_signal_identity_audit",
+            identity_command,
+            identity_path,
+            timeout=int(args.report_timeout_sec),
+        ),
+        run_report(
+            "runtime_v27_writer_topology_audit",
+            topology_command,
+            topology_path,
+            timeout=int(args.report_timeout_sec),
+        ),
+    ]
+    append_diagnostics(run_dir, rows)
+    status = evaluation_foundation_status(run_dir, hours)
+    commands_passed = all(row.get("ok") for row in rows)
+    status["commands_passed"] = commands_passed
+    status["passed"] = bool(status["passed"] and commands_passed)
+    if not commands_passed:
+        status["blockers"] = sorted(set(status["blockers"] + ["foundation_command_failed"]))
+    update_stage_state(
+        run_dir,
+        "foundation",
+        telegram_signal_identity_audit=str(identity_path),
+        runtime_v27_writer_topology_audit=str(topology_path),
+        evaluation_foundation_passed=status["passed"],
+        evaluation_foundation_blockers=status["blockers"],
+    )
+    return {"stage": "foundation", "diagnostics": rows, **status}
 
 
 def stage_selftests(args, run_dir):
@@ -262,6 +352,7 @@ def stage_capture(args, run_dir):
 
 def stage_core(args, run_dir):
     hours = int(args.hours)
+    research_db = research_db_for(args, run_dir)
     commands = [
         (
             "runtime_health_snapshot",
@@ -279,6 +370,7 @@ def stage_core(args, run_dir):
                 "scripts/offline_raw_gold_silver_funnel_audit.py",
                 "--db", args.paper_db,
                 "--raw-db", args.raw_db,
+                "--bridge-db", str(research_db),
                 "--hours", str(hours),
                 "--expected-candidates", str(args.expected_candidates),
                 "--out", str(run_dir / f"raw_gold_silver_funnel_audit_{hours}h.json"),
@@ -340,6 +432,7 @@ def stage_markov(args, run_dir):
 
 def stage_derived(args, run_dir):
     hours = int(args.hours)
+    research_db = research_db_for(args, run_dir)
     capture = load_json(run_dir / f"capture_discovery_{hours}h.json")
     downstream = load_json_default(run_dir / f"candidate_downstream_readiness_{hours}h.json", {})
     raw_funnel_path = run_dir / f"raw_gold_silver_funnel_audit_{hours}h.json"
@@ -368,9 +461,11 @@ def stage_derived(args, run_dir):
     shadow_bridge_path = run_dir / f"shadow_decision_bridge_audit_{hours}h.json"
     shadow_bridge = build_shadow_decision_bridge_audit(raw_funnel)
     shadow_bridge["read_only_evidence_mirror"]["persistence"] = persist_shadow_decision_bridge_events(
-        args.paper_db,
+        research_db,
         shadow_bridge,
         expected_candidates=args.expected_candidates,
+        forbidden_db_paths=evaluator_forbidden_database_paths(args),
+        allowed_root=run_dir,
     )
     derived_diagnostics = []
     if shadow_bridge["read_only_evidence_mirror"]["persistence"].get("upserted_event_count", 0) > 0:
@@ -380,6 +475,7 @@ def stage_derived(args, run_dir):
                 "scripts/offline_raw_gold_silver_funnel_audit.py",
                 "--db", args.paper_db,
                 "--raw-db", args.raw_db,
+                "--bridge-db", str(research_db),
                 "--hours", str(hours),
                 "--expected-candidates", str(args.expected_candidates),
                 "--out", str(raw_funnel_path),
@@ -537,6 +633,7 @@ def stage_decision(args, run_dir):
             [
                 "scripts/a_class_fastlane_mode_readiness_audit.py",
                 "--db", args.paper_db,
+                "--read-only",
                 "--raw-funnel", str(run_dir / f"raw_gold_silver_funnel_audit_{hours}h.json"),
                 "--context-coverage", str(run_dir / f"context_coverage_audit_{hours}h.json"),
                 "--volume-kline-audit", str(run_dir / f"volume_kline_coverage_audit_{hours}h.json"),
@@ -741,6 +838,8 @@ def collect_paths(args, run_dir):
         "strategy_memory_exit_shadow_summary": "strategy_memory_exit_shadow_summary.json",
         "strategy_memory_delay_replay_summary": "strategy_memory_delay_replay_summary.json",
         "strategy_memory_ingestion_summary": "strategy_memory_ingestion_summary.json",
+        "telegram_signal_identity_audit": f"telegram_signal_identity_audit_{hours}h.json",
+        "runtime_v27_writer_topology_audit": f"runtime_v27_writer_topology_audit_{hours}h.json",
         "clean_dimension_2d_capture_cross": f"clean_dimension_2d_capture_cross_{hours}h.json",
         "quality_timing_reason_cross": f"quality_timing_reason_cross_{hours}h.json",
         "strategy_memory_reason_cross": f"strategy_memory_reason_cross_{hours}h.json",
@@ -853,6 +952,7 @@ def stage_finalize(args, run_dir):
 
 STAGES = {
     "init": stage_init,
+    "foundation": stage_foundation,
     "selftests": stage_selftests,
     "capture": stage_capture,
     "core": stage_core,
@@ -867,6 +967,7 @@ STAGES = {
 
 DEFAULT_SEQUENCE = (
     "init",
+    "foundation",
     "selftests",
     "capture",
     "core",
@@ -958,12 +1059,36 @@ def self_test():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         create_self_test_dbs(root)
+        signal_db = root / "signal.db"
+        signal = sqlite3.connect(signal_db)
+        signal.execute(
+            """
+            CREATE TABLE premium_signals(
+              id INTEGER PRIMARY KEY,
+              token_ca TEXT,
+              source_message_ts INTEGER,
+              signal_type TEXT,
+              source_event_id TEXT,
+              downstream_lifecycle_id TEXT
+            )
+            """
+        )
+        signal.execute(
+            "INSERT INTO premium_signals VALUES (?,?,?,?,?,?)",
+            (1, "DOG", int(time.time()) - 120, "ATH", "self-test-event-1", "life-a"),
+        )
+        signal.commit()
+        signal.close()
         run_dir = root / "agent_runs" / "staged_self_test"
         args = argparse.Namespace(
+            signal_db=str(signal_db),
             paper_db=str(root / "paper.db"),
             raw_db=str(root / "raw.db"),
             kline_db=str(root / "kline.db"),
             data_dir=str(root),
+            repo_root=str(PROJECT_ROOT),
+            health_json=None,
+            proc_root=str(root / "missing-proc"),
             strategy_memory_dir=str(root / "strategy_memory_local"),
             hours=24,
             capture_hours="24",
@@ -983,8 +1108,9 @@ def self_test():
             run_dir=str(run_dir),
             reset=True,
         )
-        for stage in ("init", "selftests", "capture", "core", "markov", "derived"):
+        for stage in ("init", "foundation", "selftests", "capture", "core", "markov", "derived"):
             STAGES[stage](args, run_dir)
+        assert evaluation_foundation_status(run_dir, 24)["passed"] is True
         assert not (run_dir / "a_class_fastlane_mode_audit_24h.json").exists()
         assert (run_dir / "a_class_fastlane_mode_audit_24h_derived.json").exists()
         derived_only_finalize = stage_finalize(args, run_dir)
@@ -1026,12 +1152,57 @@ def self_test():
     print("SELF_TEST_PASS agent_autoloop_stage_runner")
 
 
+def execute_stages(args):
+    run_dir = run_dir_for(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results = []
+    stages = parse_stages(args.stage)
+    for stage in stages:
+        if stage not in {"init", "foundation"}:
+            foundation = evaluation_foundation_status(run_dir, int(args.hours))
+            if not foundation["passed"]:
+                blocked = {
+                    "stage": stage,
+                    "status": "blocked_evaluation_foundation_not_ready",
+                    "blockers": foundation["blockers"],
+                    "expensive_stage_skipped": True,
+                    "promotion_allowed": False,
+                }
+                results.append(blocked)
+                print(json.dumps({"schema_version": SCHEMA_VERSION, **blocked}, sort_keys=True), flush=True)
+                break
+        result = STAGES[stage](args, run_dir)
+        results.append(result)
+        print(json.dumps({"schema_version": SCHEMA_VERSION, **result}, sort_keys=True), flush=True)
+        if stage == "foundation" and result.get("passed") is not True:
+            break
+    print(json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "run_dir": str(run_dir),
+        "stages": [row.get("stage") for row in results],
+        "last_result": results[-1] if results else None,
+    }, sort_keys=True))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--paper-db", default="/app/data/paper_trades.db")
-    parser.add_argument("--raw-db", default="/app/data/raw_signal_outcomes.db")
-    parser.add_argument("--kline-db", default="/app/data/kline_cache.db")
+    parser.add_argument("--signal-db", default="/app/data/agent_evidence/current/signal.db")
+    parser.add_argument("--paper-db", default="/app/data/agent_evidence/current/paper_evidence.db")
+    parser.add_argument("--raw-db", default="/app/data/agent_evidence/current/raw.db")
+    parser.add_argument("--kline-db", default="/app/data/agent_evidence/current/kline.db")
+    parser.add_argument("--evidence-manifest", default="/app/data/agent_evidence/current/manifest.json")
+    parser.add_argument("--evidence-max-age-sec", type=float, default=28800)
+    parser.add_argument("--evidence-lock-file", default="/tmp/cross-db-evaluator-snapshot.lock")
+    parser.add_argument("--evidence-lock-timeout-sec", type=float, default=300)
+    parser.add_argument(
+        "--research-db",
+        default=None,
+        help="Writable evaluator-only DB directly inside the staged run directory; external paths are rejected.",
+    )
     parser.add_argument("--data-dir", default="/app/data")
+    parser.add_argument("--repo-root", default=str(PROJECT_ROOT))
+    parser.add_argument("--health-json", default=None)
+    parser.add_argument("--proc-root", default="/proc")
     parser.add_argument("--strategy-memory-dir", default=None)
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--capture-hours", default="24")
@@ -1071,19 +1242,23 @@ def main(argv=None):
     if args.self_test:
         self_test()
         return
-    run_dir = run_dir_for(args)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for stage in parse_stages(args.stage):
-        result = STAGES[stage](args, run_dir)
-        results.append(result)
-        print(json.dumps({"schema_version": SCHEMA_VERSION, **result}, sort_keys=True), flush=True)
-    print(json.dumps({
-        "schema_version": SCHEMA_VERSION,
-        "run_dir": str(run_dir),
-        "stages": [row.get("stage") for row in results],
-        "last_result": results[-1] if results else None,
-    }, sort_keys=True))
+    with evaluator_snapshot_bundle_lease(
+        lock_file=args.evidence_lock_file,
+        lock_timeout_sec=args.evidence_lock_timeout_sec,
+        signal_db=args.signal_db,
+        paper_db=args.paper_db,
+        raw_db=args.raw_db,
+        kline_db=args.kline_db,
+        data_dir=args.data_dir,
+        manifest_path=args.evidence_manifest,
+        max_age_sec=args.evidence_max_age_sec,
+    ) as evidence:
+        args.signal_db = evidence["databases"]["signal"]
+        args.paper_db = evidence["databases"]["paper"]
+        args.raw_db = evidence["databases"]["raw"]
+        args.kline_db = evidence["databases"]["kline"]
+        args.evidence_manifest = evidence["manifest_path"]
+        execute_stages(args)
 
 
 if __name__ == "__main__":

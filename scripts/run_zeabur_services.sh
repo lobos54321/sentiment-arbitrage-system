@@ -85,6 +85,7 @@ shutdown() {
     "${LIFECYCLE_PID:-}" \
     "${PAPER_PID:-}" \
     "${CANDIDATE_SHADOW_PID:-}" \
+    "${EVALUATOR_SNAPSHOT_PID:-}" \
     "${AGENT_CAPTURE_PID:-}" \
     "${SCOUT_PID:-}" \
     "${RESONANCE_PID:-}" \
@@ -99,6 +100,7 @@ trap shutdown TERM INT
 # Optional sidecars may be disabled by environment. Keep their PID variables
 # defined because this script runs with `set -u`.
 CANDIDATE_SHADOW_PID=""
+EVALUATOR_SNAPSHOT_PID=""
 AGENT_CAPTURE_PID=""
 SCOUT_PID=""
 RESONANCE_PID=""
@@ -330,7 +332,35 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
+if [ "${EVALUATOR_SNAPSHOT_WORKER_ENABLED:-true}" = "true" ]; then
+  echo "[STARTUP] Starting bounded cross-DB evaluator snapshot worker..."
+  PYTHONUNBUFFERED=1 python3 scripts/cross_db_evaluator_snapshot.py \
+    --signal-db /app/data/sentiment_arb.db \
+    --paper-db /app/data/paper_trades.db \
+    --raw-db /app/data/raw_signal_outcomes.db \
+    --kline-db /app/data/kline_cache.db \
+    --out-root "${EVALUATOR_SNAPSHOT_OUT_ROOT:-/app/data/agent_evidence}" \
+    --max-skew-sec "${EVALUATOR_SNAPSHOT_MAX_SKEW_SEC:-30}" \
+    --min-free-after-gib "${EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB:-5}" \
+    --keep-previous 0 \
+    --max-runs 0 \
+    --interval-sec "${EVALUATOR_SNAPSHOT_INTERVAL_SEC:-21600}" \
+    --initial-delay-sec "${EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC:-30}" \
+    --status-out "${EVALUATOR_SNAPSHOT_STATUS:-/app/data/agent_evidence/snapshot_status.json}" \
+    --lock-file "${EVALUATOR_SNAPSHOT_LOCK_FILE:-/tmp/cross-db-evaluator-snapshot.lock}" \
+    >> /app/data/cross-db-evaluator-snapshot.log 2>&1 &
+  EVALUATOR_SNAPSHOT_PID=$!
+else
+  echo "[STARTUP] Cross-DB evaluator snapshot worker disabled."
+fi
+
 if [ "${AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE:-false}" = "true" ]; then
+  AGENT_CAPTURE_EVIDENCE_ROOT="${AGENT_CAPTURE_EVIDENCE_ROOT:-/app/data/agent_evidence/current}"
+  AGENT_CAPTURE_EVIDENCE_DB="${AGENT_CAPTURE_EVIDENCE_DB:-$AGENT_CAPTURE_EVIDENCE_ROOT/paper_evidence.db}"
+  AGENT_CAPTURE_EVIDENCE_SIGNAL_DB="${AGENT_CAPTURE_EVIDENCE_SIGNAL_DB:-$AGENT_CAPTURE_EVIDENCE_ROOT/signal.db}"
+  AGENT_CAPTURE_EVIDENCE_RAW_DB="${AGENT_CAPTURE_EVIDENCE_RAW_DB:-$AGENT_CAPTURE_EVIDENCE_ROOT/raw.db}"
+  AGENT_CAPTURE_EVIDENCE_KLINE_DB="${AGENT_CAPTURE_EVIDENCE_KLINE_DB:-$AGENT_CAPTURE_EVIDENCE_ROOT/kline.db}"
+  AGENT_CAPTURE_EVIDENCE_MANIFEST="${AGENT_CAPTURE_EVIDENCE_MANIFEST:-$AGENT_CAPTURE_EVIDENCE_ROOT/manifest.json}"
   echo "[STARTUP] Starting gold/silver capture discovery agent loop..."
   (
     while true; do
@@ -340,14 +370,21 @@ if [ "${AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE:-false}" = "true" ]; then
         echo "[agent-capture-discovery] paper DB integrity marker present; running quarantine preflight before discovery report" | tee -a /app/data/agent-capture-discovery.log
         run_marker_aware_preflight "agent_capture_discovery_start_guard"
       fi
-      PAPER_DB=/app/data/paper_trades.db \
-      RAW_SIGNAL_OUTCOMES_DB=/app/data/raw_signal_outcomes.db \
-      SENTIMENT_DB=/app/data/sentiment_arb.db \
-      KLINE_DB=/app/data/kline_cache.db \
+      PAPER_DB="$AGENT_CAPTURE_EVIDENCE_DB" \
+      AGENT_CAPTURE_EVIDENCE_DB="$AGENT_CAPTURE_EVIDENCE_DB" \
+      RAW_SIGNAL_OUTCOMES_DB="$AGENT_CAPTURE_EVIDENCE_RAW_DB" \
+      SENTIMENT_DB="$AGENT_CAPTURE_EVIDENCE_SIGNAL_DB" \
+      KLINE_DB="$AGENT_CAPTURE_EVIDENCE_KLINE_DB" \
       PYTHONUNBUFFERED=1 \
       python3 scripts/agent_capture_discovery_loop.py \
-        --paper-db /app/data/paper_trades.db \
-        --raw-db /app/data/raw_signal_outcomes.db \
+        --signal-db "$AGENT_CAPTURE_EVIDENCE_SIGNAL_DB" \
+        --paper-db "$AGENT_CAPTURE_EVIDENCE_DB" \
+        --raw-db "$AGENT_CAPTURE_EVIDENCE_RAW_DB" \
+        --kline-db "$AGENT_CAPTURE_EVIDENCE_KLINE_DB" \
+        --evidence-manifest "$AGENT_CAPTURE_EVIDENCE_MANIFEST" \
+        --evidence-max-age-sec "${EVALUATOR_SNAPSHOT_MAX_AGE_SEC:-28800}" \
+        --evidence-lock-file "${EVALUATOR_SNAPSHOT_LOCK_FILE:-/tmp/cross-db-evaluator-snapshot.lock}" \
+        --evidence-lock-timeout-sec "${EVALUATOR_SNAPSHOT_LOCK_TIMEOUT_SEC:-300}" \
         --hours "${AGENT_CAPTURE_DISCOVERY_HOURS:-24}" \
         --expected-candidates "${AGENT_CAPTURE_EXPECTED_CANDIDATES:-84}" \
         --out-root "${AGENT_CAPTURE_RUNS_DIR:-/app/data/agent_runs}" \
@@ -447,7 +484,7 @@ echo "[STARTUP] Starting social-signal-service..."
 ) &
 SOCIAL_PID=$!
 
-echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} agent_capture=${AGENT_CAPTURE_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
+echo "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID candidate_shadow=${CANDIDATE_SHADOW_PID:-disabled} evaluator_snapshot=${EVALUATOR_SNAPSHOT_PID:-disabled} agent_capture=${AGENT_CAPTURE_PID:-disabled} scout=${SCOUT_PID:-disabled} resonance=${RESONANCE_PID:-disabled} social=$SOCIAL_PID"
 sleep 3
 kill -0 "$REDIS_PID" 2>/dev/null || echo "WARN: REDIS dead"
 kill -0 "$DASHBOARD_PID" 2>/dev/null || echo "WARN: DASHBOARD dead"
@@ -460,6 +497,9 @@ if [ -n "${CANDIDATE_SHADOW_PID:-}" ]; then
 fi
 if [ -n "${AGENT_CAPTURE_PID:-}" ]; then
   kill -0 "$AGENT_CAPTURE_PID" 2>/dev/null || echo "WARN: AGENT_CAPTURE dead"
+fi
+if [ -n "${EVALUATOR_SNAPSHOT_PID:-}" ]; then
+  kill -0 "$EVALUATOR_SNAPSHOT_PID" 2>/dev/null || echo "WARN: EVALUATOR_SNAPSHOT dead"
 fi
 if [ -n "${SCOUT_PID:-}" ]; then
   kill -0 "$SCOUT_PID" 2>/dev/null || echo "WARN: GMGN_SCOUT dead"

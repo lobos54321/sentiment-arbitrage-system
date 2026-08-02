@@ -897,6 +897,7 @@ function startIndexRuntimeSupervisor() {
   global.__shadowDataSidecars = [
     ...startPaperDbSnapshotRequestWorker(),
     ...startCandidateShadowObserver({}),
+    ...startEvaluatorSnapshotWorker({}),
     ...startAgentCaptureDiscoveryLoop({}),
     ...startAutoloopOosRefreshWorker({}),
     ...startPumpFunShadowWorker({}),
@@ -1269,6 +1270,46 @@ function startCandidateShadowObserver(config) {
   ];
 }
 
+function startEvaluatorSnapshotWorker(config) {
+  if (!envFlag('EVALUATOR_SNAPSHOT_WORKER_ENABLED', true)) {
+    console.log('[EvaluatorSnapshot] disabled by EVALUATOR_SNAPSHOT_WORKER_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = runtimeDataDir();
+  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
+  const paperDb = runtimePaperDbPath();
+  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
+  const klineDb = process.env.KLINE_DB || process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(dataDir, 'kline_cache.db');
+  const evidenceRoot = process.env.EVALUATOR_SNAPSHOT_OUT_ROOT || join(dataDir, 'agent_evidence');
+
+  return [
+    startPythonSidecar({
+      name: 'cross-db-evaluator-snapshot',
+      logPath: process.env.EVALUATOR_SNAPSHOT_WORKER_LOG || join(dataDir, 'cross-db-evaluator-snapshot.log'),
+      args: [
+        'scripts/cross_db_evaluator_snapshot.py',
+        '--signal-db', signalDb,
+        '--paper-db', paperDb,
+        '--raw-db', rawDb,
+        '--kline-db', klineDb,
+        '--out-root', evidenceRoot,
+        '--max-skew-sec', process.env.EVALUATOR_SNAPSHOT_MAX_SKEW_SEC || '30',
+        '--min-free-after-gib', process.env.EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB || '5',
+        '--keep-previous', '0',
+        '--max-runs', '0',
+        '--interval-sec', process.env.EVALUATOR_SNAPSHOT_INTERVAL_SEC || '21600',
+        '--initial-delay-sec', process.env.EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC || '30',
+        '--status-out', process.env.EVALUATOR_SNAPSHOT_STATUS || join(evidenceRoot, 'snapshot_status.json'),
+        '--lock-file', process.env.EVALUATOR_SNAPSHOT_LOCK_FILE || '/tmp/cross-db-evaluator-snapshot.lock',
+      ],
+      env: {
+        SIDECAR_MAX_RUNTIME_SEC: process.env.EVALUATOR_SNAPSHOT_CHILD_MAX_RUNTIME_SEC || '0',
+      },
+    }),
+  ];
+}
+
 function startAgentCaptureDiscoveryLoop(config) {
   if (!envFlag('AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE', false)) {
     console.log('[AgentCaptureDiscovery] disabled; set AGENT_CAPTURE_DISCOVERY_FORCE_ENABLE=true only for a dedicated worker/container');
@@ -1276,10 +1317,12 @@ function startAgentCaptureDiscoveryLoop(config) {
   }
 
   const dataDir = runtimeDataDir();
-  const paperDb = runtimePaperDbPath();
-  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
-  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
-  const klineDb = process.env.KLINE_DB || process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(dataDir, 'kline_cache.db');
+  const evidenceRoot = process.env.AGENT_CAPTURE_EVIDENCE_ROOT || join(dataDir, 'agent_evidence', 'current');
+  const evidenceDb = process.env.AGENT_CAPTURE_EVIDENCE_DB || join(evidenceRoot, 'paper_evidence.db');
+  const signalDb = process.env.AGENT_CAPTURE_EVIDENCE_SIGNAL_DB || join(evidenceRoot, 'signal.db');
+  const rawDb = process.env.AGENT_CAPTURE_EVIDENCE_RAW_DB || join(evidenceRoot, 'raw.db');
+  const klineDb = process.env.AGENT_CAPTURE_EVIDENCE_KLINE_DB || join(evidenceRoot, 'kline.db');
+  const evidenceManifest = process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST || join(evidenceRoot, 'manifest.json');
 
   return [
     startPythonSidecar({
@@ -1287,8 +1330,14 @@ function startAgentCaptureDiscoveryLoop(config) {
       logPath: process.env.AGENT_CAPTURE_DISCOVERY_LOG || join(dataDir, 'agent-capture-discovery.log'),
       args: [
         'scripts/agent_capture_discovery_loop.py',
-        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--paper-db', evidenceDb,
         '--raw-db', rawDb,
+        '--kline-db', klineDb,
+        '--evidence-manifest', evidenceManifest,
+        '--evidence-max-age-sec', process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || '28800',
+        '--evidence-lock-file', process.env.EVALUATOR_SNAPSHOT_LOCK_FILE || '/tmp/cross-db-evaluator-snapshot.lock',
+        '--evidence-lock-timeout-sec', process.env.EVALUATOR_SNAPSHOT_LOCK_TIMEOUT_SEC || '300',
         '--hours', process.env.AGENT_CAPTURE_DISCOVERY_HOURS || '24',
         '--expected-candidates', process.env.AGENT_CAPTURE_EXPECTED_CANDIDATES || '84',
         '--out-root', process.env.AGENT_CAPTURE_RUNS_DIR || join(dataDir, 'agent_runs'),
@@ -1303,7 +1352,8 @@ function startAgentCaptureDiscoveryLoop(config) {
         '--initial-delay-sec', process.env.AGENT_CAPTURE_DISCOVERY_INITIAL_DELAY_SEC || '120',
       ],
       env: {
-        PAPER_DB: paperDb,
+        PAPER_DB: evidenceDb,
+        AGENT_CAPTURE_EVIDENCE_DB: evidenceDb,
         RAW_SIGNAL_OUTCOMES_DB: rawDb,
         SENTIMENT_DB: signalDb,
         DB_PATH: signalDb,
@@ -1321,10 +1371,12 @@ function startAutoloopOosRefreshWorker(config) {
   }
 
   const dataDir = runtimeDataDir();
-  const paperDb = runtimePaperDbPath();
-  const signalDb = process.env.SENTIMENT_DB || process.env.DB_PATH || config.DB_PATH || join(dataDir, 'sentiment_arb.db');
-  const rawDb = process.env.RAW_SIGNAL_OUTCOMES_DB || join(dataDir, 'raw_signal_outcomes.db');
-  const klineDb = process.env.KLINE_DB || process.env.KLINE_CACHE_DB || process.env.KLINE_CACHE_DB_PATH || join(dataDir, 'kline_cache.db');
+  const evidenceRoot = process.env.AGENT_CAPTURE_EVIDENCE_ROOT || join(dataDir, 'agent_evidence', 'current');
+  const evidenceDb = process.env.AGENT_CAPTURE_EVIDENCE_DB || join(evidenceRoot, 'paper_evidence.db');
+  const signalDb = process.env.AGENT_CAPTURE_EVIDENCE_SIGNAL_DB || join(evidenceRoot, 'signal.db');
+  const rawDb = process.env.AGENT_CAPTURE_EVIDENCE_RAW_DB || join(evidenceRoot, 'raw.db');
+  const klineDb = process.env.AGENT_CAPTURE_EVIDENCE_KLINE_DB || join(evidenceRoot, 'kline.db');
+  const evidenceManifest = process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST || join(evidenceRoot, 'manifest.json');
   const runsDir = process.env.AGENT_CAPTURE_RUNS_DIR || process.env.AGENT_RUNS_DIR || join(dataDir, 'agent_runs');
   const handoffDir = process.env.AGENT_CAPTURE_HANDOFFS_DIR || process.env.AGENT_HANDOFFS_DIR || join(dataDir, 'agent_handoffs');
   const registry = process.env.AGENT_CAPTURE_HYPOTHESIS_REGISTRY || process.env.HYPOTHESIS_REGISTRY_PATH || join(dataDir, 'hypothesis_registry.json');
@@ -1335,9 +1387,14 @@ function startAutoloopOosRefreshWorker(config) {
       logPath: process.env.AUTOLOOP_OOS_REFRESH_LOG || join(dataDir, 'autoloop-oos-refresh.log'),
       args: [
         'scripts/autoloop_oos_refresh_worker.py',
-        '--paper-db', paperDb,
+        '--signal-db', signalDb,
+        '--paper-db', evidenceDb,
         '--raw-db', rawDb,
         '--kline-db', klineDb,
+        '--evidence-manifest', evidenceManifest,
+        '--evidence-max-age-sec', process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || '28800',
+        '--evidence-lock-file', process.env.EVALUATOR_SNAPSHOT_LOCK_FILE || '/tmp/cross-db-evaluator-snapshot.lock',
+        '--evidence-lock-timeout-sec', process.env.EVALUATOR_SNAPSHOT_LOCK_TIMEOUT_SEC || '300',
         '--data-dir', dataDir,
         '--hours', process.env.AUTOLOOP_OOS_REFRESH_HOURS || process.env.AGENT_CAPTURE_DISCOVERY_HOURS || '24',
         '--capture-hours', process.env.AUTOLOOP_OOS_REFRESH_CAPTURE_HOURS || process.env.AGENT_CAPTURE_CAPTURE_HOURS || '24',
@@ -1356,7 +1413,8 @@ function startAutoloopOosRefreshWorker(config) {
         '--lock-file', process.env.AUTOLOOP_OOS_REFRESH_LOCK_FILE || '/tmp/autoloop-oos-refresh.lock',
       ],
       env: {
-        PAPER_DB: paperDb,
+        PAPER_DB: evidenceDb,
+        AGENT_CAPTURE_EVIDENCE_DB: evidenceDb,
         RAW_SIGNAL_OUTCOMES_DB: rawDb,
         SENTIMENT_DB: signalDb,
         DB_PATH: signalDb,
