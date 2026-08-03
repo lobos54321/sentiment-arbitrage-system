@@ -25,6 +25,7 @@ from urllib.parse import quote
 SCHEMA_VERSION = "cross_db_evaluator_snapshot.v2"
 PRUNABLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, "cross_db_evaluator_snapshot.v1"}
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
+BUDGET_SCHEMA_VERSION = "evaluator_snapshot_budget.v2"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
 DEFAULT_MAX_OUTPUT_GIB = 10.0
@@ -36,6 +37,8 @@ DATABASE_BUDGET_SHARES = {
     "raw": 0.18,
     "kline": 0.06,
 }
+DYNAMIC_BUDGET_HEADROOM_NUMERATOR = 5
+DYNAMIC_BUDGET_HEADROOM_DENOMINATOR = 4
 
 
 def recent(*time_columns: str, horizon: str = "review", required: bool = False) -> dict[str, Any]:
@@ -826,7 +829,7 @@ def disk_preflight(
     }
 
 
-def database_output_budgets(max_output_gib: float) -> dict[str, int]:
+def static_database_output_budgets(max_output_gib: float) -> dict[str, int]:
     total = int(float(max_output_gib) * 1024**3)
     if total <= 0:
         raise ValueError("max_output_gib must be positive")
@@ -836,6 +839,81 @@ def database_output_budgets(max_output_gib: float) -> dict[str, int]:
     }
     budgets["paper"] += total - sum(budgets.values())
     return budgets
+
+
+def strict_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def database_output_budget_plan(
+    max_output_gib: float,
+    source_page_reports: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    """Reclaim unused non-paper reserves without changing the bundle cap."""
+
+    static_budgets = static_database_output_budgets(max_output_gib)
+    budgets = dict(static_budgets)
+    compact_estimates: dict[str, int | None] = {}
+    padded_estimates: dict[str, int | None] = {}
+    static_fallback_databases: list[str] = []
+    reclaimed = 0
+
+    for name in ("signal", "raw", "kline"):
+        report = source_page_reports.get(name) or {}
+        compact_bytes = strict_positive_int(report.get("estimated_compact_bytes"))
+        page_size = strict_positive_int(report.get("page_size")) or 4096
+        page_size = max(512, page_size)
+        if compact_bytes is None:
+            compact_estimates[name] = None
+            padded_estimates[name] = None
+            static_fallback_databases.append(name)
+            continue
+
+        padded_bytes = (
+            compact_bytes * DYNAMIC_BUDGET_HEADROOM_NUMERATOR
+            + DYNAMIC_BUDGET_HEADROOM_DENOMINATOR
+            - 1
+        ) // DYNAMIC_BUDGET_HEADROOM_DENOMINATOR
+        padded_bytes = max(
+            page_size,
+            ((padded_bytes + page_size - 1) // page_size) * page_size,
+        )
+        adaptive_budget = min(static_budgets[name], padded_bytes)
+        compact_estimates[name] = compact_bytes
+        padded_estimates[name] = padded_bytes
+        budgets[name] = adaptive_budget
+        reclaimed += static_budgets[name] - adaptive_budget
+
+    paper_report = source_page_reports.get("paper") or {}
+    compact_estimates["paper"] = strict_positive_int(
+        paper_report.get("estimated_compact_bytes")
+    )
+
+    budgets["paper"] = static_budgets["paper"] + reclaimed
+    total_cap_bytes = sum(static_budgets.values())
+    if sum(budgets.values()) != total_cap_bytes:
+        raise RuntimeError("dynamic evaluator database budgets do not preserve the bundle cap")
+    if any(int(value) <= 0 for value in budgets.values()):
+        raise RuntimeError(f"dynamic evaluator database budget is non-positive: {budgets}")
+
+    return {
+        "schema_version": BUDGET_SCHEMA_VERSION,
+        "mode": "reclaim_unused_non_paper_static_reserves_to_paper",
+        "total_output_cap_bytes": total_cap_bytes,
+        "headroom_ratio": (
+            DYNAMIC_BUDGET_HEADROOM_NUMERATOR / DYNAMIC_BUDGET_HEADROOM_DENOMINATOR
+        ),
+        "static_share_budget_bytes": static_budgets,
+        "source_compact_estimate_bytes": compact_estimates,
+        "padded_non_paper_estimate_bytes": padded_estimates,
+        "static_fallback_databases": static_fallback_databases,
+        "reclaimed_to_paper_bytes": reclaimed,
+        "database_budget_bytes": budgets,
+        "total_budget_bytes": sum(budgets.values()),
+        "bundle_cap_unchanged": True,
+    }
 
 
 def publish_current(root: Path, snapshot_dir: Path) -> None:
@@ -961,7 +1039,8 @@ def build_snapshot_bundle(
         preflight = disk_preflight(root, min_free_after_gib, max_output_gib)
         if not preflight["accepted"]:
             raise RuntimeError(f"insufficient disk for evaluator snapshot: {preflight}")
-        output_budgets = database_output_budgets(max_output_gib)
+        budget_plan = database_output_budget_plan(max_output_gib, source_page_reports)
+        output_budgets = budget_plan["database_budget_bytes"]
         database_reports = snapshot_all_concurrently(
             source_paths,
             partial_dir,
@@ -1055,6 +1134,7 @@ def build_snapshot_bundle(
                 "table_rules_are_explicit": True,
             },
             "database_payload_size_bytes": database_payload_size_bytes,
+            "database_budget_plan": budget_plan,
             "output_size_bytes": database_payload_size_bytes,
             "output_cap_bytes": output_cap_bytes,
             "output_cap_passed": output_cap_passed,

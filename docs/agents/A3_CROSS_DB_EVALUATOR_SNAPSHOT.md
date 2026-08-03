@@ -35,6 +35,19 @@ The snapshot worker:
 
 Failed or partial runs never replace `current`.
 
+## A3 v2.1 database budgets
+
+The bundle cap remains 10 GiB and the disk reserve remains 5 GiB. The worker no
+longer strands fixed capacity in the three small databases. Before extraction,
+it reads each source database's compact page estimate, adds 25% headroom, keeps
+that value within the database's original static share, and transfers only the
+unused signal/raw/kline reserve to `paper_evidence.db`.
+
+Missing or malformed compact estimates fail safe by retaining the original
+static reserve. Per-database `max_page_count` limits and the final
+manifest-inclusive 10 GiB directory check remain enforced. The manifest records
+the complete `database_budget_plan` so production allocation is auditable.
+
 ## Selection windows
 
 The default v2 bundle contains:
