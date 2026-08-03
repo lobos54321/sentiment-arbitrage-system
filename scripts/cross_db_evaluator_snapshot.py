@@ -48,13 +48,25 @@ DYNAMIC_BUDGET_HEADROOM_NUMERATOR = 5
 DYNAMIC_BUDGET_HEADROOM_DENOMINATOR = 4
 
 
-def recent(*time_columns: str, horizon: str = "review", required: bool = False) -> dict[str, Any]:
-    return {
+def recent(
+    *time_columns: str,
+    horizon: str = "review",
+    required: bool = False,
+    indexed_epoch_seconds_anchor: str | None = None,
+    epoch_seconds_columns: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if indexed_epoch_seconds_anchor and indexed_epoch_seconds_anchor not in time_columns:
+        raise ValueError("indexed epoch-seconds anchor must be a registered time column")
+    rule = {
         "mode": "recent",
         "time_columns": tuple(time_columns),
         "horizon": horizon,
         "required": required,
     }
+    if indexed_epoch_seconds_anchor:
+        rule["indexed_epoch_seconds_anchor"] = indexed_epoch_seconds_anchor
+        rule["epoch_seconds_columns"] = tuple(epoch_seconds_columns)
+    return rule
 
 
 def full(*, required: bool = False) -> dict[str, Any]:
@@ -113,9 +125,21 @@ DATABASE_SPECS = {
             "opportunity_events": ("id", "event_ts", "created_at"),
         },
         "tables": {
-            "candidate_shadow_observations": recent("observed_at", "signal_ts", required=True),
+            "candidate_shadow_observations": recent(
+                "observed_at",
+                "signal_ts",
+                required=True,
+                indexed_epoch_seconds_anchor="observed_at",
+                epoch_seconds_columns=("observed_at",),
+            ),
             "candidate_shadow_virtual_trades": recent(
-                "observed_at", "signal_ts", "entry_ts", "exit_ts", required=True
+                "observed_at",
+                "signal_ts",
+                "entry_ts",
+                "exit_ts",
+                required=True,
+                indexed_epoch_seconds_anchor="observed_at",
+                epoch_seconds_columns=("observed_at",),
             ),
             "paper_decision_events": recent(
                 "event_ts", "signal_ts", "created_at", required=True
@@ -464,6 +488,47 @@ def normalized_timestamp_sql(column: str) -> str:
     )
 
 
+def declared_numeric_timestamp_type(declared_type: str) -> bool:
+    normalized = str(declared_type or "").strip().upper()
+    return bool(
+        "INT" in normalized
+        or any(token in normalized for token in ("REAL", "FLOA", "DOUB", "NUM"))
+    )
+
+
+def source_index_for_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for row in connection.execute(
+        f"PRAGMA src.index_list({quote_identifier(table)})"
+    ):
+        if len(row) > 4 and int(row[4] or 0):
+            continue
+        name = str(row[1])
+        columns = [
+            str(index_row[2])
+            for index_row in connection.execute(
+                f"PRAGMA src.index_info({quote_identifier(name)})"
+            )
+        ]
+        if columns and columns[0] == column:
+            candidates.append((len(columns), name))
+    if not candidates:
+        return None
+    return sorted(candidates)[0][1]
+
+
+def source_table_reference(table: str, selection: dict[str, Any]) -> str:
+    reference = f"src.{quote_identifier(table)}"
+    source_index_name = selection.get("source_index_name")
+    if source_index_name:
+        reference += f" INDEXED BY {quote_identifier(str(source_index_name))}"
+    return reference
+
+
 def selection_for_table(
     connection: sqlite3.Connection,
     table: str,
@@ -473,10 +538,11 @@ def selection_for_table(
     long_lower_epoch: float,
     upper_epoch: float,
 ) -> dict[str, Any]:
-    columns = {
-        str(row["name"])
-        for row in connection.execute(f"PRAGMA src.table_info({quote_identifier(table)})")
-    }
+    column_rows = list(
+        connection.execute(f"PRAGMA src.table_info({quote_identifier(table)})")
+    )
+    columns = {str(row["name"]) for row in column_rows}
+    declared_types = {str(row["name"]): str(row["type"] or "") for row in column_rows}
     if rule["mode"] == "full":
         return {
             "mode": "full",
@@ -491,12 +557,50 @@ def selection_for_table(
     time_columns = [name for name in rule.get("time_columns", ()) if name in columns]
     if not time_columns:
         raise RuntimeError(f"selective_snapshot_time_column_missing:{table}")
-    normalized_columns = [normalized_timestamp_sql(column) for column in time_columns]
-    anchor = (
-        normalized_columns[0]
-        if len(normalized_columns) == 1
-        else "COALESCE(" + ", ".join(normalized_columns) + ")"
-    )
+    indexed_anchor = rule.get("indexed_epoch_seconds_anchor")
+    epoch_seconds_columns = {
+        str(name) for name in rule.get("epoch_seconds_columns", ()) if name in columns
+    }
+    source_index_name = None
+    if indexed_anchor:
+        indexed_anchor = str(indexed_anchor)
+        if indexed_anchor not in time_columns:
+            raise RuntimeError(
+                f"selective_snapshot_index_anchor_missing:{table}:{indexed_anchor}"
+            )
+        if indexed_anchor not in epoch_seconds_columns:
+            raise RuntimeError(
+                f"selective_snapshot_index_anchor_unit_missing:{table}:{indexed_anchor}"
+            )
+        invalid_types = sorted(
+            name
+            for name in epoch_seconds_columns
+            if not declared_numeric_timestamp_type(declared_types.get(name, ""))
+        )
+        if invalid_types:
+            raise RuntimeError(
+                f"selective_snapshot_epoch_seconds_type_invalid:{table}:"
+                f"{','.join(invalid_types)}"
+            )
+        source_index_name = source_index_for_column(connection, table, indexed_anchor)
+        if not source_index_name:
+            raise RuntimeError(
+                f"selective_snapshot_source_index_missing:{table}:{indexed_anchor}"
+            )
+    normalized_columns = [
+        quote_identifier(column)
+        if column in epoch_seconds_columns
+        else normalized_timestamp_sql(column)
+        for column in time_columns
+    ]
+    if indexed_anchor:
+        anchor = quote_identifier(indexed_anchor)
+    else:
+        anchor = (
+            normalized_columns[0]
+            if len(normalized_columns) == 1
+            else "COALESCE(" + ", ".join(normalized_columns) + ")"
+        )
     upper_checks = " AND ".join(
         f"({normalized} IS NULL OR {normalized} <= ?)"
         for normalized in normalized_columns
@@ -513,6 +617,11 @@ def selection_for_table(
             "upper_epoch": float(upper_epoch),
             "future_bound_enforced": True,
             "time_semantics": rule.get("time_semantics", "event_time"),
+            "predicate_strategy": (
+                "indexed_epoch_seconds" if source_index_name else "normalized_timestamp"
+            ),
+            "indexed_time_anchor": indexed_anchor,
+            "source_index_name": source_index_name,
         }
     lower_epoch = long_lower_epoch if rule.get("horizon") == "long" else review_lower_epoch
     return {
@@ -526,6 +635,11 @@ def selection_for_table(
         "upper_epoch": float(upper_epoch),
         "future_bound_enforced": True,
         "time_semantics": rule.get("time_semantics", "event_time"),
+        "predicate_strategy": (
+            "indexed_epoch_seconds" if source_index_name else "normalized_timestamp"
+        ),
+        "indexed_time_anchor": indexed_anchor,
+        "source_index_name": source_index_name,
     }
 
 
@@ -668,7 +782,7 @@ def copy_candidate_observation_projection(
     selected_columns = ", ".join(quote_identifier(name) for name in source_names)
     cursor = connection.execute(
         f"SELECT {selected_columns} "
-        f"FROM src.{quote_identifier(CANDIDATE_OBSERVATION_TABLE)} "
+        f"FROM {source_table_reference(CANDIDATE_OBSERVATION_TABLE, selection)} "
         f"WHERE {selection['predicate_sql']} "
         f"ORDER BY {quote_identifier('signal_id')}, {quote_identifier('candidate_id')}",
         selection["parameters"],
@@ -891,7 +1005,7 @@ def copy_selected_tables(
             connection.execute(create_sql)
             connection.execute(
                 f"INSERT INTO {quote_identifier(table)} "
-                f"SELECT * FROM src.{quote_identifier(table)} "
+                f"SELECT * FROM {source_table_reference(table, selection)} "
                 f"WHERE {selection['predicate_sql']}",
                 selection["parameters"],
             )
@@ -914,6 +1028,9 @@ def copy_selected_tables(
             "upper_epoch": selection["upper_epoch"],
             "future_bound_enforced": selection["future_bound_enforced"],
             "time_semantics": selection["time_semantics"],
+            "predicate_strategy": selection.get("predicate_strategy"),
+            "indexed_time_anchor": selection.get("indexed_time_anchor"),
+            "source_index_name": selection.get("source_index_name"),
             "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
             "storage_projection": storage_projection,
             "indexes_created": [],
@@ -1618,7 +1735,11 @@ def self_test() -> None:
             "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
             "paper": (
                 "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+                "CREATE INDEX idx_candidate_shadow_obs_observed "
+                "ON candidate_shadow_observations(observed_at);"
                 "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+                "CREATE INDEX idx_candidate_shadow_virtual_observed "
+                "ON candidate_shadow_virtual_trades(observed_at);"
                 "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
                 "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
                 "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
