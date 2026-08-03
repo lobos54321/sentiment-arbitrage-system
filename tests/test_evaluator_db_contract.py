@@ -32,7 +32,11 @@ def create_live_sources(root):
         "paper": (
             "paper_trades.db",
             "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_obs_observed "
+            "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_virtual_observed "
+            "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
@@ -299,6 +303,10 @@ def test_candidate_payload_projection_tampering_is_rejected(tmp_path, monkeypatc
           UNIQUE(signal_id, candidate_id)
         )
         """
+    )
+    paper.execute(
+        "CREATE INDEX idx_candidate_shadow_obs_observed "
+        "ON candidate_shadow_observations(observed_at)"
     )
     paper.execute(
         "INSERT INTO candidate_shadow_observations VALUES (1,1,'current_all',?,?)",
