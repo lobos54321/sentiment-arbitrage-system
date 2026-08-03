@@ -15,10 +15,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import cross_db_evaluator_snapshot as snapshot_module  # noqa: E402
 from agent_capture_discovery_loop import sqlite_has_table  # noqa: E402
 from cross_db_evaluator_snapshot import (  # noqa: E402
+    DATABASE_SPECS,
     build_snapshot_bundle,
     candidate_observation_projection_supported,
     cleanup_interrupted_partials,
     database_output_budget_plan,
+    selection_for_table,
+    source_table_reference,
     static_database_output_budgets,
 )
 
@@ -33,7 +36,11 @@ def create_sources(root):
         "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
         "paper": (
             "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_obs_observed "
+            "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_virtual_observed "
+            "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
@@ -120,6 +127,79 @@ def test_dynamic_budget_uses_static_reserve_for_malformed_estimate(
     assert plan["source_compact_estimate_bytes"]["paper"] is None
     assert plan["database_budget_bytes"]["raw"] == static["raw"]
     assert sum(plan["database_budget_bytes"].values()) == 10 * 1024**3
+
+
+def test_candidate_time_selection_forces_observed_at_index(tmp_path):
+    sources = create_sources(tmp_path)
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    try:
+        selection = selection_for_table(
+            connection,
+            "candidate_shadow_observations",
+            DATABASE_SPECS["paper"]["tables"]["candidate_shadow_observations"],
+            review_lower_epoch=100.0,
+            long_lower_epoch=10.0,
+            upper_epoch=200.0,
+        )
+        plan = [
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * "
+                f"FROM {source_table_reference('candidate_shadow_observations', selection)} "
+                f"WHERE {selection['predicate_sql']} "
+                "ORDER BY signal_id",
+                selection["parameters"],
+            )
+        ]
+    finally:
+        connection.close()
+
+    assert selection["predicate_strategy"] == "indexed_epoch_seconds"
+    assert selection["indexed_time_anchor"] == "observed_at"
+    assert selection["source_index_name"] == "idx_candidate_shadow_obs_observed"
+    assert '"observed_at" >= ?' in selection["predicate_sql"]
+    assert "COALESCE(" not in selection["predicate_sql"]
+    assert "typeof(\"observed_at\")" not in selection["predicate_sql"]
+    assert any(
+        "SEARCH" in detail
+        and "idx_candidate_shadow_obs_observed" in detail
+        and "observed_at>?" in detail
+        for detail in plan
+    ), plan
+    assert not any(
+        "SCAN" in detail and "candidate_shadow_observations" in detail
+        for detail in plan
+    ), plan
+
+
+def test_candidate_time_selection_fails_closed_without_source_index(tmp_path):
+    sources = create_sources(tmp_path)
+    source = sqlite3.connect(sources["paper"])
+    source.execute("DROP INDEX idx_candidate_shadow_obs_observed")
+    source.commit()
+    source.close()
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="selective_snapshot_source_index_missing:"
+            "candidate_shadow_observations:observed_at",
+        ):
+            selection_for_table(
+                connection,
+                "candidate_shadow_observations",
+                DATABASE_SPECS["paper"]["tables"]["candidate_shadow_observations"],
+                review_lower_epoch=100.0,
+                long_lower_epoch=10.0,
+                upper_epoch=200.0,
+            )
+    finally:
+        connection.close()
 
 
 def test_cross_db_snapshot_publishes_only_after_full_validation(tmp_path):
@@ -238,6 +318,8 @@ def test_candidate_observation_payload_projection_is_lossless_and_compact(tmp_pa
           ON candidate_shadow_observations(signal_id);
         CREATE INDEX idx_candidate_shadow_obs_candidate
           ON candidate_shadow_observations(candidate_id, observed_at);
+        CREATE INDEX idx_candidate_shadow_obs_observed
+          ON candidate_shadow_observations(observed_at);
         """
     )
     expected = {}
@@ -595,6 +677,56 @@ def test_secondary_future_timestamps_exclude_incomplete_as_of_rows(tmp_path):
         ).fetchone()[0] == 0
     finally:
         snapshot.close()
+
+
+def test_indexed_anchor_preserves_mixed_secondary_timestamp_formats(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    iso_past = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 30))
+    iso_future = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 3600))
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN signal_ts")
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN entry_ts")
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN exit_ts")
+    paper.executemany(
+        "INSERT INTO candidate_shadow_virtual_trades("
+        "signal_id, observed_at, signal_ts, entry_ts, exit_ts"
+        ") VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, now - 60, now - 90, now - 45, now - 30),
+            (2, now - 60, (now - 90) * 1000, (now - 45) * 1000, (now - 30) * 1000),
+            (3, now - 60, iso_past, iso_past, iso_past),
+            (4, now - 60, now - 90, now - 45, (now + 3600) * 1000),
+            (5, now - 60, iso_past, iso_past, iso_future),
+        ],
+    )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    snapshot = sqlite3.connect(report["databases"]["paper"]["snapshot_path"])
+    try:
+        assert snapshot.execute(
+            "SELECT signal_id FROM candidate_shadow_virtual_trades ORDER BY signal_id"
+        ).fetchall() == [(1,), (2,), (3,)]
+    finally:
+        snapshot.close()
+
+    selection = report["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_virtual_trades"
+    ]
+    assert selection["predicate_strategy"] == "indexed_epoch_seconds"
+    assert selection["indexed_time_anchor"] == "observed_at"
+    assert selection["source_index_name"] == "idx_candidate_shadow_virtual_observed"
 
 
 def test_failed_bundle_does_not_replace_current(tmp_path):
