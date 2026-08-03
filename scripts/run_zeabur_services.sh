@@ -342,6 +342,10 @@ if [ "${EVALUATOR_SNAPSHOT_WORKER_ENABLED:-true}" = "true" ]; then
     --out-root "${EVALUATOR_SNAPSHOT_OUT_ROOT:-/app/data/agent_evidence}" \
     --max-skew-sec "${EVALUATOR_SNAPSHOT_MAX_SKEW_SEC:-30}" \
     --min-free-after-gib "${EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB:-5}" \
+    --max-output-gib "${EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB:-10}" \
+    --review-history-hours "${EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS:-96}" \
+    --long-history-hours "${EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS:-840}" \
+    --source-busy-timeout-ms "${EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS:-30000}" \
     --keep-previous 0 \
     --max-runs 0 \
     --interval-sec "${EVALUATOR_SNAPSHOT_INTERVAL_SEC:-21600}" \

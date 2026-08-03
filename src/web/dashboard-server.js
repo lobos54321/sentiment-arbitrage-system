@@ -21,6 +21,7 @@ import {
   finalBlockerFromTrade,
 } from './lifecycle-summary-utils.js';
 import { summarizePremiumSignalGateHealth } from './data-source-health-utils.js';
+import { runEvaluatorSnapshotPreflight } from './evaluator-snapshot-preflight.js';
 import {
   buildTradeReplay,
   summarizeTradeReplays,
@@ -2067,10 +2068,6 @@ function getAgentCaptureEvidenceManifestPath() {
   return process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST || join(getAgentCaptureEvidenceRoot(), 'manifest.json');
 }
 
-function safeRealpath(pathname) {
-  try { return fs.realpathSync(pathname); } catch { return resolve(pathname); }
-}
-
 function agentCaptureEvidenceDbPreflight() {
   const candidates = {
     signal: resolve(getAgentCaptureEvidenceSignalDbPath()),
@@ -2085,58 +2082,17 @@ function agentCaptureEvidenceDbPreflight() {
     kline: resolve(getKlineCacheDbPath()),
   };
   const manifestPath = resolve(getAgentCaptureEvidenceManifestPath());
-  const blockers = [];
-  for (const [name, candidate] of Object.entries(candidates)) {
-    const exists = fs.existsSync(candidate) && fs.statSync(candidate).isFile();
-    if (!exists) blockers.push(`evaluator_snapshot_${name}_db_missing`);
-    if (safeRealpath(candidate) === safeRealpath(live[name])) {
-      blockers.push(`active_${name}_db_forbidden_for_evaluator`);
-    }
-  }
-  let manifest = null;
-  try {
-    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  } catch {
-    blockers.push(fs.existsSync(manifestPath)
-      ? 'evaluator_snapshot_manifest_invalid_json'
-      : 'evaluator_snapshot_manifest_missing');
-  }
-  if (manifest) {
-    if (manifest.schema_version !== 'cross_db_evaluator_snapshot.v1') blockers.push('evaluator_snapshot_schema_version_invalid');
-    if (manifest.accepted !== true) blockers.push('evaluator_snapshot_not_accepted');
-    if (manifest.quick_checks_passed !== true) blockers.push('evaluator_snapshot_quick_check_not_passed');
-    if (manifest.required_tables_present !== true) blockers.push('evaluator_snapshot_required_tables_missing');
-    if (manifest.cross_database_time_skew_passed !== true) blockers.push('evaluator_snapshot_cross_database_time_skew_failed');
-    if (manifest.read_views_pinned_before_copy !== true) blockers.push('evaluator_snapshot_read_views_not_pinned');
-    if (manifest.source_mutation_free !== true) blockers.push('evaluator_snapshot_source_mutation_contract_failed');
-    const snapshotAgeSec = Date.now() / 1000 - Number(manifest.snapshot_ts || 0);
-    const maxSnapshotAgeSec = Number(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || 28800);
-    if (!Number.isFinite(snapshotAgeSec) || Number(manifest.snapshot_ts || 0) <= 0) blockers.push('evaluator_snapshot_timestamp_missing');
-    else if (snapshotAgeSec < -60) blockers.push('evaluator_snapshot_timestamp_in_future');
-    else if (maxSnapshotAgeSec > 0 && snapshotAgeSec > maxSnapshotAgeSec) blockers.push('evaluator_snapshot_stale');
-    for (const [name, candidate] of Object.entries(candidates)) {
-      const report = manifest.databases?.[name] || {};
-      if (!report.snapshot_path || safeRealpath(report.snapshot_path) !== safeRealpath(candidate)) {
-        blockers.push(`evaluator_snapshot_${name}_path_mismatch`);
-      }
-      if (!report.snapshot_sha256) blockers.push(`evaluator_snapshot_${name}_sha256_missing`);
-      if (report.quick_check?.length !== 1 || report.quick_check[0] !== 'ok') {
-        blockers.push(`evaluator_snapshot_${name}_quick_check_invalid`);
-      }
-    }
-  }
-  return {
-    schema_version: 'evaluator_snapshot_bundle_contract.v1',
-    evidence_db: candidates.paper,
-    evidence_databases: candidates,
-    live_databases: live,
-    evidence_manifest: manifestPath,
-    snapshot_id: manifest?.snapshot_id || null,
-    snapshot_ts: manifest?.snapshot_ts || null,
-    accepted: blockers.length === 0,
-    blockers: [...new Set(blockers)],
-    promotion_allowed: false,
-  };
+  return runEvaluatorSnapshotPreflight({
+    pythonBin: process.env.PYTHON_BIN || 'python3',
+    contractScript: join(projectRoot, 'scripts', 'evaluator_db_contract.py'),
+    repoRoot: projectRoot,
+    dataDir: dirname(live.paper),
+    candidates,
+    live,
+    manifestPath,
+    maxAgeSec: Number(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || 28800),
+    timeoutMs: Number(process.env.EVALUATOR_SNAPSHOT_PREFLIGHT_TIMEOUT_MS || 300000),
+  });
 }
 
 function getRawSignalOutcomesDbPath() {
