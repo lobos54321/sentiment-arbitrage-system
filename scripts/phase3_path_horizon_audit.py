@@ -66,7 +66,9 @@ def tables(db):
         return set()
     return {
         str(row[0])
-        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+        )
     }
 
 

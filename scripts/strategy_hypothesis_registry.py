@@ -136,7 +136,10 @@ def load_json(path, default=None):
 
 def table_exists(db, table) -> bool:
     try:
-        return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+        return bool(db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+            (table,),
+        ).fetchone())
     except sqlite3.Error:
         return False
 

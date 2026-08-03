@@ -133,7 +133,10 @@ def sqlite_has_table(path, table):
         return False
     db = sqlite3.connect(path)
     try:
-        row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        row = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+            (table,),
+        ).fetchone()
         return bool(row)
     finally:
         db.close()

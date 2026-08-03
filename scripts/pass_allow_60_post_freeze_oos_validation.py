@@ -88,7 +88,7 @@ def table_exists(db, table):
     try:
         return bool(
             db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
                 (table,),
             ).fetchone()
         )
