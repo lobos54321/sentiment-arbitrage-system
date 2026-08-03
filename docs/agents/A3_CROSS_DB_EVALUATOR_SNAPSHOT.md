@@ -1,4 +1,4 @@
-# A3 v2.2 Cross-Database Evaluator Snapshot
+# A3 v2.3 Cross-Database Evaluator Snapshot
 
 ## Purpose
 
@@ -54,6 +54,25 @@ the read transaction is committed and detached; the manifest records both the
 lock duration and this ordering, and both are acceptance requirements.
 
 Failed or partial runs never replace `current`.
+
+## A3 v2.3 index-aware time selection
+
+The high-volume candidate observation and virtual-trade writers store the
+indexed `observed_at` anchor as Unix epoch seconds. Their snapshot rules
+declare only that anchor's unit explicitly and require a source index whose
+first column is `observed_at`. Secondary historical timestamps retain generic
+seconds/milliseconds/ISO normalization because older rows use mixed formats.
+
+For the declared anchor the producer uses a bare numeric range predicate and
+forces the verified source index. It does not wrap the indexed timestamp in the
+generic mixed-format normalization expression, which would make SQLite scan
+the full multi-million-row source table. Other tables and undeclared time
+columns keep the generic seconds/milliseconds/ISO timestamp normalization.
+
+The producer fails closed when the declared anchor is missing, is not numeric,
+or lacks a non-partial source index. The manifest records the predicate
+strategy, indexed time anchor, and source index name for each selected table.
+The existing 300-second source read-lock ceiling remains unchanged.
 
 ## A3 v2.1 database budgets
 
