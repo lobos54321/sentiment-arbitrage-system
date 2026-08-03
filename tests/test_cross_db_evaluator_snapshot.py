@@ -16,6 +16,8 @@ import cross_db_evaluator_snapshot as snapshot_module  # noqa: E402
 from cross_db_evaluator_snapshot import (  # noqa: E402
     build_snapshot_bundle,
     cleanup_interrupted_partials,
+    database_output_budget_plan,
+    static_database_output_budgets,
 )
 
 
@@ -50,6 +52,74 @@ def create_sources(root):
     return sources
 
 
+def test_dynamic_budget_reclaims_unused_small_database_reserves_for_paper():
+    gib = 1024**3
+    reports = {
+        "signal": {"estimated_compact_bytes": 189_046_784, "page_size": 4096},
+        "paper": {"estimated_compact_bytes": 16_591_126_528, "page_size": 4096},
+        "raw": {"estimated_compact_bytes": 401_227_776, "page_size": 4096},
+        "kline": {"estimated_compact_bytes": 59_219_968, "page_size": 4096},
+    }
+
+    plan = database_output_budget_plan(10, reports)
+    static = static_database_output_budgets(10)
+    budgets = plan["database_budget_bytes"]
+
+    assert plan["schema_version"] == "evaluator_snapshot_budget.v2"
+    assert plan["total_output_cap_bytes"] == 10 * gib
+    assert plan["total_budget_bytes"] == 10 * gib
+    assert plan["bundle_cap_unchanged"] is True
+    assert plan["static_fallback_databases"] == []
+    assert plan["source_compact_estimate_bytes"]["paper"] == 16_591_126_528
+    assert budgets["paper"] > static["paper"]
+    assert budgets["paper"] > 9 * gib
+    assert plan["reclaimed_to_paper_bytes"] == budgets["paper"] - static["paper"]
+    assert sum(budgets.values()) == 10 * gib
+    for name in ("signal", "raw", "kline"):
+        assert reports[name]["estimated_compact_bytes"] <= budgets[name] <= static[name]
+
+
+def test_dynamic_budget_uses_static_reserve_when_compact_estimate_is_missing():
+    reports = {
+        "signal": {"estimated_compact_bytes": 1024**2, "page_size": 4096},
+        "paper": {"estimated_compact_bytes": 8 * 1024**3, "page_size": 4096},
+        "raw": {"estimated_compact_bytes": 0, "page_size": 4096},
+        "kline": {"page_size": 4096},
+    }
+
+    plan = database_output_budget_plan(10, reports)
+    static = static_database_output_budgets(10)
+
+    assert plan["static_fallback_databases"] == ["raw", "kline"]
+    assert plan["database_budget_bytes"]["raw"] == static["raw"]
+    assert plan["database_budget_bytes"]["kline"] == static["kline"]
+    assert sum(plan["database_budget_bytes"].values()) == 10 * 1024**3
+
+
+@pytest.mark.parametrize(
+    "malformed_estimate",
+    [True, False, 0.5, 1.0, float("inf"), "1048576", object()],
+)
+def test_dynamic_budget_uses_static_reserve_for_malformed_estimate(
+    malformed_estimate,
+):
+    reports = {
+        "signal": {"estimated_compact_bytes": 1024**2, "page_size": 4096},
+        "paper": {"estimated_compact_bytes": float("inf"), "page_size": 4096},
+        "raw": {"estimated_compact_bytes": malformed_estimate, "page_size": 4096},
+        "kline": {"estimated_compact_bytes": 1024**2, "page_size": 4096},
+    }
+
+    plan = database_output_budget_plan(10, reports)
+    static = static_database_output_budgets(10)
+
+    assert "raw" in plan["static_fallback_databases"]
+    assert plan["source_compact_estimate_bytes"]["raw"] is None
+    assert plan["source_compact_estimate_bytes"]["paper"] is None
+    assert plan["database_budget_bytes"]["raw"] == static["raw"]
+    assert sum(plan["database_budget_bytes"].values()) == 10 * 1024**3
+
+
 def test_cross_db_snapshot_publishes_only_after_full_validation(tmp_path):
     sources = create_sources(tmp_path)
     out = tmp_path / "evidence"
@@ -74,6 +144,10 @@ def test_cross_db_snapshot_publishes_only_after_full_validation(tmp_path):
     earliest_copy = min(row["started_epoch"] for row in report["databases"].values())
     assert earliest_copy >= latest_pin
     assert report["source_mutation_free"] is True
+    assert report["database_budget_plan"]["bundle_cap_unchanged"] is True
+    assert sum(report["database_budget_plan"]["database_budget_bytes"].values()) == (
+        report["output_cap_bytes"]
+    )
     assert set(report["databases"]) == {"signal", "paper", "raw", "kline"}
     assert all(row["snapshot_sha256"] for row in report["databases"].values())
     assert (out / "current").is_symlink()
