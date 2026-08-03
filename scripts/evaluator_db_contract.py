@@ -22,7 +22,7 @@ from cross_db_evaluator_snapshot import (
 
 
 SCHEMA_VERSION = "evaluator_db_source_contract.v1"
-SNAPSHOT_SCHEMA_VERSION = "cross_db_evaluator_snapshot.v2"
+SNAPSHOT_SCHEMA_VERSION = "cross_db_evaluator_snapshot.v3"
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
 SNAPSHOT_FILES = {
     "signal": "signal.db",
@@ -73,7 +73,7 @@ def sqlite_temporal_bounds(
         tables = {
             str(row[0])
             for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
             )
         }
         for table, rule in spec["tables"].items():
@@ -288,6 +288,17 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_cross_database_time_skew_failed")
         if manifest.get("read_views_pinned_before_copy") is not True:
             blockers.append("evaluator_snapshot_read_views_not_pinned")
+        if manifest.get("source_read_lock_budget_passed") is not True:
+            blockers.append("evaluator_snapshot_source_read_lock_budget_failed")
+        if manifest.get("indexes_built_after_source_read_lock_release") is not True:
+            blockers.append("evaluator_snapshot_index_build_lock_order_invalid")
+        try:
+            manifest_read_lock_limit = float(manifest.get("max_source_read_lock_sec"))
+            if manifest_read_lock_limit <= 0:
+                raise ValueError("non-positive")
+        except (TypeError, ValueError):
+            manifest_read_lock_limit = None
+            blockers.append("evaluator_snapshot_source_read_lock_limit_invalid")
         if manifest.get("source_mutation_free") is not True:
             blockers.append("evaluator_snapshot_source_mutation_contract_failed")
         if manifest.get("bounded_selective_snapshot") is not True:
@@ -362,6 +373,33 @@ def evaluator_snapshot_bundle_status(
                 blockers.append(f"evaluator_snapshot_{name}_database_budget_failed")
             if report.get("source_open_mode") != "read_only_attached_uri":
                 blockers.append(f"evaluator_snapshot_{name}_source_open_mode_invalid")
+            if report.get("source_read_lock_budget_passed") is not True:
+                blockers.append(
+                    f"evaluator_snapshot_{name}_source_read_lock_budget_failed"
+                )
+            if report.get("source_read_lock_released_before_index_build") is not True:
+                blockers.append(
+                    f"evaluator_snapshot_{name}_index_build_lock_order_invalid"
+                )
+            try:
+                report_read_lock_limit = float(report.get("source_read_lock_limit_sec"))
+                report_read_lock_duration = float(
+                    report.get("source_read_lock_duration_sec")
+                )
+                if (
+                    report_read_lock_limit <= 0
+                    or report_read_lock_duration < 0
+                    or report_read_lock_duration > report_read_lock_limit + 1.0
+                    or (
+                        manifest_read_lock_limit is not None
+                        and abs(report_read_lock_limit - manifest_read_lock_limit) > 0.001
+                    )
+                ):
+                    raise ValueError("lock budget mismatch")
+            except (TypeError, ValueError):
+                blockers.append(
+                    f"evaluator_snapshot_{name}_source_read_lock_contract_invalid"
+                )
             if int(report.get("temporary_full_backup_size_bytes") or 0) != 0:
                 blockers.append(f"evaluator_snapshot_{name}_full_backup_intermediate_detected")
             try:
@@ -370,6 +408,21 @@ def evaluator_snapshot_bundle_status(
             except (TypeError, ValueError):
                 blockers.append(f"evaluator_snapshot_{name}_selection_upper_invalid")
             selected_tables = report.get("selected_tables") or {}
+            if name == "paper":
+                candidate_projection = (
+                    selected_tables.get("candidate_shadow_observations") or {}
+                ).get("storage_projection") or {}
+                if candidate_projection.get("applied") is True:
+                    if (
+                        candidate_projection.get("schema_version")
+                        != "candidate_observation_payload_projection.v1"
+                        or candidate_projection.get("payload_semantics_preserved") is not True
+                        or candidate_projection.get("unknown_payload_keys_preserved") is not True
+                        or candidate_projection.get("missing_and_null_keys_preserved") is not True
+                    ):
+                        blockers.append(
+                            "evaluator_snapshot_candidate_payload_projection_invalid"
+                        )
             for required_table in (
                 ("premium_signals",) if name == "signal" else
                 (

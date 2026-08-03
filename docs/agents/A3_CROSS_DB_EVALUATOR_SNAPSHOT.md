@@ -1,4 +1,4 @@
-# A3 v2 Cross-Database Evaluator Snapshot
+# A3 v2.2 Cross-Database Evaluator Snapshot
 
 ## Purpose
 
@@ -33,6 +33,26 @@ The snapshot worker:
    and status publication both succeed, and only while no evaluator holds the
    shared snapshot lease.
 
+## A3 v2.2 compact paper evidence
+
+`candidate_shadow_observations.payload_json` repeats most signal context across
+all 84 candidates. The snapshot stores that repeated context once per signal
+and stores only each candidate's disjoint payload delta. A read-only
+`candidate_shadow_observations` compatibility view reconstructs the original
+JSON object and columns for evaluators.
+
+The producer canonicalizes and hashes every selected source payload, reads the
+compatibility view back, and rejects the snapshot unless row counts and semantic
+SHA-256 match. Unknown keys and the distinction between a missing key and an
+explicit JSON null are preserved. Sources without the required integer primary
+key schema use the ordinary table copy path instead of an unsafe projection.
+
+The pinned source read view has a hard default limit of `300s`. SQLite progress
+handlers interrupt over-budget extraction, partial output is removed, and the
+previous published bundle remains current. Source indexes are copied only after
+the read transaction is committed and detached; the manifest records both the
+lock duration and this ordering, and both are acceptance requirements.
+
 Failed or partial runs never replace `current`.
 
 ## A3 v2.1 database budgets
@@ -50,7 +70,7 @@ the complete `database_budget_plan` so production allocation is auditable.
 
 ## Selection windows
 
-The default v2 bundle contains:
+The default v2.2 bundle contains:
 
 - `96h` of high-volume candidate observations, virtual trades, decisions and
   opportunity rows. This covers 24h/48h/72h reports plus query grace;

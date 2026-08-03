@@ -61,7 +61,10 @@ def rate(num, den):
 
 
 def table_exists(db, table):
-    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone())
+    return bool(db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+        (table,),
+    ).fetchone())
 
 
 def columns(db, table):

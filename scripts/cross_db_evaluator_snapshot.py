@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -22,13 +23,19 @@ from typing import Any
 from urllib.parse import quote
 
 
-SCHEMA_VERSION = "cross_db_evaluator_snapshot.v2"
-PRUNABLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, "cross_db_evaluator_snapshot.v1"}
+SCHEMA_VERSION = "cross_db_evaluator_snapshot.v3"
+PRUNABLE_SCHEMA_VERSIONS = {
+    SCHEMA_VERSION,
+    "cross_db_evaluator_snapshot.v2",
+    "cross_db_evaluator_snapshot.v1",
+}
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
 BUDGET_SCHEMA_VERSION = "evaluator_snapshot_budget.v2"
+PAYLOAD_PROJECTION_SCHEMA_VERSION = "candidate_observation_payload_projection.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
 DEFAULT_MAX_OUTPUT_GIB = 10.0
+DEFAULT_MAX_SOURCE_READ_LOCK_SEC = 300.0
 SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PARTIAL_SNAPSHOT_NAME_RE = re.compile(r"^\.\d{8}T\d{6}Z-[0-9a-f]{8}\.partial$")
 DATABASE_BUDGET_SHARES = {
@@ -185,6 +192,15 @@ DATABASE_SPECS = {
 }
 SNAPSHOT_DATABASE_FILENAMES = {
     spec["filename"] for spec in DATABASE_SPECS.values()
+}
+CANDIDATE_OBSERVATION_TABLE = "candidate_shadow_observations"
+CANDIDATE_OBSERVATION_ROW_TABLE = "__a3_candidate_shadow_observation_rows"
+CANDIDATE_OBSERVATION_CONTEXT_TABLE = "__a3_candidate_shadow_observation_contexts"
+CANDIDATE_OBSERVATION_PROJECTION_REQUIRED_COLUMNS = {
+    "id",
+    "signal_id",
+    "candidate_id",
+    "payload_json",
 }
 
 
@@ -345,10 +361,13 @@ def database_metadata(
     spec: dict[str, Any],
     *,
     schema: str = "main",
+    include_views: bool = False,
 ) -> dict[str, Any]:
     schema = _schema_prefix(schema)
+    object_types = "('table','view')" if include_views else "('table')"
     table_rows = connection.execute(
-        f"SELECT name, sql FROM {schema}.sqlite_master WHERE type='table' ORDER BY name"
+        f"SELECT name, sql FROM {schema}.sqlite_master "
+        f"WHERE type IN {object_types} ORDER BY name"
     ).fetchall()
     table_sql = {str(row["name"]): str(row["sql"] or "") for row in table_rows}
     table_names = set(table_sql)
@@ -510,6 +529,307 @@ def selection_for_table(
     }
 
 
+def canonical_json_object(raw: Any, *, table: str, signal_id: Any) -> tuple[dict[str, Any], str]:
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"snapshot_payload_json_invalid:{table}:signal_id={signal_id}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"snapshot_payload_json_not_object:{table}:signal_id={signal_id}"
+        )
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return value, canonical
+
+
+def update_payload_semantic_digest(
+    digest: Any,
+    *,
+    signal_id: Any,
+    candidate_id: Any,
+    payload_json: str,
+) -> None:
+    digest.update(str(signal_id).encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(str(candidate_id).encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(payload_json.encode("utf-8"))
+    digest.update(b"\n")
+
+
+def column_definition(row: sqlite3.Row) -> str:
+    name = str(row["name"])
+    parts = [quote_identifier(name)]
+    declared_type = str(row["type"] or "").strip()
+    if declared_type:
+        parts.append(declared_type)
+    if int(row["pk"] or 0):
+        parts.append("PRIMARY KEY")
+    if int(row["notnull"] or 0):
+        parts.append("NOT NULL")
+    if row["dflt_value"] is not None:
+        parts.extend(("DEFAULT", str(row["dflt_value"])))
+    return " ".join(parts)
+
+
+def candidate_observation_projection_supported(
+    connection: sqlite3.Connection,
+) -> tuple[bool, list[sqlite3.Row]]:
+    columns = list(
+        connection.execute(
+            f"PRAGMA src.table_info({quote_identifier(CANDIDATE_OBSERVATION_TABLE)})"
+        )
+    )
+    names = {str(row["name"]) for row in columns}
+    id_columns = [row for row in columns if str(row["name"]) == "id"]
+    id_is_rowid_alias = bool(
+        len(id_columns) == 1
+        and str(id_columns[0]["type"] or "").strip().upper() == "INTEGER"
+        and int(id_columns[0]["pk"] or 0) == 1
+    )
+    return (
+        CANDIDATE_OBSERVATION_PROJECTION_REQUIRED_COLUMNS.issubset(names)
+        and id_is_rowid_alias,
+        columns,
+    )
+
+
+def candidate_payload_expression() -> str:
+    common = f"c.{quote_identifier('common_payload_json')}"
+    delta = f"r.{quote_identifier('payload_delta_json')}"
+    return (
+        "CASE "
+        f"WHEN {common}='{{}}' THEN {delta} "
+        f"WHEN {delta}='{{}}' THEN {common} "
+        f"ELSE substr({common},1,length({common})-1) || ',' || substr({delta},2) "
+        "END"
+    )
+
+
+def create_candidate_observation_projection(
+    connection: sqlite3.Connection,
+    source_columns: list[sqlite3.Row],
+) -> list[str]:
+    source_names = [str(row["name"]) for row in source_columns]
+    for internal in (
+        CANDIDATE_OBSERVATION_ROW_TABLE,
+        CANDIDATE_OBSERVATION_CONTEXT_TABLE,
+        "payload_delta_json",
+        "common_payload_json",
+    ):
+        if internal in source_names:
+            raise RuntimeError(f"candidate_observation_projection_name_collision:{internal}")
+    row_columns = [row for row in source_columns if str(row["name"]) != "payload_json"]
+    definitions = [column_definition(row) for row in row_columns]
+    definitions.extend(
+        (
+            f"{quote_identifier('context_id')} INTEGER NOT NULL",
+            f"{quote_identifier('payload_delta_json')} TEXT NOT NULL",
+            f"UNIQUE({quote_identifier('signal_id')},{quote_identifier('candidate_id')})",
+        )
+    )
+    connection.execute(
+        f"CREATE TABLE {quote_identifier(CANDIDATE_OBSERVATION_ROW_TABLE)} "
+        f"({', '.join(definitions)})"
+    )
+    connection.execute(
+        f"CREATE TABLE {quote_identifier(CANDIDATE_OBSERVATION_CONTEXT_TABLE)} ("
+        f"{quote_identifier('context_id')} INTEGER PRIMARY KEY, "
+        f"{quote_identifier('signal_id')} TEXT NOT NULL, "
+        f"{quote_identifier('common_payload_json')} TEXT NOT NULL)"
+    )
+    projected_columns = []
+    for name in source_names:
+        if name == "payload_json":
+            projected_columns.append(
+                f"{candidate_payload_expression()} AS {quote_identifier(name)}"
+            )
+        else:
+            projected_columns.append(f"r.{quote_identifier(name)}")
+    projected_columns.append(f"r.{quote_identifier('id')} AS {quote_identifier('rowid')}")
+    connection.execute(
+        f"CREATE VIEW {quote_identifier(CANDIDATE_OBSERVATION_TABLE)} AS "
+        f"SELECT {', '.join(projected_columns)} "
+        f"FROM {quote_identifier(CANDIDATE_OBSERVATION_ROW_TABLE)} AS r "
+        f"JOIN {quote_identifier(CANDIDATE_OBSERVATION_CONTEXT_TABLE)} AS c "
+        f"ON c.{quote_identifier('context_id')}=r.{quote_identifier('context_id')}"
+    )
+    return source_names
+
+
+def copy_candidate_observation_projection(
+    connection: sqlite3.Connection,
+    source_columns: list[sqlite3.Row],
+    selection: dict[str, Any],
+) -> dict[str, Any]:
+    source_names = create_candidate_observation_projection(connection, source_columns)
+    selected_columns = ", ".join(quote_identifier(name) for name in source_names)
+    cursor = connection.execute(
+        f"SELECT {selected_columns} "
+        f"FROM src.{quote_identifier(CANDIDATE_OBSERVATION_TABLE)} "
+        f"WHERE {selection['predicate_sql']} "
+        f"ORDER BY {quote_identifier('signal_id')}, {quote_identifier('candidate_id')}",
+        selection["parameters"],
+    )
+    source_digest = hashlib.sha256()
+    rows_copied = 0
+    context_count = 0
+    source_payload_bytes = 0
+    projected_payload_bytes = 0
+    row_insert_columns = [
+        name for name in source_names if name != "payload_json"
+    ] + ["context_id", "payload_delta_json"]
+    row_insert_sql = (
+        f"INSERT INTO {quote_identifier(CANDIDATE_OBSERVATION_ROW_TABLE)} "
+        f"({', '.join(quote_identifier(name) for name in row_insert_columns)}) "
+        f"VALUES ({', '.join('?' for _ in row_insert_columns)})"
+    )
+    context_insert_sql = (
+        f"INSERT INTO {quote_identifier(CANDIDATE_OBSERVATION_CONTEXT_TABLE)} "
+        f"({quote_identifier('context_id')},{quote_identifier('signal_id')},"
+        f"{quote_identifier('common_payload_json')}) VALUES (?,?,?)"
+    )
+    for signal_id, grouped in itertools.groupby(cursor, key=lambda row: row["signal_id"]):
+        rows = list(grouped)
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload, canonical = canonical_json_object(
+                row["payload_json"],
+                table=CANDIDATE_OBSERVATION_TABLE,
+                signal_id=signal_id,
+            )
+            payloads.append(payload)
+            source_payload_bytes += len(str(row["payload_json"]).encode("utf-8"))
+            update_payload_semantic_digest(
+                source_digest,
+                signal_id=signal_id,
+                candidate_id=row["candidate_id"],
+                payload_json=canonical,
+            )
+        common = dict(payloads[0])
+        common_encodings = {
+            key: json.dumps(value, sort_keys=True, separators=(",", ":"))
+            for key, value in common.items()
+        }
+        for payload in payloads[1:]:
+            for key in list(common):
+                if (
+                    key not in payload
+                    or json.dumps(
+                        payload[key], sort_keys=True, separators=(",", ":")
+                    )
+                    != common_encodings[key]
+                ):
+                    del common[key]
+                    del common_encodings[key]
+        common_json = json.dumps(common, sort_keys=True, separators=(",", ":"))
+        context_count += 1
+        connection.execute(
+            context_insert_sql,
+            (context_count, str(signal_id), common_json),
+        )
+        projected_payload_bytes += len(common_json.encode("utf-8"))
+        insert_rows = []
+        for row, payload in zip(rows, payloads):
+            delta = {key: value for key, value in payload.items() if key not in common}
+            delta_json = json.dumps(delta, sort_keys=True, separators=(",", ":"))
+            projected_payload_bytes += len(delta_json.encode("utf-8"))
+            values = [row[name] for name in source_names if name != "payload_json"]
+            values.extend((context_count, delta_json))
+            insert_rows.append(values)
+        connection.executemany(row_insert_sql, insert_rows)
+        rows_copied += len(insert_rows)
+    return {
+        "schema_version": PAYLOAD_PROJECTION_SCHEMA_VERSION,
+        "applied": True,
+        "logical_object_type": "view",
+        "row_storage_table": CANDIDATE_OBSERVATION_ROW_TABLE,
+        "context_storage_table": CANDIDATE_OBSERVATION_CONTEXT_TABLE,
+        "rows_copied": rows_copied,
+        "context_rows": context_count,
+        "source_payload_bytes": source_payload_bytes,
+        "projected_payload_bytes": projected_payload_bytes,
+        "payload_storage_ratio": (
+            projected_payload_bytes / source_payload_bytes
+            if source_payload_bytes > 0
+            else 0.0
+        ),
+        "source_payload_semantic_sha256": source_digest.hexdigest(),
+        "payload_reconstruction": "common_object_plus_disjoint_per_candidate_delta",
+        "unknown_payload_keys_preserved": True,
+        "missing_and_null_keys_preserved": True,
+    }
+
+
+def candidate_projection_indexes() -> list[tuple[str, str]]:
+    table = quote_identifier(CANDIDATE_OBSERVATION_ROW_TABLE)
+    return [
+        (
+            "idx_a3_candidate_shadow_obs_signal",
+            f"CREATE INDEX idx_a3_candidate_shadow_obs_signal ON {table}(signal_id)",
+        ),
+        (
+            "idx_a3_candidate_shadow_obs_candidate",
+            f"CREATE INDEX idx_a3_candidate_shadow_obs_candidate "
+            f"ON {table}(candidate_id, observed_at)",
+        ),
+        (
+            "idx_a3_candidate_shadow_obs_observed",
+            f"CREATE INDEX idx_a3_candidate_shadow_obs_observed ON {table}(observed_at)",
+        ),
+    ]
+
+
+def verify_candidate_observation_projection(
+    connection: sqlite3.Connection,
+    report: dict[str, Any],
+) -> None:
+    projection = report.get("storage_projection") or {}
+    if projection.get("applied") is not True:
+        return
+    destination_digest = hashlib.sha256()
+    rows_verified = 0
+    cursor = connection.execute(
+        f"SELECT signal_id, candidate_id, payload_json "
+        f"FROM {quote_identifier(CANDIDATE_OBSERVATION_TABLE)} "
+        f"ORDER BY signal_id, candidate_id"
+    )
+    for row in cursor:
+        _payload, canonical = canonical_json_object(
+            row["payload_json"],
+            table=CANDIDATE_OBSERVATION_TABLE,
+            signal_id=row["signal_id"],
+        )
+        update_payload_semantic_digest(
+            destination_digest,
+            signal_id=row["signal_id"],
+            candidate_id=row["candidate_id"],
+            payload_json=canonical,
+        )
+        rows_verified += 1
+    projection["destination_payload_semantic_sha256"] = destination_digest.hexdigest()
+    projection["semantic_rows_verified"] = rows_verified
+    projection["payload_semantics_preserved"] = bool(
+        rows_verified == int(report.get("rows_copied") or 0)
+        and destination_digest.hexdigest()
+        == projection.get("source_payload_semantic_sha256")
+    )
+    if projection["payload_semantics_preserved"] is not True:
+        raise RuntimeError("candidate_observation_payload_projection_semantic_mismatch")
+
+
+def create_deferred_indexes(
+    connection: sqlite3.Connection,
+    deferred_indexes: list[tuple[str, str, str]],
+    table_reports: dict[str, dict[str, Any]],
+) -> None:
+    for table, name, sql in deferred_indexes:
+        connection.execute(sql)
+        table_reports[table].setdefault("indexes_created", []).append(name)
+
+
 def copy_selected_tables(
     connection: sqlite3.Connection,
     spec: dict[str, Any],
@@ -517,13 +837,18 @@ def copy_selected_tables(
     review_lower_epoch: float,
     long_lower_epoch: float,
     upper_epoch: float,
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    list[dict[str, str]],
+    list[tuple[str, str, str]],
+]:
     source_rows = connection.execute(
         "SELECT name, sql FROM src.sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     source_table_sql = {str(row["name"]): str(row["sql"] or "") for row in source_rows}
     source_tables = set(source_table_sql)
     table_reports: dict[str, dict[str, Any]] = {}
+    deferred_indexes: list[tuple[str, str, str]] = []
     for table, rule in spec["tables"].items():
         required = bool(rule.get("required"))
         if table not in source_tables:
@@ -546,13 +871,37 @@ def copy_selected_tables(
             long_lower_epoch=long_lower_epoch,
             upper_epoch=upper_epoch,
         )
-        connection.execute(create_sql)
-        connection.execute(
-            f"INSERT INTO {quote_identifier(table)} "
-            f"SELECT * FROM src.{quote_identifier(table)} WHERE {selection['predicate_sql']}",
-            selection["parameters"],
-        )
-        copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
+        projection_supported = False
+        source_columns: list[sqlite3.Row] = []
+        if table == CANDIDATE_OBSERVATION_TABLE:
+            projection_supported, source_columns = candidate_observation_projection_supported(
+                connection
+            )
+        storage_projection: dict[str, Any]
+        if projection_supported:
+            storage_projection = copy_candidate_observation_projection(
+                connection,
+                source_columns,
+                selection,
+            )
+            copied_rows = int(storage_projection["rows_copied"])
+            for name, sql in candidate_projection_indexes():
+                deferred_indexes.append((table, name, sql))
+        else:
+            connection.execute(create_sql)
+            connection.execute(
+                f"INSERT INTO {quote_identifier(table)} "
+                f"SELECT * FROM src.{quote_identifier(table)} "
+                f"WHERE {selection['predicate_sql']}",
+                selection["parameters"],
+            )
+            copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
+            storage_projection = {
+                "schema_version": PAYLOAD_PROJECTION_SCHEMA_VERSION,
+                "applied": False,
+                "reason": "source_schema_not_projection_compatible",
+                "payload_semantics_preserved": True,
+            }
         table_reports[table] = {
             "included": True,
             "required": required,
@@ -566,20 +915,23 @@ def copy_selected_tables(
             "future_bound_enforced": selection["future_bound_enforced"],
             "time_semantics": selection["time_semantics"],
             "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
+            "storage_projection": storage_projection,
+            "indexes_created": [],
         }
     for table, report in table_reports.items():
         if not report.get("included"):
+            continue
+        if (report.get("storage_projection") or {}).get("applied") is True:
             continue
         indexes = connection.execute(
             "SELECT name, sql FROM src.sqlite_master "
             "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name",
             (table,),
         ).fetchall()
-        created = []
         for index in indexes:
-            connection.execute(str(index["sql"]))
-            created.append(str(index["name"]))
-        report["indexes_created"] = created
+            deferred_indexes.append(
+                (table, str(index["name"]), str(index["sql"]))
+            )
     omitted = [
         {
             "table": table,
@@ -587,7 +939,7 @@ def copy_selected_tables(
         }
         for table in sorted(source_tables - set(spec["tables"]) - {"sqlite_sequence"})
     ]
-    return table_reports, omitted
+    return table_reports, omitted, deferred_indexes
 
 
 def snapshot_one(
@@ -618,7 +970,7 @@ def snapshot_one(
             f"snapshot missing required watermarks for {source}: "
             f"{source_metadata['missing_required_watermarks']}"
         )
-    table_reports, omitted_tables = copy_selected_tables(
+    table_reports, omitted_tables, deferred_indexes = copy_selected_tables(
         connection,
         spec,
         review_lower_epoch=review_lower_epoch,
@@ -627,9 +979,17 @@ def snapshot_one(
     )
     connection.commit()
     read_view_released = time.time()
+    connection.set_progress_handler(None, 0)
     data_version_after = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
     source_stat_after = source.stat()
     connection.execute("DETACH DATABASE src")
+    index_build_started = time.time()
+    create_deferred_indexes(connection, deferred_indexes, table_reports)
+    connection.commit()
+    index_build_finished = time.time()
+    candidate_report = table_reports.get(CANDIDATE_OBSERVATION_TABLE)
+    if candidate_report:
+        verify_candidate_observation_projection(connection, candidate_report)
     connection.execute("PRAGMA journal_mode=DELETE")
     connection.commit()
     finished = time.time()
@@ -637,7 +997,7 @@ def snapshot_one(
     check.row_factory = sqlite3.Row
     try:
         quick_check = [str(row[0]) for row in check.execute("PRAGMA quick_check").fetchall()]
-        metadata = database_metadata(check, spec)
+        metadata = database_metadata(check, spec, include_views=True)
     finally:
         check.close()
     if quick_check != ["ok"]:
@@ -664,7 +1024,24 @@ def snapshot_one(
         "finished_epoch": finished,
         "midpoint_epoch": (started + finished) / 2,
         "duration_sec": round(finished - started, 6),
-        "source_read_lock_duration_sec": round(read_view_released - started, 6),
+        "source_read_lock_duration_sec": round(
+            read_view_released - float(pin_report["pinned_started_epoch"]), 6
+        ),
+        "source_read_lock_limit_sec": float(
+            pin_report["source_read_lock_limit_sec"]
+        ),
+        "source_read_lock_budget_passed": (
+            read_view_released - float(pin_report["pinned_started_epoch"])
+            <= float(pin_report["source_read_lock_limit_sec"]) + 1.0
+        ),
+        "source_read_lock_released_before_index_build": (
+            index_build_started >= read_view_released
+        ),
+        "deferred_index_build_started_at": utc_iso(index_build_started),
+        "deferred_index_build_finished_at": utc_iso(index_build_finished),
+        "deferred_index_build_duration_sec": round(
+            index_build_finished - index_build_started, 6
+        ),
         "source_size_bytes_before": source_stat_before.st_size,
         "source_size_bytes_after": source_stat_after.st_size,
         "source_mtime_before": source_stat_before.st_mtime,
@@ -708,6 +1085,7 @@ def snapshot_all_concurrently(
     upper_epoch: float,
     database_budgets: dict[str, int],
     busy_timeout_ms: int,
+    max_source_read_lock_sec: float,
 ) -> dict[str, dict[str, Any]]:
     names = tuple(DATABASE_SPECS)
     start_barrier = threading.Barrier(len(names))
@@ -736,6 +1114,12 @@ def snapshot_all_concurrently(
             connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
             start_barrier.wait(timeout=30)
             pin_started = time.time()
+            lock_deadline = time.monotonic() + float(max_source_read_lock_sec)
+
+            def interrupt_expired_read_view() -> int:
+                return 1 if time.monotonic() >= lock_deadline else 0
+
+            connection.set_progress_handler(interrupt_expired_read_view, 10000)
             connection.execute("BEGIN")
             connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
             pin_finished = time.time()
@@ -745,6 +1129,7 @@ def snapshot_all_concurrently(
                 "pinned_started_epoch": pin_started,
                 "pinned_finished_epoch": pin_finished,
                 "pinned_midpoint_epoch": (pin_started + pin_finished) / 2,
+                "source_read_lock_limit_sec": float(max_source_read_lock_sec),
                 **source_page_reports[name],
             }
             pinned_barrier.wait(timeout=30)
@@ -762,6 +1147,18 @@ def snapshot_all_concurrently(
             with result_lock:
                 reports[name] = report
         except Exception as exc:
+            if connection is not None:
+                connection.set_progress_handler(None, 0)
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and "interrupted" in str(exc).lower()
+                and time.monotonic()
+                >= locals().get("lock_deadline", float("inf"))
+            ):
+                exc = RuntimeError(
+                    f"source_read_lock_budget_exceeded:{name}:"
+                    f"{float(max_source_read_lock_sec):.3f}s"
+                )
             for barrier in (start_barrier, pinned_barrier):
                 try:
                     barrier.abort()
@@ -1002,6 +1399,7 @@ def build_snapshot_bundle(
     review_history_hours: float = DEFAULT_REVIEW_HISTORY_HOURS,
     long_history_hours: float = DEFAULT_LONG_HISTORY_HOURS,
     source_busy_timeout_ms: int = 30000,
+    max_source_read_lock_sec: float = DEFAULT_MAX_SOURCE_READ_LOCK_SEC,
     keep_previous: int = 0,
     snapshot_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1022,6 +1420,8 @@ def build_snapshot_bundle(
         raise ValueError("long_history_hours must be >= review_history_hours")
     if int(source_busy_timeout_ms) < 0:
         raise ValueError("source_busy_timeout_ms must be non-negative")
+    if float(max_source_read_lock_sec) <= 0:
+        raise ValueError("max_source_read_lock_sec must be positive")
     review_lower_epoch = selection_upper_epoch - review_history_hours * 3600
     long_lower_epoch = selection_upper_epoch - long_history_hours * 3600
     snapshots_root = root / "snapshots"
@@ -1050,6 +1450,7 @@ def build_snapshot_bundle(
             upper_epoch=selection_upper_epoch,
             database_budgets=output_budgets,
             busy_timeout_ms=int(source_busy_timeout_ms),
+            max_source_read_lock_sec=float(max_source_read_lock_sec),
         )
         pin_midpoints = [
             float(report["pinned_read_view"]["pinned_midpoint_epoch"])
@@ -1073,6 +1474,14 @@ def build_snapshot_bundle(
             float(report["selection_upper_epoch"]) == float(selection_upper_epoch)
             for report in database_reports.values()
         )
+        source_read_lock_budget_passed = all(
+            report.get("source_read_lock_budget_passed") is True
+            for report in database_reports.values()
+        )
+        indexes_built_after_source_read_lock_release = all(
+            report.get("source_read_lock_released_before_index_build") is True
+            for report in database_reports.values()
+        )
         database_payload_size_bytes = sum(
             int(report["snapshot_size_bytes"]) for report in database_reports.values()
         )
@@ -1094,6 +1503,8 @@ def build_snapshot_bundle(
             and source_mutation_free
             and skew <= max_skew_sec
             and selection_upper_bounds_consistent
+            and source_read_lock_budget_passed
+            and indexes_built_after_source_read_lock_release
             and output_cap_passed
             and git_commit
         )
@@ -1109,9 +1520,14 @@ def build_snapshot_bundle(
             "snapshot_ts": selection_upper_epoch,
             "git_commit": git_commit,
             "git_commit_present": bool(git_commit),
-            "method": "coordinated_read_view_pin_then_bounded_selective_extract",
+            "method": "coordinated_read_view_pin_then_compact_bounded_selective_extract",
             "bounded_selective_snapshot": True,
             "read_views_pinned_before_copy": True,
+            "max_source_read_lock_sec": float(max_source_read_lock_sec),
+            "source_read_lock_budget_passed": source_read_lock_budget_passed,
+            "indexes_built_after_source_read_lock_release": (
+                indexes_built_after_source_read_lock_release
+            ),
             "source_mutation_free": source_mutation_free,
             "copy_mode": "parallel_direct_extract_no_full_database_intermediate",
             "cross_database_time_skew_sec": round(skew, 6),
@@ -1265,6 +1681,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 review_history_hours=args.review_history_hours,
                 long_history_hours=args.long_history_hours,
                 source_busy_timeout_ms=args.source_busy_timeout_ms,
+                max_source_read_lock_sec=args.max_source_read_lock_sec,
                 keep_previous=args.keep_previous,
                 snapshot_id=args.snapshot_id,
             )
@@ -1309,6 +1726,11 @@ def main() -> int:
     parser.add_argument("--review-history-hours", type=float, default=DEFAULT_REVIEW_HISTORY_HOURS)
     parser.add_argument("--long-history-hours", type=float, default=DEFAULT_LONG_HISTORY_HOURS)
     parser.add_argument("--source-busy-timeout-ms", type=int, default=30000)
+    parser.add_argument(
+        "--max-source-read-lock-sec",
+        type=float,
+        default=DEFAULT_MAX_SOURCE_READ_LOCK_SEC,
+    )
     parser.add_argument("--keep-previous", type=int, default=0)
     parser.add_argument("--snapshot-id")
     parser.add_argument("--lock-file", default="/tmp/cross-db-evaluator-snapshot.lock")

@@ -2,6 +2,7 @@ import fcntl
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 
@@ -259,6 +260,81 @@ def test_selection_contract_tampering_is_rejected(tmp_path, monkeypatch):
 
     assert status["accepted"] is False
     assert "evaluator_snapshot_future_row_contract_invalid" in status["blockers"]
+
+
+def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_read_lock_budget_passed"] = False
+    manifest["databases"]["paper"]["source_read_lock_duration_sec"] = 9999
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_source_read_lock_budget_failed" in status["blockers"]
+    assert "evaluator_snapshot_paper_source_read_lock_contract_invalid" in status["blockers"]
+
+
+def test_candidate_payload_projection_tampering_is_rejected(tmp_path, monkeypatch):
+    live, sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE candidate_shadow_observations")
+    paper.execute(
+        """
+        CREATE TABLE candidate_shadow_observations(
+          id INTEGER PRIMARY KEY,
+          signal_id INTEGER NOT NULL,
+          candidate_id TEXT NOT NULL,
+          observed_at INTEGER NOT NULL,
+          payload_json TEXT NOT NULL,
+          UNIQUE(signal_id, candidate_id)
+        )
+        """
+    )
+    paper.execute(
+        "INSERT INTO candidate_shadow_observations VALUES (1,1,'current_all',?,?)",
+        (int(time.time()), '{"context":true}'),
+    )
+    paper.commit()
+    paper.close()
+    out = live / "projected_evidence"
+    build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    projection = manifest["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_observations"
+    ]["storage_projection"]
+    assert projection["applied"] is True
+    projection["payload_semantics_preserved"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_candidate_payload_projection_invalid" in status["blockers"]
 
 
 def test_partial_artifact_inside_published_bundle_is_rejected(tmp_path, monkeypatch):

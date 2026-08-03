@@ -60,7 +60,10 @@ def ts(v):
 
 
 def table_exists(db, name):
-    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+    return bool(db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+        (name,),
+    ).fetchone())
 
 
 def cols(db, table):

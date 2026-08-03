@@ -151,7 +151,10 @@ def compact_rate_counts(prefix, counts, denominator):
 
 
 def table_exists(db, name):
-    return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+    return bool(db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+        (name,),
+    ).fetchone())
 
 
 def recent_rowid_floor(db, table, max_scan_rows):

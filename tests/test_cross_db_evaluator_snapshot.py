@@ -13,8 +13,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import cross_db_evaluator_snapshot as snapshot_module  # noqa: E402
+from agent_capture_discovery_loop import sqlite_has_table  # noqa: E402
 from cross_db_evaluator_snapshot import (  # noqa: E402
     build_snapshot_bundle,
+    candidate_observation_projection_supported,
     cleanup_interrupted_partials,
     database_output_budget_plan,
     static_database_output_budgets,
@@ -210,6 +212,210 @@ def test_selective_snapshot_does_not_copy_source_freelist_or_mutate_source(tmp_p
     assert report["databases"]["paper"]["source_mutated_by_snapshot_process"] is False
     assert report["databases"]["paper"]["temporary_full_backup_size_bytes"] == 0
     assert report["bounded_selective_snapshot"] is True
+
+
+def test_candidate_observation_payload_projection_is_lossless_and_compact(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE candidate_shadow_observations")
+    paper.executescript(
+        """
+        CREATE TABLE candidate_shadow_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          signal_id INTEGER NOT NULL,
+          token_ca TEXT NOT NULL,
+          signal_ts INTEGER,
+          candidate_id TEXT NOT NULL,
+          family TEXT,
+          matched INTEGER NOT NULL,
+          reason TEXT,
+          observed_at INTEGER NOT NULL,
+          payload_json TEXT NOT NULL,
+          UNIQUE(signal_id, candidate_id)
+        );
+        CREATE INDEX idx_candidate_shadow_obs_signal
+          ON candidate_shadow_observations(signal_id);
+        CREATE INDEX idx_candidate_shadow_obs_candidate
+          ON candidate_shadow_observations(candidate_id, observed_at);
+        """
+    )
+    expected = {}
+    for index in range(84):
+        candidate_id = "current_all" if index == 0 else f"candidate_{index:02d}"
+        payload = {
+            "common_blob": "x" * 2048,
+            "context_schema_version": "candidate-shadow-context-v2",
+            "explicit_null": None,
+            "nested": {"quote": {"clean": True}, "items": [1, 2, 3]},
+            "candidate_id": candidate_id,
+            "matched": index % 3 == 0,
+            "type_sensitive_value": True if index == 1 else 1,
+        }
+        if index != 1:
+            payload["optional_key"] = None
+        if index == 2:
+            payload["future_unknown_key"] = {"kept": True}
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        expected[(1, candidate_id)] = payload
+        paper.execute(
+            """
+            INSERT INTO candidate_shadow_observations
+              (signal_id, token_ca, signal_ts, candidate_id, family, matched,
+               reason, observed_at, payload_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                "TOKEN",
+                now - 120,
+                candidate_id,
+                "base",
+                int(payload["matched"]),
+                "self_test",
+                now - 60,
+                encoded,
+            ),
+        )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    paper_report = report["databases"]["paper"]
+    selection = paper_report["selected_tables"]["candidate_shadow_observations"]
+    projection = selection["storage_projection"]
+    assert projection["applied"] is True
+    assert projection["payload_semantics_preserved"] is True
+    assert projection["semantic_rows_verified"] == 84
+    assert projection["payload_storage_ratio"] < 0.1
+    assert projection["unknown_payload_keys_preserved"] is True
+    assert projection["missing_and_null_keys_preserved"] is True
+    assert paper_report["source_read_lock_released_before_index_build"] is True
+    assert paper_report["source_read_lock_budget_passed"] is True
+    assert set(selection["indexes_created"]) == {
+        "idx_a3_candidate_shadow_obs_signal",
+        "idx_a3_candidate_shadow_obs_candidate",
+        "idx_a3_candidate_shadow_obs_observed",
+    }
+
+    snapshot = sqlite3.connect(paper_report["snapshot_path"])
+    snapshot.row_factory = sqlite3.Row
+    try:
+        object_type = snapshot.execute(
+            "SELECT type FROM sqlite_master WHERE name='candidate_shadow_observations'"
+        ).fetchone()[0]
+        assert object_type == "view"
+        assert sqlite_has_table(paper_report["snapshot_path"], "candidate_shadow_observations")
+        assert snapshot.execute(
+            "SELECT MAX(rowid) FROM candidate_shadow_observations"
+        ).fetchone()[0] == 84
+        actual = {
+            (int(row["signal_id"]), str(row["candidate_id"])): json.loads(
+                row["payload_json"]
+            )
+            for row in snapshot.execute(
+                "SELECT signal_id, candidate_id, payload_json "
+                "FROM candidate_shadow_observations"
+            )
+        }
+        assert actual == expected
+        assert snapshot.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    finally:
+        snapshot.close()
+
+
+def test_candidate_projection_requires_integer_primary_key_rowid_alias(tmp_path):
+    source = tmp_path / "paper.db"
+    source_db = sqlite3.connect(source)
+    source_db.execute(
+        "CREATE TABLE candidate_shadow_observations("
+        "id TEXT PRIMARY KEY, signal_id TEXT, candidate_id TEXT, payload_json TEXT)"
+    )
+    source_db.commit()
+    source_db.close()
+
+    destination = sqlite3.connect(":memory:")
+    destination.row_factory = sqlite3.Row
+    destination.execute("ATTACH DATABASE ? AS src", (str(source),))
+    try:
+        supported, _ = candidate_observation_projection_supported(destination)
+        assert supported is False
+    finally:
+        destination.close()
+
+
+def test_index_build_order_violation_fails_snapshot_acceptance(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    original_snapshot_one = snapshot_module.snapshot_one
+
+    def invalidate_index_order(*args, **kwargs):
+        report = original_snapshot_one(*args, **kwargs)
+        if Path(args[0]) == Path(sources["paper"]):
+            report["source_read_lock_released_before_index_build"] = False
+        return report
+
+    monkeypatch.setattr(snapshot_module, "snapshot_one", invalidate_index_order)
+    with pytest.raises(RuntimeError, match="cross-database snapshot acceptance failed"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T000000Z-1234abcd",
+        )
+    assert not (out / "current").exists()
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcd.partial").exists()
+
+
+def test_source_read_lock_deadline_fails_closed_and_cleans_partial(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    original_snapshot_one = snapshot_module.snapshot_one
+
+    def force_expired_progress_handler(source, destination, spec, connection, pin_report, **kwargs):
+        if Path(source) == Path(sources["paper"]):
+            time.sleep(0.02)
+            connection.execute(
+                "WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<1000000) "
+                "SELECT SUM(x) FROM n"
+            ).fetchone()
+        return original_snapshot_one(
+            source,
+            destination,
+            spec,
+            connection,
+            pin_report,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(snapshot_module, "snapshot_one", force_expired_progress_handler)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="source_read_lock_budget_exceeded:paper"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            max_source_read_lock_sec=0.01,
+            snapshot_id="20260101T000000Z-1234abcd",
+        )
+    assert time.monotonic() - started < 1.0
+    assert not (out / "current").exists()
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcd.partial").exists()
 
 
 def test_selective_snapshot_applies_one_bounded_upper_time_to_all_databases(tmp_path):
