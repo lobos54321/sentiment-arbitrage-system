@@ -1,4 +1,5 @@
 import fcntl
+import json
 from pathlib import Path
 import sqlite3
 
@@ -18,6 +19,7 @@ from evaluator_db_contract import (  # noqa: E402
     evaluator_snapshot_bundle_status,
     require_evaluator_db_source,
     require_evaluator_snapshot_bundle,
+    sha256_file,
 )
 from cross_db_evaluator_snapshot import build_snapshot_bundle  # noqa: E402
 
@@ -90,6 +92,20 @@ def test_active_paper_db_is_rejected_by_default(tmp_path):
         require_evaluator_db_source(str(live), str(tmp_path))
 
 
+def test_active_paper_db_hardlink_alias_is_rejected(tmp_path):
+    live = tmp_path / "paper_trades.db"
+    live.touch()
+    alias = tmp_path / "research" / "paper_evidence.db"
+    alias.parent.mkdir()
+    alias.hardlink_to(live)
+
+    status = evaluator_db_source_status(str(alias), str(tmp_path))
+
+    assert status["accepted"] is False
+    assert status["is_live_paper_db"] is True
+    assert "active_paper_db_forbidden_for_evaluator" in status["blockers"]
+
+
 def test_separate_evidence_db_is_accepted(tmp_path):
     evidence = tmp_path / "agent_evidence" / "current" / "paper_evidence.db"
     evidence.parent.mkdir(parents=True)
@@ -141,6 +157,68 @@ def test_valid_cross_db_snapshot_bundle_is_required(tmp_path, monkeypatch):
     assert "active_paper_db_forbidden_for_evaluator" in rejected["blockers"]
 
 
+def test_all_active_database_hardlink_aliases_are_rejected(tmp_path, monkeypatch):
+    live, sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    aliases = tmp_path / "aliases"
+    aliases.mkdir()
+    alias_paths = {}
+    for name, source in sources.items():
+        alias = aliases / Path(source).name
+        alias.hardlink_to(Path(source))
+        alias_paths[name] = str(alias)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=alias_paths["signal"],
+        paper_db=alias_paths["paper"],
+        raw_db=alias_paths["raw"],
+        kline_db=alias_paths["kline"],
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    for name in ("signal", "paper", "raw", "kline"):
+        assert f"active_{name}_db_forbidden_for_evaluator" in status["blockers"]
+
+
+def test_cross_role_active_database_hardlink_alias_is_rejected(tmp_path, monkeypatch):
+    live, sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    alias = tmp_path / "aliases" / "signal.db"
+    alias.parent.mkdir()
+    alias.hardlink_to(Path(sources["paper"]))
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(alias),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    assert "active_paper_db_forbidden_for_signal_evaluator" in status["blockers"]
+
+
+@pytest.mark.parametrize("payload", [{}, None, []])
+def test_falsy_or_non_object_manifest_is_rejected(tmp_path, monkeypatch, payload):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_manifest_invalid_structure" in status["blockers"]
+
+
 def test_same_size_snapshot_corruption_is_rejected(tmp_path, monkeypatch):
     live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
     paper = (out / "current" / "paper_evidence.db").resolve()
@@ -161,6 +239,146 @@ def test_same_size_snapshot_corruption_is_rejected(tmp_path, monkeypatch):
 
     assert status["accepted"] is False
     assert "evaluator_snapshot_paper_sha256_mismatch" in status["blockers"]
+
+
+def test_selection_contract_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["selection_contract"]["future_rows_excluded"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_future_row_contract_invalid" in status["blockers"]
+
+
+def test_partial_artifact_inside_published_bundle_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    snapshot_dir = (out / "current").resolve()
+    (snapshot_dir / ".paper_evidence.db.tmp").write_text("partial", encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_partial_artifacts_present" in status["blockers"]
+
+
+@pytest.mark.parametrize(
+    "side_name",
+    [
+        "paper_evidence.db-shm",
+        "paper_evidence.db-wal",
+        "paper_evidence.db-journal",
+        ".paper_evidence.db.tmp",
+        "unexpected.bin",
+    ],
+)
+def test_side_or_unknown_file_is_rejected_and_counted_outside_manifest(
+    tmp_path, monkeypatch, side_name
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    snapshot_dir = (out / "current").resolve()
+    (snapshot_dir / side_name).write_bytes(b"unexpected-side-file")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_partial_artifacts_present" in status["blockers"]
+    assert "evaluator_snapshot_bundle_size_mismatch" in status["blockers"]
+
+
+def test_time_bearing_selection_without_future_bound_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["databases"]["paper"]["selected_tables"]["paper_trades"][
+        "future_bound_enforced"
+    ] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_paper_future_bound_missing:paper_trades" in status["blockers"]
+
+
+def test_consumer_recomputes_temporal_maxima_instead_of_trusting_manifest(
+    tmp_path, monkeypatch
+):
+    live = tmp_path / "live"
+    sources = create_live_sources(live)
+    paper_source = sqlite3.connect(sources["paper"])
+    paper_source.execute("ALTER TABLE paper_trades ADD COLUMN exit_ts INTEGER")
+    paper_source.execute(
+        "INSERT INTO paper_trades(id, entry_time, exit_ts) VALUES (1, ?, NULL)",
+        (1,),
+    )
+    paper_source.commit()
+    paper_source.close()
+    monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
+    out = live / "agent_evidence"
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    paper = (out / "current" / "paper_evidence.db").resolve()
+    mutated = sqlite3.connect(paper)
+    mutated.execute(
+        "UPDATE paper_trades SET entry_time=?, exit_ts=? WHERE id=1",
+        (int(report["snapshot_ts"]) - 60, int(report["snapshot_ts"]) + 3600),
+    )
+    mutated.commit()
+    mutated.close()
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["databases"]["paper"]["snapshot_sha256"] = sha256_file(paper)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(paper),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_paper_future_rows_detected:paper_trades" in status["blockers"]
 
 
 def test_snapshot_lease_pins_immutable_paths_and_blocks_publish_lock(tmp_path, monkeypatch):

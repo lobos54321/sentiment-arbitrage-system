@@ -22,14 +22,61 @@ from typing import Any
 from urllib.parse import quote
 
 
-SCHEMA_VERSION = "cross_db_evaluator_snapshot.v1"
+SCHEMA_VERSION = "cross_db_evaluator_snapshot.v2"
+PRUNABLE_SCHEMA_VERSIONS = {SCHEMA_VERSION, "cross_db_evaluator_snapshot.v1"}
+SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
+DEFAULT_REVIEW_HISTORY_HOURS = 96.0
+DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
+DEFAULT_MAX_OUTPUT_GIB = 10.0
 SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PARTIAL_SNAPSHOT_NAME_RE = re.compile(r"^\.\d{8}T\d{6}Z-[0-9a-f]{8}\.partial$")
+DATABASE_BUDGET_SHARES = {
+    "signal": 0.08,
+    "paper": 0.68,
+    "raw": 0.18,
+    "kline": 0.06,
+}
+
+
+def recent(*time_columns: str, horizon: str = "review", required: bool = False) -> dict[str, Any]:
+    return {
+        "mode": "recent",
+        "time_columns": tuple(time_columns),
+        "horizon": horizon,
+        "required": required,
+    }
+
+
+def full(*, required: bool = False) -> dict[str, Any]:
+    return {
+        "mode": "full",
+        "required": required,
+        "time_semantics": "timeless_reference",
+    }
+
+
+def through_upper(*time_columns: str, required: bool = False) -> dict[str, Any]:
+    return {
+        "mode": "through_upper",
+        "time_columns": tuple(time_columns),
+        "required": required,
+        "time_semantics": "event_time",
+    }
+
+
 DATABASE_SPECS = {
     "signal": {
         "filename": "signal.db",
         "required_tables": ("premium_signals",),
         "watermarks": {"premium_signals": ("id", "source_message_ts", "timestamp", "receive_ts")},
+        "tables": {
+            "premium_signals": recent(
+                "timestamp", "source_message_ts", "receive_ts", "created_at",
+                horizon="long", required=True
+            ),
+            "token_motion_events": recent("ts_ms", horizon="long"),
+            "tokens": through_upper("first_seen_at", "created_at", "decision_timestamp"),
+        },
     },
     "paper": {
         "filename": "paper_evidence.db",
@@ -44,24 +91,97 @@ DATABASE_SPECS = {
         ),
         "watermarks": {
             "candidate_shadow_observations": ("signal_id", "signal_ts", "observed_at"),
-            "candidate_shadow_virtual_trades": ("signal_id", "observed_at", "closed_at"),
+            "candidate_shadow_virtual_trades": (
+                "signal_id", "signal_ts", "observed_at", "exit_ts"
+            ),
             "paper_decision_events": ("id", "event_ts", "created_at"),
             "a_class_decision_events": ("id", "event_ts", "created_at"),
             "a_class_mode_runtime_state": ("id", "updated_at", "evaluated_at", "created_at"),
-            "paper_trades": ("id", "entry_time", "exit_time", "created_at"),
+            "paper_trades": (
+                "id", "signal_ts", "entry_ts", "entry_time", "exit_ts", "created_at"
+            ),
             "opportunity_events": ("id", "event_ts", "created_at"),
+        },
+        "tables": {
+            "candidate_shadow_observations": recent("observed_at", "signal_ts", required=True),
+            "candidate_shadow_virtual_trades": recent(
+                "observed_at", "signal_ts", "entry_ts", "exit_ts", required=True
+            ),
+            "paper_decision_events": recent(
+                "event_ts", "signal_ts", "created_at", required=True
+            ),
+            "a_class_decision_events": recent(
+                "event_ts", "signal_ts", "opportunity_ts", "created_at", required=True
+            ),
+            "a_class_mode_runtime_state": through_upper(
+                "updated_at", "created_at", "last_breach_ts", required=True
+            ),
+            "paper_trades": through_upper(
+                "entry_ts", "entry_time", "signal_ts", "exit_ts", "last_ath_ts",
+                "trigger_ts", "armed_ts", "rolling_low_ts",
+                "stage3_qualifying_exit_ts", "created_at", required=True
+            ),
+            "opportunity_events": recent(
+                "event_ts", "raw_signal_ts", "opportunity_ts", "created_at", "updated_at",
+                required=True
+            ),
+            "canonical_trade_ledger": through_upper(
+                "entry_ts", "exit_ts", "created_at", "updated_at"
+            ),
+            "paper_missed_signal_attribution": recent(
+                "signal_ts", "created_event_ts", "baseline_ts", "first_tradable_ts",
+                "created_at", "updated_at", horizon="long"
+            ),
+            "opportunity_event_path_samples": recent(
+                "sample_ts", "created_at", "updated_at", horizon="long"
+            ),
+            "paper_trade_path_samples": recent("sample_ts", "created_at", horizon="long"),
+            "candidate_shadow_kline_fetch_attempts": through_upper("last_attempt_at"),
+            "lotto_not_ath_watch_shadow_snapshots": recent(
+                "captured_at", "signal_ts", "snapshot_ts", "first_seen_ts", "created_at",
+                horizon="long"
+            ),
+            "external_alpha_snapshots": recent("captured_at", "created_at", horizon="long"),
+            "external_alpha_state": through_upper("updated_at", "last_seen_ts", "first_seen_ts"),
+            "external_alpha_health": through_upper("updated_at", "last_run_ts", "last_success_ts"),
         },
     },
     "raw": {
         "filename": "raw.db",
         "required_tables": ("raw_signal_outcomes",),
         "watermarks": {"raw_signal_outcomes": ("id", "signal_id", "signal_ts", "updated_at")},
+        "tables": {
+            "raw_signal_outcomes": recent(
+                "signal_ts", "matured_at_ts", "baseline_ts", "first_bar_ts",
+                "created_at", "updated_at", horizon="long", required=True
+            ),
+            "raw_signal_observations": recent(
+                "signal_ts", "matured_at_ts", "first_bar_ts", "created_at", "updated_at",
+                horizon="long"
+            ),
+            "raw_price_bars_1m": recent(
+                "timestamp", "first_trade_ts", "last_trade_ts", "fetched_at", "created_at",
+                "updated_at", horizon="long"
+            ),
+            "raw_path_observer_provider_state": through_upper("updated_at"),
+        },
     },
     "kline": {
         "filename": "kline.db",
         "required_tables": ("kline_1m",),
         "watermarks": {"kline_1m": ("timestamp", "fetched_at", "updated_at")},
+        "tables": {
+            "kline_1m": recent("timestamp", "fetched_at", horizon="long", required=True),
+            "pool_mapping": through_upper("fetched_at"),
+            "helius_trades": recent("block_time", "ingested_at", horizon="long"),
+            "history_backfill_cursor": through_upper(
+                "last_backfill_at", "newest_block_time", "oldest_block_time"
+            ),
+        },
     },
+}
+SNAPSHOT_DATABASE_FILENAMES = {
+    spec["filename"] for spec in DATABASE_SPECS.values()
 }
 
 
@@ -96,12 +216,84 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
+def atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
 def fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def snapshot_directory_report(path: Path, *, include_manifest: bool) -> dict[str, Any]:
+    allowed = set(SNAPSHOT_DATABASE_FILENAMES)
+    if include_manifest:
+        allowed.add("manifest.json")
+    entries = list(path.iterdir()) if path.is_dir() else []
+    files = [item for item in entries if item.is_file()]
+    actual_names = {item.name for item in files}
+    unexpected = sorted(
+        item.name
+        for item in entries
+        if not item.is_file() or item.name not in allowed
+    )
+    missing = sorted(allowed - actual_names)
+    sizes = {item.name: int(item.stat().st_size) for item in files}
+    return {
+        "files": sizes,
+        "total_size_bytes": sum(sizes.values()),
+        "unexpected_entries": unexpected,
+        "missing_entries": missing,
+        "accepted": not unexpected and not missing,
+    }
+
+
+def write_bounded_manifest(
+    partial_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    output_cap_bytes: int,
+) -> dict[str, Any]:
+    manifest_path = partial_dir / "manifest.json"
+    manifest["manifest_size_bytes"] = 0
+    manifest["output_size_bytes"] = int(manifest.get("database_payload_size_bytes") or 0)
+    for _attempt in range(8):
+        atomic_json(manifest_path, manifest)
+        directory = snapshot_directory_report(partial_dir, include_manifest=True)
+        if not directory["accepted"]:
+            raise RuntimeError(f"snapshot bundle contains unexpected files: {directory}")
+        manifest_size = int(directory["files"]["manifest.json"])
+        total_size = int(directory["total_size_bytes"])
+        if total_size > int(output_cap_bytes):
+            raise RuntimeError(
+                f"selective snapshot exceeded bundle output cap: {total_size}>{output_cap_bytes}"
+            )
+        if (
+            int(manifest.get("manifest_size_bytes") or 0) == manifest_size
+            and int(manifest.get("output_size_bytes") or 0) == total_size
+        ):
+            manifest["output_cap_passed"] = True
+            return directory
+        manifest["manifest_size_bytes"] = manifest_size
+        manifest["output_size_bytes"] = total_size
+        manifest["output_cap_passed"] = True
+    raise RuntimeError("snapshot manifest size did not converge")
 
 
 @contextmanager
@@ -129,18 +321,31 @@ def quote_identifier(value: str) -> str:
     return '"' + str(value).replace('"', '""') + '"'
 
 
-def readonly_connection(path: Path) -> sqlite3.Connection:
+def readonly_connection(path: Path, *, busy_timeout_ms: int = 30000) -> sqlite3.Connection:
     uri = f"file:{quote(str(path.resolve()), safe='/')}?mode=ro"
-    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    timeout_sec = max(0.001, float(busy_timeout_ms) / 1000.0)
+    connection = sqlite3.connect(uri, uri=True, timeout=timeout_sec)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
-    connection.execute("PRAGMA busy_timeout=30000")
+    connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
     return connection
 
 
-def database_metadata(connection: sqlite3.Connection, spec: dict[str, Any]) -> dict[str, Any]:
+def _schema_prefix(schema: str) -> str:
+    if schema not in {"main", "src"}:
+        raise ValueError(f"unsupported SQLite schema: {schema}")
+    return schema
+
+
+def database_metadata(
+    connection: sqlite3.Connection,
+    spec: dict[str, Any],
+    *,
+    schema: str = "main",
+) -> dict[str, Any]:
+    schema = _schema_prefix(schema)
     table_rows = connection.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        f"SELECT name, sql FROM {schema}.sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     table_sql = {str(row["name"]): str(row["sql"] or "") for row in table_rows}
     table_names = set(table_sql)
@@ -152,7 +357,9 @@ def database_metadata(connection: sqlite3.Connection, spec: dict[str, Any]) -> d
             continue
         columns = {
             str(row["name"])
-            for row in connection.execute(f"PRAGMA table_info({quote_identifier(table)})")
+            for row in connection.execute(
+                f"PRAGMA {schema}.table_info({quote_identifier(table)})"
+            )
         }
         selected = [name for name in candidates if name in columns]
         if not selected:
@@ -164,17 +371,17 @@ def database_metadata(connection: sqlite3.Connection, spec: dict[str, Any]) -> d
             for column in selected
         )
         row = connection.execute(
-            f"SELECT {expressions} FROM {quote_identifier(table)}"
+            f"SELECT {expressions} FROM {schema}.{quote_identifier(table)}"
         ).fetchone()
         watermarks[table] = {column: row[column] for column in selected}
     schema_text = "\n".join(f"{name}\n{table_sql[name]}" for name in sorted(table_sql))
     return {
-        "schema_version": int(connection.execute("PRAGMA schema_version").fetchone()[0]),
-        "user_version": int(connection.execute("PRAGMA user_version").fetchone()[0]),
-        "application_id": int(connection.execute("PRAGMA application_id").fetchone()[0]),
-        "page_size": int(connection.execute("PRAGMA page_size").fetchone()[0]),
-        "page_count": int(connection.execute("PRAGMA page_count").fetchone()[0]),
-        "freelist_count": int(connection.execute("PRAGMA freelist_count").fetchone()[0]),
+        "schema_version": int(connection.execute(f"PRAGMA {schema}.schema_version").fetchone()[0]),
+        "user_version": int(connection.execute(f"PRAGMA {schema}.user_version").fetchone()[0]),
+        "application_id": int(connection.execute(f"PRAGMA {schema}.application_id").fetchone()[0]),
+        "page_size": int(connection.execute(f"PRAGMA {schema}.page_size").fetchone()[0]),
+        "page_count": int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0]),
+        "freelist_count": int(connection.execute(f"PRAGMA {schema}.freelist_count").fetchone()[0]),
         "table_schema_sha256": hashlib.sha256(schema_text.encode()).hexdigest(),
         "table_count": len(table_names),
         "missing_required_tables": missing_required,
@@ -196,52 +403,232 @@ def source_page_stats(connection: sqlite3.Connection, source: Path) -> dict[str,
     }
 
 
-def inspect_source_page_reports(source_paths: dict[str, Path]) -> dict[str, dict[str, int]]:
+def inspect_source_page_reports(
+    source_paths: dict[str, Path],
+    *,
+    busy_timeout_ms: int = 30000,
+) -> dict[str, dict[str, int]]:
     reports = {}
     for name, source in source_paths.items():
         if not source.is_file():
             raise FileNotFoundError(source)
-        connection = readonly_connection(source)
+        connection = readonly_connection(source, busy_timeout_ms=busy_timeout_ms)
         try:
-            reports[name] = source_page_stats(connection, source)
+            try:
+                reports[name] = source_page_stats(connection, source)
+            except sqlite3.Error as exc:
+                raise RuntimeError(
+                    f"snapshot source inspection failed:{name}:{type(exc).__name__}:{exc}"
+                ) from exc
         finally:
             connection.close()
     return reports
+
+
+def normalized_timestamp_sql(column: str) -> str:
+    value = quote_identifier(column)
+    text_value = f"TRIM(CAST({value} AS TEXT))"
+    numeric = f"CAST({value} AS REAL)"
+    normalized_numeric = (
+        f"CASE WHEN ABS({numeric}) >= 100000000000 THEN {numeric} / 1000.0 ELSE {numeric} END"
+    )
+    return (
+        "CASE "
+        f"WHEN {value} IS NULL THEN NULL "
+        f"WHEN typeof({value}) IN ('integer','real') THEN {normalized_numeric} "
+        f"WHEN {text_value} != '' AND {text_value} NOT GLOB '*[^0-9.-]*' "
+        f"THEN {normalized_numeric} "
+        f"ELSE CAST(strftime('%s', {value}) AS REAL) END"
+    )
+
+
+def selection_for_table(
+    connection: sqlite3.Connection,
+    table: str,
+    rule: dict[str, Any],
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+) -> dict[str, Any]:
+    columns = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA src.table_info({quote_identifier(table)})")
+    }
+    if rule["mode"] == "full":
+        return {
+            "mode": "full",
+            "predicate_sql": "1=1",
+            "parameters": [],
+            "time_column": None,
+            "lower_epoch": None,
+            "upper_epoch": upper_epoch,
+            "future_bound_enforced": False,
+            "time_semantics": rule.get("time_semantics"),
+        }
+    time_columns = [name for name in rule.get("time_columns", ()) if name in columns]
+    if not time_columns:
+        raise RuntimeError(f"selective_snapshot_time_column_missing:{table}")
+    normalized_columns = [normalized_timestamp_sql(column) for column in time_columns]
+    anchor = (
+        normalized_columns[0]
+        if len(normalized_columns) == 1
+        else "COALESCE(" + ", ".join(normalized_columns) + ")"
+    )
+    upper_checks = " AND ".join(
+        f"({normalized} IS NULL OR {normalized} <= ?)"
+        for normalized in normalized_columns
+    )
+    if rule["mode"] == "through_upper":
+        return {
+            "mode": "through_upper",
+            "predicate_sql": f"{anchor} IS NOT NULL AND {upper_checks}",
+            "parameters": [float(upper_epoch)] * len(normalized_columns),
+            "time_column": time_columns[0],
+            "time_columns": time_columns,
+            "upper_bound_columns": time_columns,
+            "lower_epoch": None,
+            "upper_epoch": float(upper_epoch),
+            "future_bound_enforced": True,
+            "time_semantics": rule.get("time_semantics", "event_time"),
+        }
+    lower_epoch = long_lower_epoch if rule.get("horizon") == "long" else review_lower_epoch
+    return {
+        "mode": "recent",
+        "predicate_sql": f"{anchor} IS NOT NULL AND {anchor} >= ? AND {upper_checks}",
+        "parameters": [float(lower_epoch)] + [float(upper_epoch)] * len(normalized_columns),
+        "time_column": time_columns[0],
+        "time_columns": time_columns,
+        "upper_bound_columns": time_columns,
+        "lower_epoch": float(lower_epoch),
+        "upper_epoch": float(upper_epoch),
+        "future_bound_enforced": True,
+        "time_semantics": rule.get("time_semantics", "event_time"),
+    }
+
+
+def copy_selected_tables(
+    connection: sqlite3.Connection,
+    spec: dict[str, Any],
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, str]]]:
+    source_rows = connection.execute(
+        "SELECT name, sql FROM src.sqlite_master WHERE type='table' ORDER BY name"
+    ).fetchall()
+    source_table_sql = {str(row["name"]): str(row["sql"] or "") for row in source_rows}
+    source_tables = set(source_table_sql)
+    table_reports: dict[str, dict[str, Any]] = {}
+    for table, rule in spec["tables"].items():
+        required = bool(rule.get("required"))
+        if table not in source_tables:
+            if required:
+                raise RuntimeError(f"snapshot missing required tables: {table}")
+            table_reports[table] = {
+                "included": False,
+                "required": False,
+                "reason": "optional_source_table_missing",
+            }
+            continue
+        create_sql = source_table_sql[table]
+        if not create_sql:
+            raise RuntimeError(f"snapshot source table schema missing: {table}")
+        selection = selection_for_table(
+            connection,
+            table,
+            rule,
+            review_lower_epoch=review_lower_epoch,
+            long_lower_epoch=long_lower_epoch,
+            upper_epoch=upper_epoch,
+        )
+        connection.execute(create_sql)
+        connection.execute(
+            f"INSERT INTO {quote_identifier(table)} "
+            f"SELECT * FROM src.{quote_identifier(table)} WHERE {selection['predicate_sql']}",
+            selection["parameters"],
+        )
+        copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
+        table_reports[table] = {
+            "included": True,
+            "required": required,
+            "rows_copied": copied_rows,
+            "selection_mode": selection["mode"],
+            "time_column": selection["time_column"],
+            "time_columns": selection.get("time_columns") or [],
+            "upper_bound_columns": selection.get("upper_bound_columns") or [],
+            "lower_epoch": selection["lower_epoch"],
+            "upper_epoch": selection["upper_epoch"],
+            "future_bound_enforced": selection["future_bound_enforced"],
+            "time_semantics": selection["time_semantics"],
+            "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
+        }
+    for table, report in table_reports.items():
+        if not report.get("included"):
+            continue
+        indexes = connection.execute(
+            "SELECT name, sql FROM src.sqlite_master "
+            "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        ).fetchall()
+        created = []
+        for index in indexes:
+            connection.execute(str(index["sql"]))
+            created.append(str(index["name"]))
+        report["indexes_created"] = created
+    omitted = [
+        {
+            "table": table,
+            "reason": "not_required_by_evaluator_selection_contract",
+        }
+        for table in sorted(source_tables - set(spec["tables"]) - {"sqlite_sequence"})
+    ]
+    return table_reports, omitted
 
 
 def snapshot_one(
     source: Path,
     destination: Path,
     spec: dict[str, Any],
-    source_connection: sqlite3.Connection,
+    connection: sqlite3.Connection,
     pin_report: dict[str, Any],
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    budget_bytes: int,
 ) -> dict[str, Any]:
     if not source.is_file():
         raise FileNotFoundError(source)
     started = time.time()
     source_stat_before = source.stat()
-    backup_path = destination.with_name(f".{destination.name}.full-backup.tmp")
-    destination_connection = None
-    try:
-        data_version_before = int(source_connection.execute("PRAGMA data_version").fetchone()[0])
-        destination_connection = sqlite3.connect(backup_path)
-        source_connection.backup(destination_connection, pages=4096, sleep=0.01)
-        destination_connection.commit()
-        data_version_after = int(source_connection.execute("PRAGMA data_version").fetchone()[0])
-    finally:
-        if destination_connection is not None:
-            destination_connection.close()
-    backup_finished = time.time()
+    data_version_before = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
+    source_metadata = database_metadata(connection, spec, schema="src")
+    if source_metadata["missing_required_tables"]:
+        raise RuntimeError(
+            f"snapshot missing required tables for {source}: "
+            f"{source_metadata['missing_required_tables']}"
+        )
+    if source_metadata["missing_required_watermarks"]:
+        raise RuntimeError(
+            f"snapshot missing required watermarks for {source}: "
+            f"{source_metadata['missing_required_watermarks']}"
+        )
+    table_reports, omitted_tables = copy_selected_tables(
+        connection,
+        spec,
+        review_lower_epoch=review_lower_epoch,
+        long_lower_epoch=long_lower_epoch,
+        upper_epoch=upper_epoch,
+    )
+    connection.commit()
+    read_view_released = time.time()
+    data_version_after = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
     source_stat_after = source.stat()
-    source_connection.rollback()
-    temporary_backup_size = backup_path.stat().st_size
-    compact_source = sqlite3.connect(backup_path)
-    try:
-        compact_source.execute("PRAGMA busy_timeout=30000")
-        compact_source.execute("VACUUM INTO ?", (str(destination),))
-    finally:
-        compact_source.close()
-    backup_path.unlink()
+    connection.execute("DETACH DATABASE src")
+    connection.execute("PRAGMA journal_mode=DELETE")
+    connection.commit()
     finished = time.time()
     check = sqlite3.connect(destination)
     check.row_factory = sqlite3.Row
@@ -256,6 +643,12 @@ def snapshot_one(
         raise RuntimeError(
             f"snapshot missing required tables for {source}: {metadata['missing_required_tables']}"
         )
+    snapshot_size = destination.stat().st_size
+    if snapshot_size > budget_bytes:
+        raise RuntimeError(
+            f"selective snapshot exceeded database budget for {source}: "
+            f"{snapshot_size}>{budget_bytes}"
+        )
     with destination.open("rb") as handle:
         os.fsync(handle.fileno())
     return {
@@ -263,31 +656,41 @@ def snapshot_one(
         "snapshot_path": str(destination.resolve()),
         "started_at": utc_iso(started),
         "finished_at": utc_iso(finished),
-        "source_read_view_released_at": utc_iso(backup_finished),
+        "source_read_view_released_at": utc_iso(read_view_released),
         "started_epoch": started,
         "finished_epoch": finished,
         "midpoint_epoch": (started + finished) / 2,
         "duration_sec": round(finished - started, 6),
-        "source_read_lock_duration_sec": round(backup_finished - started, 6),
+        "source_read_lock_duration_sec": round(read_view_released - started, 6),
         "source_size_bytes_before": source_stat_before.st_size,
         "source_size_bytes_after": source_stat_after.st_size,
         "source_mtime_before": source_stat_before.st_mtime,
         "source_mtime_after": source_stat_after.st_mtime,
         "source_data_version_before": data_version_before,
         "source_data_version_after": data_version_after,
-        "source_connection_total_changes": int(source_connection.total_changes),
-        "source_mutated_by_snapshot_process": bool(source_connection.total_changes),
+        "destination_connection_total_changes": int(connection.total_changes),
+        "source_open_mode": "read_only_attached_uri",
+        "source_mutated_by_snapshot_process": False,
         "source_changed_during_backup": (
             data_version_before != data_version_after
             or source_stat_before.st_mtime_ns != source_stat_after.st_mtime_ns
             or source_stat_before.st_size != source_stat_after.st_size
         ),
-        "temporary_full_backup_size_bytes": temporary_backup_size,
-        "snapshot_size_bytes": destination.stat().st_size,
-        "compaction_removed_bytes": max(0, temporary_backup_size - destination.stat().st_size),
+        "temporary_full_backup_size_bytes": 0,
+        "snapshot_size_bytes": snapshot_size,
+        "database_budget_bytes": int(budget_bytes),
+        "database_budget_passed": snapshot_size <= budget_bytes,
         "snapshot_sha256": sha256_file(destination),
         "quick_check": quick_check,
         "pinned_read_view": pin_report,
+        "selection_upper_epoch": float(upper_epoch),
+        "selection_review_lower_epoch": float(review_lower_epoch),
+        "selection_long_lower_epoch": float(long_lower_epoch),
+        "selected_tables": table_reports,
+        "omitted_source_tables": omitted_tables,
+        "source_schema_version": source_metadata["schema_version"],
+        "source_table_schema_sha256": source_metadata["table_schema_sha256"],
+        "source_upper_watermarks": source_metadata["upper_watermarks"],
         **metadata,
     }
 
@@ -296,6 +699,12 @@ def snapshot_all_concurrently(
     source_paths: dict[str, Path],
     partial_dir: Path,
     source_page_reports: dict[str, dict[str, int]],
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    database_budgets: dict[str, int],
+    busy_timeout_ms: int,
 ) -> dict[str, dict[str, Any]]:
     names = tuple(DATABASE_SPECS)
     start_barrier = threading.Barrier(len(names))
@@ -308,11 +717,24 @@ def snapshot_all_concurrently(
         connection = None
         try:
             source = source_paths[name]
-            connection = readonly_connection(source)
+            destination = partial_dir / DATABASE_SPECS[name]["filename"]
+            timeout_sec = max(0.001, float(busy_timeout_ms) / 1000.0)
+            connection = sqlite3.connect(destination, timeout=timeout_sec, uri=True)
+            connection.row_factory = sqlite3.Row
+            connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA temp_store=FILE")
+            page_size = max(512, int(source_page_reports[name]["page_size"] or 4096))
+            connection.execute(f"PRAGMA page_size={page_size}")
+            max_pages = max(1, int(database_budgets[name]) // page_size)
+            connection.execute(f"PRAGMA max_page_count={max_pages}")
+            source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
+            connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
             start_barrier.wait(timeout=30)
             pin_started = time.time()
             connection.execute("BEGIN")
-            connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+            connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
             pin_finished = time.time()
             pin_report = {
                 "pinned_started_at": utc_iso(pin_started),
@@ -329,6 +751,10 @@ def snapshot_all_concurrently(
                 DATABASE_SPECS[name],
                 connection,
                 pin_report,
+                review_lower_epoch=review_lower_epoch,
+                long_lower_epoch=long_lower_epoch,
+                upper_epoch=upper_epoch,
+                budget_bytes=database_budgets[name],
             )
             with result_lock:
                 reports[name] = report
@@ -379,26 +805,37 @@ def detected_commit(repo_root: Path) -> str | None:
 
 def disk_preflight(
     root: Path,
-    pin_reports: dict[str, dict[str, Any]],
     min_free_after_gib: float,
+    max_output_gib: float,
 ) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(root)
-    estimated_compact = sum(int(row["estimated_compact_bytes"]) for row in pin_reports.values())
-    concurrent_full_backups = sum(int(row["source_size_bytes"]) for row in pin_reports.values())
-    estimated_peak = estimated_compact + concurrent_full_backups
+    bounded_output = int(float(max_output_gib) * 1024**3)
     reserve = int(float(min_free_after_gib) * 1024**3)
-    accepted = usage.free >= estimated_peak + reserve
+    accepted = bounded_output > 0 and usage.free >= bounded_output + reserve
     return {
         "free_bytes": usage.free,
-        "estimated_compact_snapshot_bytes": estimated_compact,
-        "concurrent_temporary_full_backup_bytes": concurrent_full_backups,
-        "estimated_peak_working_bytes": estimated_peak,
+        "selective_snapshot_output_cap_bytes": bounded_output,
+        "temporary_full_backup_bytes": 0,
+        "estimated_peak_working_bytes": bounded_output,
         "required_reserve_bytes": reserve,
-        "estimated_free_after_bytes": usage.free - estimated_compact,
-        "estimated_free_at_peak_bytes": usage.free - estimated_peak,
+        "estimated_free_after_bytes": usage.free - bounded_output,
+        "estimated_free_at_peak_bytes": usage.free - bounded_output,
+        "fail_closed_on_insufficient_space": True,
         "accepted": accepted,
     }
+
+
+def database_output_budgets(max_output_gib: float) -> dict[str, int]:
+    total = int(float(max_output_gib) * 1024**3)
+    if total <= 0:
+        raise ValueError("max_output_gib must be positive")
+    budgets = {
+        name: int(total * DATABASE_BUDGET_SHARES[name])
+        for name in DATABASE_SPECS
+    }
+    budgets["paper"] += total - sum(budgets.values())
+    return budgets
 
 
 def publish_current(root: Path, snapshot_dir: Path) -> None:
@@ -411,7 +848,29 @@ def publish_current(root: Path, snapshot_dir: Path) -> None:
     os.replace(temporary, current)
 
 
-def prune_old_snapshots(root: Path, current_name: str, keep_previous: int) -> list[str]:
+def current_symlink_target(root: Path) -> str | None:
+    current = root / "current"
+    if not current.exists() and not current.is_symlink():
+        return None
+    if not current.is_symlink():
+        raise RuntimeError(f"current path must be a symlink or absent: {current}")
+    return os.readlink(current)
+
+
+def restore_current(root: Path, target: str | None) -> None:
+    current = root / "current"
+    if target is None:
+        current.unlink(missing_ok=True)
+        fsync_directory(root)
+        return
+    temporary = root / ".current.rollback.tmp"
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(target, target_is_directory=True)
+    os.replace(temporary, current)
+    fsync_directory(root)
+
+
+def prune_old_snapshots(root: Path, current_name: str, keep_previous: int) -> dict[str, list[str]]:
     snapshots = root / "snapshots"
     valid = []
     for path in snapshots.iterdir():
@@ -422,17 +881,24 @@ def prune_old_snapshots(root: Path, current_name: str, keep_previous: int) -> li
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if manifest.get("schema_version") == SCHEMA_VERSION and manifest.get("accepted") is True:
+        if (
+            manifest.get("schema_version") in PRUNABLE_SCHEMA_VERSIONS
+            and manifest.get("accepted") is True
+        ):
             valid.append(path)
     valid.sort(key=lambda item: item.name, reverse=True)
     protected = {current_name, *[path.name for path in valid if path.name != current_name][:keep_previous]}
     removed = []
+    errors = []
     for path in valid:
         if path.name in protected:
             continue
-        shutil.rmtree(path)
-        removed.append(str(path))
-    return removed
+        try:
+            shutil.rmtree(path)
+            removed.append(str(path))
+        except OSError as exc:
+            errors.append(f"{path}:{type(exc).__name__}:{exc}")
+    return {"removed_snapshots": removed, "removal_errors": errors}
 
 
 def cleanup_interrupted_partials(root: Path) -> list[str]:
@@ -454,6 +920,10 @@ def build_snapshot_bundle(
     repo_root: str,
     max_skew_sec: float = 300,
     min_free_after_gib: float = 5,
+    max_output_gib: float = DEFAULT_MAX_OUTPUT_GIB,
+    review_history_hours: float = DEFAULT_REVIEW_HISTORY_HOURS,
+    long_history_hours: float = DEFAULT_LONG_HISTORY_HOURS,
+    source_busy_timeout_ms: int = 30000,
     keep_previous: int = 0,
     snapshot_id: str | None = None,
 ) -> dict[str, Any]:
@@ -464,6 +934,18 @@ def build_snapshot_bundle(
     sid = snapshot_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{os.urandom(4).hex()}"
     if not SNAPSHOT_NAME_RE.fullmatch(sid):
         raise ValueError(f"invalid snapshot id: {sid}")
+    started = time.time()
+    selection_upper_epoch = started
+    review_history_hours = float(review_history_hours)
+    long_history_hours = float(long_history_hours)
+    if review_history_hours < 72:
+        raise ValueError("review_history_hours must cover at least 72 hours")
+    if long_history_hours < review_history_hours:
+        raise ValueError("long_history_hours must be >= review_history_hours")
+    if int(source_busy_timeout_ms) < 0:
+        raise ValueError("source_busy_timeout_ms must be non-negative")
+    review_lower_epoch = selection_upper_epoch - review_history_hours * 3600
+    long_lower_epoch = selection_upper_epoch - long_history_hours * 3600
     snapshots_root = root / "snapshots"
     snapshots_root.mkdir(parents=True, exist_ok=True)
     final_dir = snapshots_root / sid
@@ -471,16 +953,24 @@ def build_snapshot_bundle(
     if final_dir.exists() or partial_dir.exists():
         raise FileExistsError(sid)
     partial_dir.mkdir()
-    started = time.time()
     try:
-        source_page_reports = inspect_source_page_reports(source_paths)
-        preflight = disk_preflight(root, source_page_reports, min_free_after_gib)
+        source_page_reports = inspect_source_page_reports(
+            source_paths,
+            busy_timeout_ms=int(source_busy_timeout_ms),
+        )
+        preflight = disk_preflight(root, min_free_after_gib, max_output_gib)
         if not preflight["accepted"]:
             raise RuntimeError(f"insufficient disk for evaluator snapshot: {preflight}")
+        output_budgets = database_output_budgets(max_output_gib)
         database_reports = snapshot_all_concurrently(
             source_paths,
             partial_dir,
             source_page_reports,
+            review_lower_epoch=review_lower_epoch,
+            long_lower_epoch=long_lower_epoch,
+            upper_epoch=selection_upper_epoch,
+            database_budgets=output_budgets,
+            busy_timeout_ms=int(source_busy_timeout_ms),
         )
         pin_midpoints = [
             float(report["pinned_read_view"]["pinned_midpoint_epoch"])
@@ -500,6 +990,23 @@ def build_snapshot_bundle(
         required_watermarks_present = all(
             not report["missing_required_watermarks"] for report in database_reports.values()
         )
+        selection_upper_bounds_consistent = all(
+            float(report["selection_upper_epoch"]) == float(selection_upper_epoch)
+            for report in database_reports.values()
+        )
+        database_payload_size_bytes = sum(
+            int(report["snapshot_size_bytes"]) for report in database_reports.values()
+        )
+        output_cap_bytes = int(preflight["selective_snapshot_output_cap_bytes"])
+        payload_directory = snapshot_directory_report(partial_dir, include_manifest=False)
+        if not payload_directory["accepted"]:
+            raise RuntimeError(f"snapshot payload contains unexpected files: {payload_directory}")
+        if int(payload_directory["total_size_bytes"]) != database_payload_size_bytes:
+            raise RuntimeError(
+                "snapshot payload size accounting mismatch: "
+                f"{payload_directory['total_size_bytes']}!={database_payload_size_bytes}"
+            )
+        output_cap_passed = database_payload_size_bytes < output_cap_bytes
         git_commit = detected_commit(Path(repo_root).expanduser().resolve())
         accepted = bool(
             quick_checks_passed
@@ -507,6 +1014,8 @@ def build_snapshot_bundle(
             and required_watermarks_present
             and source_mutation_free
             and skew <= max_skew_sec
+            and selection_upper_bounds_consistent
+            and output_cap_passed
             and git_commit
         )
         for name, report in database_reports.items():
@@ -518,41 +1027,86 @@ def build_snapshot_bundle(
             "generated_at": utc_iso(),
             "snapshot_started_at": utc_iso(started),
             "snapshot_completed_at": utc_iso(),
-            "snapshot_ts": min(pin_midpoints),
+            "snapshot_ts": selection_upper_epoch,
             "git_commit": git_commit,
             "git_commit_present": bool(git_commit),
-            "method": "concurrent_read_view_pin_then_parallel_backup_and_compact",
+            "method": "coordinated_read_view_pin_then_bounded_selective_extract",
+            "bounded_selective_snapshot": True,
             "read_views_pinned_before_copy": True,
             "source_mutation_free": source_mutation_free,
-            "copy_mode": "parallel_per_database_release_on_completion",
+            "copy_mode": "parallel_direct_extract_no_full_database_intermediate",
             "cross_database_time_skew_sec": round(skew, 6),
             "max_allowed_cross_database_time_skew_sec": float(max_skew_sec),
             "cross_database_time_skew_passed": skew <= max_skew_sec,
             "quick_checks_passed": quick_checks_passed,
             "required_tables_present": required_tables_present,
             "required_watermarks_present": required_watermarks_present,
+            "selection_upper_bounds_consistent": selection_upper_bounds_consistent,
+            "selection_contract": {
+                "schema_version": SELECTION_SCHEMA_VERSION,
+                "common_upper_epoch": selection_upper_epoch,
+                "common_upper_at": utc_iso(selection_upper_epoch),
+                "review_history_hours": review_history_hours,
+                "review_lower_epoch": review_lower_epoch,
+                "long_history_hours": long_history_hours,
+                "long_lower_epoch": long_lower_epoch,
+                "supported_capture_windows_hours": [24, 48, 72],
+                "future_rows_excluded": True,
+                "table_rules_are_explicit": True,
+            },
+            "database_payload_size_bytes": database_payload_size_bytes,
+            "output_size_bytes": database_payload_size_bytes,
+            "output_cap_bytes": output_cap_bytes,
+            "output_cap_passed": output_cap_passed,
             "disk_preflight": preflight,
             "databases": database_reports,
             "accepted": accepted,
             "immutable": True,
+            "partial_artifacts_absent": True,
+            "active_database_reads_allowed_for_autoloop": False,
             "promotion_allowed": False,
         }
         if not accepted:
             raise RuntimeError(f"cross-database snapshot acceptance failed: {manifest}")
-        atomic_json(partial_dir / "manifest.json", manifest)
-        os.replace(partial_dir, final_dir)
-        fsync_directory(snapshots_root)
-        publish_current(root, final_dir)
-        fsync_directory(root)
-        removed = prune_old_snapshots(root, final_dir.name, max(0, int(keep_previous)))
-        latest_manifest = {
-            **manifest,
-            "retention": {
+        write_bounded_manifest(
+            partial_dir,
+            manifest,
+            output_cap_bytes=output_cap_bytes,
+        )
+        if manifest["output_cap_passed"] is not True:
+            raise RuntimeError(f"cross-database snapshot output cap failed: {manifest}")
+        previous_current_target = current_symlink_target(root)
+        latest_path = root / "latest_manifest.json"
+        previous_latest_bytes = latest_path.read_bytes() if latest_path.is_file() else None
+        manifest["retention"] = {
             "keep_previous": max(0, int(keep_previous)),
-            "removed_snapshots": removed,
-            },
+            "removed_snapshots": [],
+            "removal_errors": [],
         }
-        atomic_json(root / "latest_manifest.json", latest_manifest)
+        try:
+            os.replace(partial_dir, final_dir)
+            fsync_directory(snapshots_root)
+            publish_current(root, final_dir)
+            fsync_directory(root)
+            atomic_json(latest_path, manifest)
+            fsync_directory(root)
+        except BaseException:
+            restore_current(root, previous_current_target)
+            if previous_latest_bytes is None:
+                latest_path.unlink(missing_ok=True)
+            else:
+                atomic_bytes(latest_path, previous_latest_bytes)
+            fsync_directory(root)
+            if final_dir.exists():
+                shutil.rmtree(final_dir)
+            raise
+        retention = prune_old_snapshots(root, final_dir.name, max(0, int(keep_previous)))
+        manifest["retention"].update(retention)
+        try:
+            atomic_json(latest_path, manifest)
+        except Exception as exc:
+            manifest["retention"]["status_write_error"] = f"{type(exc).__name__}:{exc}"
+        latest_manifest = manifest
         return latest_manifest
     except BaseException:
         if partial_dir.exists():
@@ -595,6 +1149,7 @@ def self_test() -> None:
                 repo_root=str(Path(__file__).resolve().parent.parent),
                 max_skew_sec=30,
                 min_free_after_gib=0,
+                max_output_gib=0.1,
                 snapshot_id="20260101T000000Z-1234abcd",
             )
         finally:
@@ -626,6 +1181,10 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 repo_root=args.repo_root,
                 max_skew_sec=args.max_skew_sec,
                 min_free_after_gib=args.min_free_after_gib,
+                max_output_gib=args.max_output_gib,
+                review_history_hours=args.review_history_hours,
+                long_history_hours=args.long_history_hours,
+                source_busy_timeout_ms=args.source_busy_timeout_ms,
                 keep_previous=args.keep_previous,
                 snapshot_id=args.snapshot_id,
             )
@@ -666,6 +1225,10 @@ def main() -> int:
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parent.parent))
     parser.add_argument("--max-skew-sec", type=float, default=300)
     parser.add_argument("--min-free-after-gib", type=float, default=5)
+    parser.add_argument("--max-output-gib", type=float, default=DEFAULT_MAX_OUTPUT_GIB)
+    parser.add_argument("--review-history-hours", type=float, default=DEFAULT_REVIEW_HISTORY_HOURS)
+    parser.add_argument("--long-history-hours", type=float, default=DEFAULT_LONG_HISTORY_HOURS)
+    parser.add_argument("--source-busy-timeout-ms", type=int, default=30000)
     parser.add_argument("--keep-previous", type=int, default=0)
     parser.add_argument("--snapshot-id")
     parser.add_argument("--lock-file", default="/tmp/cross-db-evaluator-snapshot.lock")

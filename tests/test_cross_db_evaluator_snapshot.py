@@ -2,6 +2,9 @@ import json
 from pathlib import Path
 import sqlite3
 import sys
+import threading
+import time
+from collections import namedtuple
 
 import pytest
 
@@ -103,7 +106,7 @@ def test_new_snapshot_prunes_previous_only_after_publish(tmp_path):
     assert json.loads((out / "current" / "manifest.json").read_text())["snapshot_id"] == second["snapshot_id"]
 
 
-def test_snapshot_compacts_source_freelist_without_mutating_source(tmp_path):
+def test_selective_snapshot_does_not_copy_source_freelist_or_mutate_source(tmp_path):
     sources = create_sources(tmp_path)
     paper = Path(sources["paper"])
     connection = sqlite3.connect(paper)
@@ -131,6 +134,187 @@ def test_snapshot_compacts_source_freelist_without_mutating_source(tmp_path):
     assert paper.stat().st_size == source_size
     assert snapshot_size < source_size / 2
     assert report["databases"]["paper"]["source_mutated_by_snapshot_process"] is False
+    assert report["databases"]["paper"]["temporary_full_backup_size_bytes"] == 0
+    assert report["bounded_selective_snapshot"] is True
+
+
+def test_selective_snapshot_applies_one_bounded_upper_time_to_all_databases(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    signal = sqlite3.connect(sources["signal"])
+    signal.execute("ALTER TABLE premium_signals ADD COLUMN timestamp INTEGER")
+    signal.executemany(
+        "INSERT INTO premium_signals(id, source_message_ts, timestamp) VALUES (?, ?, ?)",
+        [
+            (1, now - 60, None),
+            (2, now - 40 * 86400, None),
+            (3, now + 3600, None),
+        ],
+    )
+    signal.commit()
+    signal.close()
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO candidate_shadow_observations(signal_id, observed_at) VALUES (?, ?)",
+        [(1, now - 60), (2, now - 5 * 86400), (3, now + 3600)],
+    )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        review_history_hours=96,
+        long_history_hours=24 * 35,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    signal_snapshot = sqlite3.connect(report["databases"]["signal"]["snapshot_path"])
+    paper_snapshot = sqlite3.connect(report["databases"]["paper"]["snapshot_path"])
+    try:
+        assert signal_snapshot.execute("SELECT id FROM premium_signals").fetchall() == [(1,)]
+        assert paper_snapshot.execute(
+            "SELECT signal_id FROM candidate_shadow_observations"
+        ).fetchall() == [(1,)]
+    finally:
+        signal_snapshot.close()
+        paper_snapshot.close()
+    assert report["selection_upper_bounds_consistent"] is True
+    assert {
+        row["selection_upper_epoch"] for row in report["databases"].values()
+    } == {report["snapshot_ts"]}
+    assert report["databases"]["signal"]["selected_tables"]["premium_signals"]["rows_copied"] == 1
+    assert report["databases"]["paper"]["selected_tables"]["candidate_shadow_observations"]["rows_copied"] == 1
+
+
+def test_writer_commit_after_all_read_views_are_pinned_is_not_visible(
+    tmp_path, monkeypatch
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    signal = sqlite3.connect(sources["signal"])
+    signal.execute("PRAGMA journal_mode=WAL")
+    signal.execute(
+        "INSERT INTO premium_signals(id, source_message_ts) VALUES (?, ?)",
+        (1, now - 60),
+    )
+    signal.commit()
+    signal.close()
+    original_snapshot_one = snapshot_module.snapshot_one
+    injection_lock = threading.Lock()
+    injected = False
+
+    def snapshot_one_with_concurrent_commit(source, *args, **kwargs):
+        nonlocal injected
+        if Path(source) == Path(sources["signal"]):
+            with injection_lock:
+                if not injected:
+                    writer = sqlite3.connect(sources["signal"])
+                    writer.execute(
+                        "INSERT INTO premium_signals(id, source_message_ts) VALUES (?, ?)",
+                        (2, now - 30),
+                    )
+                    writer.commit()
+                    writer.close()
+                    injected = True
+        return original_snapshot_one(source, *args, **kwargs)
+
+    monkeypatch.setattr(snapshot_module, "snapshot_one", snapshot_one_with_concurrent_commit)
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    source = sqlite3.connect(sources["signal"])
+    snapshot = sqlite3.connect(report["databases"]["signal"]["snapshot_path"])
+    try:
+        assert source.execute("SELECT id FROM premium_signals ORDER BY id").fetchall() == [
+            (1,), (2,)
+        ]
+        assert snapshot.execute("SELECT id FROM premium_signals ORDER BY id").fetchall() == [
+            (1,)
+        ]
+    finally:
+        source.close()
+        snapshot.close()
+
+
+def test_time_bearing_small_tables_also_exclude_future_rows(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO paper_trades(id, entry_time) VALUES (?, ?)",
+        [(1, now - 60), (2, now + 3600)],
+    )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    snapshot = sqlite3.connect(report["databases"]["paper"]["snapshot_path"])
+    try:
+        assert snapshot.execute("SELECT id FROM paper_trades ORDER BY id").fetchall() == [(1,)]
+    finally:
+        snapshot.close()
+    selection = report["databases"]["paper"]["selected_tables"]["paper_trades"]
+    assert selection["selection_mode"] == "through_upper"
+    assert selection["future_bound_enforced"] is True
+
+
+def test_secondary_future_timestamps_exclude_incomplete_as_of_rows(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("ALTER TABLE paper_trades ADD COLUMN exit_ts INTEGER")
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN exit_ts INTEGER")
+    paper.execute(
+        "INSERT INTO paper_trades(id, entry_time, exit_ts) VALUES (?, ?, ?)",
+        (1, now - 60, now + 3600),
+    )
+    paper.execute(
+        "INSERT INTO candidate_shadow_virtual_trades(signal_id, observed_at, exit_ts) "
+        "VALUES (?, ?, ?)",
+        (1, now - 60, now + 3600),
+    )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    snapshot = sqlite3.connect(report["databases"]["paper"]["snapshot_path"])
+    try:
+        assert snapshot.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0] == 0
+        assert snapshot.execute(
+            "SELECT COUNT(*) FROM candidate_shadow_virtual_trades"
+        ).fetchone()[0] == 0
+    finally:
+        snapshot.close()
 
 
 def test_failed_bundle_does_not_replace_current(tmp_path):
@@ -163,6 +347,74 @@ def test_failed_bundle_does_not_replace_current(tmp_path):
     assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
 
 
+def test_late_status_write_failure_rolls_back_current_and_preserves_previous(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    first = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    original_atomic_json = snapshot_module.atomic_json
+    failed = False
+
+    def fail_first_new_latest(path, payload):
+        nonlocal failed
+        if (
+            not failed
+            and Path(path) == out / "latest_manifest.json"
+            and payload.get("snapshot_id") == "20260101T010000Z-abcdef12"
+        ):
+            failed = True
+            raise OSError("injected_latest_manifest_failure")
+        return original_atomic_json(path, payload)
+
+    monkeypatch.setattr(snapshot_module, "atomic_json", fail_first_new_latest)
+    with pytest.raises(OSError, match="injected_latest_manifest_failure"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T010000Z-abcdef12",
+        )
+
+    current = json.loads((out / "current" / "manifest.json").read_text())
+    latest = json.loads((out / "latest_manifest.json").read_text())
+    assert current["snapshot_id"] == first["snapshot_id"]
+    assert latest["snapshot_id"] == first["snapshot_id"]
+    assert (out / "snapshots" / first["snapshot_id"]).is_dir()
+    assert not (out / "snapshots" / "20260101T010000Z-abcdef12").exists()
+
+
+def test_bundle_output_accounting_includes_manifest_and_has_no_side_files(tmp_path):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    snapshot_dir = (out / "current").resolve()
+    files = [item for item in snapshot_dir.iterdir() if item.is_file()]
+    assert {item.name for item in files} == {
+        "signal.db", "paper_evidence.db", "raw.db", "kline.db", "manifest.json"
+    }
+    assert sum(item.stat().st_size for item in files) == report["output_size_bytes"]
+    assert report["output_size_bytes"] <= report["output_cap_bytes"]
+
+
 def test_interrupted_partial_cleanup_is_strictly_scoped(tmp_path):
     snapshots = tmp_path / "evidence" / "snapshots"
     interrupted = snapshots / ".20260101T010000Z-abcdef12.partial"
@@ -190,7 +442,7 @@ def test_missing_required_watermark_rejects_bundle(tmp_path):
     connection.close()
     out = tmp_path / "evidence"
 
-    with pytest.raises(RuntimeError, match="snapshot acceptance failed"):
+    with pytest.raises(RuntimeError, match="required watermarks"):
         build_snapshot_bundle(
             sources=sources,
             out_root=str(out),
@@ -201,6 +453,139 @@ def test_missing_required_watermark_rejects_bundle(tmp_path):
         )
 
     assert not (out / "current").exists()
+
+
+def test_disk_shortage_fails_closed_without_replacing_current(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    first = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    DiskUsage = namedtuple("DiskUsage", "total used free")
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "disk_usage",
+        lambda _path: DiskUsage(1024**3, 1024**3 - 1024, 1024),
+    )
+
+    with pytest.raises(RuntimeError, match="insufficient disk"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T010000Z-abcdef12",
+        )
+
+    current = json.loads((out / "current" / "manifest.json").read_text())
+    assert current["snapshot_id"] == first["snapshot_id"]
+    assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
+
+
+def test_output_cap_breach_fails_closed_without_replacing_current(tmp_path):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    first = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("ALTER TABLE candidate_shadow_observations ADD COLUMN payload BLOB")
+    paper.execute(
+        "INSERT INTO candidate_shadow_observations(signal_id, observed_at, payload) VALUES (?,?,?)",
+        (1, int(time.time()), b"x" * 256_000),
+    )
+    paper.commit()
+    paper.close()
+
+    with pytest.raises(RuntimeError, match="concurrent evaluator snapshot failed"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.0001,
+            snapshot_id="20260101T010000Z-abcdef12",
+        )
+
+    current = json.loads((out / "current" / "manifest.json").read_text())
+    assert current["snapshot_id"] == first["snapshot_id"]
+    assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
+
+
+def test_locked_source_fails_closed_without_replacing_current(tmp_path):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    first = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+    lock = sqlite3.connect(sources["paper"])
+    lock.execute("BEGIN EXCLUSIVE")
+    try:
+        with pytest.raises(RuntimeError, match="snapshot source inspection failed"):
+            build_snapshot_bundle(
+                sources=sources,
+                out_root=str(out),
+                repo_root=str(ROOT),
+                max_skew_sec=30,
+                min_free_after_gib=0,
+                max_output_gib=0.1,
+                source_busy_timeout_ms=10,
+                snapshot_id="20260101T010000Z-abcdef12",
+            )
+    finally:
+        lock.rollback()
+        lock.close()
+    current = json.loads((out / "current" / "manifest.json").read_text())
+    assert current["snapshot_id"] == first["snapshot_id"]
+    assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
+
+
+def test_duplicate_snapshot_id_is_rejected_without_partial(tmp_path):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "evidence"
+    build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    with pytest.raises(FileExistsError):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T000000Z-1234abcd",
+        )
+
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcd.partial").exists()
 
 
 def test_missing_git_commit_rejects_bundle(tmp_path, monkeypatch):
