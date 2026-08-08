@@ -32,7 +32,9 @@ def create_live_sources(root):
         "signal": ("sentiment_arb.db", "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)"),
         "paper": (
             "paper_trades.db",
-            "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE TABLE candidate_shadow_observations("
+            "id INTEGER PRIMARY KEY, signal_id INTEGER, candidate_id TEXT, "
+            "observed_at INTEGER, payload_json TEXT);"
             "CREATE INDEX idx_candidate_shadow_obs_observed "
             "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
@@ -503,6 +505,67 @@ def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
     assert status["accepted"] is False
     assert "evaluator_snapshot_source_read_lock_budget_failed" in status["blockers"]
     assert "evaluator_snapshot_paper_source_read_lock_contract_invalid" in status["blockers"]
+
+
+def test_candidate_projection_lock_order_or_stage_cleanup_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["candidate_projection_after_source_read_lock_release"] = False
+    manifest["candidate_stage_removed_before_publish"] = False
+    paper_report = manifest["databases"]["paper"]
+    paper_report["candidate_projection_after_source_read_lock_release"] = False
+    paper_report["temporary_candidate_stage_removed_before_publish"] = False
+    projection = paper_report["selected_tables"]["candidate_shadow_observations"][
+        "storage_projection"
+    ]
+    projection["applied"] = False
+    projection["projection_started_after_source_read_view_release"] = False
+    projection["stage_query_plan_uses_order_index"] = False
+    projection["stage_query_plan_temp_btree_detected"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_candidate_projection_lock_order_invalid" in status["blockers"]
+    assert "evaluator_snapshot_candidate_stage_cleanup_invalid" in status["blockers"]
+    assert "evaluator_snapshot_paper_candidate_projection_lock_order_invalid" in status["blockers"]
+    assert "evaluator_snapshot_paper_candidate_stage_cleanup_invalid" in status["blockers"]
+    assert "evaluator_snapshot_candidate_payload_projection_required" in status["blockers"]
+    assert "evaluator_snapshot_candidate_stage_projection_contract_invalid" in status["blockers"]
+
+
+def test_candidate_stage_budget_formula_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    disk = manifest["disk_preflight"]
+    disk["candidate_stage_budget_mode"] = "fixed_output_fraction"
+    disk["temporary_candidate_stage_cap_bytes"] -= 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
 
 
 def test_disk_preflight_tampering_is_rejected(tmp_path, monkeypatch):

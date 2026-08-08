@@ -9222,6 +9222,36 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const disk = manifestPayloadValid && manifestPayload.disk_preflight && typeof manifestPayload.disk_preflight === 'object'
     ? manifestPayload.disk_preflight
     : {};
+  const diskFreeBytes = Number(disk.free_bytes);
+  const diskOutputCapBytes = Number(disk.selective_snapshot_output_cap_bytes);
+  const diskReserveBytes = Number(disk.required_reserve_bytes);
+  const diskStageCapBytes = Number(disk.temporary_candidate_stage_cap_bytes);
+  const diskStageMinimumBytes = Number(disk.candidate_stage_minimum_cap_bytes);
+  const diskPeakBytes = Number(disk.estimated_peak_working_bytes);
+  const diskFreeAtPeakBytes = Number(disk.estimated_free_at_peak_bytes);
+  const expectedDiskStageCapBytes = Math.max(0, diskFreeBytes - diskOutputCapBytes - diskReserveBytes);
+  const diskPreflightPassed = Boolean(
+    disk.accepted === true
+    && [
+      diskFreeBytes,
+      diskOutputCapBytes,
+      diskReserveBytes,
+      diskStageCapBytes,
+      diskStageMinimumBytes,
+      diskPeakBytes,
+      diskFreeAtPeakBytes,
+    ].every((value) => Number.isFinite(value) && value >= 0)
+    && diskOutputCapBytes > 0
+    && diskStageMinimumBytes === 12288
+    && diskStageCapBytes >= diskStageMinimumBytes
+    && diskStageCapBytes === expectedDiskStageCapBytes
+    && disk.candidate_stage_budget_mode === 'residual_disk_after_output_and_reserve'
+    && diskPeakBytes === diskOutputCapBytes + diskStageCapBytes
+    && diskFreeAtPeakBytes === diskFreeBytes - diskPeakBytes
+    && diskFreeAtPeakBytes >= diskReserveBytes
+    && Number(disk.temporary_full_backup_bytes || 0) === 0
+    && disk.fail_closed_on_insufficient_space === true
+  );
   const producerManifestSha256 = statusPayloadValid
     ? statusPayload.last_accepted_snapshot?.manifest_sha256 || null
     : null;
@@ -9241,13 +9271,15 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     cross_database_time_skew_passed: manifestPayload?.cross_database_time_skew_passed === true,
     source_read_lock_budget_passed: manifestPayload?.source_read_lock_budget_passed === true,
     indexes_built_after_source_read_lock_release: manifestPayload?.indexes_built_after_source_read_lock_release === true,
+    candidate_projection_after_source_read_lock_release: manifestPayload?.candidate_projection_after_source_read_lock_release === true,
+    candidate_stage_removed_before_publish: manifestPayload?.candidate_stage_removed_before_publish === true,
     source_mutation_free: manifestPayload?.source_mutation_free === true,
     bounded_selective_snapshot: manifestPayload?.bounded_selective_snapshot === true,
     selection_upper_bounds_consistent: manifestPayload?.selection_upper_bounds_consistent === true,
     output_cap_passed: manifestPayload?.output_cap_passed === true,
     partial_artifacts_absent: manifestPayload?.partial_artifacts_absent === true,
     active_database_reads_forbidden: manifestPayload?.active_database_reads_allowed_for_autoloop === false,
-    disk_preflight_passed: disk.accepted === true,
+    disk_preflight_passed: diskPreflightPassed,
     indexed_selection_passed: Object.values(indexedSelection).every((row) => row.passed),
     indexed_watermarks_passed: Object.values(indexedWatermarks).every((row) => row.passed),
     database_contracts_passed: databaseNames.every((name) => Object.values(databaseChecks[name]).every(Boolean)),
@@ -9478,7 +9510,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       cap_bytes: Number.isFinite(Number(manifestPayload?.output_cap_bytes))
         ? Number(manifestPayload.output_cap_bytes)
         : null,
-      disk_preflight_passed: disk.accepted === true,
+      disk_preflight_passed: diskPreflightPassed,
       estimated_free_after_bytes: Number.isFinite(Number(disk.estimated_free_after_bytes))
         ? Number(disk.estimated_free_after_bytes)
         : null,

@@ -32,6 +32,12 @@ PRUNABLE_SCHEMA_VERSIONS = {
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
 BUDGET_SCHEMA_VERSION = "evaluator_snapshot_budget.v2"
 PAYLOAD_PROJECTION_SCHEMA_VERSION = "candidate_observation_payload_projection.v1"
+CANDIDATE_STAGE_SCHEMA_VERSION = "candidate_observation_selective_stage.v1"
+CANDIDATE_STAGE_SCHEMA = "candidate_stage"
+CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
+CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal_candidate"
+MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
+CANDIDATE_STAGE_BUDGET_MODE = "residual_disk_after_output_and_reserve"
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
@@ -1147,16 +1153,19 @@ def create_candidate_observation_projection(
 def copy_candidate_observation_projection(
     connection: sqlite3.Connection,
     source_columns: list[sqlite3.Row],
-    selection: dict[str, Any],
+    *,
+    source_relation: str,
+    where_sql: str = "1=1",
+    parameters: tuple[Any, ...] | list[Any] = (),
 ) -> dict[str, Any]:
     source_names = create_candidate_observation_projection(connection, source_columns)
     selected_columns = ", ".join(quote_identifier(name) for name in source_names)
     cursor = connection.execute(
         f"SELECT {selected_columns} "
-        f"FROM {source_table_reference(CANDIDATE_OBSERVATION_TABLE, selection)} "
-        f"WHERE {selection['predicate_sql']} "
+        f"FROM {source_relation} "
+        f"WHERE {where_sql} "
         f"ORDER BY {quote_identifier('signal_id')}, {quote_identifier('candidate_id')}",
-        selection["parameters"],
+        tuple(parameters),
     )
     source_digest = hashlib.sha256()
     rows_copied = 0
@@ -1248,6 +1257,66 @@ def copy_candidate_observation_projection(
     }
 
 
+def stage_candidate_observation_rows(
+    connection: sqlite3.Connection,
+    selection: dict[str, Any],
+) -> int:
+    stage_relation = (
+        f"{quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
+        f"{quote_identifier(CANDIDATE_STAGE_TABLE)}"
+    )
+    source_relation = source_table_reference(CANDIDATE_OBSERVATION_TABLE, selection)
+    connection.execute(
+        f"CREATE TABLE {stage_relation} AS "
+        f"SELECT * FROM {source_relation} WHERE 0"
+    )
+    # Build the ordering index while the staging table is empty. This avoids a
+    # file-backed sorter during CREATE INDEX; subsequent pages are maintained
+    # incrementally by INSERT and remain bounded by candidate_stage.max_page_count.
+    connection.execute(
+        f"CREATE INDEX {quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
+        f"{quote_identifier(CANDIDATE_STAGE_ORDER_INDEX)} "
+        f"ON {quote_identifier(CANDIDATE_STAGE_TABLE)}(signal_id,candidate_id)"
+    )
+    connection.execute(
+        f"INSERT INTO {stage_relation} "
+        f"SELECT * FROM {source_relation} WHERE {selection['predicate_sql']}",
+        selection["parameters"],
+    )
+    return int(connection.execute("SELECT changes()").fetchone()[0])
+
+
+def candidate_stage_relation() -> str:
+    return (
+        f"{quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
+        f"{quote_identifier(CANDIDATE_STAGE_TABLE)}"
+    )
+
+
+def prepare_candidate_stage_for_projection(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    plan_rows = connection.execute(
+        f"EXPLAIN QUERY PLAN SELECT signal_id,candidate_id,payload_json "
+        f"FROM {candidate_stage_relation()} "
+        f"ORDER BY signal_id,candidate_id"
+    ).fetchall()
+    details = [str(row[3]) for row in plan_rows]
+    uses_order_index = any(CANDIDATE_STAGE_ORDER_INDEX in detail for detail in details)
+    temp_btree_detected = any("TEMP B-TREE" in detail.upper() for detail in details)
+    if not uses_order_index or temp_btree_detected:
+        raise RuntimeError(
+            "candidate_observation_payload_projection_semantic_mismatch:"
+            "stage_order_index_not_used"
+        )
+    return {
+        "stage_order_index_name": CANDIDATE_STAGE_ORDER_INDEX,
+        "stage_query_plan": details,
+        "stage_query_plan_uses_order_index": uses_order_index,
+        "stage_query_plan_temp_btree_detected": temp_btree_detected,
+    }
+
+
 def candidate_projection_indexes() -> list[tuple[str, str]]:
     table = quote_identifier(CANDIDATE_OBSERVATION_ROW_TABLE)
     return [
@@ -1329,6 +1398,7 @@ def copy_selected_tables(
     dict[str, dict[str, Any]],
     list[dict[str, str]],
     list[tuple[str, str, str]],
+    list[sqlite3.Row] | None,
 ]:
     source_rows = connection.execute(
         "SELECT name, sql FROM src.sqlite_master WHERE type='table' ORDER BY name"
@@ -1337,6 +1407,7 @@ def copy_selected_tables(
     source_tables = set(source_table_sql)
     table_reports: dict[str, dict[str, Any]] = {}
     deferred_indexes: list[tuple[str, str, str]] = []
+    candidate_source_columns: list[sqlite3.Row] | None = None
     if progress is not None:
         progress.setdefault("completed_table_timings", {})
     for table, rule in spec["tables"].items():
@@ -1382,14 +1453,23 @@ def copy_selected_tables(
             projection_supported, source_columns = candidate_observation_projection_supported(
                 connection
             )
+            if not projection_supported:
+                raise RuntimeError(
+                    "candidate_observation_payload_projection_semantic_mismatch:"
+                    "source_schema_not_projection_compatible"
+                )
         storage_projection: dict[str, Any]
         if projection_supported:
-            storage_projection = copy_candidate_observation_projection(
-                connection,
-                source_columns,
-                selection,
-            )
-            copied_rows = int(storage_projection["rows_copied"])
+            candidate_source_columns = source_columns
+            copied_rows = stage_candidate_observation_rows(connection, selection)
+            storage_projection = {
+                "schema_version": PAYLOAD_PROJECTION_SCHEMA_VERSION,
+                "applied": False,
+                "deferred_off_source_lock": True,
+                "stage_schema_version": CANDIDATE_STAGE_SCHEMA_VERSION,
+                "stage_rows_copied": copied_rows,
+                "payload_semantics_preserved": False,
+            }
             for name, sql in candidate_projection_indexes():
                 deferred_indexes.append((table, name, sql))
         else:
@@ -1473,7 +1553,11 @@ def copy_selected_tables(
     for table, report in table_reports.items():
         if not report.get("included"):
             continue
-        if (report.get("storage_projection") or {}).get("applied") is True:
+        projection = report.get("storage_projection") or {}
+        if (
+            projection.get("applied") is True
+            or projection.get("deferred_off_source_lock") is True
+        ):
             continue
         indexes = connection.execute(
             "SELECT name, sql FROM src.sqlite_master "
@@ -1491,7 +1575,7 @@ def copy_selected_tables(
         }
         for table in sorted(source_tables - set(spec["tables"]) - {"sqlite_sequence"})
     ]
-    return table_reports, omitted, deferred_indexes
+    return table_reports, omitted, deferred_indexes, candidate_source_columns
 
 
 def snapshot_one(
@@ -1505,7 +1589,8 @@ def snapshot_one(
     long_lower_epoch: float,
     upper_epoch: float,
     budget_bytes: int,
-    progress: dict[str, str] | None = None,
+    candidate_stage_path: Path | None = None,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not source.is_file():
         raise FileNotFoundError(source)
@@ -1531,7 +1616,7 @@ def snapshot_one(
             f"snapshot missing required watermarks for {source}: "
             f"{source_metadata['missing_required_watermarks']}"
         )
-    table_reports, omitted_tables, deferred_indexes = copy_selected_tables(
+    table_reports, omitted_tables, deferred_indexes, candidate_source_columns = copy_selected_tables(
         connection,
         spec,
         review_lower_epoch=review_lower_epoch,
@@ -1549,13 +1634,60 @@ def snapshot_one(
     data_version_after = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
     source_stat_after = source.stat()
     connection.execute("DETACH DATABASE src")
+    candidate_report = table_reports.get(CANDIDATE_OBSERVATION_TABLE)
+    candidate_projection_started = None
+    candidate_projection_finished = None
+    candidate_stage_size_bytes = 0
+    candidate_stage_removed = True
+    if candidate_source_columns is not None:
+        if candidate_stage_path is None or not candidate_stage_path.is_file():
+            raise RuntimeError("candidate_observation_stage_missing_after_source_release")
+        candidate_stage_plan = prepare_candidate_stage_for_projection(connection)
+        candidate_stage_size_bytes = int(candidate_stage_path.stat().st_size)
+        candidate_projection_started = time.time()
+        if progress is not None:
+            progress["stage"] = "project_candidate_observations_off_source_lock"
+        storage_projection = copy_candidate_observation_projection(
+            connection,
+            candidate_source_columns,
+            source_relation=candidate_stage_relation(),
+        )
+        candidate_projection_finished = time.time()
+        storage_projection.update(
+            {
+                "deferred_off_source_lock": False,
+                "source_stage_schema_version": CANDIDATE_STAGE_SCHEMA_VERSION,
+                "source_stage_size_bytes": candidate_stage_size_bytes,
+                **candidate_stage_plan,
+                "projection_started_after_source_read_view_release": (
+                    candidate_projection_started >= read_view_released
+                ),
+                "off_source_lock_projection_duration_sec": round(
+                    candidate_projection_finished - candidate_projection_started, 6
+                ),
+            }
+        )
+        if candidate_report is not None:
+            candidate_report["storage_projection"] = storage_projection
+        connection.commit()
+    try:
+        connection.execute(f"DETACH DATABASE {quote_identifier(CANDIDATE_STAGE_SCHEMA)}")
+    except sqlite3.OperationalError as exc:
+        if "no such database" not in str(exc).lower():
+            raise
+    if candidate_stage_path is not None:
+        candidate_stage_path.unlink(missing_ok=True)
+        for suffix in ("-journal", "-wal", "-shm"):
+            Path(f"{candidate_stage_path}{suffix}").unlink(missing_ok=True)
+        candidate_stage_removed = not candidate_stage_path.exists()
+        if not candidate_stage_removed:
+            raise RuntimeError("candidate_observation_stage_cleanup_failed")
     index_build_started = time.time()
     if progress is not None:
         progress["stage"] = "build_snapshot_indexes"
     create_deferred_indexes(connection, deferred_indexes, table_reports)
     connection.commit()
     index_build_finished = time.time()
-    candidate_report = table_reports.get(CANDIDATE_OBSERVATION_TABLE)
     if candidate_report:
         if progress is not None:
             progress["stage"] = "verify_candidate_projection"
@@ -1611,6 +1743,18 @@ def snapshot_one(
         "source_read_lock_released_before_index_build": (
             index_build_started >= read_view_released
         ),
+        "candidate_projection_after_source_read_lock_release": (
+            candidate_projection_started is None
+            or candidate_projection_started >= read_view_released
+        ),
+        "candidate_projection_duration_sec": (
+            round(candidate_projection_finished - candidate_projection_started, 6)
+            if candidate_projection_started is not None
+            and candidate_projection_finished is not None
+            else 0.0
+        ),
+        "temporary_candidate_stage_size_bytes": candidate_stage_size_bytes,
+        "temporary_candidate_stage_removed_before_publish": candidate_stage_removed,
         "deferred_index_build_started_at": utc_iso(index_build_started),
         "deferred_index_build_finished_at": utc_iso(index_build_finished),
         "deferred_index_build_duration_sec": round(
@@ -1661,6 +1805,7 @@ def snapshot_all_concurrently(
     long_lower_epoch: float,
     upper_epoch: float,
     database_budgets: dict[str, int],
+    candidate_stage_budget_bytes: int,
     busy_timeout_ms: int,
     max_source_read_lock_sec: float,
 ) -> dict[str, dict[str, Any]]:
@@ -1691,6 +1836,27 @@ def snapshot_all_concurrently(
             source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
             progress["stage"] = "attach_source"
             connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
+            candidate_stage_path = None
+            if name == "paper":
+                candidate_stage_path = partial_dir / ".candidate-observation-stage.db"
+                connection.execute(
+                    f"ATTACH DATABASE ? AS {quote_identifier(CANDIDATE_STAGE_SCHEMA)}",
+                    (str(candidate_stage_path),),
+                )
+                connection.execute(
+                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.journal_mode=OFF"
+                )
+                connection.execute(
+                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.synchronous=OFF"
+                )
+                stage_page_size = 4096
+                connection.execute(
+                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.page_size={stage_page_size}"
+                )
+                stage_max_pages = max(1, int(candidate_stage_budget_bytes) // stage_page_size)
+                connection.execute(
+                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.max_page_count={stage_max_pages}"
+                )
             progress["stage"] = "start_barrier"
             start_barrier.wait(timeout=30)
             pin_started = time.time()
@@ -1727,6 +1893,7 @@ def snapshot_all_concurrently(
                 long_lower_epoch=long_lower_epoch,
                 upper_epoch=upper_epoch,
                 budget_bytes=database_budgets[name],
+                candidate_stage_path=candidate_stage_path,
                 progress=progress,
             )
             with result_lock:
@@ -1837,15 +2004,25 @@ def disk_preflight(
     usage = shutil.disk_usage(root)
     bounded_output = int(float(max_output_gib) * 1024**3)
     reserve = int(float(min_free_after_gib) * 1024**3)
-    accepted = bounded_output > 0 and usage.free >= bounded_output + reserve
+    stage_cap = max(0, int(usage.free) - bounded_output - reserve)
+    estimated_peak = bounded_output + stage_cap
+    estimated_free_at_peak = int(usage.free) - estimated_peak
+    accepted = bool(
+        bounded_output > 0
+        and stage_cap >= MIN_CANDIDATE_STAGE_CAP_BYTES
+        and estimated_free_at_peak >= reserve
+    )
     return {
-        "free_bytes": usage.free,
+        "free_bytes": int(usage.free),
         "selective_snapshot_output_cap_bytes": bounded_output,
         "temporary_full_backup_bytes": 0,
-        "estimated_peak_working_bytes": bounded_output,
+        "temporary_candidate_stage_cap_bytes": stage_cap,
+        "candidate_stage_budget_mode": CANDIDATE_STAGE_BUDGET_MODE,
+        "candidate_stage_minimum_cap_bytes": MIN_CANDIDATE_STAGE_CAP_BYTES,
+        "estimated_peak_working_bytes": estimated_peak,
         "required_reserve_bytes": reserve,
-        "estimated_free_after_bytes": usage.free - bounded_output,
-        "estimated_free_at_peak_bytes": usage.free - bounded_output,
+        "estimated_free_after_bytes": int(usage.free) - bounded_output,
+        "estimated_free_at_peak_bytes": estimated_free_at_peak,
         "fail_closed_on_insufficient_space": True,
         "accepted": accepted,
     }
@@ -2061,7 +2238,12 @@ def build_snapshot_bundle(
             source_paths,
             busy_timeout_ms=int(source_busy_timeout_ms),
         )
-        preflight = disk_preflight(root, min_free_after_gib, max_output_gib)
+        preflight = disk_preflight(
+            root,
+            min_free_after_gib,
+            max_output_gib,
+        )
+        stage_budget_bytes = int(preflight["temporary_candidate_stage_cap_bytes"])
         if not preflight["accepted"]:
             raise RuntimeError(f"insufficient disk for evaluator snapshot: {preflight}")
         budget_plan = database_output_budget_plan(max_output_gib, source_page_reports)
@@ -2074,6 +2256,7 @@ def build_snapshot_bundle(
             long_lower_epoch=long_lower_epoch,
             upper_epoch=selection_upper_epoch,
             database_budgets=output_budgets,
+            candidate_stage_budget_bytes=stage_budget_bytes,
             busy_timeout_ms=int(source_busy_timeout_ms),
             max_source_read_lock_sec=float(max_source_read_lock_sec),
         )
@@ -2107,6 +2290,14 @@ def build_snapshot_bundle(
             report.get("source_read_lock_released_before_index_build") is True
             for report in database_reports.values()
         )
+        candidate_projection_after_source_read_lock_release = all(
+            report.get("candidate_projection_after_source_read_lock_release") is True
+            for report in database_reports.values()
+        )
+        candidate_stage_removed_before_publish = all(
+            report.get("temporary_candidate_stage_removed_before_publish") is True
+            for report in database_reports.values()
+        )
         database_payload_size_bytes = sum(
             int(report["snapshot_size_bytes"]) for report in database_reports.values()
         )
@@ -2130,6 +2321,8 @@ def build_snapshot_bundle(
             and selection_upper_bounds_consistent
             and source_read_lock_budget_passed
             and indexes_built_after_source_read_lock_release
+            and candidate_projection_after_source_read_lock_release
+            and candidate_stage_removed_before_publish
             and output_cap_passed
             and git_commit
         )
@@ -2153,6 +2346,10 @@ def build_snapshot_bundle(
             "indexes_built_after_source_read_lock_release": (
                 indexes_built_after_source_read_lock_release
             ),
+            "candidate_projection_after_source_read_lock_release": (
+                candidate_projection_after_source_read_lock_release
+            ),
+            "candidate_stage_removed_before_publish": candidate_stage_removed_before_publish,
             "source_mutation_free": source_mutation_free,
             "copy_mode": "parallel_direct_extract_no_full_database_intermediate",
             "cross_database_time_skew_sec": round(skew, 6),
@@ -2242,7 +2439,18 @@ def self_test() -> None:
         definitions = {
             "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
             "paper": (
-                "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+                "CREATE TABLE candidate_shadow_observations("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "signal_id INTEGER NOT NULL,"
+                "token_ca TEXT NOT NULL,"
+                "signal_ts INTEGER,"
+                "candidate_id TEXT NOT NULL,"
+                "family TEXT,"
+                "matched INTEGER NOT NULL,"
+                "reason TEXT,"
+                "observed_at INTEGER NOT NULL,"
+                "payload_json TEXT NOT NULL,"
+                "UNIQUE(signal_id,candidate_id));"
                 "CREATE INDEX idx_candidate_shadow_obs_observed "
                 "ON candidate_shadow_observations(observed_at);"
                 "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"

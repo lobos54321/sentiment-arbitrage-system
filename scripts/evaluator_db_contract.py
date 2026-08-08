@@ -16,7 +16,9 @@ import time
 from urllib.parse import quote
 
 from cross_db_evaluator_snapshot import (
+    CANDIDATE_STAGE_BUDGET_MODE,
     DATABASE_SPECS,
+    MIN_CANDIDATE_STAGE_CAP_BYTES,
     normalized_timestamp_sql,
     quote_identifier,
 )
@@ -358,6 +360,10 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_source_read_lock_budget_failed")
         if manifest.get("indexes_built_after_source_read_lock_release") is not True:
             blockers.append("evaluator_snapshot_index_build_lock_order_invalid")
+        if manifest.get("candidate_projection_after_source_read_lock_release") is not True:
+            blockers.append("evaluator_snapshot_candidate_projection_lock_order_invalid")
+        if manifest.get("candidate_stage_removed_before_publish") is not True:
+            blockers.append("evaluator_snapshot_candidate_stage_cleanup_invalid")
         try:
             manifest_read_lock_limit = float(manifest.get("max_source_read_lock_sec"))
             if manifest_read_lock_limit <= 0:
@@ -382,11 +388,37 @@ def evaluator_snapshot_bundle_status(
                 disk_reserve_bytes = int(disk_preflight.get("required_reserve_bytes"))
                 disk_free_after_bytes = int(disk_preflight.get("estimated_free_after_bytes"))
                 disk_cap_bytes = int(disk_preflight.get("selective_snapshot_output_cap_bytes"))
+                candidate_stage_cap_bytes = int(
+                    disk_preflight.get("temporary_candidate_stage_cap_bytes")
+                )
+                candidate_stage_minimum_cap_bytes = int(
+                    disk_preflight.get("candidate_stage_minimum_cap_bytes")
+                )
+                estimated_peak_working_bytes = int(
+                    disk_preflight.get("estimated_peak_working_bytes")
+                )
+                estimated_free_at_peak_bytes = int(
+                    disk_preflight.get("estimated_free_at_peak_bytes")
+                )
+                expected_stage_cap_bytes = max(
+                    0,
+                    disk_free_bytes - disk_cap_bytes - disk_reserve_bytes,
+                )
                 if (
                     disk_free_bytes <= 0
                     or disk_reserve_bytes < 0
                     or disk_free_after_bytes < disk_reserve_bytes
                     or disk_cap_bytes <= 0
+                    or candidate_stage_cap_bytes != expected_stage_cap_bytes
+                    or candidate_stage_cap_bytes < MIN_CANDIDATE_STAGE_CAP_BYTES
+                    or candidate_stage_minimum_cap_bytes != MIN_CANDIDATE_STAGE_CAP_BYTES
+                    or disk_preflight.get("candidate_stage_budget_mode")
+                    != CANDIDATE_STAGE_BUDGET_MODE
+                    or estimated_peak_working_bytes
+                    != disk_cap_bytes + candidate_stage_cap_bytes
+                    or estimated_free_at_peak_bytes
+                    != disk_free_bytes - estimated_peak_working_bytes
+                    or estimated_free_at_peak_bytes < disk_reserve_bytes
                     or int(disk_preflight.get("temporary_full_backup_bytes") or 0) != 0
                     or disk_preflight.get("fail_closed_on_insufficient_space") is not True
                 ):
@@ -519,20 +551,73 @@ def evaluator_snapshot_bundle_status(
                         f"{watermark_table}"
                     )
             if name == "paper":
+                if report.get("candidate_projection_after_source_read_lock_release") is not True:
+                    blockers.append(
+                        "evaluator_snapshot_paper_candidate_projection_lock_order_invalid"
+                    )
+                if report.get("temporary_candidate_stage_removed_before_publish") is not True:
+                    blockers.append(
+                        "evaluator_snapshot_paper_candidate_stage_cleanup_invalid"
+                    )
                 candidate_projection = (
                     selected_tables.get("candidate_shadow_observations") or {}
                 ).get("storage_projection") or {}
-                if candidate_projection.get("applied") is True:
+                if candidate_projection.get("applied") is not True:
+                    blockers.append("evaluator_snapshot_candidate_payload_projection_required")
+                try:
+                    stage_size_bytes = int(
+                        report.get("temporary_candidate_stage_size_bytes")
+                    )
+                    stage_cap_bytes = int(
+                        disk_preflight.get("temporary_candidate_stage_cap_bytes")
+                    )
+                    projection_duration_sec = float(
+                        report.get("candidate_projection_duration_sec")
+                    )
+                    stage_plan = candidate_projection.get("stage_query_plan") or []
                     if (
-                        candidate_projection.get("schema_version")
-                        != "candidate_observation_payload_projection.v1"
-                        or candidate_projection.get("payload_semantics_preserved") is not True
-                        or candidate_projection.get("unknown_payload_keys_preserved") is not True
-                        or candidate_projection.get("missing_and_null_keys_preserved") is not True
-                    ):
-                        blockers.append(
-                            "evaluator_snapshot_candidate_payload_projection_invalid"
+                        candidate_projection.get("applied") is not True
+                        or stage_size_bytes <= 0
+                        or stage_cap_bytes <= 0
+                        or stage_size_bytes > stage_cap_bytes
+                        or projection_duration_sec < 0
+                        or candidate_projection.get(
+                            "projection_started_after_source_read_view_release"
                         )
+                        is not True
+                        or candidate_projection.get("source_stage_schema_version")
+                        != "candidate_observation_selective_stage.v1"
+                        or int(candidate_projection.get("source_stage_size_bytes") or 0)
+                        != stage_size_bytes
+                        or candidate_projection.get("stage_order_index_name")
+                        != "idx_a3_candidate_stage_signal_candidate"
+                        or candidate_projection.get("stage_query_plan_uses_order_index")
+                        is not True
+                        or candidate_projection.get("stage_query_plan_temp_btree_detected")
+                        is not False
+                        or not isinstance(stage_plan, list)
+                        or not stage_plan
+                        or not any(
+                            "idx_a3_candidate_stage_signal_candidate" in str(item)
+                            for item in stage_plan
+                        )
+                        or any("TEMP B-TREE" in str(item).upper() for item in stage_plan)
+                    ):
+                        raise ValueError("invalid off-lock candidate projection evidence")
+                except (TypeError, ValueError):
+                    blockers.append(
+                        "evaluator_snapshot_candidate_stage_projection_contract_invalid"
+                    )
+                if (
+                    candidate_projection.get("schema_version")
+                    != "candidate_observation_payload_projection.v1"
+                    or candidate_projection.get("payload_semantics_preserved") is not True
+                    or candidate_projection.get("unknown_payload_keys_preserved") is not True
+                    or candidate_projection.get("missing_and_null_keys_preserved") is not True
+                ):
+                    blockers.append(
+                        "evaluator_snapshot_candidate_payload_projection_invalid"
+                    )
             for required_table in (
                 ("premium_signals",) if name == "signal" else
                 (

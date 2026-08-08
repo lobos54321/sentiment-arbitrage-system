@@ -36,7 +36,9 @@ def create_sources(root):
     definitions = {
         "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
         "paper": (
-            "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE TABLE candidate_shadow_observations("
+            "id INTEGER PRIMARY KEY, signal_id INTEGER, candidate_id TEXT, "
+            "observed_at INTEGER, payload_json TEXT);"
             "CREATE INDEX idx_candidate_shadow_obs_observed "
             "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
@@ -63,6 +65,11 @@ def create_sources(root):
         connection.close()
         sources[name] = str(path)
     return sources
+
+
+def test_bundled_self_test_uses_projection_compatible_schema(capsys):
+    snapshot_module.self_test()
+    assert "SELF_TEST_PASS cross_db_evaluator_snapshot" in capsys.readouterr().out
 
 
 def test_source_page_inspection_failure_is_component_scoped(tmp_path, monkeypatch):
@@ -94,6 +101,88 @@ def test_source_page_inspection_failure_is_component_scoped(tmp_path, monkeypatc
         }
     }
     assert "/secret/path" not in str(raised.value)
+
+
+def test_disk_preflight_sizes_stage_from_residual_space_not_output_fraction(
+    tmp_path,
+    monkeypatch,
+):
+    gib = 1024**3
+    free_bytes = 40 * gib
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=80 * gib, used=40 * gib, free=free_bytes),
+    )
+
+    report = snapshot_module.disk_preflight(
+        tmp_path,
+        min_free_after_gib=5,
+        max_output_gib=10,
+    )
+
+    assert report["accepted"] is True
+    assert report["candidate_stage_budget_mode"] == "residual_disk_after_output_and_reserve"
+    assert report["candidate_stage_minimum_cap_bytes"] == 12288
+    assert report["temporary_candidate_stage_cap_bytes"] == 25 * gib
+    assert report["temporary_candidate_stage_cap_bytes"] > 5 * gib
+    assert report["estimated_peak_working_bytes"] == 35 * gib
+    assert report["estimated_free_at_peak_bytes"] == 5 * gib
+    assert report["estimated_free_at_peak_bytes"] == report["required_reserve_bytes"]
+
+
+def test_disk_preflight_fails_when_residual_stage_capacity_is_below_one_page(
+    tmp_path,
+    monkeypatch,
+):
+    gib = 1024**3
+    free_bytes = 15 * gib + 12287
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=80 * gib, used=80 * gib - free_bytes, free=free_bytes),
+    )
+
+    report = snapshot_module.disk_preflight(
+        tmp_path,
+        min_free_after_gib=5,
+        max_output_gib=10,
+    )
+
+    assert report["temporary_candidate_stage_cap_bytes"] == 12287
+    assert report["accepted"] is False
+
+
+def test_minimum_stage_capacity_supports_empty_table_and_order_index(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    output_cap_bytes = int(0.1 * 1024**3)
+    free_bytes = output_cap_bytes + 12288
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            total=2 * output_cap_bytes,
+            used=2 * output_cap_bytes - free_bytes,
+            free=free_bytes,
+        ),
+    )
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "minimum-stage-evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcf",
+    )
+
+    assert report["accepted"] is True
+    assert report["disk_preflight"]["temporary_candidate_stage_cap_bytes"] == 12288
+    assert report["candidate_stage_removed_before_publish"] is True
 
 
 def test_dynamic_budget_reclaims_unused_small_database_reserves_for_paper():
@@ -562,6 +651,93 @@ def test_candidate_observation_payload_projection_is_lossless_and_compact(tmp_pa
         snapshot.close()
 
 
+def test_candidate_projection_runs_after_source_lock_release_and_stage_is_removed(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE candidate_shadow_observations")
+    paper.executescript(
+        """
+        CREATE TABLE candidate_shadow_observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          signal_id INTEGER NOT NULL,
+          token_ca TEXT NOT NULL,
+          signal_ts INTEGER,
+          candidate_id TEXT NOT NULL,
+          family TEXT,
+          matched INTEGER NOT NULL,
+          reason TEXT,
+          observed_at INTEGER NOT NULL,
+          payload_json TEXT NOT NULL,
+          UNIQUE(signal_id, candidate_id)
+        );
+        CREATE INDEX idx_candidate_shadow_obs_observed
+          ON candidate_shadow_observations(observed_at);
+        """
+    )
+    paper.execute(
+        """
+        INSERT INTO candidate_shadow_observations
+          (signal_id, token_ca, signal_ts, candidate_id, family, matched,
+           reason, observed_at, payload_json)
+        VALUES (1, 'TOKEN', ?, 'current_all', 'base', 1, 'self_test', ?, ?)
+        """,
+        (now - 120, now - 60, '{"common_blob":"x","candidate_id":"current_all"}'),
+    )
+    paper.commit()
+    paper.close()
+    original_projection = snapshot_module.copy_candidate_observation_projection
+
+    def slow_projection(*args, **kwargs):
+        time.sleep(0.1)
+        return original_projection(*args, **kwargs)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "copy_candidate_observation_projection",
+        slow_projection,
+    )
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abce",
+    )
+
+    paper_report = report["databases"]["paper"]
+    projection = paper_report["selected_tables"][
+        "candidate_shadow_observations"
+    ]["storage_projection"]
+    assert paper_report["candidate_projection_after_source_read_lock_release"] is True
+    assert paper_report["candidate_projection_duration_sec"] >= 0.1
+    assert paper_report["temporary_candidate_stage_size_bytes"] > 0
+    assert paper_report["temporary_candidate_stage_removed_before_publish"] is True
+    assert projection["applied"] is True
+    assert projection["projection_started_after_source_read_view_release"] is True
+    assert projection["source_stage_schema_version"] == "candidate_observation_selective_stage.v1"
+    assert projection["source_stage_size_bytes"] > 0
+    assert projection["stage_order_index_name"] == "idx_a3_candidate_stage_signal_candidate"
+    assert projection["stage_query_plan_uses_order_index"] is True
+    assert projection["stage_query_plan_temp_btree_detected"] is False
+    assert all("TEMP B-TREE" not in row.upper() for row in projection["stage_query_plan"])
+    assert projection["off_source_lock_projection_duration_sec"] >= 0.1
+    snapshot_dir = Path(paper_report["snapshot_path"]).parent
+    assert not (snapshot_dir / ".candidate-observation-stage.db").exists()
+    assert report["candidate_projection_after_source_read_lock_release"] is True
+    assert report["candidate_stage_removed_before_publish"] is True
+    assert report["disk_preflight"]["temporary_candidate_stage_cap_bytes"] > 0
+    assert (
+        report["disk_preflight"]["estimated_free_at_peak_bytes"]
+        >= report["disk_preflight"]["required_reserve_bytes"]
+    )
+
+
 def test_candidate_projection_requires_integer_primary_key_rowid_alias(tmp_path):
     source = tmp_path / "paper.db"
     source_db = sqlite3.connect(source)
@@ -580,6 +756,41 @@ def test_candidate_projection_requires_integer_primary_key_rowid_alias(tmp_path)
         assert supported is False
     finally:
         destination.close()
+
+
+def test_incompatible_candidate_projection_schema_fails_closed_without_publish(tmp_path):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE candidate_shadow_observations")
+    paper.executescript(
+        """
+        CREATE TABLE candidate_shadow_observations(
+          signal_id INTEGER,
+          observed_at INTEGER
+        );
+        CREATE INDEX idx_candidate_shadow_obs_observed
+          ON candidate_shadow_observations(observed_at);
+        """
+    )
+    paper.commit()
+    paper.close()
+    out = tmp_path / "evidence"
+
+    with pytest.raises(
+        snapshot_module.ConcurrentSnapshotError,
+        match="candidate_observation_payload_projection_semantic_mismatch",
+    ):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T000000Z-1234abcf",
+        )
+    assert not (out / "current").exists()
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcf.partial").exists()
 
 
 def test_index_build_order_violation_fails_snapshot_acceptance(tmp_path, monkeypatch):
@@ -664,8 +875,13 @@ def test_selective_snapshot_applies_one_bounded_upper_time_to_all_databases(tmp_
     signal.close()
     paper = sqlite3.connect(sources["paper"])
     paper.executemany(
-        "INSERT INTO candidate_shadow_observations(signal_id, observed_at) VALUES (?, ?)",
-        [(1, now - 60), (2, now - 5 * 86400), (3, now + 3600)],
+        "INSERT INTO candidate_shadow_observations"
+        "(id, signal_id, candidate_id, observed_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, 1, "candidate_1", now - 60, '{"candidate_id":"candidate_1"}'),
+            (2, 2, "candidate_2", now - 5 * 86400, '{"candidate_id":"candidate_2"}'),
+            (3, 3, "candidate_3", now + 3600, '{"candidate_id":"candidate_3"}'),
+        ],
     )
     paper.commit()
     paper.close()
