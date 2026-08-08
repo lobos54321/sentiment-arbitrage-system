@@ -1338,6 +1338,7 @@ function startEvaluatorSnapshotWorker(config) {
         '--keep-previous', '0',
         '--max-runs', '0',
         '--interval-sec', process.env.EVALUATOR_SNAPSHOT_INTERVAL_SEC || '21600',
+        '--failure-retry-sec', process.env.EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC || '60',
         '--initial-delay-sec', process.env.EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC || '30',
         '--status-out', process.env.EVALUATOR_SNAPSHOT_STATUS || join(evidenceRoot, 'snapshot_status.json'),
         '--lock-file', process.env.EVALUATOR_SNAPSHOT_LOCK_FILE || '/tmp/cross-db-evaluator-snapshot.lock',

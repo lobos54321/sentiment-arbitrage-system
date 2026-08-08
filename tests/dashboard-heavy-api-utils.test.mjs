@@ -1671,6 +1671,10 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       started_at: '2026-08-08T03:45:00.000Z',
       last_attempt_at: '2026-08-08T03:59:00.000Z',
       last_success_at: '2026-08-08T03:59:30.000Z',
+      success_interval_sec: 21600,
+      failure_retry_sec: 60,
+      next_attempt_delay_sec: 21600,
+      next_attempt_at: '2026-08-08T09:59:30.000Z',
       error_count: 0,
       accepted: true,
       snapshot_id: snapshotId,
@@ -1867,13 +1871,65 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       ...fixture.statusPayload,
       status: 'failed',
       accepted: false,
-      last_failure_code: 'snapshot_source_read_lock_budget_exceeded',
+      last_failure_code: 'source_read_lock_budget_exceeded',
+      last_failure_details: {
+        paper: {
+          error_code: 'source_read_lock_budget_exceeded',
+          error_type: 'RuntimeError',
+          stage: 'copy_table:candidate_shadow_observations',
+          unsafe_extra: '/app/data/paper_trades.db',
+        },
+        raw: {
+          error_code: '/app/data/raw.db?token=secret',
+          error_type: 'SELECT * FROM secrets',
+          stage: 'copy_table:../../private_key',
+        },
+        unexpected: {
+          error_code: 'should_not_be_public',
+          stage: 'ignored',
+        },
+      },
+      next_attempt_delay_sec: 60,
+      next_attempt_at: '2026-08-08T04:01:00.000Z',
     },
   });
   assert.equal(failed.status, 'failed');
   assert.equal(failed.degraded, true);
   assert.equal(failed.consumer_ready, true);
-  assert.ok(failed.blockers.includes('snapshot_source_read_lock_budget_exceeded'));
+  assert.ok(failed.blockers.includes('source_read_lock_budget_exceeded'));
+  assert.deepEqual(failed.last_failure_details, {
+    paper: {
+      error_code: 'source_read_lock_budget_exceeded',
+      error_type: 'RuntimeError',
+      stage: 'copy_table:candidate_shadow_observations',
+    },
+    raw: {
+      error_code: 'snapshot_component_failed',
+      error_type: 'Exception',
+      stage: 'unknown',
+    },
+  });
+  assert.equal(failed.failure_retry_sec, 60);
+  assert.equal(failed.next_attempt_delay_sec, 60);
+  assert.equal(failed.next_attempt_at, '2026-08-08T04:01:00.000Z');
+  assert.equal(JSON.stringify(failed).includes('/app/data/paper_trades.db'), false);
+  assert.equal(JSON.stringify(failed).includes('/app/data/raw.db'), false);
+  assert.equal(JSON.stringify(failed).includes('SELECT * FROM secrets'), false);
+  assert.equal(JSON.stringify(failed).includes('private_key'), false);
+  assert.equal(Object.hasOwn(failed.last_failure_details, 'unexpected'), false);
+
+  const unsafeTopLevelCode = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    statusPayload: {
+      ...fixture.statusPayload,
+      status: 'failed',
+      accepted: false,
+      last_failure_code: '/app/data/paper.db?token=secret',
+    },
+  });
+  assert.equal(unsafeTopLevelCode.last_failure_code, 'snapshot_component_failed');
+  assert.ok(unsafeTopLevelCode.blockers.includes('snapshot_component_failed'));
+  assert.equal(JSON.stringify(unsafeTopLevelCode).includes('/app/data/paper.db'), false);
 
   const stale = readEvaluatorSnapshotWorkerHealth({
     ...base,

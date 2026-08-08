@@ -8847,6 +8847,106 @@ export function readV27ReadModelWorkerHealth(options = {}) {
   };
 }
 
+const EVALUATOR_PUBLIC_FAILURE_CODES = new Set([
+  'evaluator_snapshot_lock_held',
+  'source_read_lock_budget_exceeded',
+  'selective_snapshot_source_query_plan_not_indexed',
+  'selective_snapshot_source_index_missing',
+  'selective_snapshot_epoch_seconds_type_invalid',
+  'selective_snapshot_index_anchor_missing',
+  'selective_snapshot_index_anchor_unit_missing',
+  'snapshot_source_read_lock_timeout',
+  'selective_snapshot_exceeded_database_budget',
+  'snapshot_source_inspection_failed',
+  'snapshot_missing_required_tables',
+  'snapshot_missing_required_watermarks',
+  'candidate_observation_payload_projection_semantic_mismatch',
+  'concurrent_evaluator_snapshot_failed',
+  'cross_database_snapshot_acceptance_failed',
+  'insufficient_disk_for_evaluator_snapshot',
+  'selective_snapshot_exceeded_bundle_output_cap',
+  'snapshot_manifest_size_did_not_converge',
+  'snapshot_component_failed',
+]);
+const EVALUATOR_PUBLIC_ERROR_TYPES = new Set([
+  'RuntimeError',
+  'OperationalError',
+  'DatabaseError',
+  'IntegrityError',
+  'FileNotFoundError',
+  'TimeoutError',
+  'BrokenBarrierError',
+  'OSError',
+  'ValueError',
+  'Exception',
+]);
+const EVALUATOR_PUBLIC_FAILURE_STAGES = new Set([
+  'open_destination',
+  'attach_source',
+  'start_barrier',
+  'pin_source_read_view',
+  'pinned_barrier',
+  'source_metadata',
+  'release_source_read_view',
+  'build_snapshot_indexes',
+  'verify_candidate_projection',
+  'snapshot_quick_check',
+  'snapshot_budget_and_sha256',
+  'run_snapshot_once',
+  'unknown',
+]);
+const EVALUATOR_PUBLIC_COPY_TABLES = new Set([
+  'premium_signals',
+  'token_motion_events',
+  'tokens',
+  'candidate_shadow_observations',
+  'candidate_shadow_virtual_trades',
+  'paper_decision_events',
+  'a_class_decision_events',
+  'a_class_mode_runtime_state',
+  'paper_trades',
+  'opportunity_events',
+  'canonical_trade_ledger',
+  'paper_missed_signal_attribution',
+  'opportunity_event_path_samples',
+  'paper_trade_path_samples',
+  'candidate_shadow_kline_fetch_attempts',
+  'lotto_not_ath_watch_shadow_snapshots',
+  'external_alpha_snapshots',
+  'external_alpha_state',
+  'external_alpha_health',
+  'raw_signal_outcomes',
+  'raw_signal_observations',
+  'raw_price_bars_1m',
+  'raw_path_observer_provider_state',
+  'kline_1m',
+  'pool_mapping',
+  'helius_trades',
+  'history_backfill_cursor',
+]);
+
+function publicEvaluatorFailureCode(value) {
+  const normalized = String(value || '');
+  return EVALUATOR_PUBLIC_FAILURE_CODES.has(normalized)
+    ? normalized
+    : 'snapshot_component_failed';
+}
+
+function publicEvaluatorErrorType(value) {
+  const normalized = String(value || '');
+  return EVALUATOR_PUBLIC_ERROR_TYPES.has(normalized) ? normalized : 'Exception';
+}
+
+function publicEvaluatorFailureStage(value) {
+  const normalized = String(value || '');
+  if (EVALUATOR_PUBLIC_FAILURE_STAGES.has(normalized)) return normalized;
+  if (normalized.startsWith('copy_table:')) {
+    const table = normalized.slice('copy_table:'.length);
+    if (EVALUATOR_PUBLIC_COPY_TABLES.has(table)) return normalized;
+  }
+  return 'unknown';
+}
+
 export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
   const enabled = options.enabled === undefined
@@ -9084,6 +9184,25 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && statusSnapshotId === manifestSnapshotId
   );
   const producerFailed = Boolean(statusPayloadValid && statusPayload.status === 'failed');
+  const producerFailureCode = statusPayloadValid
+    ? publicEvaluatorFailureCode(statusPayload.last_failure_code)
+    : null;
+  const producerFailureDetails = {};
+  const rawFailureDetails = statusPayloadValid
+    && statusPayload.last_failure_details
+    && typeof statusPayload.last_failure_details === 'object'
+    && !Array.isArray(statusPayload.last_failure_details)
+    ? statusPayload.last_failure_details
+    : {};
+  for (const name of ['signal', 'paper', 'raw', 'kline', 'worker']) {
+    const details = rawFailureDetails[name];
+    if (!details || typeof details !== 'object' || Array.isArray(details)) continue;
+    producerFailureDetails[name] = {
+      error_code: publicEvaluatorFailureCode(details.error_code),
+      error_type: publicEvaluatorErrorType(details.error_type),
+      stage: publicEvaluatorFailureStage(details.stage),
+    };
+  }
   const bundleCandidateAvailable = Boolean(
     manifestPayloadValid
     && manifestContractPassed
@@ -9132,7 +9251,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     if (!snapshotFiles[name].available) blockers.push(`evaluator_snapshot_${name}_file_missing`);
     else if (!snapshotFiles[name].size_matches_manifest) blockers.push(`evaluator_snapshot_${name}_size_mismatch`);
   }
-  if (producerFailed) blockers.push(statusPayload.last_failure_code || 'evaluator_snapshot_producer_failed');
+  if (producerFailed) blockers.push(producerFailureCode || 'snapshot_component_failed');
 
   let status = 'disabled';
   if (enabled) {
@@ -9204,8 +9323,19 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     last_attempt_at: statusPayloadValid ? statusPayload.last_attempt_at || null : null,
     last_success_at: statusPayloadValid ? statusPayload.last_success_at || null : null,
     last_failure_at: statusPayloadValid ? statusPayload.last_failure_at || null : null,
-    last_failure_code: statusPayloadValid ? statusPayload.last_failure_code || null : null,
+    last_failure_code: producerFailureCode,
+    last_failure_details: producerFailureDetails,
     error_count: statusPayloadValid ? Number(statusPayload.error_count || 0) : 0,
+    success_interval_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.success_interval_sec))
+      ? Number(statusPayload.success_interval_sec)
+      : intervalSec,
+    failure_retry_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.failure_retry_sec))
+      ? Number(statusPayload.failure_retry_sec)
+      : null,
+    next_attempt_delay_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.next_attempt_delay_sec))
+      ? Number(statusPayload.next_attempt_delay_sec)
+      : null,
+    next_attempt_at: statusPayloadValid ? statusPayload.next_attempt_at || null : null,
     status_artifact: statusArtifact,
     manifest_artifact: manifestArtifact,
     manifest_contract: manifestContractChecks,

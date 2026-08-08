@@ -335,10 +335,23 @@ Accepted snapshot → AutoLoop 血缘：
 - reviewer 的 read-only sandbox 无可写 temp，无法自行重跑完整 Python fixture，且默认 Node 22 与本项目 ABI 115 不一致；本实施工作区已经独立完成 Python `255 passed` 与 Node 20 `79 passed`，CI 也已固定 Node 20；
 - reviewer 仍建议生产部署前进行人工复核和真实 25GB+ 数据运行时验收。
 
+### 2026-08-08｜首轮生产验收与 retry/diagnostics 热修
+
+- 原子发布 SHA `d06b6e819eb68c5d5aaf8ad7e2834e769cdad44d` 已由 Zeabur 成功部署；public health commit 与 release SHA 一致；
+- production paper DB 约 25.58GB，integrity marker 不存在，read-model worker 持续刷新且 `error_count=0`；
+- 首次 evaluator snapshot 在约 306 秒后以 `concurrent_evaluator_snapshot_failed` fail-closed；没有发布 partial/current manifest，AutoLoop 没有回退到 active DB；
+- 发现 continuous producer 失败后仍按成功 cadence 休眠 21600 秒，外层 supervisor 因进程仍存活而不会短重试；
+- retry/diagnostics 热修保持成功 cadence 21600 秒；连续失败采用 60 秒、900 秒、3600 秒、随后至少 21600 秒的有界退避，不提高 300 秒 source read-lock ceiling，也不允许配置把首次失败重试压低到 60 秒以下；
+- duplicate producer 的 lock contention 直接使用至少 21600 秒 cadence，不形成竞争 retry loop；
+- concurrent failure 新增 public-safe 结构化诊断，只公开 allowlisted 数据库角色、稳定 error code/type 与执行 stage；路径、SQL、行数据、secret 或未知 stage 即使进入允许字段也会被替换为安全默认值；
+- `source_read_lock_budget_exceeded` 等组件级失败在单一根因时成为顶层 failure code，避免被泛化为不可行动的 concurrent failure；
+- P0-D paper E2E 继续锁定；strategy、gates、mode、paper/live enablement 和 promotion policy 未改变；
+- retry/diagnostics 第一轮独立 verifier 因无限 60 秒重试和未 allowlist 的 public strings 给出 `REJECT`；完成有界退避与 adversarial sanitization 后，第二轮 verifier 给出 `APPROVE`。
+
 尚未声称完成的生产证据：
 
-- 尚未部署；
-- 尚未在 25GB+ production paper DB 上生成新的 accepted snapshot；
+- 尚未生成新的 production accepted snapshot；
 - 尚未证明生产 read lock duration、output size、free-space reserve 与 manifest SHA；
+- 尚未观察到 authoritative consumer 对同一 snapshot/manifest 完整通过；
 - 尚未观察到生产 AutoLoop 从该 snapshot 生成 fresh primary capture；
-- 因此状态是“本地实现完成，等待生产 accepted snapshot 与 AutoLoop 验收”，不是“线上已经恢复”。
+- 因此当前状态是“发布已完成、producer 正在 fail-closed 修复与验收”，不是“线上 AutoLoop 已恢复”。

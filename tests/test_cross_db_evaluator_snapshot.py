@@ -757,7 +757,7 @@ def test_failed_bundle_does_not_replace_current(tmp_path):
     broken_raw.unlink()
     sqlite3.connect(broken_raw).close()
 
-    with pytest.raises(RuntimeError, match="missing required tables"):
+    with pytest.raises(RuntimeError, match="snapshot_missing_required_tables:raw"):
         build_snapshot_bundle(
             sources=sources,
             out_root=str(out),
@@ -867,7 +867,7 @@ def test_missing_required_watermark_rejects_bundle(tmp_path):
     connection.close()
     out = tmp_path / "evidence"
 
-    with pytest.raises(RuntimeError, match="required watermarks"):
+    with pytest.raises(RuntimeError, match="snapshot_missing_required_watermarks:signal"):
         build_snapshot_bundle(
             sources=sources,
             out_root=str(out),
@@ -1008,6 +1008,7 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
         status_out=str(out_root / "snapshot_status.json"),
         max_runs=max_runs,
         interval_sec=21600,
+        failure_retry_sec=60,
         initial_delay_sec=0,
     )
 
@@ -1047,6 +1048,10 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert accepted["manifest_sha256"] == snapshot_module.sha256_file(Path(accepted["manifest_path"]))
     assert accepted["indexed_selection"]["candidate_shadow_observations"]["predicate_strategy"] == "indexed_epoch_seconds"
     assert accepted["indexed_selection"]["candidate_shadow_virtual_trades"]["source_index_name"] == "idx_candidate_shadow_virtual_observed"
+    assert persisted["next_attempt_delay_sec"] == 21600
+    assert persisted["next_attempt_at"]
+    assert persisted["failure_retry_sec"] == 60
+    assert persisted["consecutive_failure_count"] == 0
     assert persisted["promotion_allowed"] is False
 
 
@@ -1087,8 +1092,93 @@ def test_snapshot_worker_failure_preserves_last_accepted_summary(tmp_path, monke
     assert persisted["last_success_at"] == "2026-08-08T00:00:00Z"
     assert persisted["last_accepted_snapshot"] == previous_summary
     assert persisted["last_failure_code"] == "selective_snapshot_source_index_missing"
+    assert persisted["last_failure_details"]["worker"] == {
+        "error_code": "selective_snapshot_source_index_missing",
+        "error_type": "RuntimeError",
+        "stage": "run_snapshot_once",
+    }
+    assert persisted["next_attempt_delay_sec"] == 60
+    assert persisted["next_attempt_at"]
+    assert persisted["consecutive_failure_count"] == 1
     assert persisted["error_count"] == 3
     assert persisted["promotion_allowed"] is False
+
+
+def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_soon(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+
+    def fail_snapshot(**_kwargs):
+        raise snapshot_module.ConcurrentSnapshotError({
+            "paper": {
+                "error_code": "source_read_lock_budget_exceeded",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:candidate_shadow_observations",
+            }
+        })
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_snapshot)
+    status = snapshot_module.run_snapshot_once(args)
+
+    assert status["accepted"] is False
+    assert status["last_failure_code"] == "source_read_lock_budget_exceeded"
+    assert status["last_failure_details"] == {
+        "paper": {
+            "error_code": "source_read_lock_budget_exceeded",
+            "error_type": "RuntimeError",
+            "stage": "copy_table:candidate_shadow_observations",
+        }
+    }
+    assert status["next_attempt_delay_sec"] == 60
+    assert status["failure_retry_sec"] == 60
+    assert status["consecutive_failure_count"] == 1
+    assert snapshot_module.snapshot_next_attempt_delay_sec(
+        status,
+        interval_sec=21600,
+        failure_retry_sec=60,
+    ) == 60
+
+
+@pytest.mark.parametrize(
+    ("consecutive_failure_count", "expected_delay_sec"),
+    [
+        (1, 60),
+        (2, 900),
+        (3, 3600),
+        (4, 21600),
+        (20, 21600),
+    ],
+)
+def test_snapshot_failure_backoff_prevents_retry_storm(
+    consecutive_failure_count,
+    expected_delay_sec,
+):
+    status = {
+        "accepted": False,
+        "last_failure_code": "source_read_lock_budget_exceeded",
+        "consecutive_failure_count": consecutive_failure_count,
+    }
+    assert snapshot_module.snapshot_next_attempt_delay_sec(
+        status,
+        interval_sec=21600,
+        failure_retry_sec=1,
+    ) == expected_delay_sec
+
+
+def test_duplicate_worker_lock_contention_uses_long_retry_cadence():
+    status = {
+        "accepted": False,
+        "last_failure_code": "evaluator_snapshot_lock_held",
+        "consecutive_failure_count": 1,
+    }
+    assert snapshot_module.snapshot_next_attempt_delay_sec(
+        status,
+        interval_sec=21600,
+        failure_retry_sec=60,
+    ) == 21600
 
 
 def test_duplicate_snapshot_worker_does_not_overwrite_active_status(tmp_path):

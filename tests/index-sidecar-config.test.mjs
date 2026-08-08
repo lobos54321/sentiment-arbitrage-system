@@ -39,6 +39,9 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(zeaburSupervisor, /\/tmp\/paper-db-snapshot-verify/);
   assert.match(zeaburSupervisor, /export V27_READ_MODEL_REFRESH_WORKER_ENABLED=/);
   assert.match(zeaburSupervisor, /export V27_READ_MODEL_WORKER_STATUS_PATH=/);
+  assert.match(zeaburSupervisor, /export EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC=/);
+  assert.match(zeaburSupervisor, /--failure-retry-sec "\$EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC"/);
+  assert.match(source, /'--failure-retry-sec', process\.env\.EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC \|\| '60'/);
   assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);

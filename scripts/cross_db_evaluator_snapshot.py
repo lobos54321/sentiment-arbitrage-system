@@ -37,6 +37,11 @@ DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
 DEFAULT_MAX_OUTPUT_GIB = 10.0
 DEFAULT_MAX_SOURCE_READ_LOCK_SEC = 300.0
+DEFAULT_FAILURE_RETRY_SEC = 60
+MIN_FAILURE_RETRY_SEC = 60
+SECOND_FAILURE_RETRY_SEC = 900
+THIRD_FAILURE_RETRY_SEC = 3600
+SUSTAINED_FAILURE_RETRY_SEC = 21600
 SNAPSHOT_NAME_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}$")
 PARTIAL_SNAPSHOT_NAME_RE = re.compile(r"^\.\d{8}T\d{6}Z-[0-9a-f]{8}\.partial$")
 DATABASE_BUDGET_SHARES = {
@@ -273,10 +278,97 @@ def bounded_error_text(exc: BaseException, limit: int = 4096) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
-def snapshot_failure_code(exc: BaseException) -> str:
+class ConcurrentSnapshotError(RuntimeError):
+    """Bounded multi-database failure with public-safe component details."""
+
+    def __init__(self, errors: dict[str, dict[str, Any]]):
+        self.errors = {
+            str(name): {
+                "error_code": str((details or {}).get("error_code") or "snapshot_component_failed"),
+                "error_type": str((details or {}).get("error_type") or "Exception"),
+                "stage": str((details or {}).get("stage") or "unknown"),
+            }
+            for name, details in sorted((errors or {}).items())
+        }
+        summary = ",".join(
+            f"{details['error_code']}:{name}:{details['stage']}"
+            for name, details in self.errors.items()
+        )
+        super().__init__(f"concurrent evaluator snapshot failed: {summary}")
+
+
+def snapshot_component_failure_code(exc: BaseException) -> str:
     text = str(exc)
     known = (
+        "source_read_lock_budget_exceeded",
+        "selective_snapshot_source_query_plan_not_indexed",
+        "selective_snapshot_source_index_missing",
+        "selective_snapshot_epoch_seconds_type_invalid",
+        "selective_snapshot_index_anchor_missing",
+        "selective_snapshot_index_anchor_unit_missing",
+        "snapshot_source_read_lock_timeout",
+        "selective snapshot exceeded database budget",
+        "snapshot source inspection failed",
+        "snapshot missing required tables",
+        "snapshot missing required watermarks",
+        "candidate_observation_payload_projection_semantic_mismatch",
+    )
+    for marker in known:
+        if marker in text:
+            return marker.replace(" ", "_").replace("-", "_")
+    return type(exc).__name__
+
+
+def snapshot_failure_details(exc: BaseException) -> dict[str, dict[str, str]]:
+    if isinstance(exc, ConcurrentSnapshotError):
+        return {name: dict(details) for name, details in exc.errors.items()}
+    return {
+        "worker": {
+            "error_code": snapshot_component_failure_code(exc),
+            "error_type": type(exc).__name__,
+            "stage": "run_snapshot_once",
+        }
+    }
+
+
+def snapshot_next_attempt_delay_sec(
+    status: dict[str, Any],
+    *,
+    interval_sec: int,
+    failure_retry_sec: int,
+) -> int:
+    success_interval = max(1, int(interval_sec))
+    if status.get("accepted") is True:
+        return success_interval
+    if status.get("last_failure_code") == "evaluator_snapshot_lock_held":
+        return max(SUSTAINED_FAILURE_RETRY_SEC, success_interval)
+    first_retry = max(MIN_FAILURE_RETRY_SEC, int(failure_retry_sec))
+    try:
+        consecutive_failures = max(1, int(status.get("consecutive_failure_count") or 1))
+    except (TypeError, ValueError):
+        consecutive_failures = 1
+    if consecutive_failures == 1:
+        return first_retry
+    if consecutive_failures == 2:
+        return max(first_retry, SECOND_FAILURE_RETRY_SEC)
+    if consecutive_failures == 3:
+        return max(first_retry, THIRD_FAILURE_RETRY_SEC)
+    return max(first_retry, SUSTAINED_FAILURE_RETRY_SEC, success_interval)
+
+
+def snapshot_failure_code(exc: BaseException) -> str:
+    text = str(exc)
+    if isinstance(exc, ConcurrentSnapshotError):
+        component_codes = {
+            str(details.get("error_code") or "snapshot_component_failed")
+            for details in exc.errors.values()
+        }
+        if len(component_codes) == 1:
+            return next(iter(component_codes))
+        return "concurrent_evaluator_snapshot_failed"
+    known = (
         "evaluator_snapshot_lock_held",
+        "source_read_lock_budget_exceeded",
         "selective_snapshot_source_index_missing",
         "selective_snapshot_epoch_seconds_type_invalid",
         "selective_snapshot_index_anchor_missing",
@@ -1115,6 +1207,7 @@ def copy_selected_tables(
     review_lower_epoch: float,
     long_lower_epoch: float,
     upper_epoch: float,
+    progress: dict[str, str] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[dict[str, str]],
@@ -1128,6 +1221,8 @@ def copy_selected_tables(
     table_reports: dict[str, dict[str, Any]] = {}
     deferred_indexes: list[tuple[str, str, str]] = []
     for table, rule in spec["tables"].items():
+        if progress is not None:
+            progress["stage"] = f"copy_table:{table}"
         required = bool(rule.get("required"))
         if table not in source_tables:
             if required:
@@ -1250,12 +1345,15 @@ def snapshot_one(
     long_lower_epoch: float,
     upper_epoch: float,
     budget_bytes: int,
+    progress: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not source.is_file():
         raise FileNotFoundError(source)
     started = time.time()
     source_stat_before = source.stat()
     data_version_before = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
+    if progress is not None:
+        progress["stage"] = "source_metadata"
     source_metadata = database_metadata(connection, spec, schema="src")
     if source_metadata["missing_required_tables"]:
         raise RuntimeError(
@@ -1273,7 +1371,10 @@ def snapshot_one(
         review_lower_epoch=review_lower_epoch,
         long_lower_epoch=long_lower_epoch,
         upper_epoch=upper_epoch,
+        progress=progress,
     )
+    if progress is not None:
+        progress["stage"] = "release_source_read_view"
     connection.commit()
     read_view_released = time.time()
     connection.set_progress_handler(None, 0)
@@ -1281,15 +1382,21 @@ def snapshot_one(
     source_stat_after = source.stat()
     connection.execute("DETACH DATABASE src")
     index_build_started = time.time()
+    if progress is not None:
+        progress["stage"] = "build_snapshot_indexes"
     create_deferred_indexes(connection, deferred_indexes, table_reports)
     connection.commit()
     index_build_finished = time.time()
     candidate_report = table_reports.get(CANDIDATE_OBSERVATION_TABLE)
     if candidate_report:
+        if progress is not None:
+            progress["stage"] = "verify_candidate_projection"
         verify_candidate_observation_projection(connection, candidate_report)
     connection.execute("PRAGMA journal_mode=DELETE")
     connection.commit()
     finished = time.time()
+    if progress is not None:
+        progress["stage"] = "snapshot_quick_check"
     check = sqlite3.connect(destination)
     check.row_factory = sqlite3.Row
     try:
@@ -1303,6 +1410,8 @@ def snapshot_one(
         raise RuntimeError(
             f"snapshot missing required tables for {source}: {metadata['missing_required_tables']}"
         )
+    if progress is not None:
+        progress["stage"] = "snapshot_budget_and_sha256"
     snapshot_size = destination.stat().st_size
     if snapshot_size > budget_bytes:
         raise RuntimeError(
@@ -1393,6 +1502,7 @@ def snapshot_all_concurrently(
 
     def worker(name: str) -> None:
         connection = None
+        progress = {"stage": "open_destination"}
         try:
             source = source_paths[name]
             destination = partial_dir / DATABASE_SPECS[name]["filename"]
@@ -1408,7 +1518,9 @@ def snapshot_all_concurrently(
             max_pages = max(1, int(database_budgets[name]) // page_size)
             connection.execute(f"PRAGMA max_page_count={max_pages}")
             source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
+            progress["stage"] = "attach_source"
             connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
+            progress["stage"] = "start_barrier"
             start_barrier.wait(timeout=30)
             pin_started = time.time()
             lock_deadline = time.monotonic() + float(max_source_read_lock_sec)
@@ -1417,6 +1529,7 @@ def snapshot_all_concurrently(
                 return 1 if time.monotonic() >= lock_deadline else 0
 
             connection.set_progress_handler(interrupt_expired_read_view, 10000)
+            progress["stage"] = "pin_source_read_view"
             connection.execute("BEGIN")
             connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
             pin_finished = time.time()
@@ -1429,6 +1542,7 @@ def snapshot_all_concurrently(
                 "source_read_lock_limit_sec": float(max_source_read_lock_sec),
                 **source_page_reports[name],
             }
+            progress["stage"] = "pinned_barrier"
             pinned_barrier.wait(timeout=30)
             report = snapshot_one(
                 source,
@@ -1440,6 +1554,7 @@ def snapshot_all_concurrently(
                 long_lower_epoch=long_lower_epoch,
                 upper_epoch=upper_epoch,
                 budget_bytes=database_budgets[name],
+                progress=progress,
             )
             with result_lock:
                 reports[name] = report
@@ -1454,6 +1569,7 @@ def snapshot_all_concurrently(
             ):
                 exc = RuntimeError(
                     f"source_read_lock_budget_exceeded:{name}:"
+                    f"{progress.get('stage') or 'unknown'}:"
                     f"{float(max_source_read_lock_sec):.3f}s"
                 )
             for barrier in (start_barrier, pinned_barrier):
@@ -1462,7 +1578,11 @@ def snapshot_all_concurrently(
                 except threading.BrokenBarrierError:
                     pass
             with result_lock:
-                errors[name] = f"{type(exc).__name__}:{exc}"
+                errors[name] = {
+                    "error_code": snapshot_component_failure_code(exc),
+                    "error_type": type(exc).__name__,
+                    "stage": str(progress.get("stage") or "unknown"),
+                }
         finally:
             if connection is not None:
                 try:
@@ -1477,7 +1597,7 @@ def snapshot_all_concurrently(
     for thread in threads:
         thread.join()
     if errors:
-        raise RuntimeError(f"concurrent evaluator snapshot failed: {errors}")
+        raise ConcurrentSnapshotError(errors)
     if set(reports) != set(names):
         raise RuntimeError(f"concurrent evaluator snapshot incomplete: {sorted(reports)}")
     return reports
@@ -1969,6 +2089,11 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     )
     previous = read_json_object(status_path) if status_path else {}
     continuous_worker = int(args.max_runs) <= 0
+    interval_sec = max(1, int(getattr(args, "interval_sec", 21600)))
+    failure_retry_sec = max(
+        MIN_FAILURE_RETRY_SEC,
+        int(getattr(args, "failure_retry_sec", DEFAULT_FAILURE_RETRY_SEC)),
+    )
     current_path = str(Path(args.out_root).expanduser().resolve() / "current")
     base_status = {
         "schema_version": WORKER_STATUS_SCHEMA_VERSION,
@@ -1982,8 +2107,14 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         "last_success_at": previous.get("last_success_at"),
         "last_failure_at": previous.get("last_failure_at"),
         "last_failure_code": previous.get("last_failure_code"),
+        "last_failure_details": previous.get("last_failure_details"),
         "last_error": previous.get("last_error"),
         "error_count": int(previous.get("error_count") or 0),
+        "consecutive_failure_count": int(previous.get("consecutive_failure_count") or 0),
+        "success_interval_sec": interval_sec,
+        "failure_retry_sec": failure_retry_sec,
+        "next_attempt_delay_sec": None,
+        "next_attempt_at": None,
         "status": "running",
         "accepted": False,
         "snapshot_id": None,
@@ -2029,6 +2160,11 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             )
             accepted_summary["manifest_path"] = str(accepted_manifest_path)
             accepted_summary["manifest_sha256"] = sha256_file(accepted_manifest_path)
+            next_attempt_delay = snapshot_next_attempt_delay_sec(
+                {"accepted": True, "consecutive_failure_count": 0},
+                interval_sec=interval_sec,
+                failure_retry_sec=failure_retry_sec,
+            )
             status = {
                 **base_status,
                 "running": continuous_worker,
@@ -2036,18 +2172,38 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 "finished_at": finished,
                 "last_success_at": finished,
                 "last_failure_code": None,
+                "last_failure_details": None,
                 "last_error": None,
                 "status": "completed",
                 "accepted": True,
+                "consecutive_failure_count": 0,
                 "snapshot_id": manifest["snapshot_id"],
                 "interrupted_partials_removed": interrupted_partials_removed,
                 "last_accepted_snapshot": accepted_summary,
+                "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
+                "next_attempt_at": (
+                    utc_iso(time.time() + next_attempt_delay)
+                    if continuous_worker
+                    else None
+                ),
             }
             if status_path:
                 atomic_json(status_path, status)
     except Exception as exc:
         finished = utc_iso()
         failure_code = snapshot_failure_code(exc)
+        failure_details = snapshot_failure_details(exc)
+        consecutive_failure_count = int(base_status["consecutive_failure_count"]) + 1
+        retry_status = {
+            "accepted": False,
+            "last_failure_code": failure_code,
+            "consecutive_failure_count": consecutive_failure_count,
+        }
+        next_attempt_delay = snapshot_next_attempt_delay_sec(
+            retry_status,
+            interval_sec=interval_sec,
+            failure_retry_sec=failure_retry_sec,
+        )
         status = {
             **base_status,
             "running": continuous_worker if lock_acquired else False,
@@ -2055,12 +2211,20 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             "finished_at": finished,
             "last_failure_at": finished,
             "last_failure_code": failure_code,
+            "last_failure_details": failure_details,
             "last_error": bounded_error_text(exc),
             "error_count": int(base_status["error_count"]) + 1,
             "status": "failed",
             "accepted": False,
+            "consecutive_failure_count": consecutive_failure_count,
             "error": bounded_error_text(exc),
             "status_artifact_preserved": not lock_acquired,
+            "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
+            "next_attempt_at": (
+                utc_iso(time.time() + next_attempt_delay)
+                if continuous_worker
+                else None
+            ),
         }
         if status_path and lock_acquired:
             atomic_json(status_path, status)
@@ -2093,6 +2257,11 @@ def main() -> int:
     parser.add_argument("--status-out", default="/app/data/agent_evidence/snapshot_status.json")
     parser.add_argument("--max-runs", type=int, default=1)
     parser.add_argument("--interval-sec", type=int, default=21600)
+    parser.add_argument(
+        "--failure-retry-sec",
+        type=int,
+        default=DEFAULT_FAILURE_RETRY_SEC,
+    )
     parser.add_argument("--initial-delay-sec", type=int, default=0)
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -2109,7 +2278,13 @@ def main() -> int:
         last_status = run_snapshot_once(args)
         if max_runs > 0 and run_count >= max_runs:
             break
-        time.sleep(max(1, int(args.interval_sec)))
+        time.sleep(
+            snapshot_next_attempt_delay_sec(
+                last_status or {},
+                interval_sec=args.interval_sec,
+                failure_retry_sec=args.failure_retry_sec,
+            )
+        )
     return 0 if last_status and last_status["accepted"] else 1
 
 
