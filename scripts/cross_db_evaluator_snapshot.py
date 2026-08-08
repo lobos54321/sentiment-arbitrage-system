@@ -309,6 +309,7 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
         "snapshot_source_read_lock_timeout",
         "selective snapshot exceeded database budget",
         "snapshot source inspection failed",
+        "snapshot_source_watermark_query_plan_not_indexed",
         "snapshot missing required tables",
         "snapshot missing required watermarks",
         "candidate_observation_payload_projection_semantic_mismatch",
@@ -374,6 +375,8 @@ def snapshot_failure_code(exc: BaseException) -> str:
         "selective_snapshot_index_anchor_missing",
         "selective_snapshot_index_anchor_unit_missing",
         "snapshot_source_read_lock_timeout",
+        "snapshot source inspection failed",
+        "snapshot_source_inspection_failed",
         "insufficient disk for evaluator snapshot",
         "concurrent evaluator snapshot failed",
         "cross-database snapshot acceptance failed",
@@ -572,6 +575,8 @@ def database_metadata(
     *,
     schema: str = "main",
     include_views: bool = False,
+    indexed_watermark_anchors: bool = False,
+    progress: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     schema = _schema_prefix(schema)
     object_types = "('table','view')" if include_views else "('table')"
@@ -584,7 +589,10 @@ def database_metadata(
     missing_required = [name for name in spec["required_tables"] if name not in table_names]
     missing_required_watermarks = []
     watermarks = {}
+    watermark_query_evidence = {}
     for table, candidates in spec["watermarks"].items():
+        if progress is not None:
+            progress["stage"] = f"source_metadata:{table}"
         if table not in table_names:
             continue
         columns = {
@@ -598,6 +606,60 @@ def database_metadata(
             if table in spec["required_tables"]:
                 missing_required_watermarks.append(table)
             continue
+        rule = (spec.get("tables") or {}).get(table) or {}
+        indexed_anchor = rule.get("indexed_epoch_seconds_anchor")
+        if indexed_watermark_anchors and indexed_anchor in selected:
+            source_index_name = source_index_for_column(
+                connection,
+                table,
+                str(indexed_anchor),
+                schema=schema,
+            )
+            if not source_index_name:
+                if table in spec["required_tables"]:
+                    missing_required_watermarks.append(table)
+                watermark_query_evidence[table] = {
+                    "strategy": "indexed_anchor_missing",
+                    "column": indexed_anchor,
+                    "source_index_name": None,
+                    "query_plan": [],
+                    "uses_declared_index": False,
+                    "full_table_scan_detected": None,
+                }
+                continue
+            table_reference = (
+                f"{schema}.{quote_identifier(table)} "
+                f"INDEXED BY {quote_identifier(source_index_name)}"
+            )
+            query = (
+                f"SELECT MAX({quote_identifier(str(indexed_anchor))}) AS value "
+                f"FROM {table_reference}"
+            )
+            query_plan = [
+                str(row[3])
+                for row in connection.execute(f"EXPLAIN QUERY PLAN {query}")
+            ]
+            uses_index = any(source_index_name in detail for detail in query_plan)
+            full_scan = any(
+                "SCAN" in detail.upper() and source_index_name not in detail
+                for detail in query_plan
+            )
+            if not uses_index or full_scan:
+                raise RuntimeError(
+                    f"snapshot_source_watermark_query_plan_not_indexed:{table}:"
+                    f"{indexed_anchor}:{source_index_name}"
+                )
+            row = connection.execute(query).fetchone()
+            watermarks[table] = {str(indexed_anchor): row["value"]}
+            watermark_query_evidence[table] = {
+                "strategy": "indexed_anchor_max",
+                "column": str(indexed_anchor),
+                "source_index_name": source_index_name,
+                "query_plan": query_plan,
+                "uses_declared_index": True,
+                "full_table_scan_detected": False,
+            }
+            continue
         expressions = ", ".join(
             f"MAX({quote_identifier(column)}) AS {quote_identifier(column)}"
             for column in selected
@@ -606,6 +668,10 @@ def database_metadata(
             f"SELECT {expressions} FROM {schema}.{quote_identifier(table)}"
         ).fetchone()
         watermarks[table] = {column: row[column] for column in selected}
+        watermark_query_evidence[table] = {
+            "strategy": "aggregate_max",
+            "columns": selected,
+        }
     schema_text = "\n".join(f"{name}\n{table_sql[name]}" for name in sorted(table_sql))
     return {
         "schema_version": int(connection.execute(f"PRAGMA {schema}.schema_version").fetchone()[0]),
@@ -619,6 +685,7 @@ def database_metadata(
         "missing_required_tables": missing_required,
         "missing_required_watermarks": missing_required_watermarks,
         "upper_watermarks": watermarks,
+        "watermark_query_evidence": watermark_query_evidence,
     }
 
 
@@ -649,9 +716,13 @@ def inspect_source_page_reports(
             try:
                 reports[name] = source_page_stats(connection, source)
             except sqlite3.Error as exc:
-                raise RuntimeError(
-                    f"snapshot source inspection failed:{name}:{type(exc).__name__}:{exc}"
-                ) from exc
+                raise ConcurrentSnapshotError({
+                    name: {
+                        "error_code": "snapshot_source_inspection_failed",
+                        "error_type": type(exc).__name__,
+                        "stage": "source_page_stats",
+                    }
+                }) from exc
         finally:
             connection.close()
     return reports
@@ -686,10 +757,13 @@ def source_index_for_column(
     connection: sqlite3.Connection,
     table: str,
     column: str,
+    *,
+    schema: str = "src",
 ) -> str | None:
     candidates: list[tuple[int, str]] = []
+    schema = _schema_prefix(schema)
     for row in connection.execute(
-        f"PRAGMA src.index_list({quote_identifier(table)})"
+        f"PRAGMA {schema}.index_list({quote_identifier(table)})"
     ):
         if len(row) > 4 and int(row[4] or 0):
             continue
@@ -697,7 +771,7 @@ def source_index_for_column(
         columns = [
             str(index_row[2])
             for index_row in connection.execute(
-                f"PRAGMA src.index_info({quote_identifier(name)})"
+                f"PRAGMA {schema}.index_info({quote_identifier(name)})"
             )
         ]
         if columns and columns[0] == column:
@@ -1354,7 +1428,13 @@ def snapshot_one(
     data_version_before = int(connection.execute("PRAGMA src.data_version").fetchone()[0])
     if progress is not None:
         progress["stage"] = "source_metadata"
-    source_metadata = database_metadata(connection, spec, schema="src")
+    source_metadata = database_metadata(
+        connection,
+        spec,
+        schema="src",
+        indexed_watermark_anchors=True,
+        progress=progress,
+    )
     if source_metadata["missing_required_tables"]:
         raise RuntimeError(
             f"snapshot missing required tables for {source}: "
@@ -1477,6 +1557,9 @@ def snapshot_one(
         "source_schema_version": source_metadata["schema_version"],
         "source_table_schema_sha256": source_metadata["table_schema_sha256"],
         "source_upper_watermarks": source_metadata["upper_watermarks"],
+        "source_watermark_query_evidence": source_metadata.get(
+            "watermark_query_evidence"
+        ) or {},
         **metadata,
     }
 

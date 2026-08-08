@@ -62,6 +62,37 @@ def create_sources(root):
     return sources
 
 
+def test_source_page_inspection_failure_is_component_scoped(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+
+    def fail_page_stats(_connection, source):
+        if Path(source) == Path(sources["paper"]):
+            raise sqlite3.OperationalError("database is busy at /secret/path")
+        return {
+            "source_size_bytes": 4096,
+            "page_size": 4096,
+            "page_count": 1,
+            "freelist_count": 0,
+            "estimated_compact_bytes": 4096,
+        }
+
+    monkeypatch.setattr(snapshot_module, "source_page_stats", fail_page_stats)
+    with pytest.raises(snapshot_module.ConcurrentSnapshotError) as raised:
+        snapshot_module.inspect_source_page_reports(
+            {name: Path(path) for name, path in sources.items()},
+            busy_timeout_ms=1,
+        )
+
+    assert raised.value.errors == {
+        "paper": {
+            "error_code": "snapshot_source_inspection_failed",
+            "error_type": "OperationalError",
+            "stage": "source_page_stats",
+        }
+    }
+    assert "/secret/path" not in str(raised.value)
+
+
 def test_dynamic_budget_reclaims_unused_small_database_reserves_for_paper():
     gib = 1024**3
     reports = {
@@ -175,6 +206,56 @@ def test_candidate_time_selection_forces_observed_at_index(tmp_path):
         "SCAN" in detail and "candidate_shadow_observations" in detail
         for detail in plan
     ), plan
+
+
+def test_candidate_source_watermarks_use_observed_at_indexes_without_full_scan(tmp_path):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO candidate_shadow_observations(signal_id, observed_at) VALUES (?, ?)",
+        [(1, 100), (2, 200)],
+    )
+    paper.executemany(
+        "INSERT INTO candidate_shadow_virtual_trades(signal_id, observed_at) VALUES (?, ?)",
+        [(1, 110), (2, 210)],
+    )
+    paper.commit()
+    paper.close()
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    try:
+        metadata = snapshot_module.database_metadata(
+            connection,
+            DATABASE_SPECS["paper"],
+            schema="src",
+            indexed_watermark_anchors=True,
+        )
+    finally:
+        connection.close()
+
+    assert metadata["upper_watermarks"]["candidate_shadow_observations"] == {
+        "observed_at": 200
+    }
+    assert metadata["upper_watermarks"]["candidate_shadow_virtual_trades"] == {
+        "observed_at": 210
+    }
+    for table, index_name in (
+        ("candidate_shadow_observations", "idx_candidate_shadow_obs_observed"),
+        ("candidate_shadow_virtual_trades", "idx_candidate_shadow_virtual_observed"),
+    ):
+        evidence = metadata["watermark_query_evidence"][table]
+        assert evidence["strategy"] == "indexed_anchor_max"
+        assert evidence["column"] == "observed_at"
+        assert evidence["source_index_name"] == index_name
+        assert evidence["uses_declared_index"] is True
+        assert evidence["full_table_scan_detected"] is False
+        assert any(index_name in detail for detail in evidence["query_plan"])
+        assert not any(
+            "SCAN" in detail.upper() and index_name not in detail
+            for detail in evidence["query_plan"]
+        )
 
 
 def test_candidate_time_selection_fails_closed_without_source_index(tmp_path):
@@ -967,7 +1048,10 @@ def test_locked_source_fails_closed_without_replacing_current(tmp_path):
     lock = sqlite3.connect(sources["paper"])
     lock.execute("BEGIN EXCLUSIVE")
     try:
-        with pytest.raises(RuntimeError, match="snapshot source inspection failed"):
+        with pytest.raises(
+            RuntimeError,
+            match="snapshot_source_inspection_failed:paper:source_page_stats",
+        ):
             build_snapshot_bundle(
                 sources=sources,
                 out_root=str(out),

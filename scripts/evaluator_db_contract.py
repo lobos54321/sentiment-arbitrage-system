@@ -500,6 +500,7 @@ def evaluator_snapshot_bundle_status(
             except (TypeError, ValueError):
                 blockers.append(f"evaluator_snapshot_{name}_selection_upper_invalid")
             selected_tables = report.get("selected_tables") or {}
+            source_watermark_evidence = report.get("source_watermark_query_evidence") or {}
             if name == "paper":
                 candidate_projection = (
                     selected_tables.get("candidate_shadow_observations") or {}
@@ -541,6 +542,28 @@ def evaluator_snapshot_bundle_status(
                 if indexed_anchor:
                     source_index_name = selection_report.get("source_index_name")
                     source_index_columns = selection_report.get("source_index_columns")
+                    watermark_evidence = source_watermark_evidence.get(table) or {}
+                    watermark_plan = watermark_evidence.get("query_plan")
+                    if (
+                        watermark_evidence.get("strategy") != "indexed_anchor_max"
+                        or watermark_evidence.get("column") != indexed_anchor
+                        or watermark_evidence.get("source_index_name") != source_index_name
+                        or not isinstance(source_index_name, str)
+                        or not source_index_name
+                        or watermark_evidence.get("uses_declared_index") is not True
+                        or watermark_evidence.get("full_table_scan_detected") is not False
+                        or not isinstance(watermark_plan, list)
+                        or not watermark_plan
+                        or not all(
+                            isinstance(value, str)
+                            and value
+                            and source_index_name in value
+                            for value in watermark_plan
+                        )
+                    ):
+                        blockers.append(
+                            f"evaluator_snapshot_{name}_indexed_watermark_invalid:{table}"
+                        )
                     if (
                         selection_report.get("predicate_strategy") != "indexed_epoch_seconds"
                         or selection_report.get("indexed_time_anchor") != indexed_anchor

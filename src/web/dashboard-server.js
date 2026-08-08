@@ -8858,6 +8858,7 @@ const EVALUATOR_PUBLIC_FAILURE_CODES = new Set([
   'snapshot_source_read_lock_timeout',
   'selective_snapshot_exceeded_database_budget',
   'snapshot_source_inspection_failed',
+  'snapshot_source_watermark_query_plan_not_indexed',
   'snapshot_missing_required_tables',
   'snapshot_missing_required_watermarks',
   'candidate_observation_payload_projection_semantic_mismatch',
@@ -8886,6 +8887,7 @@ const EVALUATOR_PUBLIC_FAILURE_STAGES = new Set([
   'start_barrier',
   'pin_source_read_view',
   'pinned_barrier',
+  'source_page_stats',
   'source_metadata',
   'release_source_read_view',
   'build_snapshot_indexes',
@@ -8940,8 +8942,9 @@ function publicEvaluatorErrorType(value) {
 function publicEvaluatorFailureStage(value) {
   const normalized = String(value || '');
   if (EVALUATOR_PUBLIC_FAILURE_STAGES.has(normalized)) return normalized;
-  if (normalized.startsWith('copy_table:')) {
-    const table = normalized.slice('copy_table:'.length);
+  for (const prefix of ['copy_table:', 'source_metadata:']) {
+    if (!normalized.startsWith(prefix)) continue;
+    const table = normalized.slice(prefix.length);
     if (EVALUATOR_PUBLIC_COPY_TABLES.has(table)) return normalized;
   }
   return 'unknown';
@@ -9141,6 +9144,41 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     };
   }
 
+  const paperSourceWatermarkEvidence = databaseReports.paper?.source_watermark_query_evidence
+    && typeof databaseReports.paper.source_watermark_query_evidence === 'object'
+    ? databaseReports.paper.source_watermark_query_evidence
+    : {};
+  const indexedWatermarks = {};
+  for (const table of ['candidate_shadow_observations', 'candidate_shadow_virtual_trades']) {
+    const evidence = paperSourceWatermarkEvidence[table]
+      && typeof paperSourceWatermarkEvidence[table] === 'object'
+      ? paperSourceWatermarkEvidence[table]
+      : {};
+    const selection = indexedSelection[table] || {};
+    const queryPlan = Array.isArray(evidence.query_plan)
+      ? evidence.query_plan.map((value) => String(value).slice(0, 500)).slice(0, 8)
+      : [];
+    indexedWatermarks[table] = {
+      strategy: evidence.strategy || null,
+      column: evidence.column || null,
+      source_index_name: evidence.source_index_name || null,
+      query_plan: queryPlan,
+      uses_declared_index: evidence.uses_declared_index === true,
+      full_table_scan_detected: evidence.full_table_scan_detected === true,
+      passed: Boolean(
+        evidence.strategy === 'indexed_anchor_max'
+        && evidence.column === 'observed_at'
+        && typeof evidence.source_index_name === 'string'
+        && evidence.source_index_name.length > 0
+        && evidence.source_index_name === selection.source_index_name
+        && queryPlan.length > 0
+        && queryPlan.every((value) => value.includes(evidence.source_index_name))
+        && evidence.uses_declared_index === true
+        && evidence.full_table_scan_detected === false
+      ),
+    };
+  }
+
   const disk = manifestPayloadValid && manifestPayload.disk_preflight && typeof manifestPayload.disk_preflight === 'object'
     ? manifestPayload.disk_preflight
     : {};
@@ -9171,6 +9209,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     active_database_reads_forbidden: manifestPayload?.active_database_reads_allowed_for_autoloop === false,
     disk_preflight_passed: disk.accepted === true,
     indexed_selection_passed: Object.values(indexedSelection).every((row) => row.passed),
+    indexed_watermarks_passed: Object.values(indexedWatermarks).every((row) => row.passed),
     database_contracts_passed: databaseNames.every((name) => Object.values(databaseChecks[name]).every(Boolean)),
   };
   const manifestContractPassed = manifestPayloadValid && Object.values(manifestContractChecks).every(Boolean);
@@ -9326,13 +9365,24 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     last_failure_code: producerFailureCode,
     last_failure_details: producerFailureDetails,
     error_count: statusPayloadValid ? Number(statusPayload.error_count || 0) : 0,
-    success_interval_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.success_interval_sec))
+    consecutive_failure_count: statusPayloadValid
+      && statusPayload.consecutive_failure_count != null
+      && Number.isFinite(Number(statusPayload.consecutive_failure_count))
+      ? Number(statusPayload.consecutive_failure_count)
+      : null,
+    success_interval_sec: statusPayloadValid
+      && statusPayload.success_interval_sec != null
+      && Number.isFinite(Number(statusPayload.success_interval_sec))
       ? Number(statusPayload.success_interval_sec)
       : intervalSec,
-    failure_retry_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.failure_retry_sec))
+    failure_retry_sec: statusPayloadValid
+      && statusPayload.failure_retry_sec != null
+      && Number.isFinite(Number(statusPayload.failure_retry_sec))
       ? Number(statusPayload.failure_retry_sec)
       : null,
-    next_attempt_delay_sec: statusPayloadValid && Number.isFinite(Number(statusPayload.next_attempt_delay_sec))
+    next_attempt_delay_sec: statusPayloadValid
+      && statusPayload.next_attempt_delay_sec != null
+      && Number.isFinite(Number(statusPayload.next_attempt_delay_sec))
       ? Number(statusPayload.next_attempt_delay_sec)
       : null,
     next_attempt_at: statusPayloadValid ? statusPayload.next_attempt_at || null : null,
@@ -9342,6 +9392,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     databases: databaseChecks,
     snapshot_files: snapshotFiles,
     indexed_selection: indexedSelection,
+    indexed_watermarks: indexedWatermarks,
     authoritative_consumer_preflight: {
       available: authoritativePreflightValid,
       accepted: authoritativePreflightValid && authoritativePreflight.accepted === true,

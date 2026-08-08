@@ -1671,6 +1671,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       started_at: '2026-08-08T03:45:00.000Z',
       last_attempt_at: '2026-08-08T03:59:00.000Z',
       last_success_at: '2026-08-08T03:59:30.000Z',
+      consecutive_failure_count: 0,
       success_interval_sec: 21600,
       failure_retry_sec: 60,
       next_attempt_delay_sec: 21600,
@@ -1718,6 +1719,28 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         signal: databaseReport('signal'),
         paper: {
           ...databaseReport('paper'),
+          source_watermark_query_evidence: {
+            candidate_shadow_observations: {
+              strategy: 'indexed_anchor_max',
+              column: 'observed_at',
+              source_index_name: 'idx_candidate_shadow_obs_observed',
+              query_plan: [
+                'SEARCH src.candidate_shadow_observations USING COVERING INDEX idx_candidate_shadow_obs_observed',
+              ],
+              uses_declared_index: true,
+              full_table_scan_detected: false,
+            },
+            candidate_shadow_virtual_trades: {
+              strategy: 'indexed_anchor_max',
+              column: 'observed_at',
+              source_index_name: 'idx_candidate_shadow_virtual_observed',
+              query_plan: [
+                'SEARCH src.candidate_shadow_virtual_trades USING COVERING INDEX idx_candidate_shadow_virtual_observed',
+              ],
+              uses_declared_index: true,
+              full_table_scan_detected: false,
+            },
+          },
           selected_tables: {
             candidate_shadow_observations: {
               included: true,
@@ -1803,8 +1826,16 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.snapshot_identity_matched, true);
   assert.equal(health.snapshot_fresh, true);
   assert.equal(health.manifest_contract.indexed_selection_passed, true);
+  assert.equal(health.manifest_contract.indexed_watermarks_passed, true);
   assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 36120);
+  assert.equal(health.indexed_watermarks.candidate_shadow_observations.passed, true);
+  assert.equal(
+    health.indexed_watermarks.candidate_shadow_observations.source_index_name,
+    'idx_candidate_shadow_obs_observed',
+  );
   assert.equal(health.source_read_lock.max_duration_sec, 3.33);
+  assert.equal(health.consecutive_failure_count, 0);
+  assert.equal(health.next_attempt_delay_sec, 21600);
   assert.equal(health.snapshot_files.paper.size_matches_manifest, true);
   assert.equal(health.authoritative_consumer_preflight.matched_current_bundle, true);
   assert.equal(health.promotion_allowed, false);
@@ -1889,6 +1920,7 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
           stage: 'ignored',
         },
       },
+      consecutive_failure_count: 1,
       next_attempt_delay_sec: 60,
       next_attempt_at: '2026-08-08T04:01:00.000Z',
     },
@@ -1910,6 +1942,7 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
     },
   });
   assert.equal(failed.failure_retry_sec, 60);
+  assert.equal(failed.consecutive_failure_count, 1);
   assert.equal(failed.next_attempt_delay_sec, 60);
   assert.equal(failed.next_attempt_at, '2026-08-08T04:01:00.000Z');
   assert.equal(JSON.stringify(failed).includes('/app/data/paper_trades.db'), false);
@@ -1930,6 +1963,42 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.equal(unsafeTopLevelCode.last_failure_code, 'snapshot_component_failed');
   assert.ok(unsafeTopLevelCode.blockers.includes('snapshot_component_failed'));
   assert.equal(JSON.stringify(unsafeTopLevelCode).includes('/app/data/paper.db'), false);
+
+  const runningNullSchedule = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    statusPayload: {
+      ...fixture.statusPayload,
+      status: 'running',
+      attempt_running: true,
+      consecutive_failure_count: 2,
+      next_attempt_delay_sec: null,
+      next_attempt_at: null,
+    },
+  });
+  assert.equal(runningNullSchedule.consecutive_failure_count, 2);
+  assert.equal(runningNullSchedule.next_attempt_delay_sec, null);
+  assert.equal(runningNullSchedule.next_attempt_at, null);
+
+  const metadataStage = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    statusPayload: {
+      ...fixture.statusPayload,
+      status: 'failed',
+      accepted: false,
+      last_failure_code: 'source_read_lock_budget_exceeded',
+      last_failure_details: {
+        paper: {
+          error_code: 'source_read_lock_budget_exceeded',
+          error_type: 'RuntimeError',
+          stage: 'source_metadata:candidate_shadow_observations',
+        },
+      },
+    },
+  });
+  assert.equal(
+    metadataStage.last_failure_details.paper.stage,
+    'source_metadata:candidate_shadow_observations',
+  );
 
   const stale = readEvaluatorSnapshotWorkerHealth({
     ...base,

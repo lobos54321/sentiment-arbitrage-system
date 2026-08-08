@@ -348,6 +348,19 @@ Accepted snapshot → AutoLoop 血缘：
 - P0-D paper E2E 继续锁定；strategy、gates、mode、paper/live enablement 和 promotion policy 未改变；
 - retry/diagnostics 第一轮独立 verifier 因无限 60 秒重试和未 allowlist 的 public strings 给出 `REJECT`；完成有界退避与 adversarial sanitization 后，第二轮 verifier 给出 `APPROVE`。
 
+### 2026-08-08｜生产根因收敛：indexed source watermark
+
+- retry/diagnostics SHA `97eeb01833d4647e59fc2d9017cfa85703bd9883` 已部署；首次 300 秒失败被精确归因为 `paper / source_metadata / source_read_lock_budget_exceeded`；
+- 第二次 source inspection 锁竞争在约 30 秒 fail-closed，并真实进入 900 秒第二级退避，证明不是无限 60 秒 retry loop；
+- 根因是 source metadata 在 25.58GB paper DB 的高频 candidate 表上以单条多列 `MAX(signal_id, signal_ts, observed_at)` 聚合扫描，发生在 pinned source read view 内；
+- 修复不增加 300 秒 ceiling、不缩短/改写 snapshot window，也不跳过 watermark：source phase 对两张 candidate 表只用已验证 non-partial leading `observed_at` index 执行 `MAX(observed_at)`，并运行 `EXPLAIN QUERY PLAN`；
+- manifest 新增 `source_watermark_query_evidence`，记录 strategy、column、source index、query plan、index usage 与 full-scan 标志；
+- consumer 要求 indexed watermark 与 indexed selection 使用同一 index，任何 aggregate scan、index mismatch、伪造 plan 或 full scan evidence 均 fail-closed；
+- source lock 释放后，冻结 snapshot 仍计算完整的 `signal_id/signal_ts/observed_at` 等多列 upper watermarks，因此最终 manifest 证据没有被削弱；
+- Dashboard health 新增 `indexed_watermarks` 与 `indexed_watermarks_passed`，并修复运行中 null retry schedule 被误显示为 0 的问题；
+- source page inspection failure 也被限制为 public-safe `database / snapshot_source_inspection_failed / source_page_stats`，原始 SQLite 文本和路径不进入 health；
+- indexed-watermark 独立 verifier 给出 `APPROVE`：确认 source watermark 使用 covering index、不削弱冻结库完整多列 watermarks、consumer/health 会拒绝篡改，且 300 秒 budget 与所有 promotion/mode/paper 边界保持不变。
+
 尚未声称完成的生产证据：
 
 - 尚未生成新的 production accepted snapshot；

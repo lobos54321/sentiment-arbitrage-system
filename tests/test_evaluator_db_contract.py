@@ -424,6 +424,35 @@ def test_indexed_query_plan_tampering_is_rejected(tmp_path, monkeypatch):
     ) in status["blockers"]
 
 
+def test_indexed_source_watermark_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    watermark = manifest["databases"]["paper"]["source_watermark_query_evidence"][
+        "candidate_shadow_observations"
+    ]
+    watermark["strategy"] = "aggregate_max"
+    watermark["query_plan"] = ["SCAN src.candidate_shadow_observations"]
+    watermark["uses_declared_index"] = False
+    watermark["full_table_scan_detected"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_paper_indexed_watermark_invalid:"
+        "candidate_shadow_observations"
+    ) in status["blockers"]
+
+
 def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
     live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
     manifest_path = (out / "current" / "manifest.json").resolve()
