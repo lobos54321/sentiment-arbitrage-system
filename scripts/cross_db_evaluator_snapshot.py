@@ -148,10 +148,21 @@ DATABASE_SPECS = {
                 epoch_seconds_columns=("observed_at",),
             ),
             "paper_decision_events": recent(
-                "event_ts", "signal_ts", "created_at", required=True
+                "event_ts",
+                "signal_ts",
+                "created_at",
+                required=True,
+                indexed_epoch_seconds_anchor="event_ts",
+                epoch_seconds_columns=("event_ts",),
             ),
             "a_class_decision_events": recent(
-                "event_ts", "signal_ts", "opportunity_ts", "created_at", required=True
+                "event_ts",
+                "signal_ts",
+                "opportunity_ts",
+                "created_at",
+                required=True,
+                indexed_epoch_seconds_anchor="event_ts",
+                epoch_seconds_columns=("event_ts",),
             ),
             "a_class_mode_runtime_state": through_upper(
                 "updated_at", "created_at", "last_breach_ts", required=True
@@ -162,8 +173,14 @@ DATABASE_SPECS = {
                 "stage3_qualifying_exit_ts", "created_at", required=True
             ),
             "opportunity_events": recent(
-                "event_ts", "raw_signal_ts", "opportunity_ts", "created_at", "updated_at",
-                required=True
+                "event_ts",
+                "raw_signal_ts",
+                "opportunity_ts",
+                "created_at",
+                "updated_at",
+                required=True,
+                indexed_epoch_seconds_anchor="event_ts",
+                epoch_seconds_columns=("event_ts",),
             ),
             "canonical_trade_ledger": through_upper(
                 "entry_ts", "exit_ts", "created_at", "updated_at"
@@ -608,7 +625,27 @@ def database_metadata(
             continue
         rule = (spec.get("tables") or {}).get(table) or {}
         indexed_anchor = rule.get("indexed_epoch_seconds_anchor")
-        if indexed_watermark_anchors and indexed_anchor in selected:
+        if indexed_watermark_anchors:
+            if not indexed_anchor:
+                watermarks[table] = {}
+                watermark_query_evidence[table] = {
+                    "strategy": "deferred_to_frozen_snapshot",
+                    "columns": selected,
+                    "source_query_executed": False,
+                }
+                continue
+            if indexed_anchor not in selected:
+                if table in spec["required_tables"]:
+                    missing_required_watermarks.append(table)
+                watermark_query_evidence[table] = {
+                    "strategy": "indexed_anchor_column_missing",
+                    "column": indexed_anchor,
+                    "source_index_name": None,
+                    "query_plan": [],
+                    "uses_declared_index": False,
+                    "full_table_scan_detected": None,
+                }
+                continue
             source_index_name = source_index_for_column(
                 connection,
                 table,
@@ -2124,10 +2161,13 @@ def self_test() -> None:
                 "CREATE INDEX idx_candidate_shadow_virtual_observed "
                 "ON candidate_shadow_virtual_trades(observed_at);"
                 "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
+                "CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);"
                 "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
+                "CREATE INDEX idx_a_class_decision_recent ON a_class_decision_events(event_ts);"
                 "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
                 "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
-                "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER)"
+                "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
+                "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)"
             ),
             "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
             "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",

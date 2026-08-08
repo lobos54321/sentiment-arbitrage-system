@@ -9110,8 +9110,15 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const paperSelections = databaseReports.paper?.selected_tables && typeof databaseReports.paper.selected_tables === 'object'
     ? databaseReports.paper.selected_tables
     : {};
+  const indexedPaperAnchors = {
+    candidate_shadow_observations: 'observed_at',
+    candidate_shadow_virtual_trades: 'observed_at',
+    paper_decision_events: 'event_ts',
+    a_class_decision_events: 'event_ts',
+    opportunity_events: 'event_ts',
+  };
   const indexedSelection = {};
-  for (const table of ['candidate_shadow_observations', 'candidate_shadow_virtual_trades']) {
+  for (const [table, anchor] of Object.entries(indexedPaperAnchors)) {
     const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
       ? paperSelections[table]
       : {};
@@ -9129,11 +9136,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       passed: Boolean(
         selection.included === true
         && selection.predicate_strategy === 'indexed_epoch_seconds'
-        && selection.indexed_time_anchor === 'observed_at'
+        && selection.indexed_time_anchor === anchor
         && typeof selection.source_index_name === 'string'
         && selection.source_index_name.length > 0
         && Array.isArray(selection.source_index_columns)
-        && selection.source_index_columns[0] === 'observed_at'
+        && selection.source_index_columns[0] === anchor
         && selection.source_index_partial === false
         && Array.isArray(selection.source_query_plan)
         && selection.source_query_plan.length > 0
@@ -9149,7 +9156,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     ? databaseReports.paper.source_watermark_query_evidence
     : {};
   const indexedWatermarks = {};
-  for (const table of ['candidate_shadow_observations', 'candidate_shadow_virtual_trades']) {
+  for (const [table, anchor] of Object.entries(indexedPaperAnchors)) {
     const evidence = paperSourceWatermarkEvidence[table]
       && typeof paperSourceWatermarkEvidence[table] === 'object'
       ? paperSourceWatermarkEvidence[table]
@@ -9167,7 +9174,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       full_table_scan_detected: evidence.full_table_scan_detected === true,
       passed: Boolean(
         evidence.strategy === 'indexed_anchor_max'
-        && evidence.column === 'observed_at'
+        && evidence.column === anchor
         && typeof evidence.source_index_name === 'string'
         && evidence.source_index_name.length > 0
         && evidence.source_index_name === selection.source_index_name

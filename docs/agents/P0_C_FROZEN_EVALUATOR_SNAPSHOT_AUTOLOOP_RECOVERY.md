@@ -361,6 +361,19 @@ Accepted snapshot → AutoLoop 血缘：
 - source page inspection failure 也被限制为 public-safe `database / snapshot_source_inspection_failed / source_page_stats`，原始 SQLite 文本和路径不进入 health；
 - indexed-watermark 独立 verifier 给出 `APPROVE`：确认 source watermark 使用 covering index、不削弱冻结库完整多列 watermarks、consumer/health 会拒绝篡改，且 300 秒 budget 与所有 promotion/mode/paper 边界保持不变。
 
+### 2026-08-08｜生产第二轮收敛：bounded source metadata policy
+
+- indexed-candidate-watermark SHA `1c448672c804b0654e9507a4ecc6cc105b86d680` 已部署；candidate 两表不再成为断点，生产 failure stage 推进到 `paper / source_metadata:paper_decision_events`；
+- 这证明 observed_at watermark 修复有效，同时说明 source phase 不能对其他高频 required 表继续执行多列 aggregate MAX；
+- source metadata 统一为 bounded policy：`candidate_shadow_observations`、`candidate_shadow_virtual_trades`、`paper_decision_events`、`a_class_decision_events`、`opportunity_events` 必须使用 validated leading timestamp index；
+- `paper_decision_events` 使用 `idx_pde_event_ts`，A_CLASS 使用 `idx_a_class_decision_recent`，opportunity 使用 `idx_opportunity_events_recent`；复制 predicate 与 source watermark 均绑定同一 index；
+- 没有登记 indexed anchor 的 watermark 表在 source phase 必须写入 `deferred_to_frozen_snapshot / source_query_executed=false`，不得运行 aggregate source query；
+- authoritative consumer 新增 deferred-policy 验证，任何恢复 active-source aggregate scan 的 manifest 都被拒绝；
+- source lock 释放后，冻结 snapshot 继续计算每张表完整的 multi-column upper watermarks、quick-check、size 和 SHA；
+- Dashboard producer health 扩展为验证 5 张 indexed paper 表，`consumer_ready` 仍只来自 authoritative Python preflight；
+- 生产本轮仍在 300 秒 ceiling fail-closed，没有 current/partial publication，paper DB integrity 保持 `ok`，P0-D 继续锁定；
+- bounded-source-metadata 独立 verifier 给出 `APPROVE`：确认 active-source 无锚表只 deferred，5 张 paper 表使用真实 leading indexes，冻结库完整 watermarks/SHA/quick-check 仍为 acceptance 必需条件。
+
 尚未声称完成的生产证据：
 
 - 尚未生成新的 production accepted snapshot；

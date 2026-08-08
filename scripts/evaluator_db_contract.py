@@ -501,6 +501,23 @@ def evaluator_snapshot_bundle_status(
                 blockers.append(f"evaluator_snapshot_{name}_selection_upper_invalid")
             selected_tables = report.get("selected_tables") or {}
             source_watermark_evidence = report.get("source_watermark_query_evidence") or {}
+            for watermark_table in (DATABASE_SPECS[name].get("watermarks") or {}):
+                watermark_rule = (
+                    (DATABASE_SPECS[name].get("tables") or {}).get(watermark_table)
+                    or {}
+                )
+                if watermark_rule.get("indexed_epoch_seconds_anchor"):
+                    continue
+                watermark_report = source_watermark_evidence.get(watermark_table) or {}
+                if (
+                    watermark_report.get("strategy")
+                    != "deferred_to_frozen_snapshot"
+                    or watermark_report.get("source_query_executed") is not False
+                ):
+                    blockers.append(
+                        f"evaluator_snapshot_{name}_source_watermark_not_deferred:"
+                        f"{watermark_table}"
+                    )
             if name == "paper":
                 candidate_projection = (
                     selected_tables.get("candidate_shadow_observations") or {}

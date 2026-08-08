@@ -43,10 +43,13 @@ def create_sources(root):
             "CREATE INDEX idx_candidate_shadow_virtual_observed "
             "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_a_class_decision_recent ON a_class_decision_events(event_ts);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
             "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
-            "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER)"
+            "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)"
         ),
         "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
         "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",
@@ -208,7 +211,7 @@ def test_candidate_time_selection_forces_observed_at_index(tmp_path):
     ), plan
 
 
-def test_candidate_source_watermarks_use_observed_at_indexes_without_full_scan(tmp_path):
+def test_paper_source_watermarks_use_indexes_or_defer_without_full_scan(tmp_path):
     sources = create_sources(tmp_path)
     paper = sqlite3.connect(sources["paper"])
     paper.executemany(
@@ -219,12 +222,30 @@ def test_candidate_source_watermarks_use_observed_at_indexes_without_full_scan(t
         "INSERT INTO candidate_shadow_virtual_trades(signal_id, observed_at) VALUES (?, ?)",
         [(1, 110), (2, 210)],
     )
+    paper.executemany(
+        "INSERT INTO paper_decision_events(id, event_ts) VALUES (?, ?)",
+        [(1, 120), (2, 220)],
+    )
+    paper.executemany(
+        "INSERT INTO a_class_decision_events(id, event_ts) VALUES (?, ?)",
+        [(1, 130), (2, 230)],
+    )
+    paper.executemany(
+        "INSERT INTO opportunity_events(id, event_ts) VALUES (?, ?)",
+        [(1, 140), (2, 240)],
+    )
+    paper.execute(
+        "INSERT INTO a_class_mode_runtime_state(id, updated_at) VALUES (1, 250)"
+    )
+    paper.execute("INSERT INTO paper_trades(id, entry_time) VALUES (1, 260)")
     paper.commit()
     paper.close()
 
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    statements = []
+    connection.set_trace_callback(statements.append)
     try:
         metadata = snapshot_module.database_metadata(
             connection,
@@ -241,13 +262,38 @@ def test_candidate_source_watermarks_use_observed_at_indexes_without_full_scan(t
     assert metadata["upper_watermarks"]["candidate_shadow_virtual_trades"] == {
         "observed_at": 210
     }
-    for table, index_name in (
-        ("candidate_shadow_observations", "idx_candidate_shadow_obs_observed"),
-        ("candidate_shadow_virtual_trades", "idx_candidate_shadow_virtual_observed"),
-    ):
+    expected_indexed = (
+        (
+            "candidate_shadow_observations",
+            "idx_candidate_shadow_obs_observed",
+            "observed_at",
+            200,
+        ),
+        (
+            "candidate_shadow_virtual_trades",
+            "idx_candidate_shadow_virtual_observed",
+            "observed_at",
+            210,
+        ),
+        ("paper_decision_events", "idx_pde_event_ts", "event_ts", 220),
+        (
+            "a_class_decision_events",
+            "idx_a_class_decision_recent",
+            "event_ts",
+            230,
+        ),
+        (
+            "opportunity_events",
+            "idx_opportunity_events_recent",
+            "event_ts",
+            240,
+        ),
+    )
+    for table, index_name, column, expected_value in expected_indexed:
+        assert metadata["upper_watermarks"][table] == {column: expected_value}
         evidence = metadata["watermark_query_evidence"][table]
         assert evidence["strategy"] == "indexed_anchor_max"
-        assert evidence["column"] == "observed_at"
+        assert evidence["column"] == column
         assert evidence["source_index_name"] == index_name
         assert evidence["uses_declared_index"] is True
         assert evidence["full_table_scan_detected"] is False
@@ -256,6 +302,20 @@ def test_candidate_source_watermarks_use_observed_at_indexes_without_full_scan(t
             "SCAN" in detail.upper() and index_name not in detail
             for detail in evidence["query_plan"]
         )
+
+    for table in ("a_class_mode_runtime_state", "paper_trades"):
+        assert metadata["upper_watermarks"][table] == {}
+        evidence = metadata["watermark_query_evidence"][table]
+        assert evidence["strategy"] == "deferred_to_frozen_snapshot"
+        assert evidence["source_query_executed"] is False
+    assert not any(
+        "SELECT MAX(" in statement.upper()
+        and any(
+            f'"{table}"' in statement
+            for table in ("a_class_mode_runtime_state", "paper_trades")
+        )
+        for statement in statements
+    )
 
 
 def test_candidate_time_selection_fails_closed_without_source_index(tmp_path):

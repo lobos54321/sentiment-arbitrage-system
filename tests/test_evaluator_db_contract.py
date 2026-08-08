@@ -39,10 +39,13 @@ def create_live_sources(root):
             "CREATE INDEX idx_candidate_shadow_virtual_observed "
             "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_a_class_decision_recent ON a_class_decision_events(event_ts);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
             "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
-            "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER)",
+            "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
+            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)",
         ),
         "raw": ("raw_signal_outcomes.db", "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)"),
         "kline": ("kline_cache.db", "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)"),
@@ -451,6 +454,33 @@ def test_indexed_source_watermark_tampering_is_rejected(tmp_path, monkeypatch):
         "evaluator_snapshot_paper_indexed_watermark_invalid:"
         "candidate_shadow_observations"
     ) in status["blockers"]
+
+
+def test_deferred_source_watermark_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    deferred = manifest["databases"]["paper"]["source_watermark_query_evidence"][
+        "paper_trades"
+    ]
+    deferred["strategy"] = "aggregate_max"
+    deferred["source_query_executed"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_paper_source_watermark_not_deferred:paper_trades"
+        in status["blockers"]
+    )
 
 
 def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
