@@ -37,7 +37,13 @@ CANDIDATE_STAGE_SCHEMA = "candidate_stage"
 CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
 CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal_candidate"
 MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
-CANDIDATE_STAGE_BUDGET_MODE = "residual_disk_after_output_and_reserve"
+CANDIDATE_STAGE_BUDGET_MODE = "shared_residual_disk_after_output_and_reserve"
+PAPER_DECISION_STAGE_SCHEMA_VERSION = "paper_decision_events_parallel_stage.v1"
+PAPER_DECISION_STAGE_SCHEMA = "paper_decision_stage"
+PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
+MIN_PAPER_DECISION_STAGE_CAP_BYTES = 3 * 4096
+CANDIDATE_STAGE_RESIDUAL_SHARE = 0.40
+PAPER_DECISION_STAGE_RESIDUAL_SHARE = 0.60
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
@@ -340,6 +346,16 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
         "snapshot missing required tables",
         "snapshot missing required watermarks",
         "candidate_observation_payload_projection_semantic_mismatch",
+        "paper_decision_parallel_stage_start_timeout",
+        "paper_decision_parallel_stage_cancelled",
+        "paper_decision_parallel_stage_barrier_broken",
+        "paper_decision_parallel_stage_timeout",
+        "paper_decision_parallel_stage_missing",
+        "paper_decision_parallel_stage_budget_exceeded",
+        "paper_decision_parallel_stage_quick_check_failed",
+        "paper_decision_parallel_stage_row_count_mismatch",
+        "paper_decision_parallel_stage_cleanup_failed",
+        "paper_decision_parallel_stage_failed",
     )
     for marker in known:
         if marker in text:
@@ -409,6 +425,16 @@ def snapshot_failure_code(exc: BaseException) -> str:
         "cross-database snapshot acceptance failed",
         "selective snapshot exceeded bundle output cap",
         "snapshot manifest size did not converge",
+        "paper_decision_parallel_stage_start_timeout",
+        "paper_decision_parallel_stage_cancelled",
+        "paper_decision_parallel_stage_barrier_broken",
+        "paper_decision_parallel_stage_timeout",
+        "paper_decision_parallel_stage_missing",
+        "paper_decision_parallel_stage_budget_exceeded",
+        "paper_decision_parallel_stage_quick_check_failed",
+        "paper_decision_parallel_stage_row_count_mismatch",
+        "paper_decision_parallel_stage_cleanup_failed",
+        "paper_decision_parallel_stage_failed",
     )
     for marker in known:
         if marker in text:
@@ -1384,6 +1410,161 @@ def create_deferred_indexes(
         table_reports[table].setdefault("indexes_created", []).append(name)
 
 
+def stage_single_source_table(
+    connection: sqlite3.Connection,
+    table: str,
+    rule: dict[str, Any],
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    progress: dict[str, Any] | None = None,
+    lock_started_monotonic: float | None = None,
+    lock_limit_sec: float | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    table_started_monotonic = time.monotonic()
+    if progress is not None:
+        progress["stage"] = f"copy_table:{table}"
+        progress["current_table"] = table
+        progress["current_table_started_monotonic"] = table_started_monotonic
+    source_row = connection.execute(
+        "SELECT sql FROM src.sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if source_row is None:
+        if rule.get("required"):
+            raise RuntimeError(f"snapshot missing required tables: {table}")
+        return {
+            "included": False,
+            "required": False,
+            "reason": "optional_source_table_missing",
+        }, []
+    create_sql = str(source_row["sql"] or "")
+    if not create_sql:
+        raise RuntimeError(f"snapshot source table schema missing: {table}")
+    selection = selection_for_table(
+        connection,
+        table,
+        rule,
+        review_lower_epoch=review_lower_epoch,
+        long_lower_epoch=long_lower_epoch,
+        upper_epoch=upper_epoch,
+    )
+    query_plan = source_query_plan_evidence(connection, table, selection)
+    if query_plan["required"] and (
+        query_plan["uses_declared_index"] is not True
+        or query_plan["uses_range_search"] is not True
+        or query_plan["full_table_scan_detected"] is True
+    ):
+        raise RuntimeError(
+            f"selective_snapshot_source_query_plan_not_indexed:{table}:"
+            f"{selection.get('source_index_name')}:{query_plan['details']}"
+        )
+    connection.execute(create_sql)
+    connection.execute(
+        f"INSERT INTO {quote_identifier(table)} "
+        f"SELECT * FROM {source_table_reference(table, selection)} "
+        f"WHERE {selection['predicate_sql']}",
+        selection["parameters"],
+    )
+    copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
+    deferred_indexes = [
+        (table, str(row["name"]), str(row["sql"]))
+        for row in connection.execute(
+            "SELECT name, sql FROM src.sqlite_master "
+            "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name",
+            (table,),
+        ).fetchall()
+    ]
+    table_finished_monotonic = time.monotonic()
+    table_duration_sec = max(0.0, table_finished_monotonic - table_started_monotonic)
+    source_lock_elapsed_sec = (
+        max(0.0, table_finished_monotonic - lock_started_monotonic)
+        if lock_started_monotonic is not None
+        else None
+    )
+    source_lock_remaining_sec = (
+        max(0.0, float(lock_limit_sec) - source_lock_elapsed_sec)
+        if source_lock_elapsed_sec is not None and lock_limit_sec is not None
+        else None
+    )
+    report = {
+        "included": True,
+        "required": bool(rule.get("required")),
+        "rows_copied": copied_rows,
+        "selection_mode": selection["mode"],
+        "time_column": selection["time_column"],
+        "time_columns": selection.get("time_columns") or [],
+        "upper_bound_columns": selection.get("upper_bound_columns") or [],
+        "lower_epoch": selection["lower_epoch"],
+        "upper_epoch": selection["upper_epoch"],
+        "future_bound_enforced": selection["future_bound_enforced"],
+        "time_semantics": selection["time_semantics"],
+        "predicate_strategy": selection.get("predicate_strategy"),
+        "indexed_time_anchor": selection.get("indexed_time_anchor"),
+        "source_index_name": selection.get("source_index_name"),
+        "source_index_columns": selection.get("source_index_columns") or [],
+        "source_index_partial": selection.get("source_index_partial"),
+        "source_query_plan": query_plan["details"],
+        "source_query_plan_uses_index": query_plan["uses_declared_index"],
+        "source_query_plan_uses_range_search": query_plan["uses_range_search"],
+        "source_query_plan_full_table_scan_detected": query_plan["full_table_scan_detected"],
+        "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
+        "storage_projection": {
+            "schema_version": PAPER_DECISION_STAGE_SCHEMA_VERSION,
+            "applied": False,
+            "reason": "parallel_full_fidelity_stage",
+            "payload_semantics_preserved": True,
+        },
+        "indexes_created": [],
+        "source_copy_duration_sec": round(table_duration_sec, 6),
+        "source_lock_elapsed_after_table_sec": (
+            round(source_lock_elapsed_sec, 6)
+            if source_lock_elapsed_sec is not None
+            else None
+        ),
+        "source_lock_remaining_after_table_sec": (
+            round(source_lock_remaining_sec, 6)
+            if source_lock_remaining_sec is not None
+            else None
+        ),
+    }
+    if progress is not None:
+        progress.setdefault("completed_table_timings", {})[table] = {
+            "duration_sec": round(table_duration_sec, 6),
+            "rows_copied": copied_rows,
+            "source_lock_elapsed_sec": report["source_lock_elapsed_after_table_sec"],
+            "source_lock_remaining_sec": report["source_lock_remaining_after_table_sec"],
+        }
+    return report, deferred_indexes
+
+
+def merge_staged_table(
+    connection: sqlite3.Connection,
+    *,
+    stage_schema: str,
+    table: str,
+) -> int:
+    schema = quote_identifier(stage_schema)
+    row = connection.execute(
+        f"SELECT sql FROM {schema}.sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if row is None or not row["sql"]:
+        raise RuntimeError(f"parallel_stage_table_missing:{table}")
+    if connection.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE name=?",
+        (table,),
+    ).fetchone():
+        raise RuntimeError(f"parallel_stage_destination_collision:{table}")
+    connection.execute(str(row["sql"]))
+    connection.execute(
+        f"INSERT INTO {quote_identifier(table)} "
+        f"SELECT * FROM {schema}.{quote_identifier(table)}"
+    )
+    return int(connection.execute("SELECT changes()").fetchone()[0])
+
+
 def copy_selected_tables(
     connection: sqlite3.Connection,
     spec: dict[str, Any],
@@ -1394,6 +1575,7 @@ def copy_selected_tables(
     progress: dict[str, Any] | None = None,
     lock_started_monotonic: float | None = None,
     lock_limit_sec: float | None = None,
+    externally_staged_tables: set[str] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[dict[str, str]],
@@ -1408,9 +1590,12 @@ def copy_selected_tables(
     table_reports: dict[str, dict[str, Any]] = {}
     deferred_indexes: list[tuple[str, str, str]] = []
     candidate_source_columns: list[sqlite3.Row] | None = None
+    externally_staged_tables = set(externally_staged_tables or ())
     if progress is not None:
         progress.setdefault("completed_table_timings", {})
     for table, rule in spec["tables"].items():
+        if table in externally_staged_tables:
+            continue
         table_started_monotonic = time.monotonic()
         if progress is not None:
             progress["stage"] = f"copy_table:{table}"
@@ -1590,6 +1775,7 @@ def snapshot_one(
     upper_epoch: float,
     budget_bytes: int,
     candidate_stage_path: Path | None = None,
+    paper_decision_stage_state: dict[str, Any] | None = None,
     progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not source.is_file():
@@ -1625,6 +1811,11 @@ def snapshot_one(
         progress=progress,
         lock_started_monotonic=pin_report.get("pinned_started_monotonic"),
         lock_limit_sec=pin_report.get("source_read_lock_limit_sec"),
+        externally_staged_tables=(
+            {PAPER_DECISION_STAGE_TABLE}
+            if paper_decision_stage_state is not None
+            else None
+        ),
     )
     if progress is not None:
         progress["stage"] = "release_source_read_view"
@@ -1639,6 +1830,100 @@ def snapshot_one(
     candidate_projection_finished = None
     candidate_stage_size_bytes = 0
     candidate_stage_removed = True
+    paper_decision_stage_result: dict[str, Any] | None = None
+    paper_decision_stage_size_bytes = 0
+    paper_decision_stage_removed = True
+    paper_decision_merge_started = None
+    paper_decision_merge_finished = None
+    paper_decision_rows_merged = 0
+    pinned_read_views = [pin_report]
+    all_source_read_views_released_at = read_view_released
+    if paper_decision_stage_state is not None:
+        stage_thread = paper_decision_stage_state["thread"]
+        stage_thread.join(timeout=float(pin_report["source_read_lock_limit_sec"]) + 60.0)
+        if stage_thread.is_alive():
+            paper_decision_stage_state["cancel_event"].set()
+            stage_thread.join(timeout=30)
+            raise RuntimeError("paper_decision_parallel_stage_timeout")
+        stage_state = paper_decision_stage_state["state"]
+        if stage_state.get("exception") is not None:
+            if progress is not None:
+                progress["stage"] = f"copy_table:{PAPER_DECISION_STAGE_TABLE}"
+                progress["current_table"] = PAPER_DECISION_STAGE_TABLE
+            raise stage_state["exception"]
+        paper_decision_stage_result = stage_state.get("result")
+        if (
+            not isinstance(paper_decision_stage_result, dict)
+            or paper_decision_stage_result.get("accepted") is not True
+        ):
+            raise RuntimeError("paper_decision_parallel_stage_failed")
+        paper_decision_stage_path = Path(paper_decision_stage_result["stage_path"])
+        if not paper_decision_stage_path.is_file():
+            raise RuntimeError("paper_decision_parallel_stage_missing")
+        paper_decision_stage_size_bytes = int(
+            paper_decision_stage_result.get("stage_size_bytes") or 0
+        )
+        pinned_read_views.append(paper_decision_stage_result["pinned_read_view"])
+        all_source_read_views_released_at = max(
+            all_source_read_views_released_at,
+            float(paper_decision_stage_result["source_read_view_released_epoch"]),
+        )
+        if progress is not None:
+            progress["stage"] = "merge_paper_decision_parallel_stage"
+            progress["current_table"] = PAPER_DECISION_STAGE_TABLE
+        connection.execute(
+            f"ATTACH DATABASE ? AS {quote_identifier(PAPER_DECISION_STAGE_SCHEMA)}",
+            (str(paper_decision_stage_path),),
+        )
+        paper_decision_merge_started = time.time()
+        paper_decision_rows_merged = merge_staged_table(
+            connection,
+            stage_schema=PAPER_DECISION_STAGE_SCHEMA,
+            table=PAPER_DECISION_STAGE_TABLE,
+        )
+        expected_rows = int(
+            (paper_decision_stage_result.get("table_report") or {}).get("rows_copied")
+            or 0
+        )
+        if paper_decision_rows_merged != expected_rows:
+            raise RuntimeError("paper_decision_parallel_stage_row_count_mismatch")
+        connection.commit()
+        paper_decision_merge_finished = time.time()
+        connection.execute(
+            f"DETACH DATABASE {quote_identifier(PAPER_DECISION_STAGE_SCHEMA)}"
+        )
+        table_report = dict(paper_decision_stage_result["table_report"])
+        table_report["parallel_stage"] = {
+            "schema_version": PAPER_DECISION_STAGE_SCHEMA_VERSION,
+            "full_fidelity_row_copy": True,
+            "payload_semantics_preserved": True,
+            "stage_rows_copied": expected_rows,
+            "rows_merged": paper_decision_rows_merged,
+            "row_count_matched": paper_decision_rows_merged == expected_rows,
+            "quick_check": paper_decision_stage_result.get("quick_check") or [],
+            "stage_page_size": paper_decision_stage_result.get("stage_page_size"),
+            "source_read_lock_duration_sec": paper_decision_stage_result.get(
+                "source_read_lock_duration_sec"
+            ),
+            "source_read_lock_budget_passed": paper_decision_stage_result.get(
+                "source_read_lock_budget_passed"
+            )
+            is True,
+            "merge_started_after_source_read_view_release": (
+                paper_decision_merge_started
+                >= float(paper_decision_stage_result["source_read_view_released_epoch"])
+            ),
+        }
+        table_reports[PAPER_DECISION_STAGE_TABLE] = table_report
+        deferred_indexes.extend(
+            list(paper_decision_stage_result.get("deferred_indexes") or [])
+        )
+        paper_decision_stage_path.unlink(missing_ok=True)
+        for suffix in ("-journal", "-wal", "-shm"):
+            Path(f"{paper_decision_stage_path}{suffix}").unlink(missing_ok=True)
+        paper_decision_stage_removed = not paper_decision_stage_path.exists()
+        if not paper_decision_stage_removed:
+            raise RuntimeError("paper_decision_parallel_stage_cleanup_failed")
     if candidate_source_columns is not None:
         if candidate_stage_path is None or not candidate_stage_path.is_file():
             raise RuntimeError("candidate_observation_stage_missing_after_source_release")
@@ -1660,7 +1945,7 @@ def snapshot_one(
                 "source_stage_size_bytes": candidate_stage_size_bytes,
                 **candidate_stage_plan,
                 "projection_started_after_source_read_view_release": (
-                    candidate_projection_started >= read_view_released
+                    candidate_projection_started >= all_source_read_views_released_at
                 ),
                 "off_source_lock_projection_duration_sec": round(
                     candidate_projection_finished - candidate_projection_started, 6
@@ -1720,28 +2005,91 @@ def snapshot_one(
         )
     with destination.open("rb") as handle:
         os.fsync(handle.fileno())
+    main_source_read_lock_duration_sec = (
+        read_view_released - float(pin_report["pinned_started_epoch"])
+    )
+    paper_decision_source_read_lock_duration_sec = (
+        float(paper_decision_stage_result["source_read_lock_duration_sec"])
+        if paper_decision_stage_result is not None
+        else 0.0
+    )
+    max_source_read_lock_duration_sec = max(
+        main_source_read_lock_duration_sec,
+        paper_decision_source_read_lock_duration_sec,
+    )
+    all_source_read_lock_budgets_passed = bool(
+        main_source_read_lock_duration_sec
+        <= float(pin_report["source_read_lock_limit_sec"]) + 1.0
+        and (
+            paper_decision_stage_result is None
+            or paper_decision_stage_result.get("source_read_lock_budget_passed") is True
+        )
+    )
     return {
         "source_path": str(source.resolve()),
         "snapshot_path": str(destination.resolve()),
         "started_at": utc_iso(started),
         "finished_at": utc_iso(finished),
-        "source_read_view_released_at": utc_iso(read_view_released),
+        "source_read_view_released_at": utc_iso(all_source_read_views_released_at),
+        "main_source_read_view_released_at": utc_iso(read_view_released),
         "started_epoch": started,
         "finished_epoch": finished,
         "midpoint_epoch": (started + finished) / 2,
         "duration_sec": round(finished - started, 6),
         "source_read_lock_duration_sec": round(
-            read_view_released - float(pin_report["pinned_started_epoch"]), 6
+            max_source_read_lock_duration_sec, 6
+        ),
+        "main_source_read_lock_duration_sec": round(
+            main_source_read_lock_duration_sec, 6
+        ),
+        "paper_decision_source_read_lock_duration_sec": round(
+            paper_decision_source_read_lock_duration_sec, 6
         ),
         "source_read_lock_limit_sec": float(
             pin_report["source_read_lock_limit_sec"]
         ),
-        "source_read_lock_budget_passed": (
-            read_view_released - float(pin_report["pinned_started_epoch"])
-            <= float(pin_report["source_read_lock_limit_sec"]) + 1.0
-        ),
+        "source_read_lock_budget_passed": all_source_read_lock_budgets_passed,
         "source_read_lock_released_before_index_build": (
-            index_build_started >= read_view_released
+            index_build_started >= all_source_read_views_released_at
+        ),
+        "paper_decision_parallel_stage_used": paper_decision_stage_result is not None,
+        "paper_decision_parallel_stage_schema_version": (
+            paper_decision_stage_result.get("schema_version")
+            if paper_decision_stage_result is not None
+            else None
+        ),
+        "paper_decision_parallel_read_view_pinned": (
+            paper_decision_stage_result is None
+            or bool(paper_decision_stage_result.get("pinned_read_view"))
+        ),
+        "paper_decision_parallel_stage_merged_after_source_read_lock_release": (
+            paper_decision_stage_result is None
+            or (
+                paper_decision_merge_started is not None
+                and paper_decision_merge_started
+                >= float(paper_decision_stage_result["source_read_view_released_epoch"])
+            )
+        ),
+        "paper_decision_parallel_stage_size_bytes": paper_decision_stage_size_bytes,
+        "paper_decision_parallel_stage_page_size": (
+            int(paper_decision_stage_result.get("stage_page_size") or 0)
+            if paper_decision_stage_result is not None
+            else 0
+        ),
+        "paper_decision_parallel_stage_budget_bytes": (
+            int(paper_decision_stage_result.get("stage_budget_bytes") or 0)
+            if paper_decision_stage_result is not None
+            else 0
+        ),
+        "paper_decision_parallel_stage_rows_merged": paper_decision_rows_merged,
+        "paper_decision_parallel_stage_merge_duration_sec": (
+            round(paper_decision_merge_finished - paper_decision_merge_started, 6)
+            if paper_decision_merge_started is not None
+            and paper_decision_merge_finished is not None
+            else 0.0
+        ),
+        "paper_decision_parallel_stage_removed_before_publish": (
+            paper_decision_stage_removed
         ),
         "candidate_projection_after_source_read_lock_release": (
             candidate_projection_started is None
@@ -1781,6 +2129,7 @@ def snapshot_one(
         "snapshot_sha256": sha256_file(destination),
         "quick_check": quick_check,
         "pinned_read_view": pin_report,
+        "pinned_read_views": pinned_read_views,
         "selection_upper_epoch": float(upper_epoch),
         "selection_review_lower_epoch": float(review_lower_epoch),
         "selection_long_lower_epoch": float(long_lower_epoch),
@@ -1796,6 +2145,164 @@ def snapshot_one(
     }
 
 
+def build_parallel_table_stage(
+    *,
+    source: Path,
+    destination: Path,
+    table: str,
+    rule: dict[str, Any],
+    source_page_report: dict[str, int],
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    budget_bytes: int,
+    busy_timeout_ms: int,
+    max_source_read_lock_sec: float,
+    start_event: threading.Event,
+    pinned_barrier: threading.Barrier,
+    copy_start_event: threading.Event,
+    cancel_event: threading.Event,
+) -> dict[str, Any]:
+    connection: sqlite3.Connection | None = None
+    progress: dict[str, Any] = {"stage": "open_parallel_stage"}
+    pin_started_monotonic: float | None = None
+    lock_deadline: float | None = None
+    try:
+        timeout_sec = max(0.001, float(busy_timeout_ms) / 1000.0)
+        connection = sqlite3.connect(destination, timeout=timeout_sec, uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute("PRAGMA temp_store=FILE")
+        page_size = 4096
+        connection.execute(f"PRAGMA page_size={page_size}")
+        connection.execute(f"PRAGMA max_page_count={max(1, int(budget_bytes) // page_size)}")
+        source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
+        progress["stage"] = "attach_source"
+        connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
+        if not start_event.wait(timeout=30):
+            raise RuntimeError("paper_decision_parallel_stage_start_timeout")
+        if cancel_event.is_set():
+            raise RuntimeError("paper_decision_parallel_stage_cancelled")
+        pin_started = time.time()
+        pin_started_monotonic = time.monotonic()
+        lock_deadline = pin_started_monotonic + float(max_source_read_lock_sec)
+
+        def interrupt_expired_or_cancelled() -> int:
+            return 1 if cancel_event.is_set() or time.monotonic() >= lock_deadline else 0
+
+        connection.set_progress_handler(interrupt_expired_or_cancelled, 10000)
+        progress["stage"] = "pin_source_read_view"
+        connection.execute("BEGIN")
+        connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
+        pin_finished = time.time()
+        pin_report = {
+            "role": "paper_decision_events_parallel_stage",
+            "table": table,
+            "pinned_started_at": utc_iso(pin_started),
+            "pinned_finished_at": utc_iso(pin_finished),
+            "pinned_started_epoch": pin_started,
+            "pinned_started_monotonic": pin_started_monotonic,
+            "pinned_finished_epoch": pin_finished,
+            "pinned_midpoint_epoch": (pin_started + pin_finished) / 2,
+            "source_read_lock_limit_sec": float(max_source_read_lock_sec),
+            **source_page_report,
+        }
+        progress["stage"] = "parallel_pinned_barrier"
+        pinned_barrier.wait(timeout=30)
+        while not copy_start_event.wait(timeout=0.1):
+            if cancel_event.is_set():
+                raise RuntimeError("paper_decision_parallel_stage_cancelled")
+            if time.monotonic() >= lock_deadline:
+                raise RuntimeError(
+                    f"source_read_lock_budget_exceeded:paper:copy_table:{table}:"
+                    f"{float(max_source_read_lock_sec):.3f}s"
+                )
+        if cancel_event.is_set():
+            raise RuntimeError("paper_decision_parallel_stage_cancelled")
+        table_report, deferred_indexes = stage_single_source_table(
+            connection,
+            table,
+            rule,
+            review_lower_epoch=review_lower_epoch,
+            long_lower_epoch=long_lower_epoch,
+            upper_epoch=upper_epoch,
+            progress=progress,
+            lock_started_monotonic=pin_started_monotonic,
+            lock_limit_sec=max_source_read_lock_sec,
+        )
+        progress["stage"] = "release_parallel_source_read_view"
+        connection.commit()
+        read_view_released = time.time()
+        connection.set_progress_handler(None, 0)
+        connection.execute("DETACH DATABASE src")
+        connection.close()
+        connection = None
+        stage_size_bytes = int(destination.stat().st_size)
+        if stage_size_bytes <= 0 or stage_size_bytes > int(budget_bytes):
+            raise RuntimeError("paper_decision_parallel_stage_budget_exceeded")
+        quick_check = sqlite3.connect(destination)
+        try:
+            quick_check_rows = [
+                str(row[0]) for row in quick_check.execute("PRAGMA quick_check").fetchall()
+            ]
+        finally:
+            quick_check.close()
+        if quick_check_rows != ["ok"]:
+            raise RuntimeError("paper_decision_parallel_stage_quick_check_failed")
+        duration_sec = read_view_released - pin_started
+        return {
+            "schema_version": PAPER_DECISION_STAGE_SCHEMA_VERSION,
+            "accepted": True,
+            "table": table,
+            "stage_path": str(destination.resolve()),
+            "stage_size_bytes": stage_size_bytes,
+            "stage_budget_bytes": int(budget_bytes),
+            "stage_page_size": page_size,
+            "stage_budget_passed": stage_size_bytes <= int(budget_bytes),
+            "quick_check": quick_check_rows,
+            "table_report": table_report,
+            "deferred_indexes": deferred_indexes,
+            "pinned_read_view": pin_report,
+            "source_read_view_released_at": utc_iso(read_view_released),
+            "source_read_view_released_epoch": read_view_released,
+            "source_read_lock_duration_sec": round(duration_sec, 6),
+            "source_read_lock_limit_sec": float(max_source_read_lock_sec),
+            "source_read_lock_budget_passed": (
+                duration_sec <= float(max_source_read_lock_sec) + 1.0
+            ),
+            "source_open_mode": "read_only_attached_uri",
+            "source_mutated_by_snapshot_process": False,
+            "full_fidelity_row_copy": True,
+            "payload_semantics_preserved": True,
+        }
+    except threading.BrokenBarrierError as exc:
+        raise RuntimeError("paper_decision_parallel_stage_barrier_broken") from exc
+    except sqlite3.OperationalError as exc:
+        if (
+            "interrupted" in str(exc).lower()
+            and lock_deadline is not None
+            and time.monotonic() >= lock_deadline
+        ):
+            raise RuntimeError(
+                f"source_read_lock_budget_exceeded:paper:"
+                f"{progress.get('stage') or f'copy_table:{table}'}:"
+                f"{float(max_source_read_lock_sec):.3f}s"
+            ) from exc
+        if "interrupted" in str(exc).lower() and cancel_event.is_set():
+            raise RuntimeError("paper_decision_parallel_stage_cancelled") from exc
+        raise
+    finally:
+        if connection is not None:
+            connection.set_progress_handler(None, 0)
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            connection.close()
+
+
 def snapshot_all_concurrently(
     source_paths: dict[str, Path],
     partial_dir: Path,
@@ -1806,6 +2313,7 @@ def snapshot_all_concurrently(
     upper_epoch: float,
     database_budgets: dict[str, int],
     candidate_stage_budget_bytes: int,
+    paper_decision_stage_budget_bytes: int,
     busy_timeout_ms: int,
     max_source_read_lock_sec: float,
 ) -> dict[str, dict[str, Any]]:
@@ -1818,6 +2326,7 @@ def snapshot_all_concurrently(
 
     def worker(name: str) -> None:
         connection = None
+        paper_stage_runtime: dict[str, Any] | None = None
         progress = {"stage": "open_destination"}
         try:
             source = source_paths[name]
@@ -1857,8 +2366,62 @@ def snapshot_all_concurrently(
                 connection.execute(
                     f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.max_page_count={stage_max_pages}"
                 )
+                paper_decision_stage_path = partial_dir / ".paper-decision-events-stage.db"
+                stage_start_event = threading.Event()
+                stage_copy_start_event = threading.Event()
+                stage_cancel_event = threading.Event()
+                stage_pin_barrier = threading.Barrier(2)
+                stage_state: dict[str, Any] = {}
+
+                def paper_decision_stage_worker() -> None:
+                    try:
+                        stage_state["result"] = build_parallel_table_stage(
+                            source=source,
+                            destination=paper_decision_stage_path,
+                            table=PAPER_DECISION_STAGE_TABLE,
+                            rule=DATABASE_SPECS["paper"]["tables"][PAPER_DECISION_STAGE_TABLE],
+                            source_page_report=source_page_reports["paper"],
+                            review_lower_epoch=review_lower_epoch,
+                            long_lower_epoch=long_lower_epoch,
+                            upper_epoch=upper_epoch,
+                            budget_bytes=paper_decision_stage_budget_bytes,
+                            busy_timeout_ms=busy_timeout_ms,
+                            max_source_read_lock_sec=max_source_read_lock_sec,
+                            start_event=stage_start_event,
+                            pinned_barrier=stage_pin_barrier,
+                            copy_start_event=stage_copy_start_event,
+                            cancel_event=stage_cancel_event,
+                        )
+                    except Exception as stage_exc:
+                        stage_state["exception"] = stage_exc
+                        stage_state["error"] = {
+                            "error_code": snapshot_component_failure_code(stage_exc),
+                            "error_type": type(stage_exc).__name__,
+                            "stage": PAPER_DECISION_STAGE_TABLE,
+                        }
+                        try:
+                            stage_pin_barrier.abort()
+                        except threading.BrokenBarrierError:
+                            pass
+
+                stage_thread = threading.Thread(
+                    target=paper_decision_stage_worker,
+                    name="snapshot-paper-decision-stage",
+                )
+                paper_stage_runtime = {
+                    "thread": stage_thread,
+                    "state": stage_state,
+                    "path": paper_decision_stage_path,
+                    "start_event": stage_start_event,
+                    "copy_start_event": stage_copy_start_event,
+                    "cancel_event": stage_cancel_event,
+                    "pin_barrier": stage_pin_barrier,
+                }
+                stage_thread.start()
             progress["stage"] = "start_barrier"
             start_barrier.wait(timeout=30)
+            if paper_stage_runtime is not None:
+                paper_stage_runtime["start_event"].set()
             pin_started = time.time()
             pin_started_monotonic = time.monotonic()
             lock_deadline = pin_started_monotonic + float(max_source_read_lock_sec)
@@ -1872,6 +2435,7 @@ def snapshot_all_concurrently(
             connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
             pin_finished = time.time()
             pin_report = {
+                "role": f"{name}_main_selective_copy",
                 "pinned_started_at": utc_iso(pin_started),
                 "pinned_finished_at": utc_iso(pin_finished),
                 "pinned_started_epoch": pin_started,
@@ -1881,8 +2445,13 @@ def snapshot_all_concurrently(
                 "source_read_lock_limit_sec": float(max_source_read_lock_sec),
                 **source_page_reports[name],
             }
+            if paper_stage_runtime is not None:
+                progress["stage"] = "paper_parallel_pinned_barrier"
+                paper_stage_runtime["pin_barrier"].wait(timeout=30)
             progress["stage"] = "pinned_barrier"
             pinned_barrier.wait(timeout=30)
+            if paper_stage_runtime is not None:
+                paper_stage_runtime["copy_start_event"].set()
             report = snapshot_one(
                 source,
                 partial_dir / DATABASE_SPECS[name]["filename"],
@@ -1894,11 +2463,21 @@ def snapshot_all_concurrently(
                 upper_epoch=upper_epoch,
                 budget_bytes=database_budgets[name],
                 candidate_stage_path=candidate_stage_path,
+                paper_decision_stage_state=paper_stage_runtime,
                 progress=progress,
             )
             with result_lock:
                 reports[name] = report
         except Exception as exc:
+            if paper_stage_runtime is not None:
+                paper_stage_runtime["cancel_event"].set()
+                paper_stage_runtime["start_event"].set()
+                paper_stage_runtime["copy_start_event"].set()
+                try:
+                    paper_stage_runtime["pin_barrier"].abort()
+                except threading.BrokenBarrierError:
+                    pass
+                paper_stage_runtime["thread"].join(timeout=30)
             if connection is not None:
                 connection.set_progress_handler(None, 0)
             if (
@@ -1959,6 +2538,15 @@ def snapshot_all_concurrently(
                     "copy_timing": copy_timing,
                 }
         finally:
+            if paper_stage_runtime is not None and paper_stage_runtime["thread"].is_alive():
+                paper_stage_runtime["cancel_event"].set()
+                paper_stage_runtime["start_event"].set()
+                paper_stage_runtime["copy_start_event"].set()
+                try:
+                    paper_stage_runtime["pin_barrier"].abort()
+                except threading.BrokenBarrierError:
+                    pass
+                paper_stage_runtime["thread"].join(timeout=30)
             if connection is not None:
                 try:
                     connection.rollback()
@@ -2004,21 +2592,42 @@ def disk_preflight(
     usage = shutil.disk_usage(root)
     bounded_output = int(float(max_output_gib) * 1024**3)
     reserve = int(float(min_free_after_gib) * 1024**3)
-    stage_cap = max(0, int(usage.free) - bounded_output - reserve)
-    estimated_peak = bounded_output + stage_cap
+    total_stage_cap = max(0, int(usage.free) - bounded_output - reserve)
+    minimum_stage_total = (
+        MIN_CANDIDATE_STAGE_CAP_BYTES + MIN_PAPER_DECISION_STAGE_CAP_BYTES
+    )
+    if total_stage_cap >= minimum_stage_total:
+        residual_after_minimums = total_stage_cap - minimum_stage_total
+        candidate_extra = int(
+            residual_after_minimums * CANDIDATE_STAGE_RESIDUAL_SHARE
+        )
+        candidate_extra = (candidate_extra // 4096) * 4096
+        candidate_stage_cap = MIN_CANDIDATE_STAGE_CAP_BYTES + candidate_extra
+        paper_decision_stage_cap = total_stage_cap - candidate_stage_cap
+    else:
+        candidate_stage_cap = min(total_stage_cap, MIN_CANDIDATE_STAGE_CAP_BYTES)
+        paper_decision_stage_cap = max(0, total_stage_cap - candidate_stage_cap)
+    estimated_peak = bounded_output + candidate_stage_cap + paper_decision_stage_cap
     estimated_free_at_peak = int(usage.free) - estimated_peak
     accepted = bool(
         bounded_output > 0
-        and stage_cap >= MIN_CANDIDATE_STAGE_CAP_BYTES
+        and candidate_stage_cap >= MIN_CANDIDATE_STAGE_CAP_BYTES
+        and paper_decision_stage_cap >= MIN_PAPER_DECISION_STAGE_CAP_BYTES
+        and candidate_stage_cap + paper_decision_stage_cap == total_stage_cap
         and estimated_free_at_peak >= reserve
     )
     return {
         "free_bytes": int(usage.free),
         "selective_snapshot_output_cap_bytes": bounded_output,
         "temporary_full_backup_bytes": 0,
-        "temporary_candidate_stage_cap_bytes": stage_cap,
+        "temporary_stage_total_cap_bytes": total_stage_cap,
+        "temporary_candidate_stage_cap_bytes": candidate_stage_cap,
+        "temporary_paper_decision_stage_cap_bytes": paper_decision_stage_cap,
+        "candidate_stage_residual_share": CANDIDATE_STAGE_RESIDUAL_SHARE,
+        "paper_decision_stage_residual_share": PAPER_DECISION_STAGE_RESIDUAL_SHARE,
         "candidate_stage_budget_mode": CANDIDATE_STAGE_BUDGET_MODE,
         "candidate_stage_minimum_cap_bytes": MIN_CANDIDATE_STAGE_CAP_BYTES,
+        "paper_decision_stage_minimum_cap_bytes": MIN_PAPER_DECISION_STAGE_CAP_BYTES,
         "estimated_peak_working_bytes": estimated_peak,
         "required_reserve_bytes": reserve,
         "estimated_free_after_bytes": int(usage.free) - bounded_output,
@@ -2243,7 +2852,12 @@ def build_snapshot_bundle(
             min_free_after_gib,
             max_output_gib,
         )
-        stage_budget_bytes = int(preflight["temporary_candidate_stage_cap_bytes"])
+        candidate_stage_budget_bytes = int(
+            preflight["temporary_candidate_stage_cap_bytes"]
+        )
+        paper_decision_stage_budget_bytes = int(
+            preflight["temporary_paper_decision_stage_cap_bytes"]
+        )
         if not preflight["accepted"]:
             raise RuntimeError(f"insufficient disk for evaluator snapshot: {preflight}")
         budget_plan = database_output_budget_plan(max_output_gib, source_page_reports)
@@ -2256,13 +2870,22 @@ def build_snapshot_bundle(
             long_lower_epoch=long_lower_epoch,
             upper_epoch=selection_upper_epoch,
             database_budgets=output_budgets,
-            candidate_stage_budget_bytes=stage_budget_bytes,
+            candidate_stage_budget_bytes=candidate_stage_budget_bytes,
+            paper_decision_stage_budget_bytes=paper_decision_stage_budget_bytes,
             busy_timeout_ms=int(source_busy_timeout_ms),
             max_source_read_lock_sec=float(max_source_read_lock_sec),
         )
-        pin_midpoints = [
-            float(report["pinned_read_view"]["pinned_midpoint_epoch"])
+        pinned_read_views = [
+            view
             for report in database_reports.values()
+            for view in (
+                report.get("pinned_read_views")
+                or [report["pinned_read_view"]]
+            )
+        ]
+        pin_midpoints = [
+            float(view["pinned_midpoint_epoch"])
+            for view in pinned_read_views
         ]
         skew = max(pin_midpoints) - min(pin_midpoints)
         source_mutation_free = all(
@@ -2298,6 +2921,20 @@ def build_snapshot_bundle(
             report.get("temporary_candidate_stage_removed_before_publish") is True
             for report in database_reports.values()
         )
+        paper_report = database_reports.get("paper") or {}
+        paper_decision_parallel_read_view_pinned = (
+            paper_report.get("paper_decision_parallel_read_view_pinned") is True
+        )
+        paper_decision_parallel_stage_merged_after_source_read_lock_release = (
+            paper_report.get(
+                "paper_decision_parallel_stage_merged_after_source_read_lock_release"
+            )
+            is True
+        )
+        paper_decision_parallel_stage_removed_before_publish = (
+            paper_report.get("paper_decision_parallel_stage_removed_before_publish")
+            is True
+        )
         database_payload_size_bytes = sum(
             int(report["snapshot_size_bytes"]) for report in database_reports.values()
         )
@@ -2323,6 +2960,9 @@ def build_snapshot_bundle(
             and indexes_built_after_source_read_lock_release
             and candidate_projection_after_source_read_lock_release
             and candidate_stage_removed_before_publish
+            and paper_decision_parallel_read_view_pinned
+            and paper_decision_parallel_stage_merged_after_source_read_lock_release
+            and paper_decision_parallel_stage_removed_before_publish
             and output_cap_passed
             and git_commit
         )
@@ -2350,8 +2990,18 @@ def build_snapshot_bundle(
                 candidate_projection_after_source_read_lock_release
             ),
             "candidate_stage_removed_before_publish": candidate_stage_removed_before_publish,
+            "paper_decision_parallel_read_view_pinned": (
+                paper_decision_parallel_read_view_pinned
+            ),
+            "paper_decision_parallel_stage_merged_after_source_read_lock_release": (
+                paper_decision_parallel_stage_merged_after_source_read_lock_release
+            ),
+            "paper_decision_parallel_stage_removed_before_publish": (
+                paper_decision_parallel_stage_removed_before_publish
+            ),
             "source_mutation_free": source_mutation_free,
-            "copy_mode": "parallel_direct_extract_no_full_database_intermediate",
+            "copy_mode": "parallel_pinned_paper_decision_stage_plus_bounded_selective_extract",
+            "pinned_read_view_count": len(pinned_read_views),
             "cross_database_time_skew_sec": round(skew, 6),
             "max_allowed_cross_database_time_skew_sec": float(max_skew_sec),
             "cross_database_time_skew_passed": skew <= max_skew_sec,

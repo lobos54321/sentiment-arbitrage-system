@@ -546,6 +546,75 @@ def test_candidate_projection_lock_order_or_stage_cleanup_tampering_is_rejected(
     assert "evaluator_snapshot_candidate_stage_projection_contract_invalid" in status["blockers"]
 
 
+def test_parallel_paper_decision_stage_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["paper_decision_parallel_read_view_pinned"] = False
+    manifest[
+        "paper_decision_parallel_stage_merged_after_source_read_lock_release"
+    ] = False
+    manifest["paper_decision_parallel_stage_removed_before_publish"] = False
+    paper_report = manifest["databases"]["paper"]
+    paper_report["paper_decision_parallel_read_view_pinned"] = False
+    paper_report[
+        "paper_decision_parallel_stage_merged_after_source_read_lock_release"
+    ] = False
+    paper_report["paper_decision_parallel_stage_removed_before_publish"] = False
+    paper_report["paper_decision_parallel_stage_rows_merged"] += 1
+    paper_report["pinned_read_views"] = paper_report["pinned_read_views"][:1]
+    parallel_stage = paper_report["selected_tables"]["paper_decision_events"][
+        "parallel_stage"
+    ]
+    parallel_stage["full_fidelity_row_copy"] = False
+    parallel_stage["row_count_matched"] = False
+    parallel_stage["merge_started_after_source_read_view_release"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_paper_decision_parallel_pin_invalid" in status["blockers"]
+    assert "evaluator_snapshot_paper_decision_merge_lock_order_invalid" in status["blockers"]
+    assert "evaluator_snapshot_paper_decision_stage_cleanup_invalid" in status["blockers"]
+    assert (
+        "evaluator_snapshot_paper_decision_parallel_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+def test_pinned_read_view_lineage_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pinned_read_view_count"] = 4
+    paper_views = manifest["databases"]["paper"]["pinned_read_views"]
+    paper_views[1]["role"] = "paper_main_selective_copy"
+    paper_views[1]["pinned_midpoint_epoch"] = (
+        float(manifest["snapshot_ts"]) + 60.0
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_pinned_read_view_lineage_invalid" in status["blockers"]
+
+
 def test_candidate_stage_budget_formula_tampering_is_rejected(tmp_path, monkeypatch):
     live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
     manifest_path = (out / "current" / "manifest.json").resolve()
@@ -553,6 +622,33 @@ def test_candidate_stage_budget_formula_tampering_is_rejected(tmp_path, monkeypa
     disk = manifest["disk_preflight"]
     disk["candidate_stage_budget_mode"] = "fixed_output_fraction"
     disk["temporary_candidate_stage_cap_bytes"] -= 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
+
+
+def test_paper_decision_stage_budget_formula_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    disk = manifest["disk_preflight"]
+    disk["temporary_paper_decision_stage_cap_bytes"] -= 4096
+    manifest["databases"]["paper"][
+        "paper_decision_parallel_stage_budget_bytes"
+    ] -= 4096
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     status = evaluator_snapshot_bundle_status(

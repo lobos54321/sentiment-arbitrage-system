@@ -374,6 +374,20 @@ Accepted snapshot → AutoLoop 血缘：
 - 生产本轮仍在 300 秒 ceiling fail-closed，没有 current/partial publication，paper DB integrity 保持 `ok`，P0-D 继续锁定；
 - bounded-source-metadata 独立 verifier 给出 `APPROVE`：确认 active-source 无锚表只 deferred，5 张 paper 表使用真实 leading indexes，冻结库完整 watermarks/SHA/quick-check 仍为 acceptance 必需条件。
 
+### 2026-08-09｜生产第三轮收敛：table timing、candidate off-lock 与 parallel paper-decision stage
+
+- table-timing SHA `9a87359853b5d4efd353069f205f7fba2953e8ce` 在生产测得：candidate observations 286,272 行约 147.4 秒，virtual trades 123,256 行约 12.4 秒，`paper_decision_events` 在剩余约 140 秒内仍无法完成；
+- candidate off-lock SHA `b503725486700036f055dbd8d69cc77013bdf7c1` 已部署，将 candidate observations 的 active-source 阶段缩短到约 74.5 秒；生产新断点明确为 `paper_decision_events` 约 213.9 秒，累计仍触及 300 秒；
+- 当前受控实现将 `paper_decision_events` 作为完整行、完整 `payload_json` 的独立 staging copy，与 main paper selective copy 并行；两条 source read view 各自保留 300 秒 deadline；
+- 两条 paper views 与 signal/raw/kline 共 5 个 pinned view 全部纳入 cross-DB skew；authoritative consumer 与 public health 都会重算角色、数量、中点和 skew，不能只信 manifest 自报；
+- main paper 与 parallel decision view 都释放后，才执行 stage merge、candidate JSON projection、index build、full watermarks、quick-check 与 SHA；
+- candidate stage 和 paper-decision stage 使用独立硬容量上限，disk preflight 计入 output cap + 两个 stage cap + reserve；paper-decision stage 固定使用 4096-byte pages，避免大源页尺寸造成预检与实际容量不一致；
+- stage copy 保留 source schema、所有列和 payload；row count、quick-check、stage page size、source-lock duration、merge order 与 cleanup 都成为 producer、consumer 和 Dashboard 的强制契约；
+- 所有 synchronization、timeout、budget、quick-check、row mismatch 与 cleanup failure 都保留稳定 public-safe error code；
+- 第一轮独立 review 发现大页尺寸与错误分类缺口并给出 `REJECT`；修复后第二轮 review 未发现可执行 correctness regression；
+- 最终本地门禁：Python `343 passed`、Node 20 `71 passed`、Basic Readiness 无 blocker、`normal_tiny_ready=false`，尚未部署本轮 parallel stage；
+- P0-D 仍锁定，promotion、strategy change、automatic runtime change 与 paper enablement 均保持 false。
+
 尚未声称完成的生产证据：
 
 - 尚未生成新的 production accepted snapshot；

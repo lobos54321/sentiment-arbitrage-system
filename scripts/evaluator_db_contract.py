@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -17,8 +18,13 @@ from urllib.parse import quote
 
 from cross_db_evaluator_snapshot import (
     CANDIDATE_STAGE_BUDGET_MODE,
+    CANDIDATE_STAGE_RESIDUAL_SHARE,
     DATABASE_SPECS,
     MIN_CANDIDATE_STAGE_CAP_BYTES,
+    MIN_PAPER_DECISION_STAGE_CAP_BYTES,
+    PAPER_DECISION_STAGE_RESIDUAL_SHARE,
+    PAPER_DECISION_STAGE_SCHEMA_VERSION,
+    PAPER_DECISION_STAGE_TABLE,
     normalized_timestamp_sql,
     quote_identifier,
 )
@@ -364,6 +370,20 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_candidate_projection_lock_order_invalid")
         if manifest.get("candidate_stage_removed_before_publish") is not True:
             blockers.append("evaluator_snapshot_candidate_stage_cleanup_invalid")
+        if manifest.get("paper_decision_parallel_read_view_pinned") is not True:
+            blockers.append("evaluator_snapshot_paper_decision_parallel_pin_invalid")
+        if (
+            manifest.get(
+                "paper_decision_parallel_stage_merged_after_source_read_lock_release"
+            )
+            is not True
+        ):
+            blockers.append("evaluator_snapshot_paper_decision_merge_lock_order_invalid")
+        if (
+            manifest.get("paper_decision_parallel_stage_removed_before_publish")
+            is not True
+        ):
+            blockers.append("evaluator_snapshot_paper_decision_stage_cleanup_invalid")
         try:
             manifest_read_lock_limit = float(manifest.get("max_source_read_lock_sec"))
             if manifest_read_lock_limit <= 0:
@@ -388,11 +408,20 @@ def evaluator_snapshot_bundle_status(
                 disk_reserve_bytes = int(disk_preflight.get("required_reserve_bytes"))
                 disk_free_after_bytes = int(disk_preflight.get("estimated_free_after_bytes"))
                 disk_cap_bytes = int(disk_preflight.get("selective_snapshot_output_cap_bytes"))
+                total_stage_cap_bytes = int(
+                    disk_preflight.get("temporary_stage_total_cap_bytes")
+                )
                 candidate_stage_cap_bytes = int(
                     disk_preflight.get("temporary_candidate_stage_cap_bytes")
                 )
+                paper_decision_stage_cap_bytes = int(
+                    disk_preflight.get("temporary_paper_decision_stage_cap_bytes")
+                )
                 candidate_stage_minimum_cap_bytes = int(
                     disk_preflight.get("candidate_stage_minimum_cap_bytes")
+                )
+                paper_decision_stage_minimum_cap_bytes = int(
+                    disk_preflight.get("paper_decision_stage_minimum_cap_bytes")
                 )
                 estimated_peak_working_bytes = int(
                     disk_preflight.get("estimated_peak_working_bytes")
@@ -400,22 +429,79 @@ def evaluator_snapshot_bundle_status(
                 estimated_free_at_peak_bytes = int(
                     disk_preflight.get("estimated_free_at_peak_bytes")
                 )
-                expected_stage_cap_bytes = max(
+                expected_total_stage_cap_bytes = max(
                     0,
                     disk_free_bytes - disk_cap_bytes - disk_reserve_bytes,
                 )
+                minimum_stage_total = (
+                    MIN_CANDIDATE_STAGE_CAP_BYTES
+                    + MIN_PAPER_DECISION_STAGE_CAP_BYTES
+                )
+                if expected_total_stage_cap_bytes >= minimum_stage_total:
+                    residual_after_minimums = (
+                        expected_total_stage_cap_bytes - minimum_stage_total
+                    )
+                    expected_candidate_stage_cap_bytes = (
+                        MIN_CANDIDATE_STAGE_CAP_BYTES
+                        + (
+                            int(
+                                residual_after_minimums
+                                * CANDIDATE_STAGE_RESIDUAL_SHARE
+                            )
+                            // 4096
+                            * 4096
+                        )
+                    )
+                    expected_paper_decision_stage_cap_bytes = (
+                        expected_total_stage_cap_bytes
+                        - expected_candidate_stage_cap_bytes
+                    )
+                else:
+                    expected_candidate_stage_cap_bytes = min(
+                        expected_total_stage_cap_bytes,
+                        MIN_CANDIDATE_STAGE_CAP_BYTES,
+                    )
+                    expected_paper_decision_stage_cap_bytes = max(
+                        0,
+                        expected_total_stage_cap_bytes
+                        - expected_candidate_stage_cap_bytes,
+                    )
                 if (
                     disk_free_bytes <= 0
                     or disk_reserve_bytes < 0
                     or disk_free_after_bytes < disk_reserve_bytes
                     or disk_cap_bytes <= 0
-                    or candidate_stage_cap_bytes != expected_stage_cap_bytes
+                    or total_stage_cap_bytes != expected_total_stage_cap_bytes
+                    or candidate_stage_cap_bytes
+                    != expected_candidate_stage_cap_bytes
+                    or paper_decision_stage_cap_bytes
+                    != expected_paper_decision_stage_cap_bytes
+                    or candidate_stage_cap_bytes + paper_decision_stage_cap_bytes
+                    != total_stage_cap_bytes
                     or candidate_stage_cap_bytes < MIN_CANDIDATE_STAGE_CAP_BYTES
+                    or paper_decision_stage_cap_bytes
+                    < MIN_PAPER_DECISION_STAGE_CAP_BYTES
                     or candidate_stage_minimum_cap_bytes != MIN_CANDIDATE_STAGE_CAP_BYTES
+                    or paper_decision_stage_minimum_cap_bytes
+                    != MIN_PAPER_DECISION_STAGE_CAP_BYTES
+                    or abs(
+                        float(disk_preflight.get("candidate_stage_residual_share"))
+                        - CANDIDATE_STAGE_RESIDUAL_SHARE
+                    )
+                    > 1e-9
+                    or abs(
+                        float(disk_preflight.get("paper_decision_stage_residual_share"))
+                        - PAPER_DECISION_STAGE_RESIDUAL_SHARE
+                    )
+                    > 1e-9
                     or disk_preflight.get("candidate_stage_budget_mode")
                     != CANDIDATE_STAGE_BUDGET_MODE
                     or estimated_peak_working_bytes
-                    != disk_cap_bytes + candidate_stage_cap_bytes
+                    != (
+                        disk_cap_bytes
+                        + candidate_stage_cap_bytes
+                        + paper_decision_stage_cap_bytes
+                    )
                     or estimated_free_at_peak_bytes
                     != disk_free_bytes - estimated_peak_working_bytes
                     or estimated_free_at_peak_bytes < disk_reserve_bytes
@@ -477,6 +563,7 @@ def evaluator_snapshot_bundle_status(
             except (TypeError, ValueError):
                 blockers.append("evaluator_snapshot_timestamp_invalid")
         reports = manifest.get("databases") or {}
+        all_pinned_read_views: list[dict] = []
         for name, candidate in candidates.items():
             report = reports.get(name) or {}
             expected_path = report.get("snapshot_path")
@@ -531,6 +618,17 @@ def evaluator_snapshot_bundle_status(
                     blockers.append(f"evaluator_snapshot_{name}_selection_upper_mismatch")
             except (TypeError, ValueError):
                 blockers.append(f"evaluator_snapshot_{name}_selection_upper_invalid")
+            report_pinned_read_views = report.get("pinned_read_views")
+            if (
+                not isinstance(report_pinned_read_views, list)
+                or not report_pinned_read_views
+                or not all(isinstance(view, dict) for view in report_pinned_read_views)
+            ):
+                blockers.append(
+                    f"evaluator_snapshot_{name}_pinned_read_views_invalid"
+                )
+            else:
+                all_pinned_read_views.extend(report_pinned_read_views)
             selected_tables = report.get("selected_tables") or {}
             source_watermark_evidence = report.get("source_watermark_query_evidence") or {}
             for watermark_table in (DATABASE_SPECS[name].get("watermarks") or {}):
@@ -551,6 +649,117 @@ def evaluator_snapshot_bundle_status(
                         f"{watermark_table}"
                     )
             if name == "paper":
+                paper_decision_selection = (
+                    selected_tables.get(PAPER_DECISION_STAGE_TABLE) or {}
+                )
+                paper_decision_parallel_stage = (
+                    paper_decision_selection.get("parallel_stage") or {}
+                )
+                pinned_read_views = report.get("pinned_read_views") or []
+                try:
+                    paper_decision_stage_size_bytes = int(
+                        report.get("paper_decision_parallel_stage_size_bytes")
+                    )
+                    paper_decision_stage_budget_bytes = int(
+                        report.get("paper_decision_parallel_stage_budget_bytes")
+                    )
+                    paper_decision_stage_page_size = int(
+                        report.get("paper_decision_parallel_stage_page_size")
+                    )
+                    paper_decision_stage_rows_merged = int(
+                        report.get("paper_decision_parallel_stage_rows_merged")
+                    )
+                    paper_decision_stage_merge_duration_sec = float(
+                        report.get("paper_decision_parallel_stage_merge_duration_sec")
+                    )
+                    main_lock_duration_sec = float(
+                        report.get("main_source_read_lock_duration_sec")
+                    )
+                    parallel_lock_duration_sec = float(
+                        report.get("paper_decision_source_read_lock_duration_sec")
+                    )
+                    reported_max_lock_duration_sec = float(
+                        report.get("source_read_lock_duration_sec")
+                    )
+                    roles = {
+                        str(view.get("role"))
+                        for view in pinned_read_views
+                        if isinstance(view, dict)
+                    }
+                    if (
+                        report.get("paper_decision_parallel_stage_used") is not True
+                        or report.get("paper_decision_parallel_stage_schema_version")
+                        != PAPER_DECISION_STAGE_SCHEMA_VERSION
+                        or report.get("paper_decision_parallel_read_view_pinned") is not True
+                        or report.get(
+                            "paper_decision_parallel_stage_merged_after_source_read_lock_release"
+                        )
+                        is not True
+                        or report.get(
+                            "paper_decision_parallel_stage_removed_before_publish"
+                        )
+                        is not True
+                        or paper_decision_stage_size_bytes <= 0
+                        or paper_decision_stage_budget_bytes
+                        != int(
+                            disk_preflight.get(
+                                "temporary_paper_decision_stage_cap_bytes"
+                            )
+                        )
+                        or paper_decision_stage_size_bytes
+                        > paper_decision_stage_budget_bytes
+                        or paper_decision_stage_page_size != 4096
+                        or paper_decision_stage_rows_merged
+                        != int(paper_decision_selection.get("rows_copied"))
+                        or paper_decision_stage_merge_duration_sec < 0
+                        or not isinstance(pinned_read_views, list)
+                        or len(pinned_read_views) != 2
+                        or "paper_main_selective_copy" not in roles
+                        or "paper_decision_events_parallel_stage" not in roles
+                        or main_lock_duration_sec < 0
+                        or parallel_lock_duration_sec < 0
+                        or abs(
+                            reported_max_lock_duration_sec
+                            - max(main_lock_duration_sec, parallel_lock_duration_sec)
+                        )
+                        > 0.001
+                        or paper_decision_parallel_stage.get("schema_version")
+                        != PAPER_DECISION_STAGE_SCHEMA_VERSION
+                        or paper_decision_parallel_stage.get("full_fidelity_row_copy")
+                        is not True
+                        or paper_decision_parallel_stage.get(
+                            "payload_semantics_preserved"
+                        )
+                        is not True
+                        or paper_decision_parallel_stage.get("row_count_matched")
+                        is not True
+                        or int(
+                            paper_decision_parallel_stage.get("stage_rows_copied")
+                        )
+                        != paper_decision_stage_rows_merged
+                        or int(
+                            paper_decision_parallel_stage.get("rows_merged")
+                        )
+                        != paper_decision_stage_rows_merged
+                        or paper_decision_parallel_stage.get("quick_check") != ["ok"]
+                        or int(
+                            paper_decision_parallel_stage.get("stage_page_size")
+                        )
+                        != 4096
+                        or paper_decision_parallel_stage.get(
+                            "source_read_lock_budget_passed"
+                        )
+                        is not True
+                        or paper_decision_parallel_stage.get(
+                            "merge_started_after_source_read_view_release"
+                        )
+                        is not True
+                    ):
+                        raise ValueError("invalid parallel paper decision stage evidence")
+                except (TypeError, ValueError):
+                    blockers.append(
+                        "evaluator_snapshot_paper_decision_parallel_stage_contract_invalid"
+                    )
                 if report.get("candidate_projection_after_source_read_lock_release") is not True:
                     blockers.append(
                         "evaluator_snapshot_paper_candidate_projection_lock_order_invalid"
@@ -759,6 +968,62 @@ def evaluator_snapshot_bundle_status(
                         "error": f"{type(exc).__name__}:{exc}",
                     }
                     blockers.append(f"evaluator_snapshot_{name}_integrity_revalidation_failed")
+        expected_pinned_roles = {
+            "signal_main_selective_copy",
+            "paper_main_selective_copy",
+            "paper_decision_events_parallel_stage",
+            "raw_main_selective_copy",
+            "kline_main_selective_copy",
+        }
+        try:
+            pinned_roles = {
+                str(view.get("role")) for view in all_pinned_read_views
+            }
+            pinned_midpoints = [
+                float(view.get("pinned_midpoint_epoch"))
+                for view in all_pinned_read_views
+            ]
+            pinned_limits = [
+                float(view.get("source_read_lock_limit_sec"))
+                for view in all_pinned_read_views
+            ]
+            recomputed_skew = max(pinned_midpoints) - min(pinned_midpoints)
+            manifest_skew = float(manifest.get("cross_database_time_skew_sec"))
+            manifest_max_skew = float(
+                manifest.get("max_allowed_cross_database_time_skew_sec")
+            )
+            if (
+                len(all_pinned_read_views) != 5
+                or int(manifest.get("pinned_read_view_count")) != 5
+                or pinned_roles != expected_pinned_roles
+                or len(pinned_roles) != len(all_pinned_read_views)
+                or any(
+                    not math.isfinite(value)
+                    for value in [
+                        *pinned_midpoints,
+                        *pinned_limits,
+                        recomputed_skew,
+                        manifest_skew,
+                        manifest_max_skew,
+                    ]
+                )
+                or any(limit <= 0 for limit in pinned_limits)
+                or (
+                    manifest_read_lock_limit is not None
+                    and any(
+                        abs(limit - manifest_read_lock_limit) > 0.001
+                        for limit in pinned_limits
+                    )
+                )
+                or recomputed_skew < 0
+                or abs(recomputed_skew - manifest_skew) > 0.001
+                or manifest_max_skew < 0
+                or recomputed_skew > manifest_max_skew
+                or manifest.get("cross_database_time_skew_passed") is not True
+            ):
+                raise ValueError("pinned read view lineage mismatch")
+        except (TypeError, ValueError):
+            blockers.append("evaluator_snapshot_pinned_read_view_lineage_invalid")
         if manifest_file.parent.is_dir():
             expected_names = {"manifest.json", *SNAPSHOT_FILES.values()}
             entries = list(manifest_file.parent.iterdir())

@@ -1651,6 +1651,12 @@ test('v27 read-model worker health distinguishes stopped and stale workers', () 
 function evaluatorSnapshotHealthFixture(nowMs) {
   const snapshotId = '20260808T035900Z-1234abcd';
   const snapshotTs = Math.floor(nowMs / 1000) - 60;
+  const pinnedOffsets = {
+    signal: -0.30,
+    paper: -0.10,
+    raw: -0.20,
+    kline: -0.15,
+  };
   const databaseReport = (name) => ({
     snapshot_path: `/snapshot/${name}.db`,
     snapshot_size_bytes: 100,
@@ -1660,6 +1666,13 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     missing_required_watermarks: [],
     source_read_lock_budget_passed: true,
     database_budget_passed: true,
+    pinned_read_views: [
+      {
+        role: `${name}_main_selective_copy`,
+        pinned_midpoint_epoch: snapshotTs + pinnedOffsets[name],
+        source_read_lock_limit_sec: 300,
+      },
+    ],
   });
   return {
     statusPayload: {
@@ -1697,6 +1710,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       required_tables_present: true,
       required_watermarks_present: true,
       cross_database_time_skew_passed: true,
+      pinned_read_view_count: 5,
       cross_database_time_skew_sec: 0.25,
       max_allowed_cross_database_time_skew_sec: 30,
       source_read_lock_budget_passed: true,
@@ -1704,6 +1718,9 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       indexes_built_after_source_read_lock_release: true,
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
+      paper_decision_parallel_read_view_pinned: true,
+      paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
+      paper_decision_parallel_stage_removed_before_publish: true,
       source_mutation_free: true,
       bounded_selective_snapshot: true,
       selection_upper_bounds_consistent: true,
@@ -1717,9 +1734,14 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         free_bytes: 120000,
         selective_snapshot_output_cap_bytes: 10000,
         temporary_full_backup_bytes: 0,
-        temporary_candidate_stage_cap_bytes: 100000,
-        candidate_stage_budget_mode: 'residual_disk_after_output_and_reserve',
+        temporary_stage_total_cap_bytes: 100000,
+        temporary_candidate_stage_cap_bytes: 40960,
+        temporary_paper_decision_stage_cap_bytes: 59040,
+        candidate_stage_residual_share: 0.4,
+        paper_decision_stage_residual_share: 0.6,
+        candidate_stage_budget_mode: 'shared_residual_disk_after_output_and_reserve',
         candidate_stage_minimum_cap_bytes: 12288,
+        paper_decision_stage_minimum_cap_bytes: 12288,
         estimated_peak_working_bytes: 110000,
         estimated_free_after_bytes: 110000,
         estimated_free_at_peak_bytes: 10000,
@@ -1730,6 +1752,31 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         signal: databaseReport('signal'),
         paper: {
           ...databaseReport('paper'),
+          source_read_lock_duration_sec: 3.33,
+          main_source_read_lock_duration_sec: 3.33,
+          paper_decision_source_read_lock_duration_sec: 2.5,
+          paper_decision_parallel_stage_used: true,
+          paper_decision_parallel_stage_schema_version: 'paper_decision_events_parallel_stage.v1',
+          paper_decision_parallel_read_view_pinned: true,
+          paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
+          paper_decision_parallel_stage_removed_before_publish: true,
+          paper_decision_parallel_stage_size_bytes: 20000,
+          paper_decision_parallel_stage_budget_bytes: 59040,
+          paper_decision_parallel_stage_page_size: 4096,
+          paper_decision_parallel_stage_rows_merged: 4100,
+          paper_decision_parallel_stage_merge_duration_sec: 0.25,
+          pinned_read_views: [
+            {
+              role: 'paper_main_selective_copy',
+              pinned_midpoint_epoch: snapshotTs - 0.10,
+              source_read_lock_limit_sec: 300,
+            },
+            {
+              role: 'paper_decision_events_parallel_stage',
+              pinned_midpoint_epoch: snapshotTs - 0.05,
+              source_read_lock_limit_sec: 300,
+            },
+          ],
           source_watermark_query_evidence: {
             candidate_shadow_observations: {
               strategy: 'indexed_anchor_max',
@@ -1827,6 +1874,18 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 4100,
+              parallel_stage: {
+                schema_version: 'paper_decision_events_parallel_stage.v1',
+                full_fidelity_row_copy: true,
+                payload_semantics_preserved: true,
+                stage_rows_copied: 4100,
+                rows_merged: 4100,
+                row_count_matched: true,
+                quick_check: ['ok'],
+                stage_page_size: 4096,
+                source_read_lock_budget_passed: true,
+                merge_started_after_source_read_view_release: true,
+              },
             },
             a_class_decision_events: {
               included: true,
@@ -1913,6 +1972,10 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.snapshot_fresh, true);
   assert.equal(health.manifest_contract.indexed_selection_passed, true);
   assert.equal(health.manifest_contract.indexed_watermarks_passed, true);
+  assert.equal(health.manifest_contract.pinned_read_view_lineage_passed, true);
+  assert.equal(health.pinned_read_view_lineage.passed, true);
+  assert.equal(health.pinned_read_view_lineage.actual_count, 5);
+  assert.equal(health.pinned_read_view_lineage.recomputed_skew_sec, 0.25);
   assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 36120);
   assert.equal(health.indexed_watermarks.candidate_shadow_observations.passed, true);
   assert.equal(
@@ -1923,6 +1986,13 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.consecutive_failure_count, 0);
   assert.equal(health.next_attempt_delay_sec, 21600);
   assert.equal(health.snapshot_files.paper.size_matches_manifest, true);
+  assert.equal(health.manifest_contract.paper_decision_parallel_stage_passed, true);
+  assert.equal(health.parallel_paper_decision_stage.passed, true);
+  assert.equal(health.parallel_paper_decision_stage.rows_copied, 4100);
+  assert.equal(health.parallel_paper_decision_stage.rows_merged, 4100);
+  assert.equal(health.parallel_paper_decision_stage.stage_page_size, 4096);
+  assert.equal(health.parallel_paper_decision_stage.pinned_read_view_count, 2);
+  assert.equal(health.parallel_paper_decision_stage.stage_removed_before_publish, true);
   assert.equal(health.authoritative_consumer_preflight.matched_current_bundle, true);
   assert.equal(health.promotion_allowed, false);
 
@@ -2120,6 +2190,32 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
     'source_metadata:candidate_shadow_observations',
   );
 
+  const parallelStageFailure = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    statusPayload: {
+      ...fixture.statusPayload,
+      status: 'failed',
+      accepted: false,
+      last_failure_code: 'paper_decision_parallel_stage_start_timeout',
+      last_failure_details: {
+        paper: {
+          error_code: 'paper_decision_parallel_stage_start_timeout',
+          error_type: 'RuntimeError',
+          stage: 'paper_parallel_pinned_barrier',
+        },
+      },
+    },
+  });
+  assert.equal(
+    parallelStageFailure.last_failure_code,
+    'paper_decision_parallel_stage_start_timeout',
+  );
+  assert.deepEqual(parallelStageFailure.last_failure_details.paper, {
+    error_code: 'paper_decision_parallel_stage_start_timeout',
+    error_type: 'RuntimeError',
+    stage: 'paper_parallel_pinned_barrier',
+  });
+
   const stale = readEvaluatorSnapshotWorkerHealth({
     ...base,
     nowMs: nowMs + 9 * 3600 * 1000,
@@ -2138,6 +2234,43 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.equal(contractBlocked.status, 'contract_blocked');
   assert.equal(contractBlocked.consumer_ready, false);
   assert.ok(contractBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'));
+
+  const pinnedLineageManifest = structuredClone(fixture.manifestPayload);
+  pinnedLineageManifest.pinned_read_view_count = 4;
+  pinnedLineageManifest.databases.paper.pinned_read_views[1].role = 'paper_main_selective_copy';
+  pinnedLineageManifest.databases.paper.pinned_read_views[1].pinned_midpoint_epoch += 120;
+  const pinnedLineageBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: pinnedLineageManifest,
+  });
+  assert.equal(pinnedLineageBlocked.status, 'contract_blocked');
+  assert.equal(pinnedLineageBlocked.consumer_ready, false);
+  assert.equal(
+    pinnedLineageBlocked.manifest_contract.pinned_read_view_lineage_passed,
+    false,
+  );
+  assert.equal(pinnedLineageBlocked.pinned_read_view_lineage.passed, false);
+  assert.ok(
+    pinnedLineageBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+  );
+
+  const paperDecisionManifest = structuredClone(fixture.manifestPayload);
+  paperDecisionManifest.databases.paper.selected_tables.paper_decision_events.parallel_stage.row_count_matched = false;
+  paperDecisionManifest.databases.paper.paper_decision_parallel_stage_removed_before_publish = false;
+  const paperDecisionBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: paperDecisionManifest,
+  });
+  assert.equal(paperDecisionBlocked.status, 'contract_blocked');
+  assert.equal(paperDecisionBlocked.consumer_ready, false);
+  assert.equal(
+    paperDecisionBlocked.manifest_contract.paper_decision_parallel_stage_passed,
+    false,
+  );
+  assert.equal(paperDecisionBlocked.parallel_paper_decision_stage.passed, false);
+  assert.ok(
+    paperDecisionBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+  );
 
   const shaBlocked = readEvaluatorSnapshotWorkerHealth({
     ...base,
