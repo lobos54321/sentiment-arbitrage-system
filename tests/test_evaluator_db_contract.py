@@ -585,7 +585,48 @@ def test_parallel_paper_decision_stage_tampering_is_rejected(tmp_path, monkeypat
     assert "evaluator_snapshot_paper_decision_merge_lock_order_invalid" in status["blockers"]
     assert "evaluator_snapshot_paper_decision_stage_cleanup_invalid" in status["blockers"]
     assert (
-        "evaluator_snapshot_paper_decision_parallel_stage_contract_invalid"
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    "stage_table",
+    (
+        "paper_decision_events",
+        "a_class_decision_events",
+        "opportunity_events",
+    ),
+)
+def test_each_parallel_paper_stage_nested_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+    stage_table,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    stage_report = paper_report["parallel_paper_stages"][stage_table]
+    nested = paper_report["selected_tables"][stage_table]["parallel_stage"]
+    stage_report["rows_merged"] = int(stage_report["rows_merged"]) + 1
+    stage_report["removed_before_publish"] = False
+    nested["row_count_matched"] = False
+    nested["payload_semantics_preserved"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
         in status["blockers"]
     )
 
@@ -648,6 +689,42 @@ def test_paper_decision_stage_budget_formula_tampering_is_rejected(
     disk["temporary_paper_decision_stage_cap_bytes"] -= 4096
     manifest["databases"]["paper"][
         "paper_decision_parallel_stage_budget_bytes"
+    ] -= 4096
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
+
+
+@pytest.mark.parametrize(
+    "stage_table",
+    (
+        "paper_decision_events",
+        "a_class_decision_events",
+        "opportunity_events",
+    ),
+)
+def test_each_parallel_paper_stage_budget_formula_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+    stage_table,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    disk = manifest["disk_preflight"]
+    disk["temporary_parallel_paper_stage_cap_bytes"][stage_table] -= 4096
+    manifest["databases"]["paper"]["parallel_paper_stages"][stage_table][
+        "stage_budget_bytes"
     ] -= 4096
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 

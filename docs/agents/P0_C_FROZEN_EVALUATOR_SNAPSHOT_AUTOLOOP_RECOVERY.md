@@ -388,6 +388,20 @@ Accepted snapshot → AutoLoop 血缘：
 - 最终本地门禁：Python `343 passed`、Node 20 `71 passed`、Basic Readiness 无 blocker、`normal_tiny_ready=false`，尚未部署本轮 parallel stage；
 - P0-D 仍锁定，promotion、strategy change、automatic runtime change 与 paper enablement 均保持 false。
 
+### 2026-08-09｜生产第四轮收敛：三张重型事件表并行冻结
+
+- parallel-P9 SHA `0d12afdd03f38830ea3836dede0be0469947d4cb` 已通过 exact-SHA CI 并部署；`paper_decision_events` 从 main paper 顺序路径移除后，生产断点推进到 `copy_table:a_class_decision_events`；
+- 本轮生产实测 main paper：candidate observations 278,208 行约 79.48 秒，candidate virtual trades 119,583 行约 9.71 秒；A_CLASS 在剩余约 210.82 秒内仍未完成，说明独立 P9 stage 有效，但高频宽事件表不止一张；
+- 当前受控实现将 `paper_decision_events`、`a_class_decision_events`、`opportunity_events` 三张表分别放入独立、完整行、完整 JSON 的 staging DB；每条 stage 使用独立 read-only connection、独立 transaction、独立 300 秒 deadline；
+- main paper 与三条 stage 共四个 paper read views 必须先完成 pin，随后与 signal/raw/kline 形成 7-view lineage；producer、authoritative consumer 与 Dashboard 都会重算 exact roles、view count、timestamp midpoints、lock limits 与 cross-DB skew；
+- 三条 stage 全部释放 active-source view 后，才允许依次 merge；三条 merge 完成且 stage 清理后，才执行 candidate payload projection、final indexes、full frozen watermarks、quick-check 和 SHA；
+- 三张表均保留 source schema、全部列、未知 JSON 字段和 row identities；每张表独立验证 stage size/cap、4096-byte page size、rows copied/merged、quick-check、source lock、merge order 与 cleanup；
+- disk preflight 现在显式预算 output cap、candidate stage、P9 stage、A_CLASS stage、opportunity stage 和 reserve；每个 stage 有独立硬上限，所有 cap 的 key、share、总和与 alias 都由 consumer 和 Dashboard 重算；
+- 每条 stage 的 deadline、pre-barrier、cancel、budget、quick-check、row mismatch 和 cleanup failure 都保留 public-safe component code；共同 barrier 前的单路失败会传播真实 table/code，不会退化为模糊 barrier error；
+- 本地正反例当前通过：Python snapshot/consumer `122 passed`，完整 Python gate `362 passed`，Node 20 完整 gate `71 passed`；逐表 payload 保真、逐表 deadline、逐表 budget tamper、逐表 nested tamper、7-view lineage tamper 和 pre-barrier failure propagation 均有覆盖；
+- 独立 maker/checker 审查未发现可执行 correctness regression；实际源文件复核确认 checker 输出中的重复行只是展示伪影，不存在于代码；
+- 当前三路实现尚未提交或部署；P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+
 尚未声称完成的生产证据：
 
 - 尚未生成新的 production accepted snapshot；

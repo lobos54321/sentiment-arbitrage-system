@@ -8862,6 +8862,16 @@ const EVALUATOR_PUBLIC_FAILURE_CODES = new Set([
   'snapshot_missing_required_tables',
   'snapshot_missing_required_watermarks',
   'candidate_observation_payload_projection_semantic_mismatch',
+  'parallel_paper_stage_start_timeout',
+  'parallel_paper_stage_cancelled',
+  'parallel_paper_stage_barrier_broken',
+  'parallel_paper_stage_timeout',
+  'parallel_paper_stage_missing',
+  'parallel_paper_stage_budget_exceeded',
+  'parallel_paper_stage_quick_check_failed',
+  'parallel_paper_stage_row_count_mismatch',
+  'parallel_paper_stage_cleanup_failed',
+  'parallel_paper_stage_failed',
   'paper_decision_parallel_stage_start_timeout',
   'paper_decision_parallel_stage_cancelled',
   'paper_decision_parallel_stage_barrier_broken',
@@ -8956,7 +8966,7 @@ function publicEvaluatorErrorType(value) {
 function publicEvaluatorFailureStage(value) {
   const normalized = String(value || '');
   if (EVALUATOR_PUBLIC_FAILURE_STAGES.has(normalized)) return normalized;
-  for (const prefix of ['copy_table:', 'source_metadata:']) {
+  for (const prefix of ['copy_table:', 'source_metadata:', 'merge_parallel_stage:']) {
     if (!normalized.startsWith(prefix)) continue;
     const table = normalized.slice(prefix.length);
     if (EVALUATOR_PUBLIC_COPY_TABLES.has(table)) return normalized;
@@ -9241,21 +9251,55 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const diskReserveBytes = Number(disk.required_reserve_bytes);
   const diskTotalStageCapBytes = Number(disk.temporary_stage_total_cap_bytes);
   const diskCandidateStageCapBytes = Number(disk.temporary_candidate_stage_cap_bytes);
-  const diskPaperDecisionStageCapBytes = Number(disk.temporary_paper_decision_stage_cap_bytes);
+  const parallelPaperStageConfigs = {
+    paper_decision_events: { role: 'paper_decision_events_parallel_stage', residualShare: 0.30 },
+    a_class_decision_events: { role: 'a_class_decision_events_parallel_stage', residualShare: 0.30 },
+    opportunity_events: { role: 'opportunity_events_parallel_stage', residualShare: 0.15 },
+  };
+  const parallelPaperStageTables = Object.keys(parallelPaperStageConfigs);
+  const rawDiskParallelStageCaps = disk.temporary_parallel_paper_stage_cap_bytes
+    && typeof disk.temporary_parallel_paper_stage_cap_bytes === 'object'
+    && !Array.isArray(disk.temporary_parallel_paper_stage_cap_bytes)
+    ? disk.temporary_parallel_paper_stage_cap_bytes
+    : {};
+  const diskParallelStageCaps = Object.fromEntries(
+    parallelPaperStageTables.map((table) => [table, Number(rawDiskParallelStageCaps[table])]),
+  );
+  const diskPaperDecisionStageCapBytes = diskParallelStageCaps.paper_decision_events;
   const diskCandidateStageMinimumBytes = Number(disk.candidate_stage_minimum_cap_bytes);
-  const diskPaperDecisionStageMinimumBytes = Number(disk.paper_decision_stage_minimum_cap_bytes);
+  const diskParallelStageMinimumBytes = Number(disk.parallel_paper_stage_minimum_cap_bytes);
   const diskPeakBytes = Number(disk.estimated_peak_working_bytes);
   const diskFreeAtPeakBytes = Number(disk.estimated_free_at_peak_bytes);
   const expectedDiskTotalStageCapBytes = Math.max(0, diskFreeBytes - diskOutputCapBytes - diskReserveBytes);
-  const stageMinimumTotal = 12288 + 12288;
+  const stageMinimumTotal = 12288 * (1 + parallelPaperStageTables.length);
   const residualAfterMinimums = Math.max(0, expectedDiskTotalStageCapBytes - stageMinimumTotal);
   const expectedDiskCandidateStageCapBytes = expectedDiskTotalStageCapBytes >= stageMinimumTotal
-    ? 12288 + Math.floor((residualAfterMinimums * 0.4) / 4096) * 4096
+    ? 12288 + Math.floor((residualAfterMinimums * 0.25) / 4096) * 4096
     : Math.min(expectedDiskTotalStageCapBytes, 12288);
-  const expectedDiskPaperDecisionStageCapBytes = Math.max(
-    0,
-    expectedDiskTotalStageCapBytes - expectedDiskCandidateStageCapBytes,
-  );
+  const expectedDiskParallelStageCaps = {};
+  if (expectedDiskTotalStageCapBytes >= stageMinimumTotal) {
+    let allocated = expectedDiskCandidateStageCapBytes;
+    for (const table of parallelPaperStageTables.slice(0, -1)) {
+      const extra = Math.floor(
+        (residualAfterMinimums * parallelPaperStageConfigs[table].residualShare) / 4096,
+      ) * 4096;
+      expectedDiskParallelStageCaps[table] = 12288 + extra;
+      allocated += expectedDiskParallelStageCaps[table];
+    }
+    const lastTable = parallelPaperStageTables.at(-1);
+    expectedDiskParallelStageCaps[lastTable] = expectedDiskTotalStageCapBytes - allocated;
+  } else {
+    let remaining = expectedDiskTotalStageCapBytes - expectedDiskCandidateStageCapBytes;
+    for (const table of parallelPaperStageTables) {
+      expectedDiskParallelStageCaps[table] = Math.min(Math.max(0, remaining), 12288);
+      remaining -= expectedDiskParallelStageCaps[table];
+    }
+  }
+  const diskStageShares = disk.parallel_paper_stage_residual_shares
+    && typeof disk.parallel_paper_stage_residual_shares === 'object'
+    && !Array.isArray(disk.parallel_paper_stage_residual_shares)
+    ? disk.parallel_paper_stage_residual_shares
+    : {};
   const diskPreflightPassed = Boolean(
     disk.accepted === true
     && [
@@ -9264,23 +9308,31 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       diskReserveBytes,
       diskTotalStageCapBytes,
       diskCandidateStageCapBytes,
-      diskPaperDecisionStageCapBytes,
       diskCandidateStageMinimumBytes,
-      diskPaperDecisionStageMinimumBytes,
+      diskParallelStageMinimumBytes,
       diskPeakBytes,
       diskFreeAtPeakBytes,
+      ...Object.values(diskParallelStageCaps),
     ].every((value) => Number.isFinite(value) && value >= 0)
     && diskOutputCapBytes > 0
     && diskCandidateStageMinimumBytes === 12288
-    && diskPaperDecisionStageMinimumBytes === 12288
+    && diskParallelStageMinimumBytes === 12288
     && diskTotalStageCapBytes === expectedDiskTotalStageCapBytes
     && diskCandidateStageCapBytes === expectedDiskCandidateStageCapBytes
-    && diskPaperDecisionStageCapBytes === expectedDiskPaperDecisionStageCapBytes
+    && parallelPaperStageTables.every(
+      (table) => diskParallelStageCaps[table] === expectedDiskParallelStageCaps[table],
+    )
+    && diskCandidateStageCapBytes + Object.values(diskParallelStageCaps).reduce((sum, value) => sum + value, 0)
+      === diskTotalStageCapBytes
     && diskCandidateStageCapBytes >= diskCandidateStageMinimumBytes
-    && diskPaperDecisionStageCapBytes >= diskPaperDecisionStageMinimumBytes
-    && diskCandidateStageCapBytes + diskPaperDecisionStageCapBytes === diskTotalStageCapBytes
-    && Number(disk.candidate_stage_residual_share) === 0.4
-    && Number(disk.paper_decision_stage_residual_share) === 0.6
+    && parallelPaperStageTables.every(
+      (table) => diskParallelStageCaps[table] >= diskParallelStageMinimumBytes,
+    )
+    && Number(disk.candidate_stage_residual_share) === 0.25
+    && parallelPaperStageTables.every(
+      (table) => Number(diskStageShares[table]) === parallelPaperStageConfigs[table].residualShare,
+    )
+    && Number(disk.temporary_paper_decision_stage_cap_bytes) === diskPaperDecisionStageCapBytes
     && disk.candidate_stage_budget_mode === 'shared_residual_disk_after_output_and_reserve'
     && diskPeakBytes === diskOutputCapBytes + diskTotalStageCapBytes
     && diskFreeAtPeakBytes === diskFreeBytes - diskPeakBytes
@@ -9299,7 +9351,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const expectedPinnedRoles = new Set([
     'signal_main_selective_copy',
     'paper_main_selective_copy',
-    'paper_decision_events_parallel_stage',
+    ...parallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
     'raw_main_selective_copy',
     'kline_main_selective_copy',
   ]);
@@ -9307,17 +9359,18 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const pinnedMidpoints = allPinnedReadViews
     .map((row) => Number(row.pinned_midpoint_epoch))
     .filter((value) => Number.isFinite(value));
-  const recomputedPinnedSkew = pinnedMidpoints.length === 5
+  const expectedPinnedViewCount = 4 + parallelPaperStageTables.length;
+  const recomputedPinnedSkew = pinnedMidpoints.length === expectedPinnedViewCount
     ? Math.max(...pinnedMidpoints) - Math.min(...pinnedMidpoints)
     : null;
   const manifestPinnedSkew = Number(manifestPayload?.cross_database_time_skew_sec);
   const manifestMaxPinnedSkew = Number(manifestPayload?.max_allowed_cross_database_time_skew_sec);
   const pinnedReadViewLineagePassed = Boolean(
-    allPinnedReadViews.length === 5
-    && Number(manifestPayload?.pinned_read_view_count) === 5
-    && actualPinnedRoles.size === 5
+    allPinnedReadViews.length === expectedPinnedViewCount
+    && Number(manifestPayload?.pinned_read_view_count) === expectedPinnedViewCount
+    && actualPinnedRoles.size === expectedPinnedViewCount
     && [...expectedPinnedRoles].every((role) => actualPinnedRoles.has(role))
-    && pinnedMidpoints.length === 5
+    && pinnedMidpoints.length === expectedPinnedViewCount
     && recomputedPinnedSkew != null
     && recomputedPinnedSkew >= 0
     && Number.isFinite(manifestPinnedSkew)
@@ -9330,13 +9383,15 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const paperReport = databaseReports.paper && typeof databaseReports.paper === 'object'
     ? databaseReports.paper
     : {};
-  const paperDecisionSelection = paperReport.selected_tables?.paper_decision_events
-    && typeof paperReport.selected_tables.paper_decision_events === 'object'
-    ? paperReport.selected_tables.paper_decision_events
+  const rawParallelPaperStages = paperReport.parallel_paper_stages
+    && typeof paperReport.parallel_paper_stages === 'object'
+    && !Array.isArray(paperReport.parallel_paper_stages)
+    ? paperReport.parallel_paper_stages
     : {};
-  const paperDecisionParallelStage = paperDecisionSelection.parallel_stage
-    && typeof paperDecisionSelection.parallel_stage === 'object'
-    ? paperDecisionSelection.parallel_stage
+  const rawParallelLockDurations = paperReport.parallel_paper_source_read_lock_duration_sec
+    && typeof paperReport.parallel_paper_source_read_lock_duration_sec === 'object'
+    && !Array.isArray(paperReport.parallel_paper_source_read_lock_duration_sec)
+    ? paperReport.parallel_paper_source_read_lock_duration_sec
     : {};
   const paperPinnedReadViews = Array.isArray(paperReport.pinned_read_views)
     ? paperReport.pinned_read_views
@@ -9346,41 +9401,136 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       .filter((row) => row && typeof row === 'object')
       .map((row) => String(row.role || '')),
   );
-  const paperDecisionStageSizeBytes = Number(paperReport.paper_decision_parallel_stage_size_bytes);
-  const paperDecisionStageBudgetBytes = Number(paperReport.paper_decision_parallel_stage_budget_bytes);
-  const paperDecisionStagePageSize = Number(paperReport.paper_decision_parallel_stage_page_size);
-  const paperDecisionRowsMerged = Number(paperReport.paper_decision_parallel_stage_rows_merged);
-  const paperDecisionRowsCopied = Number(paperDecisionSelection.rows_copied);
+  const expectedPaperPinnedRoles = new Set([
+    'paper_main_selective_copy',
+    ...parallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
+  ]);
+  const parallelPaperStages = {};
+  for (const table of parallelPaperStageTables) {
+    const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
+      ? paperSelections[table]
+      : {};
+    const nested = selection.parallel_stage && typeof selection.parallel_stage === 'object'
+      ? selection.parallel_stage
+      : {};
+    const stage = rawParallelPaperStages[table] && typeof rawParallelPaperStages[table] === 'object'
+      ? rawParallelPaperStages[table]
+      : {};
+    const stageSizeBytes = Number(stage.stage_size_bytes);
+    const stageBudgetBytes = Number(stage.stage_budget_bytes);
+    const stagePageSize = Number(stage.stage_page_size);
+    const rowsCopied = Number(stage.rows_copied);
+    const rowsMerged = Number(stage.rows_merged);
+    const selectionRowsCopied = Number(selection.rows_copied);
+    const lockDurationSec = Number(stage.source_read_lock_duration_sec);
+    parallelPaperStages[table] = {
+      schema_version: stage.schema_version || null,
+      role: stage.role || null,
+      stage_size_bytes: Number.isFinite(stageSizeBytes) ? stageSizeBytes : null,
+      stage_budget_bytes: Number.isFinite(stageBudgetBytes) ? stageBudgetBytes : null,
+      stage_page_size: Number.isFinite(stagePageSize) ? stagePageSize : null,
+      rows_copied: Number.isFinite(rowsCopied) ? rowsCopied : null,
+      rows_merged: Number.isFinite(rowsMerged) ? rowsMerged : null,
+      source_read_lock_duration_sec: Number.isFinite(lockDurationSec) ? lockDurationSec : null,
+      merge_duration_sec: Number.isFinite(Number(stage.merge_duration_sec))
+        ? Number(stage.merge_duration_sec)
+        : null,
+      removed_before_publish: stage.removed_before_publish === true,
+      passed: Boolean(
+        stage.schema_version === 'parallel_paper_event_stage.v1'
+        && stage.role === parallelPaperStageConfigs[table].role
+        && Number.isFinite(stageSizeBytes)
+        && stageSizeBytes > 0
+        && Number.isFinite(stageBudgetBytes)
+        && stageBudgetBytes === diskParallelStageCaps[table]
+        && stageSizeBytes <= stageBudgetBytes
+        && stagePageSize === 4096
+        && Number.isFinite(rowsCopied)
+        && rowsCopied >= 0
+        && Number.isFinite(rowsMerged)
+        && rowsMerged === rowsCopied
+        && Number.isFinite(selectionRowsCopied)
+        && selectionRowsCopied === rowsCopied
+        && Number.isFinite(lockDurationSec)
+        && lockDurationSec >= 0
+        && lockDurationSec === Number(rawParallelLockDurations[table])
+        && Number.isFinite(Number(stage.merge_duration_sec))
+        && Number(stage.merge_duration_sec) >= 0
+        && stage.source_read_lock_budget_passed === true
+        && stage.merged_after_source_read_lock_release === true
+        && stage.removed_before_publish === true
+        && Array.isArray(stage.quick_check)
+        && stage.quick_check.length === 1
+        && stage.quick_check[0] === 'ok'
+        && stage.full_fidelity_row_copy === true
+        && stage.payload_semantics_preserved === true
+        && nested.schema_version === 'parallel_paper_event_stage.v1'
+        && nested.role === parallelPaperStageConfigs[table].role
+        && nested.full_fidelity_row_copy === true
+        && nested.payload_semantics_preserved === true
+        && nested.row_count_matched === true
+        && Number(nested.stage_rows_copied) === rowsCopied
+        && Number(nested.rows_merged) === rowsMerged
+        && Array.isArray(nested.quick_check)
+        && nested.quick_check.length === 1
+        && nested.quick_check[0] === 'ok'
+        && Number(nested.stage_page_size) === 4096
+        && Number(nested.stage_size_bytes) === stageSizeBytes
+        && Number(nested.stage_budget_bytes) === stageBudgetBytes
+        && nested.source_read_lock_budget_passed === true
+        && nested.merge_started_after_source_read_view_release === true
+      ),
+    };
+  }
+  const paperMainLockDuration = Number(paperReport.main_source_read_lock_duration_sec);
+  const paperReportedMaxLockDuration = Number(paperReport.source_read_lock_duration_sec);
+  const parallelLockDurationValues = parallelPaperStageTables.map(
+    (table) => Number(rawParallelLockDurations[table]),
+  );
+  const parallelPaperStagesPassed = Boolean(
+    manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
+    && Array.isArray(manifestPayload?.parallel_paper_stage_tables)
+    && manifestPayload.parallel_paper_stage_tables.length === parallelPaperStageTables.length
+    && manifestPayload.parallel_paper_stage_tables.every(
+      (table, index) => table === parallelPaperStageTables[index],
+    )
+    && Number(manifestPayload?.parallel_paper_stage_count) === parallelPaperStageTables.length
+    && manifestPayload?.parallel_paper_stages_all_pinned === true
+    && manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true
+    && manifestPayload?.parallel_paper_stages_all_removed_before_publish === true
+    && Number(paperReport.parallel_paper_stage_count) === parallelPaperStageTables.length
+    && paperReport.parallel_paper_stages_all_pinned === true
+    && paperReport.parallel_paper_stages_all_merged_after_source_read_lock_release === true
+    && paperReport.parallel_paper_stages_all_removed_before_publish === true
+    && Object.keys(rawParallelPaperStages).length === parallelPaperStageTables.length
+    && parallelPaperStageTables.every((table) => Object.hasOwn(rawParallelPaperStages, table))
+    && Object.keys(rawParallelLockDurations).length === parallelPaperStageTables.length
+    && parallelPaperStageTables.every((table) => Object.hasOwn(rawParallelLockDurations, table))
+    && paperPinnedReadViews.length === 1 + parallelPaperStageTables.length
+    && paperPinnedRoles.size === expectedPaperPinnedRoles.size
+    && [...expectedPaperPinnedRoles].every((role) => paperPinnedRoles.has(role))
+    && Number.isFinite(paperMainLockDuration)
+    && paperMainLockDuration >= 0
+    && parallelLockDurationValues.every((value) => Number.isFinite(value) && value >= 0)
+    && Number.isFinite(paperReportedMaxLockDuration)
+    && Math.abs(
+      paperReportedMaxLockDuration
+      - Math.max(paperMainLockDuration, ...parallelLockDurationValues)
+    ) <= 0.001
+    && parallelPaperStageTables.every((table) => parallelPaperStages[table].passed)
+  );
+  const paperDecisionStage = parallelPaperStages.paper_decision_events || {};
   const paperDecisionParallelStagePassed = Boolean(
-    paperReport.paper_decision_parallel_stage_used === true
-    && paperReport.paper_decision_parallel_stage_schema_version === 'paper_decision_events_parallel_stage.v1'
+    parallelPaperStagesPassed
+    && paperReport.paper_decision_parallel_stage_used === true
+    && paperReport.paper_decision_parallel_stage_schema_version === paperDecisionStage.schema_version
     && paperReport.paper_decision_parallel_read_view_pinned === true
     && paperReport.paper_decision_parallel_stage_merged_after_source_read_lock_release === true
     && paperReport.paper_decision_parallel_stage_removed_before_publish === true
-    && Number.isFinite(paperDecisionStageSizeBytes)
-    && paperDecisionStageSizeBytes > 0
-    && Number.isFinite(paperDecisionStageBudgetBytes)
-    && paperDecisionStageBudgetBytes === diskPaperDecisionStageCapBytes
-    && paperDecisionStageSizeBytes <= paperDecisionStageBudgetBytes
-    && paperDecisionStagePageSize === 4096
-    && Number.isFinite(paperDecisionRowsMerged)
-    && Number.isFinite(paperDecisionRowsCopied)
-    && paperDecisionRowsMerged === paperDecisionRowsCopied
-    && paperPinnedReadViews.length === 2
-    && paperPinnedRoles.has('paper_main_selective_copy')
-    && paperPinnedRoles.has('paper_decision_events_parallel_stage')
-    && paperDecisionParallelStage.schema_version === 'paper_decision_events_parallel_stage.v1'
-    && paperDecisionParallelStage.full_fidelity_row_copy === true
-    && paperDecisionParallelStage.payload_semantics_preserved === true
-    && paperDecisionParallelStage.row_count_matched === true
-    && Number(paperDecisionParallelStage.stage_rows_copied) === paperDecisionRowsMerged
-    && Number(paperDecisionParallelStage.rows_merged) === paperDecisionRowsMerged
-    && Array.isArray(paperDecisionParallelStage.quick_check)
-    && paperDecisionParallelStage.quick_check.length === 1
-    && paperDecisionParallelStage.quick_check[0] === 'ok'
-    && Number(paperDecisionParallelStage.stage_page_size) === 4096
-    && paperDecisionParallelStage.source_read_lock_budget_passed === true
-    && paperDecisionParallelStage.merge_started_after_source_read_view_release === true
+    && Number(paperReport.paper_decision_parallel_stage_size_bytes) === paperDecisionStage.stage_size_bytes
+    && Number(paperReport.paper_decision_parallel_stage_budget_bytes) === paperDecisionStage.stage_budget_bytes
+    && Number(paperReport.paper_decision_parallel_stage_page_size) === paperDecisionStage.stage_page_size
+    && Number(paperReport.paper_decision_parallel_stage_rows_merged) === paperDecisionStage.rows_merged
   );
   const producerManifestSha256 = statusPayloadValid
     ? statusPayload.last_accepted_snapshot?.manifest_sha256 || null
@@ -9404,6 +9554,19 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     indexes_built_after_source_read_lock_release: manifestPayload?.indexes_built_after_source_read_lock_release === true,
     candidate_projection_after_source_read_lock_release: manifestPayload?.candidate_projection_after_source_read_lock_release === true,
     candidate_stage_removed_before_publish: manifestPayload?.candidate_stage_removed_before_publish === true,
+    parallel_paper_stage_inventory_passed: Boolean(
+      manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
+      && Array.isArray(manifestPayload?.parallel_paper_stage_tables)
+      && manifestPayload.parallel_paper_stage_tables.length === parallelPaperStageTables.length
+      && manifestPayload.parallel_paper_stage_tables.every(
+        (table, index) => table === parallelPaperStageTables[index],
+      )
+      && Number(manifestPayload?.parallel_paper_stage_count) === parallelPaperStageTables.length
+    ),
+    parallel_paper_stages_all_pinned: manifestPayload?.parallel_paper_stages_all_pinned === true,
+    parallel_paper_stages_all_merged_after_source_read_lock_release: manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true,
+    parallel_paper_stages_all_removed_before_publish: manifestPayload?.parallel_paper_stages_all_removed_before_publish === true,
+    parallel_paper_stages_passed: parallelPaperStagesPassed,
     paper_decision_parallel_read_view_pinned: manifestPayload?.paper_decision_parallel_read_view_pinned === true,
     paper_decision_parallel_stage_merged_after_source_read_lock_release: manifestPayload?.paper_decision_parallel_stage_merged_after_source_read_lock_release === true,
     paper_decision_parallel_stage_removed_before_publish: manifestPayload?.paper_decision_parallel_stage_removed_before_publish === true,
@@ -9621,7 +9784,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     },
     pinned_read_view_lineage: {
       passed: pinnedReadViewLineagePassed,
-      expected_count: 5,
+      expected_count: expectedPinnedViewCount,
       actual_count: allPinnedReadViews.length,
       expected_roles: [...expectedPinnedRoles],
       actual_roles: [...actualPinnedRoles],
@@ -9635,29 +9798,25 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         ? manifestMaxPinnedSkew
         : null,
     },
+    parallel_paper_stages: {
+      passed: parallelPaperStagesPassed,
+      schema_version: manifestPayload?.parallel_paper_stage_schema_version || null,
+      expected_tables: parallelPaperStageTables,
+      stage_count: Object.keys(parallelPaperStages).length,
+      pinned_read_view_count: paperPinnedReadViews.length,
+      stages: parallelPaperStages,
+    },
     parallel_paper_decision_stage: {
       passed: paperDecisionParallelStagePassed,
-      schema_version: paperReport.paper_decision_parallel_stage_schema_version || null,
-      stage_size_bytes: Number.isFinite(paperDecisionStageSizeBytes)
-        ? paperDecisionStageSizeBytes
-        : null,
-      stage_budget_bytes: Number.isFinite(paperDecisionStageBudgetBytes)
-        ? paperDecisionStageBudgetBytes
-        : null,
-      stage_page_size: Number.isFinite(paperDecisionStagePageSize)
-        ? paperDecisionStagePageSize
-        : null,
-      rows_copied: Number.isFinite(paperDecisionRowsCopied)
-        ? paperDecisionRowsCopied
-        : null,
-      rows_merged: Number.isFinite(paperDecisionRowsMerged)
-        ? paperDecisionRowsMerged
-        : null,
-      merge_duration_sec: Number.isFinite(Number(paperReport.paper_decision_parallel_stage_merge_duration_sec))
-        ? Number(paperReport.paper_decision_parallel_stage_merge_duration_sec)
-        : null,
+      schema_version: paperDecisionStage.schema_version || null,
+      stage_size_bytes: paperDecisionStage.stage_size_bytes ?? null,
+      stage_budget_bytes: paperDecisionStage.stage_budget_bytes ?? null,
+      stage_page_size: paperDecisionStage.stage_page_size ?? null,
+      rows_copied: paperDecisionStage.rows_copied ?? null,
+      rows_merged: paperDecisionStage.rows_merged ?? null,
+      merge_duration_sec: paperDecisionStage.merge_duration_sec ?? null,
       pinned_read_view_count: paperPinnedReadViews.length,
-      stage_removed_before_publish: paperReport.paper_decision_parallel_stage_removed_before_publish === true,
+      stage_removed_before_publish: paperDecisionStage.removed_before_publish === true,
     },
     source_read_lock: {
       budget_passed: manifestPayload?.source_read_lock_budget_passed === true,

@@ -21,9 +21,10 @@ from cross_db_evaluator_snapshot import (
     CANDIDATE_STAGE_RESIDUAL_SHARE,
     DATABASE_SPECS,
     MIN_CANDIDATE_STAGE_CAP_BYTES,
-    MIN_PAPER_DECISION_STAGE_CAP_BYTES,
-    PAPER_DECISION_STAGE_RESIDUAL_SHARE,
-    PAPER_DECISION_STAGE_SCHEMA_VERSION,
+    MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
+    PARALLEL_PAPER_STAGE_CONFIGS,
+    PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
+    PARALLEL_PAPER_STAGE_TABLES,
     PAPER_DECISION_STAGE_TABLE,
     normalized_timestamp_sql,
     quote_identifier,
@@ -370,6 +371,29 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_candidate_projection_lock_order_invalid")
         if manifest.get("candidate_stage_removed_before_publish") is not True:
             blockers.append("evaluator_snapshot_candidate_stage_cleanup_invalid")
+        if (
+            manifest.get("parallel_paper_stage_schema_version")
+            != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+            or list(manifest.get("parallel_paper_stage_tables") or [])
+            != list(PARALLEL_PAPER_STAGE_TABLES)
+            or int(manifest.get("parallel_paper_stage_count") or 0)
+            != len(PARALLEL_PAPER_STAGE_TABLES)
+        ):
+            blockers.append("evaluator_snapshot_parallel_paper_stage_inventory_invalid")
+        if manifest.get("parallel_paper_stages_all_pinned") is not True:
+            blockers.append("evaluator_snapshot_parallel_paper_stage_pin_invalid")
+        if (
+            manifest.get(
+                "parallel_paper_stages_all_merged_after_source_read_lock_release"
+            )
+            is not True
+        ):
+            blockers.append("evaluator_snapshot_parallel_paper_stage_merge_order_invalid")
+        if (
+            manifest.get("parallel_paper_stages_all_removed_before_publish")
+            is not True
+        ):
+            blockers.append("evaluator_snapshot_parallel_paper_stage_cleanup_invalid")
         if manifest.get("paper_decision_parallel_read_view_pinned") is not True:
             blockers.append("evaluator_snapshot_paper_decision_parallel_pin_invalid")
         if (
@@ -414,14 +438,20 @@ def evaluator_snapshot_bundle_status(
                 candidate_stage_cap_bytes = int(
                     disk_preflight.get("temporary_candidate_stage_cap_bytes")
                 )
-                paper_decision_stage_cap_bytes = int(
-                    disk_preflight.get("temporary_paper_decision_stage_cap_bytes")
+                raw_parallel_stage_caps = disk_preflight.get(
+                    "temporary_parallel_paper_stage_cap_bytes"
                 )
+                if not isinstance(raw_parallel_stage_caps, dict):
+                    raise ValueError("parallel stage caps missing")
+                parallel_stage_cap_bytes = {
+                    str(table): int(value)
+                    for table, value in raw_parallel_stage_caps.items()
+                }
                 candidate_stage_minimum_cap_bytes = int(
                     disk_preflight.get("candidate_stage_minimum_cap_bytes")
                 )
-                paper_decision_stage_minimum_cap_bytes = int(
-                    disk_preflight.get("paper_decision_stage_minimum_cap_bytes")
+                parallel_stage_minimum_cap_bytes = int(
+                    disk_preflight.get("parallel_paper_stage_minimum_cap_bytes")
                 )
                 estimated_peak_working_bytes = int(
                     disk_preflight.get("estimated_peak_working_bytes")
@@ -435,8 +465,10 @@ def evaluator_snapshot_bundle_status(
                 )
                 minimum_stage_total = (
                     MIN_CANDIDATE_STAGE_CAP_BYTES
-                    + MIN_PAPER_DECISION_STAGE_CAP_BYTES
+                    + len(PARALLEL_PAPER_STAGE_TABLES)
+                    * MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
                 )
+                expected_parallel_stage_cap_bytes: dict[str, int] = {}
                 if expected_total_stage_cap_bytes >= minimum_stage_total:
                     residual_after_minimums = (
                         expected_total_stage_cap_bytes - minimum_stage_total
@@ -452,20 +484,47 @@ def evaluator_snapshot_bundle_status(
                             * 4096
                         )
                     )
-                    expected_paper_decision_stage_cap_bytes = (
-                        expected_total_stage_cap_bytes
-                        - expected_candidate_stage_cap_bytes
-                    )
+                    allocated = expected_candidate_stage_cap_bytes
+                    for table in PARALLEL_PAPER_STAGE_TABLES[:-1]:
+                        share = float(
+                            PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
+                        )
+                        extra = int(residual_after_minimums * share) // 4096 * 4096
+                        expected_parallel_stage_cap_bytes[table] = (
+                            MIN_PARALLEL_PAPER_STAGE_CAP_BYTES + extra
+                        )
+                        allocated += expected_parallel_stage_cap_bytes[table]
+                    expected_parallel_stage_cap_bytes[
+                        PARALLEL_PAPER_STAGE_TABLES[-1]
+                    ] = expected_total_stage_cap_bytes - allocated
                 else:
+                    remaining = expected_total_stage_cap_bytes
                     expected_candidate_stage_cap_bytes = min(
-                        expected_total_stage_cap_bytes,
+                        remaining,
                         MIN_CANDIDATE_STAGE_CAP_BYTES,
                     )
-                    expected_paper_decision_stage_cap_bytes = max(
-                        0,
-                        expected_total_stage_cap_bytes
-                        - expected_candidate_stage_cap_bytes,
+                    remaining -= expected_candidate_stage_cap_bytes
+                    for table in PARALLEL_PAPER_STAGE_TABLES:
+                        expected_parallel_stage_cap_bytes[table] = min(
+                            remaining,
+                            MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
+                        )
+                        remaining -= expected_parallel_stage_cap_bytes[table]
+                raw_stage_shares = disk_preflight.get(
+                    "parallel_paper_stage_residual_shares"
+                )
+                if not isinstance(raw_stage_shares, dict):
+                    raise ValueError("parallel stage shares missing")
+                stage_shares = {
+                    str(table): float(value)
+                    for table, value in raw_stage_shares.items()
+                }
+                expected_stage_shares = {
+                    table: float(
+                        PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
                     )
+                    for table in PARALLEL_PAPER_STAGE_TABLES
+                }
                 if (
                     disk_free_bytes <= 0
                     or disk_reserve_bytes < 0
@@ -474,33 +533,47 @@ def evaluator_snapshot_bundle_status(
                     or total_stage_cap_bytes != expected_total_stage_cap_bytes
                     or candidate_stage_cap_bytes
                     != expected_candidate_stage_cap_bytes
-                    or paper_decision_stage_cap_bytes
-                    != expected_paper_decision_stage_cap_bytes
-                    or candidate_stage_cap_bytes + paper_decision_stage_cap_bytes
+                    or set(parallel_stage_cap_bytes)
+                    != set(PARALLEL_PAPER_STAGE_TABLES)
+                    or parallel_stage_cap_bytes
+                    != expected_parallel_stage_cap_bytes
+                    or candidate_stage_cap_bytes
+                    + sum(parallel_stage_cap_bytes.values())
                     != total_stage_cap_bytes
                     or candidate_stage_cap_bytes < MIN_CANDIDATE_STAGE_CAP_BYTES
-                    or paper_decision_stage_cap_bytes
-                    < MIN_PAPER_DECISION_STAGE_CAP_BYTES
-                    or candidate_stage_minimum_cap_bytes != MIN_CANDIDATE_STAGE_CAP_BYTES
-                    or paper_decision_stage_minimum_cap_bytes
-                    != MIN_PAPER_DECISION_STAGE_CAP_BYTES
+                    or any(
+                        parallel_stage_cap_bytes[table]
+                        < MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+                        for table in PARALLEL_PAPER_STAGE_TABLES
+                    )
+                    or candidate_stage_minimum_cap_bytes
+                    != MIN_CANDIDATE_STAGE_CAP_BYTES
+                    or parallel_stage_minimum_cap_bytes
+                    != MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
                     or abs(
                         float(disk_preflight.get("candidate_stage_residual_share"))
                         - CANDIDATE_STAGE_RESIDUAL_SHARE
                     )
                     > 1e-9
-                    or abs(
-                        float(disk_preflight.get("paper_decision_stage_residual_share"))
-                        - PAPER_DECISION_STAGE_RESIDUAL_SHARE
+                    or set(stage_shares) != set(PARALLEL_PAPER_STAGE_TABLES)
+                    or any(
+                        abs(stage_shares[table] - expected_stage_shares[table])
+                        > 1e-9
+                        for table in PARALLEL_PAPER_STAGE_TABLES
                     )
-                    > 1e-9
+                    or int(
+                        disk_preflight.get(
+                            "temporary_paper_decision_stage_cap_bytes"
+                        )
+                    )
+                    != parallel_stage_cap_bytes[PAPER_DECISION_STAGE_TABLE]
                     or disk_preflight.get("candidate_stage_budget_mode")
                     != CANDIDATE_STAGE_BUDGET_MODE
                     or estimated_peak_working_bytes
                     != (
                         disk_cap_bytes
                         + candidate_stage_cap_bytes
-                        + paper_decision_stage_cap_bytes
+                        + sum(parallel_stage_cap_bytes.values())
                     )
                     or estimated_free_at_peak_bytes
                     != disk_free_bytes - estimated_peak_working_bytes
@@ -649,34 +722,23 @@ def evaluator_snapshot_bundle_status(
                         f"{watermark_table}"
                     )
             if name == "paper":
-                paper_decision_selection = (
-                    selected_tables.get(PAPER_DECISION_STAGE_TABLE) or {}
-                )
-                paper_decision_parallel_stage = (
-                    paper_decision_selection.get("parallel_stage") or {}
-                )
                 pinned_read_views = report.get("pinned_read_views") or []
+                parallel_stage_reports = report.get("parallel_paper_stages") or {}
                 try:
-                    paper_decision_stage_size_bytes = int(
-                        report.get("paper_decision_parallel_stage_size_bytes")
+                    if not isinstance(parallel_stage_reports, dict):
+                        raise ValueError("parallel stage reports missing")
+                    parallel_stage_caps = disk_preflight.get(
+                        "temporary_parallel_paper_stage_cap_bytes"
                     )
-                    paper_decision_stage_budget_bytes = int(
-                        report.get("paper_decision_parallel_stage_budget_bytes")
+                    if not isinstance(parallel_stage_caps, dict):
+                        raise ValueError("parallel stage caps missing")
+                    parallel_lock_durations = report.get(
+                        "parallel_paper_source_read_lock_duration_sec"
                     )
-                    paper_decision_stage_page_size = int(
-                        report.get("paper_decision_parallel_stage_page_size")
-                    )
-                    paper_decision_stage_rows_merged = int(
-                        report.get("paper_decision_parallel_stage_rows_merged")
-                    )
-                    paper_decision_stage_merge_duration_sec = float(
-                        report.get("paper_decision_parallel_stage_merge_duration_sec")
-                    )
+                    if not isinstance(parallel_lock_durations, dict):
+                        raise ValueError("parallel lock durations missing")
                     main_lock_duration_sec = float(
                         report.get("main_source_read_lock_duration_sec")
-                    )
-                    parallel_lock_duration_sec = float(
-                        report.get("paper_decision_source_read_lock_duration_sec")
                     )
                     reported_max_lock_duration_sec = float(
                         report.get("source_read_lock_duration_sec")
@@ -686,11 +748,123 @@ def evaluator_snapshot_bundle_status(
                         for view in pinned_read_views
                         if isinstance(view, dict)
                     }
+                    expected_paper_roles = {
+                        "paper_main_selective_copy",
+                        *{
+                            str(PARALLEL_PAPER_STAGE_CONFIGS[table]["role"])
+                            for table in PARALLEL_PAPER_STAGE_TABLES
+                        },
+                    }
+                    if (
+                        report.get("parallel_paper_stage_count")
+                        != len(PARALLEL_PAPER_STAGE_TABLES)
+                        or set(parallel_stage_reports)
+                        != set(PARALLEL_PAPER_STAGE_TABLES)
+                        or set(parallel_lock_durations)
+                        != set(PARALLEL_PAPER_STAGE_TABLES)
+                        or report.get("parallel_paper_stages_all_pinned") is not True
+                        or report.get(
+                            "parallel_paper_stages_all_merged_after_source_read_lock_release"
+                        )
+                        is not True
+                        or report.get(
+                            "parallel_paper_stages_all_removed_before_publish"
+                        )
+                        is not True
+                        or not isinstance(pinned_read_views, list)
+                        or len(pinned_read_views)
+                        != 1 + len(PARALLEL_PAPER_STAGE_TABLES)
+                        or roles != expected_paper_roles
+                        or main_lock_duration_sec < 0
+                        or any(
+                            not math.isfinite(float(parallel_lock_durations[table]))
+                            or float(parallel_lock_durations[table]) < 0
+                            for table in PARALLEL_PAPER_STAGE_TABLES
+                        )
+                        or abs(
+                            reported_max_lock_duration_sec
+                            - max(
+                                main_lock_duration_sec,
+                                *[
+                                    float(parallel_lock_durations[table])
+                                    for table in PARALLEL_PAPER_STAGE_TABLES
+                                ],
+                            )
+                        )
+                        > 0.001
+                    ):
+                        raise ValueError("invalid parallel paper stage inventory")
+                    for table in PARALLEL_PAPER_STAGE_TABLES:
+                        config = PARALLEL_PAPER_STAGE_CONFIGS[table]
+                        stage_report = parallel_stage_reports.get(table) or {}
+                        selection_report = selected_tables.get(table) or {}
+                        nested_stage = selection_report.get("parallel_stage") or {}
+                        stage_size_bytes = int(stage_report.get("stage_size_bytes"))
+                        stage_budget_bytes = int(stage_report.get("stage_budget_bytes"))
+                        stage_page_size = int(stage_report.get("stage_page_size"))
+                        rows_copied = int(stage_report.get("rows_copied"))
+                        rows_merged = int(stage_report.get("rows_merged"))
+                        merge_duration_sec = float(
+                            stage_report.get("merge_duration_sec")
+                        )
+                        lock_duration_sec = float(
+                            stage_report.get("source_read_lock_duration_sec")
+                        )
+                        if (
+                            stage_report.get("schema_version")
+                            != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+                            or stage_report.get("role") != config["role"]
+                            or stage_size_bytes <= 0
+                            or stage_budget_bytes != int(parallel_stage_caps[table])
+                            or stage_size_bytes > stage_budget_bytes
+                            or stage_page_size != 4096
+                            or rows_copied != int(selection_report.get("rows_copied"))
+                            or rows_merged != rows_copied
+                            or merge_duration_sec < 0
+                            or lock_duration_sec
+                            != float(parallel_lock_durations[table])
+                            or stage_report.get("source_read_lock_budget_passed")
+                            is not True
+                            or stage_report.get(
+                                "merged_after_source_read_lock_release"
+                            )
+                            is not True
+                            or stage_report.get("removed_before_publish") is not True
+                            or stage_report.get("quick_check") != ["ok"]
+                            or stage_report.get("full_fidelity_row_copy") is not True
+                            or stage_report.get("payload_semantics_preserved") is not True
+                            or nested_stage.get("schema_version")
+                            != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+                            or nested_stage.get("role") != config["role"]
+                            or nested_stage.get("full_fidelity_row_copy") is not True
+                            or nested_stage.get("payload_semantics_preserved") is not True
+                            or nested_stage.get("row_count_matched") is not True
+                            or int(nested_stage.get("stage_rows_copied"))
+                            != rows_copied
+                            or int(nested_stage.get("rows_merged")) != rows_merged
+                            or nested_stage.get("quick_check") != ["ok"]
+                            or int(nested_stage.get("stage_page_size")) != 4096
+                            or int(nested_stage.get("stage_size_bytes"))
+                            != stage_size_bytes
+                            or int(nested_stage.get("stage_budget_bytes"))
+                            != stage_budget_bytes
+                            or nested_stage.get("source_read_lock_budget_passed")
+                            is not True
+                            or nested_stage.get(
+                                "merge_started_after_source_read_view_release"
+                            )
+                            is not True
+                        ):
+                            raise ValueError(
+                                f"invalid parallel paper stage evidence:{table}"
+                            )
+                    paper_alias = parallel_stage_reports[PAPER_DECISION_STAGE_TABLE]
                     if (
                         report.get("paper_decision_parallel_stage_used") is not True
                         or report.get("paper_decision_parallel_stage_schema_version")
-                        != PAPER_DECISION_STAGE_SCHEMA_VERSION
-                        or report.get("paper_decision_parallel_read_view_pinned") is not True
+                        != paper_alias.get("schema_version")
+                        or report.get("paper_decision_parallel_read_view_pinned")
+                        is not True
                         or report.get(
                             "paper_decision_parallel_stage_merged_after_source_read_lock_release"
                         )
@@ -699,66 +873,19 @@ def evaluator_snapshot_bundle_status(
                             "paper_decision_parallel_stage_removed_before_publish"
                         )
                         is not True
-                        or paper_decision_stage_size_bytes <= 0
-                        or paper_decision_stage_budget_bytes
-                        != int(
-                            disk_preflight.get(
-                                "temporary_paper_decision_stage_cap_bytes"
-                            )
-                        )
-                        or paper_decision_stage_size_bytes
-                        > paper_decision_stage_budget_bytes
-                        or paper_decision_stage_page_size != 4096
-                        or paper_decision_stage_rows_merged
-                        != int(paper_decision_selection.get("rows_copied"))
-                        or paper_decision_stage_merge_duration_sec < 0
-                        or not isinstance(pinned_read_views, list)
-                        or len(pinned_read_views) != 2
-                        or "paper_main_selective_copy" not in roles
-                        or "paper_decision_events_parallel_stage" not in roles
-                        or main_lock_duration_sec < 0
-                        or parallel_lock_duration_sec < 0
-                        or abs(
-                            reported_max_lock_duration_sec
-                            - max(main_lock_duration_sec, parallel_lock_duration_sec)
-                        )
-                        > 0.001
-                        or paper_decision_parallel_stage.get("schema_version")
-                        != PAPER_DECISION_STAGE_SCHEMA_VERSION
-                        or paper_decision_parallel_stage.get("full_fidelity_row_copy")
-                        is not True
-                        or paper_decision_parallel_stage.get(
-                            "payload_semantics_preserved"
-                        )
-                        is not True
-                        or paper_decision_parallel_stage.get("row_count_matched")
-                        is not True
-                        or int(
-                            paper_decision_parallel_stage.get("stage_rows_copied")
-                        )
-                        != paper_decision_stage_rows_merged
-                        or int(
-                            paper_decision_parallel_stage.get("rows_merged")
-                        )
-                        != paper_decision_stage_rows_merged
-                        or paper_decision_parallel_stage.get("quick_check") != ["ok"]
-                        or int(
-                            paper_decision_parallel_stage.get("stage_page_size")
-                        )
-                        != 4096
-                        or paper_decision_parallel_stage.get(
-                            "source_read_lock_budget_passed"
-                        )
-                        is not True
-                        or paper_decision_parallel_stage.get(
-                            "merge_started_after_source_read_view_release"
-                        )
-                        is not True
+                        or int(report.get("paper_decision_parallel_stage_size_bytes"))
+                        != int(paper_alias.get("stage_size_bytes"))
+                        or int(report.get("paper_decision_parallel_stage_page_size"))
+                        != int(paper_alias.get("stage_page_size"))
+                        or int(report.get("paper_decision_parallel_stage_budget_bytes"))
+                        != int(paper_alias.get("stage_budget_bytes"))
+                        or int(report.get("paper_decision_parallel_stage_rows_merged"))
+                        != int(paper_alias.get("rows_merged"))
                     ):
-                        raise ValueError("invalid parallel paper decision stage evidence")
-                except (TypeError, ValueError):
+                        raise ValueError("paper decision compatibility alias mismatch")
+                except (KeyError, TypeError, ValueError):
                     blockers.append(
-                        "evaluator_snapshot_paper_decision_parallel_stage_contract_invalid"
+                        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
                     )
                 if report.get("candidate_projection_after_source_read_lock_release") is not True:
                     blockers.append(
@@ -971,7 +1098,10 @@ def evaluator_snapshot_bundle_status(
         expected_pinned_roles = {
             "signal_main_selective_copy",
             "paper_main_selective_copy",
-            "paper_decision_events_parallel_stage",
+            *{
+                str(PARALLEL_PAPER_STAGE_CONFIGS[table]["role"])
+                for table in PARALLEL_PAPER_STAGE_TABLES
+            },
             "raw_main_selective_copy",
             "kline_main_selective_copy",
         }
@@ -993,8 +1123,9 @@ def evaluator_snapshot_bundle_status(
                 manifest.get("max_allowed_cross_database_time_skew_sec")
             )
             if (
-                len(all_pinned_read_views) != 5
-                or int(manifest.get("pinned_read_view_count")) != 5
+                len(all_pinned_read_views) != 4 + len(PARALLEL_PAPER_STAGE_TABLES)
+                or int(manifest.get("pinned_read_view_count"))
+                != 4 + len(PARALLEL_PAPER_STAGE_TABLES)
                 or pinned_roles != expected_pinned_roles
                 or len(pinned_roles) != len(all_pinned_read_views)
                 or any(

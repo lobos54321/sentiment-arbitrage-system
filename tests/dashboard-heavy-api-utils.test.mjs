@@ -1710,14 +1710,24 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       required_tables_present: true,
       required_watermarks_present: true,
       cross_database_time_skew_passed: true,
-      pinned_read_view_count: 5,
-      cross_database_time_skew_sec: 0.25,
+      pinned_read_view_count: 7,
+      cross_database_time_skew_sec: 0.35,
       max_allowed_cross_database_time_skew_sec: 30,
       source_read_lock_budget_passed: true,
       max_source_read_lock_sec: 300,
       indexes_built_after_source_read_lock_release: true,
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
+      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v1',
+      parallel_paper_stage_tables: [
+        'paper_decision_events',
+        'a_class_decision_events',
+        'opportunity_events',
+      ],
+      parallel_paper_stage_count: 3,
+      parallel_paper_stages_all_pinned: true,
+      parallel_paper_stages_all_merged_after_source_read_lock_release: true,
+      parallel_paper_stages_all_removed_before_publish: true,
       paper_decision_parallel_read_view_pinned: true,
       paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
       paper_decision_parallel_stage_removed_before_publish: true,
@@ -1735,12 +1745,23 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         selective_snapshot_output_cap_bytes: 10000,
         temporary_full_backup_bytes: 0,
         temporary_stage_total_cap_bytes: 100000,
-        temporary_candidate_stage_cap_bytes: 40960,
-        temporary_paper_decision_stage_cap_bytes: 59040,
-        candidate_stage_residual_share: 0.4,
-        paper_decision_stage_residual_share: 0.6,
+        temporary_candidate_stage_cap_bytes: 24576,
+        temporary_parallel_paper_stage_cap_bytes: {
+          paper_decision_events: 24576,
+          a_class_decision_events: 24576,
+          opportunity_events: 26272,
+        },
+        temporary_paper_decision_stage_cap_bytes: 24576,
+        candidate_stage_residual_share: 0.25,
+        parallel_paper_stage_residual_shares: {
+          paper_decision_events: 0.30,
+          a_class_decision_events: 0.30,
+          opportunity_events: 0.15,
+        },
+        paper_decision_stage_residual_share: 0.30,
         candidate_stage_budget_mode: 'shared_residual_disk_after_output_and_reserve',
         candidate_stage_minimum_cap_bytes: 12288,
+        parallel_paper_stage_minimum_cap_bytes: 12288,
         paper_decision_stage_minimum_cap_bytes: 12288,
         estimated_peak_working_bytes: 110000,
         estimated_free_after_bytes: 110000,
@@ -1754,14 +1775,76 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           ...databaseReport('paper'),
           source_read_lock_duration_sec: 3.33,
           main_source_read_lock_duration_sec: 3.33,
+          parallel_paper_source_read_lock_duration_sec: {
+            paper_decision_events: 2.5,
+            a_class_decision_events: 2.75,
+            opportunity_events: 2.25,
+          },
           paper_decision_source_read_lock_duration_sec: 2.5,
+          parallel_paper_stage_count: 3,
+          parallel_paper_stages_all_pinned: true,
+          parallel_paper_stages_all_merged_after_source_read_lock_release: true,
+          parallel_paper_stages_all_removed_before_publish: true,
+          parallel_paper_stages: {
+            paper_decision_events: {
+              schema_version: 'parallel_paper_event_stage.v1',
+              role: 'paper_decision_events_parallel_stage',
+              stage_size_bytes: 20000,
+              stage_budget_bytes: 24576,
+              stage_page_size: 4096,
+              rows_copied: 4100,
+              rows_merged: 4100,
+              merge_duration_sec: 0.25,
+              source_read_lock_duration_sec: 2.5,
+              source_read_lock_budget_passed: true,
+              merged_after_source_read_lock_release: true,
+              removed_before_publish: true,
+              quick_check: ['ok'],
+              full_fidelity_row_copy: true,
+              payload_semantics_preserved: true,
+            },
+            a_class_decision_events: {
+              schema_version: 'parallel_paper_event_stage.v1',
+              role: 'a_class_decision_events_parallel_stage',
+              stage_size_bytes: 18000,
+              stage_budget_bytes: 24576,
+              stage_page_size: 4096,
+              rows_copied: 3000,
+              rows_merged: 3000,
+              merge_duration_sec: 0.20,
+              source_read_lock_duration_sec: 2.75,
+              source_read_lock_budget_passed: true,
+              merged_after_source_read_lock_release: true,
+              removed_before_publish: true,
+              quick_check: ['ok'],
+              full_fidelity_row_copy: true,
+              payload_semantics_preserved: true,
+            },
+            opportunity_events: {
+              schema_version: 'parallel_paper_event_stage.v1',
+              role: 'opportunity_events_parallel_stage',
+              stage_size_bytes: 16000,
+              stage_budget_bytes: 26272,
+              stage_page_size: 4096,
+              rows_copied: 2000,
+              rows_merged: 2000,
+              merge_duration_sec: 0.15,
+              source_read_lock_duration_sec: 2.25,
+              source_read_lock_budget_passed: true,
+              merged_after_source_read_lock_release: true,
+              removed_before_publish: true,
+              quick_check: ['ok'],
+              full_fidelity_row_copy: true,
+              payload_semantics_preserved: true,
+            },
+          },
           paper_decision_parallel_stage_used: true,
-          paper_decision_parallel_stage_schema_version: 'paper_decision_events_parallel_stage.v1',
+          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v1',
           paper_decision_parallel_read_view_pinned: true,
           paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
           paper_decision_parallel_stage_removed_before_publish: true,
           paper_decision_parallel_stage_size_bytes: 20000,
-          paper_decision_parallel_stage_budget_bytes: 59040,
+          paper_decision_parallel_stage_budget_bytes: 24576,
           paper_decision_parallel_stage_page_size: 4096,
           paper_decision_parallel_stage_rows_merged: 4100,
           paper_decision_parallel_stage_merge_duration_sec: 0.25,
@@ -1774,6 +1857,16 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             {
               role: 'paper_decision_events_parallel_stage',
               pinned_midpoint_epoch: snapshotTs - 0.05,
+              source_read_lock_limit_sec: 300,
+            },
+            {
+              role: 'a_class_decision_events_parallel_stage',
+              pinned_midpoint_epoch: snapshotTs,
+              source_read_lock_limit_sec: 300,
+            },
+            {
+              role: 'opportunity_events_parallel_stage',
+              pinned_midpoint_epoch: snapshotTs + 0.05,
               source_read_lock_limit_sec: 300,
             },
           ],
@@ -1875,7 +1968,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 4100,
               parallel_stage: {
-                schema_version: 'paper_decision_events_parallel_stage.v1',
+                schema_version: 'parallel_paper_event_stage.v1',
+                role: 'paper_decision_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
                 stage_rows_copied: 4100,
@@ -1883,6 +1977,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
+                stage_size_bytes: 20000,
+                stage_budget_bytes: 24576,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -1901,6 +1997,21 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 3000,
+              parallel_stage: {
+                schema_version: 'parallel_paper_event_stage.v1',
+                role: 'a_class_decision_events_parallel_stage',
+                full_fidelity_row_copy: true,
+                payload_semantics_preserved: true,
+                stage_rows_copied: 3000,
+                rows_merged: 3000,
+                row_count_matched: true,
+                quick_check: ['ok'],
+                stage_page_size: 4096,
+                stage_size_bytes: 18000,
+                stage_budget_bytes: 24576,
+                source_read_lock_budget_passed: true,
+                merge_started_after_source_read_view_release: true,
+              },
             },
             opportunity_events: {
               included: true,
@@ -1916,6 +2027,21 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 2000,
+              parallel_stage: {
+                schema_version: 'parallel_paper_event_stage.v1',
+                role: 'opportunity_events_parallel_stage',
+                full_fidelity_row_copy: true,
+                payload_semantics_preserved: true,
+                stage_rows_copied: 2000,
+                rows_merged: 2000,
+                row_count_matched: true,
+                quick_check: ['ok'],
+                stage_page_size: 4096,
+                stage_size_bytes: 16000,
+                stage_budget_bytes: 26272,
+                source_read_lock_budget_passed: true,
+                merge_started_after_source_read_view_release: true,
+              },
             },
           },
         },
@@ -1974,8 +2100,8 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.manifest_contract.indexed_watermarks_passed, true);
   assert.equal(health.manifest_contract.pinned_read_view_lineage_passed, true);
   assert.equal(health.pinned_read_view_lineage.passed, true);
-  assert.equal(health.pinned_read_view_lineage.actual_count, 5);
-  assert.equal(health.pinned_read_view_lineage.recomputed_skew_sec, 0.25);
+  assert.equal(health.pinned_read_view_lineage.actual_count, 7);
+  assert.equal(health.pinned_read_view_lineage.recomputed_skew_sec, 0.35);
   assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 36120);
   assert.equal(health.indexed_watermarks.candidate_shadow_observations.passed, true);
   assert.equal(
@@ -1986,12 +2112,18 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.consecutive_failure_count, 0);
   assert.equal(health.next_attempt_delay_sec, 21600);
   assert.equal(health.snapshot_files.paper.size_matches_manifest, true);
+  assert.equal(health.manifest_contract.parallel_paper_stages_passed, true);
+  assert.equal(health.parallel_paper_stages.passed, true);
+  assert.equal(health.parallel_paper_stages.stage_count, 3);
+  assert.equal(health.parallel_paper_stages.pinned_read_view_count, 4);
+  assert.equal(health.parallel_paper_stages.stages.a_class_decision_events.passed, true);
+  assert.equal(health.parallel_paper_stages.stages.opportunity_events.passed, true);
   assert.equal(health.manifest_contract.paper_decision_parallel_stage_passed, true);
   assert.equal(health.parallel_paper_decision_stage.passed, true);
   assert.equal(health.parallel_paper_decision_stage.rows_copied, 4100);
   assert.equal(health.parallel_paper_decision_stage.rows_merged, 4100);
   assert.equal(health.parallel_paper_decision_stage.stage_page_size, 4096);
-  assert.equal(health.parallel_paper_decision_stage.pinned_read_view_count, 2);
+  assert.equal(health.parallel_paper_decision_stage.pinned_read_view_count, 4);
   assert.equal(health.parallel_paper_decision_stage.stage_removed_before_publish, true);
   assert.equal(health.authoritative_consumer_preflight.matched_current_bundle, true);
   assert.equal(health.promotion_allowed, false);
@@ -2271,6 +2403,28 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.ok(
     paperDecisionBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
   );
+
+  for (const table of ['a_class_decision_events', 'opportunity_events']) {
+    const parallelStageManifest = structuredClone(fixture.manifestPayload);
+    parallelStageManifest.databases.paper.parallel_paper_stages[table].rows_merged += 1;
+    parallelStageManifest.databases.paper.parallel_paper_stages[table].removed_before_publish = false;
+    parallelStageManifest.databases.paper.selected_tables[table].parallel_stage.row_count_matched = false;
+    const parallelStageBlocked = readEvaluatorSnapshotWorkerHealth({
+      ...base,
+      manifestPayload: parallelStageManifest,
+    });
+    assert.equal(parallelStageBlocked.status, 'contract_blocked');
+    assert.equal(parallelStageBlocked.consumer_ready, false);
+    assert.equal(
+      parallelStageBlocked.manifest_contract.parallel_paper_stages_passed,
+      false,
+    );
+    assert.equal(parallelStageBlocked.parallel_paper_stages.passed, false);
+    assert.equal(parallelStageBlocked.parallel_paper_stages.stages[table].passed, false);
+    assert.ok(
+      parallelStageBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+    );
+  }
 
   const shaBlocked = readEvaluatorSnapshotWorkerHealth({
     ...base,
