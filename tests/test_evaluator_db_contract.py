@@ -18,6 +18,7 @@ from evaluator_db_contract import (  # noqa: E402
     evaluator_db_source_status,
     evaluator_snapshot_bundle_lease,
     evaluator_snapshot_bundle_status,
+    evaluator_snapshot_provenance,
     require_evaluator_db_source,
     require_evaluator_snapshot_bundle,
     sha256_file,
@@ -32,7 +33,11 @@ def create_live_sources(root):
         "paper": (
             "paper_trades.db",
             "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_obs_observed "
+            "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_virtual_observed "
+            "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
@@ -58,13 +63,36 @@ def create_valid_bundle(tmp_path, monkeypatch):
     sources = create_live_sources(live)
     monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
     out = live / "agent_evidence"
-    build_snapshot_bundle(
+    manifest = build_snapshot_bundle(
         sources=sources,
         out_root=str(out),
         repo_root=str(ROOT),
         max_skew_sec=30,
         min_free_after_gib=0,
         snapshot_id="20260101T000000Z-1234abcd",
+    )
+    manifest_path = (
+        out / "snapshots" / str(manifest["snapshot_id"]) / "manifest.json"
+    ).resolve()
+    (out / "snapshot_status.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
+                "status": "completed",
+                "accepted": True,
+                "snapshot_id": manifest["snapshot_id"],
+                "last_success_at": "2026-01-01T00:00:00Z",
+                "last_failure_at": None,
+                "last_failure_code": None,
+                "last_accepted_snapshot": {
+                    "snapshot_id": manifest["snapshot_id"],
+                    "manifest_path": str(manifest_path),
+                    "manifest_sha256": sha256_file(manifest_path),
+                },
+                "promotion_allowed": False,
+            }
+        ),
+        encoding="utf-8",
     )
     return live, sources, out
 
@@ -132,6 +160,20 @@ def test_valid_cross_db_snapshot_bundle_is_required(tmp_path, monkeypatch):
 
     assert status["accepted"] is True
     assert status["snapshot_id"] == "20260101T000000Z-1234abcd"
+    assert status["manifest_sha256"] == sha256_file(out / "current" / "manifest.json")
+    provenance = evaluator_snapshot_provenance(status)
+    assert provenance["schema_version"] == "evaluator_snapshot_provenance.v1"
+    assert provenance["accepted"] is True
+    assert provenance["snapshot_id"] == status["snapshot_id"]
+    assert provenance["manifest_sha256"] == status["manifest_sha256"]
+    assert provenance["producer_manifest_sha256"] == status["manifest_sha256"]
+    assert provenance["producer_status_path"] == str(out / "snapshot_status.json")
+    assert provenance["databases"]["paper"]["sha256_matches_manifest"] is True
+    assert provenance["databases"]["paper"]["quick_check"] == ["ok"]
+    assert provenance["promotion_allowed"] is False
+    assert provenance["strategy_change_allowed"] is False
+    assert provenance["automatic_runtime_change_allowed"] is False
+    assert provenance["paper_enablement_allowed"] is False
 
     stale = evaluator_snapshot_bundle_status(
         signal_db=str(out / "current" / "signal.db"),
@@ -156,6 +198,67 @@ def test_valid_cross_db_snapshot_bundle_is_required(tmp_path, monkeypatch):
     )
     assert rejected["accepted"] is False
     assert "active_paper_db_forbidden_for_evaluator" in rejected["blockers"]
+
+
+def test_missing_producer_acceptance_status_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    (out / "snapshot_status.json").unlink()
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_producer_status_missing" in status["blockers"]
+
+
+def test_manifest_rehash_cannot_bypass_producer_acceptance_anchor(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["git_commit"] = "b" * 40
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_producer_manifest_sha256_mismatch" in status["blockers"]
+
+
+def test_producer_acceptance_identity_and_path_must_match_bundle(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    status_path = out / "snapshot_status.json"
+    producer = json.loads(status_path.read_text(encoding="utf-8"))
+    producer["last_accepted_snapshot"]["snapshot_id"] = "different-snapshot"
+    producer["last_accepted_snapshot"]["manifest_path"] = str(
+        out / "snapshots" / "different-snapshot" / "manifest.json"
+    )
+    status_path.write_text(json.dumps(producer), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_producer_snapshot_id_mismatch" in status["blockers"]
+    assert "evaluator_snapshot_producer_manifest_path_mismatch" in status["blockers"]
 
 
 def test_all_active_database_hardlink_aliases_are_rejected(tmp_path, monkeypatch):
@@ -262,6 +365,65 @@ def test_selection_contract_tampering_is_rejected(tmp_path, monkeypatch):
     assert "evaluator_snapshot_future_row_contract_invalid" in status["blockers"]
 
 
+def test_indexed_time_selection_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    selection = manifest["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_observations"
+    ]
+    selection["predicate_strategy"] = "normalized_timestamp"
+    selection["indexed_time_anchor"] = None
+    selection["source_index_name"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_paper_indexed_time_selection_invalid:"
+        "candidate_shadow_observations"
+    ) in status["blockers"]
+
+
+def test_indexed_query_plan_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    selection = manifest["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_observations"
+    ]
+    selection["source_query_plan"] = [
+        "SCAN src.candidate_shadow_observations"
+    ]
+    selection["source_query_plan_uses_index"] = False
+    selection["source_query_plan_uses_range_search"] = False
+    selection["source_query_plan_full_table_scan_detected"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_paper_indexed_query_plan_invalid:"
+        "candidate_shadow_observations"
+    ) in status["blockers"]
+
+
 def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
     live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
     manifest_path = (out / "current" / "manifest.json").resolve()
@@ -284,6 +446,27 @@ def test_source_read_lock_contract_tampering_is_rejected(tmp_path, monkeypatch):
     assert "evaluator_snapshot_paper_source_read_lock_contract_invalid" in status["blockers"]
 
 
+def test_disk_preflight_tampering_is_rejected(tmp_path, monkeypatch):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["disk_preflight"]["accepted"] = False
+    manifest["disk_preflight"]["estimated_free_after_bytes"] = 0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_disk_preflight_failed" in status["blockers"]
+
+
 def test_candidate_payload_projection_tampering_is_rejected(tmp_path, monkeypatch):
     live, sources, out = create_valid_bundle(tmp_path, monkeypatch)
     paper = sqlite3.connect(sources["paper"])
@@ -299,6 +482,10 @@ def test_candidate_payload_projection_tampering_is_rejected(tmp_path, monkeypatc
           UNIQUE(signal_id, candidate_id)
         )
         """
+    )
+    paper.execute(
+        "CREATE INDEX idx_candidate_shadow_obs_observed "
+        "ON candidate_shadow_observations(observed_at)"
     )
     paper.execute(
         "INSERT INTO candidate_shadow_observations VALUES (1,1,'current_all',?,?)",

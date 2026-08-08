@@ -46,8 +46,10 @@ import {
   readPaperFastLaneHealth,
   readPaperReviewSnapshotHealth,
   readRuntimeFinalEvidenceHealth,
+  readEvaluatorSnapshotWorkerHealth,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
+  readV27ReadModelWorkerHealth,
   LOG_REDACTION_PATTERN_SET,
   redactLogMessage,
   V27_API_RESPONSE_ENVELOPE_VERSION,
@@ -1334,6 +1336,34 @@ test('v27 read model health blocks unsafe projection statuses even if stale payl
   assert.equal(health.health.dashboard_safe, false);
 });
 
+test('v27 read-model readers reject mismatched artifact schemas', () => {
+  const dir = fs.mkdtempSync(join(os.tmpdir(), 'v27-schema-mismatch-'));
+  const healthPath = join(dir, 'denominator_freshness.json');
+  const modeReadinessPath = join(dir, 'mode_readiness.json');
+  fs.writeFileSync(healthPath, JSON.stringify({
+    refresh_schema_version: 'v2.6.0.read_model_refresh.v1',
+    dashboard_safe: true,
+    health: { dashboard_safe: true, normal_tiny_ready: true },
+  }));
+  fs.writeFileSync(modeReadinessPath, JSON.stringify({
+    matrix_schema_version: 'v2.6.0.mode_readiness.v1',
+    highest_allowed_mode: 'normal_tiny',
+    health: { normal_tiny_ready: true },
+  }));
+
+  const health = readV27DenominatorReadModelHealth({ healthPath });
+  const readiness = readV27ModeReadiness({ modeReadinessPath });
+
+  assert.equal(health.available, false);
+  assert.equal(health.dashboard_safe, false);
+  assert.deepEqual(health.blocking_reasons, ['v27_read_model_health_schema_mismatch']);
+  assert.equal(health.health.status, 'v27_read_model_health_schema_mismatch');
+  assert.equal(readiness.available, false);
+  assert.equal(readiness.highest_allowed_mode, null);
+  assert.deepEqual(readiness.blocking_reasons, ['v27_mode_readiness_schema_mismatch']);
+  assert.equal(readiness.health.status, 'v27_mode_readiness_schema_mismatch');
+});
+
 test('v27 mode readiness exposes materialized matrix and missing state', () => {
   const missingDir = fs.mkdtempSync(join(os.tmpdir(), 'v27-mode-readiness-missing-'));
   const missing = readV27ModeReadiness({
@@ -1396,6 +1426,514 @@ test('v27 mode readiness exposes materialized matrix and missing state', () => {
   assert.equal(readiness.basic_readiness.health.basic_contracts_ready, true);
   assert.equal(readiness.projection_consumer.health.projection_consumer_ready, true);
   assert.equal(readiness.contract_statuses.PaperModeSafetyBoundary.evidence.runtime_evidence_present, true);
+});
+
+test('v27 read-model worker health treats readiness blockers as healthy governance', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const recentMtime = '2026-08-08T03:59:00.000Z';
+  const worker = readV27ReadModelWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 12345,
+    pidAlive: true,
+    intervalSec: 60,
+    initialDelaySec: 120,
+    maxAgeMinutes: 5,
+    lockPid: 12345,
+    lockPidAlive: true,
+    statusPayload: {
+      schema_version: 'v2.7.0.read_model_worker_status.v1',
+      running: true,
+      pid: 12345,
+      status: 'readiness_blocked',
+      last_refresh_status: 'readiness_blocked',
+      started_at: '2026-08-08T03:50:00.000Z',
+      last_attempt_at: '2026-08-08T03:58:30.000Z',
+      last_success_at: '2026-08-08T03:59:00.000Z',
+      last_error_at: null,
+      last_error: null,
+      error_count: 0,
+    },
+    statusArtifact: { available: true, path: '/tmp/status.json', mtime: recentMtime, size_bytes: 100 },
+    denominatorArtifact: { available: true, path: '/tmp/denominator.json', mtime: recentMtime, size_bytes: 100 },
+    readinessArtifact: { available: true, path: '/tmp/readiness.json', mtime: recentMtime, size_bytes: 100 },
+    denominatorHealth: {
+      available: true,
+      dashboard_safe: true,
+      blocking_reasons: [],
+      health: { status: 'read_model_refresh_ok' },
+    },
+    modeReadiness: {
+      available: true,
+      highest_allowed_mode: 'observe_only',
+      health: {
+        status: 'mode_readiness_evaluated',
+        observe_only_ready: true,
+        shadow_ready: false,
+        ultra_tiny_ready: false,
+        normal_tiny_ready: false,
+      },
+      modes: {
+        observe_only: { blocking_contracts: [] },
+        shadow: { blocking_contracts: ['ShadowContract'] },
+        ultra_tiny: { blocking_contracts: ['UltraContract'] },
+        normal_tiny: { blocking_contracts: ['NormalContract'] },
+      },
+    },
+  });
+
+  assert.equal(worker.public_safe, true);
+  assert.equal(worker.running, true);
+  assert.equal(worker.pid_alive, true);
+  assert.equal(worker.lock_pid_alive, true);
+  assert.equal(worker.status, 'readiness_blocked');
+  assert.equal(worker.healthy, true);
+  assert.equal(worker.degraded, false);
+  assert.equal(worker.fresh, true);
+  assert.equal(worker.artifact_age_minutes, 1);
+  assert.equal(worker.mode_readiness.highest_allowed_mode, 'observe_only');
+  assert.equal(worker.mode_readiness.normal_tiny_ready, false);
+  assert.deepEqual(worker.mode_readiness.blocking_contract_counts, {
+    observe_only: 0,
+    shadow: 1,
+    ultra_tiny: 1,
+    normal_tiny: 1,
+  });
+});
+
+test('v27 read-model worker health covers disabled starting invalid and refresh-error states', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const disabled = readV27ReadModelWorkerHealth({
+    nowMs,
+    enabled: false,
+    pidAlive: false,
+    lockPidAlive: false,
+    statusPayload: null,
+    statusArtifact: { available: false },
+    denominatorArtifact: { available: false },
+    readinessArtifact: { available: false },
+    denominatorHealth: { available: false, dashboard_safe: false, health: {} },
+    modeReadiness: { available: false, health: {}, modes: {} },
+  });
+  assert.equal(disabled.status, 'disabled');
+  assert.equal(disabled.degraded, false);
+
+  const starting = readV27ReadModelWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    intervalSec: 60,
+    initialDelaySec: 120,
+    maxAgeMinutes: 5,
+    statusPayload: {
+      schema_version: 'v2.7.0.read_model_worker_status.v1',
+      running: true,
+      pid: 33333,
+      started_at: '2026-08-08T03:59:00.000Z',
+      status: 'starting',
+      error_count: 0,
+    },
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:00.000Z' },
+    denominatorArtifact: { available: false },
+    readinessArtifact: { available: false },
+    denominatorHealth: { available: false, dashboard_safe: false, health: {} },
+    modeReadiness: { available: false, health: {}, modes: {} },
+  });
+  assert.equal(starting.status, 'starting');
+  assert.equal(starting.degraded, false);
+
+  const invalid = readV27ReadModelWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: { error_code: 'agent_artifact_json_parse_failed', error: 'bad json' },
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:00.000Z' },
+    denominatorArtifact: { available: false },
+    readinessArtifact: { available: false },
+    denominatorHealth: { available: false, dashboard_safe: false, error: 'schema mismatch', health: {} },
+    modeReadiness: { available: false, error: 'schema mismatch', health: {}, modes: {} },
+  });
+  assert.equal(invalid.status, 'artifact_invalid');
+  assert.equal(invalid.degraded, true);
+
+  const refreshError = readV27ReadModelWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    maxAgeMinutes: 5,
+    statusPayload: {
+      schema_version: 'v2.7.0.read_model_worker_status.v1',
+      running: true,
+      pid: 33333,
+      started_at: '2026-08-08T03:40:00.000Z',
+      last_success_at: '2026-08-08T03:50:00.000Z',
+      last_error_at: '2026-08-08T03:59:00.000Z',
+      last_refresh_status: 'refresh_error',
+      last_error: 'RuntimeError:unit',
+      error_count: 1,
+    },
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:00.000Z' },
+    denominatorArtifact: { available: true, mtime: '2026-08-08T03:59:00.000Z' },
+    readinessArtifact: { available: true, mtime: '2026-08-08T03:59:00.000Z' },
+    denominatorHealth: { available: true, dashboard_safe: true, health: {} },
+    modeReadiness: { available: true, health: { normal_tiny_ready: false }, modes: {} },
+  });
+  assert.equal(refreshError.status, 'refresh_error');
+  assert.equal(refreshError.degraded, true);
+});
+
+test('v27 read-model worker health distinguishes stopped and stale workers', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const base = {
+    nowMs,
+    enabled: true,
+    pid: 22222,
+    intervalSec: 60,
+    initialDelaySec: 0,
+    maxAgeMinutes: 5,
+    lockPid: 22222,
+    statusPayload: {
+      schema_version: 'v2.7.0.read_model_worker_status.v1',
+      running: true,
+      pid: 22222,
+      started_at: '2026-08-08T03:40:00.000Z',
+      last_success_at: '2026-08-08T03:41:00.000Z',
+      last_refresh_status: 'readiness_blocked',
+      error_count: 0,
+    },
+    statusArtifact: { available: true, path: '/tmp/status.json', mtime: '2026-08-08T03:59:00.000Z', size_bytes: 100 },
+    denominatorHealth: {
+      available: true,
+      dashboard_safe: true,
+      blocking_reasons: [],
+      health: { status: 'read_model_refresh_ok' },
+    },
+    modeReadiness: {
+      available: true,
+      highest_allowed_mode: 'observe_only',
+      health: { status: 'mode_readiness_evaluated', normal_tiny_ready: false },
+      modes: {},
+    },
+  };
+
+  const stopped = readV27ReadModelWorkerHealth({
+    ...base,
+    pidAlive: false,
+    lockPidAlive: false,
+    denominatorArtifact: { available: true, path: '/tmp/denominator.json', mtime: '2026-08-08T03:59:00.000Z', size_bytes: 100 },
+    readinessArtifact: { available: true, path: '/tmp/readiness.json', mtime: '2026-08-08T03:59:00.000Z', size_bytes: 100 },
+  });
+  assert.equal(stopped.status, 'worker_not_running');
+  assert.equal(stopped.healthy, false);
+  assert.equal(stopped.degraded, true);
+
+  const stale = readV27ReadModelWorkerHealth({
+    ...base,
+    pidAlive: true,
+    lockPidAlive: true,
+    denominatorArtifact: { available: true, path: '/tmp/denominator.json', mtime: '2026-08-08T03:40:00.000Z', size_bytes: 100 },
+    readinessArtifact: { available: true, path: '/tmp/readiness.json', mtime: '2026-08-08T03:40:00.000Z', size_bytes: 100 },
+  });
+  assert.equal(stale.status, 'artifact_stale');
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.degraded, true);
+});
+
+function evaluatorSnapshotHealthFixture(nowMs) {
+  const snapshotId = '20260808T035900Z-1234abcd';
+  const snapshotTs = Math.floor(nowMs / 1000) - 60;
+  const databaseReport = (name) => ({
+    snapshot_path: `/snapshot/${name}.db`,
+    snapshot_size_bytes: 100,
+    quick_check: ['ok'],
+    snapshot_sha256: 'a'.repeat(64),
+    missing_required_tables: [],
+    missing_required_watermarks: [],
+    source_read_lock_budget_passed: true,
+    database_budget_passed: true,
+  });
+  return {
+    statusPayload: {
+      schema_version: 'cross_db_evaluator_snapshot_worker_status.v1',
+      pid: 33333,
+      running: true,
+      attempt_running: false,
+      status: 'completed',
+      started_at: '2026-08-08T03:45:00.000Z',
+      last_attempt_at: '2026-08-08T03:59:00.000Z',
+      last_success_at: '2026-08-08T03:59:30.000Z',
+      error_count: 0,
+      accepted: true,
+      snapshot_id: snapshotId,
+      last_accepted_snapshot: {
+        snapshot_id: snapshotId,
+        manifest_sha256: 'd'.repeat(64),
+        max_source_read_lock_duration_sec: 3.33,
+      },
+      promotion_allowed: false,
+    },
+    manifestPayload: {
+      schema_version: 'cross_db_evaluator_snapshot.v3',
+      snapshot_id: snapshotId,
+      snapshot_ts: snapshotTs,
+      git_commit: 'f'.repeat(40),
+      accepted: true,
+      immutable: true,
+      quick_checks_passed: true,
+      required_tables_present: true,
+      required_watermarks_present: true,
+      cross_database_time_skew_passed: true,
+      cross_database_time_skew_sec: 0.25,
+      max_allowed_cross_database_time_skew_sec: 30,
+      source_read_lock_budget_passed: true,
+      max_source_read_lock_sec: 300,
+      indexes_built_after_source_read_lock_release: true,
+      source_mutation_free: true,
+      bounded_selective_snapshot: true,
+      selection_upper_bounds_consistent: true,
+      output_cap_passed: true,
+      output_size_bytes: 1000,
+      output_cap_bytes: 10000,
+      partial_artifacts_absent: true,
+      active_database_reads_allowed_for_autoloop: false,
+      disk_preflight: {
+        accepted: true,
+        estimated_free_after_bytes: 100000,
+        required_reserve_bytes: 10000,
+      },
+      databases: {
+        signal: databaseReport('signal'),
+        paper: {
+          ...databaseReport('paper'),
+          selected_tables: {
+            candidate_shadow_observations: {
+              included: true,
+              predicate_strategy: 'indexed_epoch_seconds',
+              indexed_time_anchor: 'observed_at',
+              source_index_name: 'idx_candidate_shadow_obs_observed',
+              source_index_columns: ['observed_at'],
+              source_index_partial: false,
+              source_query_plan: [
+                'SEARCH src.candidate_shadow_observations USING COVERING INDEX idx_candidate_shadow_obs_observed (observed_at>? AND observed_at<?)',
+              ],
+              source_query_plan_uses_index: true,
+              source_query_plan_uses_range_search: true,
+              source_query_plan_full_table_scan_detected: false,
+              rows_copied: 36120,
+            },
+            candidate_shadow_virtual_trades: {
+              included: true,
+              predicate_strategy: 'indexed_epoch_seconds',
+              indexed_time_anchor: 'observed_at',
+              source_index_name: 'idx_candidate_shadow_virtual_observed',
+              source_index_columns: ['observed_at'],
+              source_index_partial: false,
+              source_query_plan: [
+                'SEARCH src.candidate_shadow_virtual_trades USING COVERING INDEX idx_candidate_shadow_virtual_observed (observed_at>? AND observed_at<?)',
+              ],
+              source_query_plan_uses_index: true,
+              source_query_plan_uses_range_search: true,
+              source_query_plan_full_table_scan_detected: false,
+              rows_copied: 13392,
+            },
+          },
+        },
+        raw: databaseReport('raw'),
+        kline: databaseReport('kline'),
+      },
+      promotion_allowed: false,
+    },
+    databaseArtifacts: {
+      signal: { available: true, size_bytes: 100 },
+      paper: { available: true, size_bytes: 100 },
+      raw: { available: true, size_bytes: 100 },
+      kline: { available: true, size_bytes: 100 },
+    },
+    authoritativePreflight: {
+      schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+      checked_at: '2026-08-08T03:59:30.000Z',
+      accepted: true,
+      snapshot_id: snapshotId,
+      manifest_sha256: 'd'.repeat(64),
+      producer_manifest_sha256: 'd'.repeat(64),
+      blockers: [],
+      promotion_allowed: false,
+    },
+  };
+}
+
+test('evaluator snapshot worker health accepts only fresh matching indexed bundles', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const health = readEvaluatorSnapshotWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: fixture.statusPayload,
+    manifestPayload: fixture.manifestPayload,
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 100 },
+    manifestArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 1000 },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  });
+
+  assert.equal(health.status, 'producer_accepted');
+  assert.equal(health.healthy, true);
+  assert.equal(health.degraded, false);
+  assert.equal(health.consumer_ready, true);
+  assert.equal(health.bundle_candidate_available, true);
+  assert.equal(health.consumer_state, 'authoritative_preflight_current');
+  assert.equal(health.snapshot_identity_matched, true);
+  assert.equal(health.snapshot_fresh, true);
+  assert.equal(health.manifest_contract.indexed_selection_passed, true);
+  assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 36120);
+  assert.equal(health.source_read_lock.max_duration_sec, 3.33);
+  assert.equal(health.snapshot_files.paper.size_matches_manifest, true);
+  assert.equal(health.authoritative_consumer_preflight.matched_current_bundle, true);
+  assert.equal(health.promotion_allowed, false);
+
+  const producerOnly = readEvaluatorSnapshotWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: fixture.statusPayload,
+    manifestPayload: fixture.manifestPayload,
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 100 },
+    manifestArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 1000 },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: null,
+  });
+  assert.equal(producerOnly.status, 'producer_accepted');
+  assert.equal(producerOnly.bundle_candidate_available, true);
+  assert.equal(producerOnly.consumer_ready, false);
+  assert.equal(producerOnly.consumer_state, 'authoritative_preflight_required');
+});
+
+test('evaluator snapshot worker health distinguishes starting failed stale and contract-blocked states', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const base = {
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: fixture.statusPayload,
+    manifestPayload: fixture.manifestPayload,
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 100 },
+    manifestArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 1000 },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  };
+
+  const starting = readEvaluatorSnapshotWorkerHealth({
+    nowMs,
+    enabled: true,
+    processUptimeSec: 10,
+    startupGraceSec: 600,
+    pidAlive: false,
+    lockPidAlive: false,
+    lockPid: null,
+    statusPayload: null,
+    manifestPayload: null,
+    statusArtifact: { available: false },
+    manifestArtifact: { available: false },
+  });
+  assert.equal(starting.status, 'starting');
+  assert.equal(starting.degraded, false);
+
+  const failed = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    statusPayload: {
+      ...fixture.statusPayload,
+      status: 'failed',
+      accepted: false,
+      last_failure_code: 'snapshot_source_read_lock_budget_exceeded',
+    },
+  });
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.degraded, true);
+  assert.equal(failed.consumer_ready, true);
+  assert.ok(failed.blockers.includes('snapshot_source_read_lock_budget_exceeded'));
+
+  const stale = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    nowMs: nowMs + 9 * 3600 * 1000,
+    maxAgeSec: 8 * 3600,
+  });
+  assert.equal(stale.status, 'stale');
+  assert.equal(stale.snapshot_fresh, false);
+
+  const contractBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: {
+      ...fixture.manifestPayload,
+      disk_preflight: { ...fixture.manifestPayload.disk_preflight, accepted: false },
+    },
+  });
+  assert.equal(contractBlocked.status, 'contract_blocked');
+  assert.equal(contractBlocked.consumer_ready, false);
+  assert.ok(contractBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'));
+
+  const shaBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestFileSha256: 'e'.repeat(64),
+  });
+  assert.equal(shaBlocked.status, 'contract_blocked');
+  assert.equal(shaBlocked.manifest_sha256_matched, false);
+
+  const futureBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: {
+      ...fixture.manifestPayload,
+      snapshot_ts: Math.floor(nowMs / 1000) + 61,
+    },
+  });
+  assert.equal(futureBlocked.status, 'contract_blocked');
+  assert.equal(futureBlocked.snapshot_timestamp_valid, false);
+  assert.equal(futureBlocked.snapshot_future_skew_sec, 61);
+  assert.ok(futureBlocked.blockers.includes('evaluator_snapshot_future_timestamp'));
+
+  const missingFile = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    databaseArtifacts: {
+      ...fixture.databaseArtifacts,
+      paper: { available: false },
+    },
+  });
+  assert.equal(missingFile.status, 'contract_blocked');
+  assert.equal(missingFile.bundle_candidate_available, false);
+  assert.ok(missingFile.blockers.includes('evaluator_snapshot_paper_file_missing'));
+
+  const sizeMismatch = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    databaseArtifacts: {
+      ...fixture.databaseArtifacts,
+      raw: { available: true, size_bytes: 99 },
+    },
+  });
+  assert.equal(sizeMismatch.status, 'contract_blocked');
+  assert.equal(sizeMismatch.snapshot_files.raw.size_matches_manifest, false);
+  assert.ok(sizeMismatch.blockers.includes('evaluator_snapshot_raw_size_mismatch'));
 });
 
 test('v27 KPI proof status separates token gate from KPI failure', () => {

@@ -12,6 +12,17 @@
     "require_post": true,
     "require_outbox_rationale": true
   },
+  "internal_observability": {
+    "allowed_target_stores": [
+      "sqlite:raw_signal_outcomes"
+    ],
+    "allowed_mode_gates": [
+      "observe_only"
+    ],
+    "require_allowed_in_paper_mode": true,
+    "forbid_http_entry_points": true,
+    "rationale": "Internal raw-path and raw-outcome materialization is rebuildable measurement evidence. It cannot create a paper/live entry and remains separately registered from authenticated break-glass mutations."
+  },
   "approved_mutation_paths": [
     {
       "write_path_id": "dashboard.paper_trades.cleanup_open_positions",

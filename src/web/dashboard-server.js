@@ -21,7 +21,10 @@ import {
   finalBlockerFromTrade,
 } from './lifecycle-summary-utils.js';
 import { summarizePremiumSignalGateHealth } from './data-source-health-utils.js';
-import { runEvaluatorSnapshotPreflight } from './evaluator-snapshot-preflight.js';
+import {
+  evaluatorSnapshotProvenance,
+  runEvaluatorSnapshotPreflight,
+} from './evaluator-snapshot-preflight.js';
 import {
   buildTradeReplay,
   summarizeTradeReplays,
@@ -2068,6 +2071,16 @@ function getAgentCaptureEvidenceManifestPath() {
   return process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST || join(getAgentCaptureEvidenceRoot(), 'manifest.json');
 }
 
+let evaluatorSnapshotAuthoritativePreflightState = {
+  schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+  checked_at: null,
+  accepted: false,
+  snapshot_id: null,
+  manifest_sha256: null,
+  blockers: ['evaluator_snapshot_authoritative_preflight_not_run'],
+  promotion_allowed: false,
+};
+
 function agentCaptureEvidenceDbPreflight() {
   const candidates = {
     signal: resolve(getAgentCaptureEvidenceSignalDbPath()),
@@ -2082,7 +2095,8 @@ function agentCaptureEvidenceDbPreflight() {
     kline: resolve(getKlineCacheDbPath()),
   };
   const manifestPath = resolve(getAgentCaptureEvidenceManifestPath());
-  return runEvaluatorSnapshotPreflight({
+  const producerStatusPath = resolve(evaluatorSnapshotStatusPath());
+  const result = runEvaluatorSnapshotPreflight({
     pythonBin: process.env.PYTHON_BIN || 'python3',
     contractScript: join(projectRoot, 'scripts', 'evaluator_db_contract.py'),
     repoRoot: projectRoot,
@@ -2090,9 +2104,21 @@ function agentCaptureEvidenceDbPreflight() {
     candidates,
     live,
     manifestPath,
+    producerStatusPath,
     maxAgeSec: Number(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || 28800),
     timeoutMs: Number(process.env.EVALUATOR_SNAPSHOT_PREFLIGHT_TIMEOUT_MS || 300000),
   });
+  evaluatorSnapshotAuthoritativePreflightState = {
+    schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+    checked_at: new Date().toISOString(),
+    accepted: result.accepted === true,
+    snapshot_id: result.snapshot_id || null,
+    manifest_sha256: result.manifest_sha256 || null,
+    producer_manifest_sha256: result.producer_status?.last_accepted_snapshot?.manifest_sha256 || null,
+    blockers: Array.isArray(result.blockers) ? result.blockers.map(String) : [],
+    promotion_allowed: false,
+  };
+  return result;
 }
 
 function getRawSignalOutcomesDbPath() {
@@ -2488,6 +2514,26 @@ export function buildAgentLatestStatus(options = {}) {
   const paths = agentCaptureArtifactPaths();
   const verdict = safeReadAgentJson(paths.verdict);
   const runner = readAgentCaptureLoopRunnerStatus();
+  const evaluatorWorker = readEvaluatorSnapshotWorkerHealth({ nowMs });
+  const compactSnapshotProvenance = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return {
+      schema_version: value.schema_version || null,
+      accepted: value.accepted === true,
+      snapshot_id: value.snapshot_id || null,
+      snapshot_ts: Number.isFinite(Number(value.snapshot_ts)) ? Number(value.snapshot_ts) : null,
+      manifest_path: value.manifest_path || null,
+      manifest_sha256: value.manifest_sha256 || null,
+      git_commit: value.git_commit || null,
+      consumer_verified_at: value.consumer_verified_at || null,
+      blockers: Array.isArray(value.blockers) ? value.blockers.map(String) : [],
+      promotion_allowed: false,
+    };
+  };
+  const runnerSnapshot = compactSnapshotProvenance(
+    runner.exec_run_provenance?.evaluator_snapshot || runner.evaluator_snapshot,
+  );
+  const verdictSnapshot = compactSnapshotProvenance(verdict?.evaluator_snapshot);
   const status = {
     schema_version: 'agent_latest_status.v1',
     generated_at: new Date(nowMs).toISOString(),
@@ -2506,8 +2552,22 @@ export function buildAgentLatestStatus(options = {}) {
         schema_version: runner.exec_run_provenance.schema_version || null,
         trigger: runner.exec_run_provenance.trigger || null,
         commit: runner.exec_run_provenance.commit || null,
+        evaluator_snapshot: runnerSnapshot,
         guardrails: runner.exec_run_provenance.guardrails || null,
       } : null,
+    },
+    evaluator_snapshot: {
+      worker: evaluatorWorker,
+      runner_provenance: runnerSnapshot,
+      verdict_provenance: verdictSnapshot,
+      lineage_matched: Boolean(
+        runnerSnapshot?.snapshot_id
+        && verdictSnapshot?.snapshot_id
+        && runnerSnapshot.snapshot_id === verdictSnapshot.snapshot_id
+        && runnerSnapshot.manifest_sha256
+        && runnerSnapshot.manifest_sha256 === verdictSnapshot.manifest_sha256
+      ),
+      promotion_allowed: false,
     },
     verdict: compactVerdictSummary(verdict),
     motion_trace: {
@@ -2585,6 +2645,7 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
       paper_enablement_allowed: false,
     };
   }
+  const evaluatorSnapshot = evaluatorSnapshotProvenance(evaluatorDb);
 
   const hours = boundedIntParam(url, 'hours', 24, 1, 168);
   const captureHours = sanitizeCaptureHours(url.searchParams.get('capture_hours') || url.searchParams.get('capture-hours'), hours);
@@ -2680,6 +2741,7 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
       runner_status_path: paths.runner_status,
       log_path: paths.log,
       latest_dir: join(getAgentRunsRoot(), 'latest'),
+      evaluator_snapshot: evaluatorSnapshot,
       guardrails: {
         promotion_allowed: false,
         strategy_change_allowed: false,
@@ -2687,6 +2749,7 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
         paper_enablement_allowed: false,
       },
     },
+    evaluator_snapshot: evaluatorSnapshot,
     promotion_allowed: false,
     strategy_change_allowed: false,
     automatic_runtime_change_allowed: false,
@@ -7538,6 +7601,56 @@ function v27ModeReadinessPath(options = {}) {
   return isAbsolute(raw) ? raw : join(root, raw);
 }
 
+function v27ReadModelWorkerStatusPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.statusPath
+    || process.env.V27_READ_MODEL_WORKER_STATUS_PATH
+    || join(v27ReadModelDir(options), 'v27_read_model_worker_status.json');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function v27ReadModelRefreshLockPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.lockFile || process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock';
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function evaluatorSnapshotRoot(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const dataDir = options.dataDir
+    || process.env.ZEABUR_DATA_DIR
+    || process.env.DATA_DIR
+    || join(root, 'data');
+  const raw = options.outRoot
+    || process.env.EVALUATOR_SNAPSHOT_OUT_ROOT
+    || join(dataDir, 'agent_evidence');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function evaluatorSnapshotStatusPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.statusPath
+    || process.env.EVALUATOR_SNAPSHOT_STATUS
+    || join(evaluatorSnapshotRoot(options), 'snapshot_status.json');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function evaluatorSnapshotManifestPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.manifestPath
+    || process.env.AGENT_CAPTURE_EVIDENCE_MANIFEST
+    || join(evaluatorSnapshotRoot(options), 'current', 'manifest.json');
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
+function evaluatorSnapshotLockPath(options = {}) {
+  const root = options.projectRoot || projectRoot;
+  const raw = options.lockFile
+    || process.env.EVALUATOR_SNAPSHOT_LOCK_FILE
+    || '/tmp/cross-db-evaluator-snapshot.lock';
+  return isAbsolute(raw) ? raw : join(root, raw);
+}
+
 let v27ReadModelManualRefresh = {
   running: false,
   started_at: null,
@@ -7550,6 +7663,14 @@ function triggerV27ReadModelRefresh(options = {}) {
       accepted: false,
       status: 'already_running',
       ...v27ReadModelManualRefresh,
+    };
+  }
+  const continuousWorker = readV27ReadModelWorkerHealth();
+  if (continuousWorker.lock_pid_alive || continuousWorker.running) {
+    return {
+      accepted: false,
+      status: 'continuous_worker_running',
+      worker: continuousWorker,
     };
   }
   const eventLogDir = process.env.V27_EVENT_LOG_DIR || './data/v27_event_log';
@@ -8161,7 +8282,26 @@ export function readV27ModeReadiness(options = {}) {
     };
   }
   try {
-    const payload = normalizeV27ModeReadinessPayload(JSON.parse(fs.readFileSync(path, 'utf8')));
+    const rawPayload = JSON.parse(fs.readFileSync(path, 'utf8'));
+    if (rawPayload?.matrix_schema_version !== 'v2.7.0.mode_readiness.v1') {
+      return {
+        generated_at: generatedAt,
+        available: false,
+        materialized: true,
+        path,
+        highest_allowed_mode: null,
+        blocking_reasons: ['v27_mode_readiness_schema_mismatch'],
+        error: `unexpected matrix_schema_version: ${rawPayload?.matrix_schema_version || '<missing>'}`,
+        health: {
+          observe_only_ready: false,
+          shadow_ready: false,
+          ultra_tiny_ready: false,
+          normal_tiny_ready: false,
+          status: 'v27_mode_readiness_schema_mismatch',
+        },
+      };
+    }
+    const payload = normalizeV27ModeReadinessPayload(rawPayload);
     return {
       generated_at: generatedAt,
       available: true,
@@ -8473,6 +8613,22 @@ export function readV27DenominatorReadModelHealth(options = {}) {
   }
   try {
     const payload = JSON.parse(fs.readFileSync(path, 'utf8'));
+    if (payload?.refresh_schema_version !== 'v2.7.0.read_model_refresh.v1') {
+      return {
+        generated_at: generatedAt,
+        available: false,
+        materialized: true,
+        path,
+        dashboard_safe: false,
+        blocking_reasons: ['v27_read_model_health_schema_mismatch'],
+        error: `unexpected refresh_schema_version: ${payload?.refresh_schema_version || '<missing>'}`,
+        health: {
+          dashboard_safe: false,
+          normal_tiny_ready: false,
+          status: 'v27_read_model_health_schema_mismatch',
+        },
+      };
+    }
     const projectionStatus = payload.projection_status || payload.verifier_report?.projection_status || payload.projection?.health?.status || null;
     const eventLogLatestSeq = payload.event_log_latest_seq ?? payload.verifier_report?.event_log_latest_seq ?? payload.read_model?.event_log_latest_seq ?? null;
     const unsafeProjectionStatuses = new Set(['event_log_invalid', 'not_built', 'seed_empty']);
@@ -8521,6 +8677,599 @@ export function readV27DenominatorReadModelHealth(options = {}) {
       },
     };
   }
+}
+
+export function readV27ReadModelWorkerHealth(options = {}) {
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+  const enabled = options.enabled === undefined
+    ? envFlagValue(process.env.V27_READ_MODEL_REFRESH_WORKER_ENABLED, false)
+    : Boolean(options.enabled);
+  const intervalSec = Math.max(5, Number(options.intervalSec ?? process.env.V27_READ_MODEL_REFRESH_INTERVAL_SEC ?? 60) || 60);
+  const initialDelaySec = Math.max(0, Number(options.initialDelaySec ?? process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC ?? 120) || 0);
+  const maxAgeMinutes = Math.max(1, Number(options.maxAgeMinutes ?? process.env.V27_READ_MODEL_WORKER_MAX_AGE_MINUTES ?? Math.max(5, Math.ceil(intervalSec / 60) * 5)) || 5);
+  const statusPath = v27ReadModelWorkerStatusPath(options);
+  const lockPath = v27ReadModelRefreshLockPath(options);
+  const healthPath = v27DenominatorFreshnessPath(options);
+  const readinessPath = v27ModeReadinessPath(options);
+  const hasOption = (name) => Object.prototype.hasOwnProperty.call(options, name);
+  const statusPayload = hasOption('statusPayload') ? options.statusPayload : safeReadAgentJson(statusPath);
+  const denominatorHealth = hasOption('denominatorHealth')
+    ? options.denominatorHealth
+    : readV27DenominatorReadModelHealth({ ...options, healthPath });
+  const modeReadiness = hasOption('modeReadiness')
+    ? options.modeReadiness
+    : readV27ModeReadiness({ ...options, modeReadinessPath: readinessPath });
+  const statusArtifact = hasOption('statusArtifact') ? options.statusArtifact : agentArtifactStat(statusPath);
+  const denominatorArtifact = hasOption('denominatorArtifact') ? options.denominatorArtifact : agentArtifactStat(healthPath);
+  const readinessArtifact = hasOption('readinessArtifact') ? options.readinessArtifact : agentArtifactStat(readinessPath);
+
+  let lockPid = null;
+  let lockReadError = null;
+  if (!hasOption('lockPid')) {
+    try {
+      const rawPid = fs.readFileSync(lockPath, 'utf8').trim();
+      lockPid = /^\d+$/.test(rawPid) ? Number(rawPid) : null;
+      if (rawPid && lockPid == null) lockReadError = 'v27_read_model_lock_pid_invalid';
+    } catch (error) {
+      if (error?.code !== 'ENOENT') lockReadError = error.message;
+    }
+  } else {
+    lockPid = options.lockPid;
+  }
+  const statusPayloadValid = Boolean(
+    statusPayload
+    && typeof statusPayload === 'object'
+    && !statusPayload.error_code
+    && statusPayload.schema_version === 'v2.7.0.read_model_worker_status.v1'
+  );
+  const lockPidAlive = options.lockPidAlive === undefined ? processIsAlive(lockPid) : Boolean(options.lockPidAlive);
+  const pid = Number(options.pid ?? (statusPayloadValid ? statusPayload.pid : null) ?? lockPid) || null;
+  const pidAlive = options.pidAlive === undefined ? processIsAlive(pid) : Boolean(options.pidAlive);
+  const running = Boolean(enabled && pidAlive && (!statusPayloadValid || statusPayload.running !== false));
+
+  const statMs = (artifact) => {
+    const parsed = artifact?.available ? Date.parse(artifact.mtime || '') : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const denominatorMtimeMs = statMs(denominatorArtifact);
+  const readinessMtimeMs = statMs(readinessArtifact);
+  const bothArtifactTimes = [denominatorMtimeMs, readinessMtimeMs].filter((value) => value != null);
+  const oldestArtifactMs = bothArtifactTimes.length === 2 ? Math.min(...bothArtifactTimes) : null;
+  const newestArtifactMs = bothArtifactTimes.length ? Math.max(...bothArtifactTimes) : null;
+  const artifactAgeMinutes = oldestArtifactMs == null ? null : +Math.max(0, (nowMs - oldestArtifactMs) / 60000).toFixed(2);
+  const fresh = Boolean(artifactAgeMinutes != null && artifactAgeMinutes <= maxAgeMinutes);
+
+  const statusStartedMs = Date.parse(statusPayloadValid ? statusPayload.started_at || '' : statusArtifact?.mtime || '');
+  const workerAgeMinutes = Number.isFinite(statusStartedMs) ? +Math.max(0, (nowMs - statusStartedMs) / 60000).toFixed(2) : null;
+  const startupGraceMinutes = +(initialDelaySec / 60 + maxAgeMinutes).toFixed(2);
+  const lastSuccessMs = Date.parse(statusPayloadValid ? statusPayload.last_success_at || '' : '');
+  const lastErrorMs = Date.parse(statusPayloadValid ? statusPayload.last_error_at || '' : '');
+  const unrecoveredRefreshError = Boolean(
+    statusPayloadValid
+    && statusPayload.last_refresh_status === 'refresh_error'
+    && Number.isFinite(lastErrorMs)
+    && (!Number.isFinite(lastSuccessMs) || lastErrorMs > lastSuccessMs)
+  );
+  const statusArtifactInvalid = Boolean(statusPayload && !statusPayloadValid);
+  const denominatorInvalid = Boolean(!denominatorHealth?.available && denominatorHealth?.error);
+  const readinessInvalid = Boolean(!modeReadiness?.available && modeReadiness?.error);
+  const artifactsAvailable = Boolean(denominatorHealth?.available && modeReadiness?.available);
+
+  let status = 'disabled';
+  if (enabled) {
+    if (statusArtifactInvalid || denominatorInvalid || readinessInvalid) {
+      status = 'artifact_invalid';
+    } else if (!running) {
+      status = 'worker_not_running';
+    } else if (unrecoveredRefreshError) {
+      status = 'refresh_error';
+    } else if (!artifactsAvailable) {
+      status = workerAgeMinutes != null && workerAgeMinutes <= startupGraceMinutes ? 'starting' : 'artifact_missing';
+    } else if (!fresh) {
+      status = 'artifact_stale';
+    } else if (!denominatorHealth?.dashboard_safe || !modeReadiness?.health?.normal_tiny_ready) {
+      status = 'readiness_blocked';
+    } else {
+      status = 'ok';
+    }
+  }
+
+  const healthy = status === 'ok' || status === 'readiness_blocked';
+  const degraded = Boolean(enabled && !healthy && status !== 'starting');
+  const blockingContractCounts = {};
+  for (const mode of ['observe_only', 'shadow', 'ultra_tiny', 'normal_tiny']) {
+    const blockers = modeReadiness?.modes?.[mode]?.blocking_contracts;
+    blockingContractCounts[mode] = Array.isArray(blockers) ? blockers.length : null;
+  }
+
+  return {
+    schema_version: 'v2.7.0.read_model_worker_health.v1',
+    generated_at: new Date(nowMs).toISOString(),
+    public_safe: true,
+    configured: enabled,
+    enabled,
+    running,
+    pid,
+    pid_alive: pidAlive,
+    status,
+    healthy,
+    degraded,
+    interval_sec: intervalSec,
+    initial_delay_sec: initialDelaySec,
+    startup_grace_minutes: startupGraceMinutes,
+    worker_age_minutes: workerAgeMinutes,
+    fresh,
+    artifact_age_minutes: artifactAgeMinutes,
+    max_age_minutes: maxAgeMinutes,
+    freshness_anchor_at: oldestArtifactMs == null ? null : new Date(oldestArtifactMs).toISOString(),
+    latest_artifact_at: newestArtifactMs == null ? null : new Date(newestArtifactMs).toISOString(),
+    status_path: statusPath,
+    lock_file: lockPath,
+    lock_pid: lockPid,
+    lock_pid_alive: lockPidAlive,
+    lock_read_error: lockReadError,
+    status_artifact: statusArtifact,
+    artifacts: {
+      denominator_freshness: denominatorArtifact,
+      mode_readiness: readinessArtifact,
+    },
+    worker_reported: statusPayloadValid ? {
+      status: statusPayload.status || null,
+      last_refresh_status: statusPayload.last_refresh_status || null,
+      started_at: statusPayload.started_at || null,
+      stopped_at: statusPayload.stopped_at || null,
+      last_attempt_at: statusPayload.last_attempt_at || null,
+      last_success_at: statusPayload.last_success_at || null,
+      last_error_at: statusPayload.last_error_at || null,
+      last_error: statusPayload.last_error || null,
+      error_count: Number(statusPayload.error_count || 0),
+    } : null,
+    denominator_read_model: {
+      available: Boolean(denominatorHealth?.available),
+      dashboard_safe: Boolean(denominatorHealth?.dashboard_safe),
+      status: denominatorHealth?.health?.status || null,
+      blocking_reasons: Array.isArray(denominatorHealth?.blocking_reasons) ? denominatorHealth.blocking_reasons : [],
+    },
+    mode_readiness: {
+      available: Boolean(modeReadiness?.available),
+      highest_allowed_mode: modeReadiness?.highest_allowed_mode || null,
+      status: modeReadiness?.health?.status || null,
+      observe_only_ready: Boolean(modeReadiness?.health?.observe_only_ready),
+      shadow_ready: Boolean(modeReadiness?.health?.shadow_ready),
+      ultra_tiny_ready: Boolean(modeReadiness?.health?.ultra_tiny_ready),
+      normal_tiny_ready: Boolean(modeReadiness?.health?.normal_tiny_ready),
+      blocking_contract_counts: blockingContractCounts,
+    },
+    notes: {
+      process_visibility: 'status_artifact_plus_shared_lock_pid',
+      readiness_boundary: 'readiness_blocked means the worker is healthy while governance still blocks the mode; it must not be bypassed',
+    },
+  };
+}
+
+export function readEvaluatorSnapshotWorkerHealth(options = {}) {
+  const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
+  const enabled = options.enabled === undefined
+    ? envFlagValue(process.env.EVALUATOR_SNAPSHOT_WORKER_ENABLED, true)
+    : Boolean(options.enabled);
+  const intervalSec = Math.max(60, Number(options.intervalSec ?? process.env.EVALUATOR_SNAPSHOT_INTERVAL_SEC ?? 21600) || 21600);
+  const initialDelaySec = Math.max(0, Number(options.initialDelaySec ?? process.env.EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC ?? 30) || 0);
+  const maxAgeSec = Math.max(60, Number(options.maxAgeSec ?? process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC ?? 28800) || 28800);
+  const maxFutureSkewSec = Math.max(0, Number(options.maxFutureSkewSec ?? process.env.EVALUATOR_SNAPSHOT_MAX_FUTURE_SKEW_SEC ?? 60) || 60);
+  const consumerPreflightMaxAgeSec = Math.max(
+    60,
+    Number(options.consumerPreflightMaxAgeSec ?? process.env.EVALUATOR_SNAPSHOT_CONSUMER_PREFLIGHT_MAX_AGE_SEC ?? 1800) || 1800,
+  );
+  const maxReadLockSec = Math.max(1, Number(options.maxReadLockSec ?? process.env.EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC ?? 300) || 300);
+  const startupGraceSec = Math.max(
+    120,
+    Number(options.startupGraceSec ?? process.env.EVALUATOR_SNAPSHOT_STARTUP_GRACE_SEC ?? (initialDelaySec + maxReadLockSec + 300)) || 600,
+  );
+  const statusPath = evaluatorSnapshotStatusPath(options);
+  const manifestPath = evaluatorSnapshotManifestPath(options);
+  const lockPath = evaluatorSnapshotLockPath(options);
+  const hasOption = (name) => Object.prototype.hasOwnProperty.call(options, name);
+  const statusPayload = hasOption('statusPayload') ? options.statusPayload : safeReadAgentJson(statusPath);
+  const manifestPayload = hasOption('manifestPayload') ? options.manifestPayload : safeReadAgentJson(manifestPath);
+  const statusArtifact = hasOption('statusArtifact') ? options.statusArtifact : agentArtifactStat(statusPath);
+  const manifestArtifact = hasOption('manifestArtifact') ? options.manifestArtifact : agentArtifactStat(manifestPath);
+  const authoritativePreflight = hasOption('authoritativePreflight')
+    ? options.authoritativePreflight
+    : evaluatorSnapshotAuthoritativePreflightState;
+  const databaseArtifacts = hasOption('databaseArtifacts') && options.databaseArtifacts && typeof options.databaseArtifacts === 'object'
+    ? options.databaseArtifacts
+    : {};
+  let manifestFileSha256 = hasOption('manifestFileSha256') ? options.manifestFileSha256 : null;
+  if (!hasOption('manifestFileSha256') && manifestArtifact?.available) {
+    try {
+      manifestFileSha256 = createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
+    } catch {
+      manifestFileSha256 = null;
+    }
+  }
+
+  let lockPid = null;
+  let lockReadError = null;
+  if (!hasOption('lockPid')) {
+    try {
+      const rawLock = fs.readFileSync(lockPath, 'utf8').trim();
+      const match = rawLock.match(/^(\d+)(?:\s|$)/);
+      lockPid = match ? Number(match[1]) : null;
+      if (rawLock && lockPid == null) lockReadError = 'evaluator_snapshot_lock_pid_invalid';
+    } catch (error) {
+      if (error?.code !== 'ENOENT') lockReadError = error.message;
+    }
+  } else {
+    lockPid = Number(options.lockPid) || null;
+  }
+
+  const statusPayloadValid = Boolean(
+    statusPayload
+    && typeof statusPayload === 'object'
+    && !Array.isArray(statusPayload)
+    && !statusPayload.error_code
+    && statusPayload.schema_version === 'cross_db_evaluator_snapshot_worker_status.v1'
+  );
+  const manifestPayloadValid = Boolean(
+    manifestPayload
+    && typeof manifestPayload === 'object'
+    && !Array.isArray(manifestPayload)
+    && !manifestPayload.error_code
+    && manifestPayload.schema_version === 'cross_db_evaluator_snapshot.v3'
+  );
+  const pid = Number(options.pid ?? (statusPayloadValid ? statusPayload.pid : null) ?? lockPid) || null;
+  const pidAlive = options.pidAlive === undefined ? processIsAlive(pid) : Boolean(options.pidAlive);
+  const lockPidAlive = options.lockPidAlive === undefined ? processIsAlive(lockPid) : Boolean(options.lockPidAlive);
+  const running = Boolean(
+    enabled
+    && (pidAlive || lockPidAlive)
+    && (!statusPayloadValid || statusPayload.running !== false)
+  );
+
+  const epochMs = (value) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return numeric >= 1e12 ? numeric : numeric * 1000;
+  };
+  const statusStartedMs = Date.parse(statusPayloadValid ? statusPayload.started_at || '' : statusArtifact?.mtime || '');
+  const workerAgeSec = Number.isFinite(statusStartedMs)
+    ? +Math.max(0, (nowMs - statusStartedMs) / 1000).toFixed(2)
+    : null;
+  const processUptimeSec = Number.isFinite(Number(options.processUptimeSec))
+    ? Number(options.processUptimeSec)
+    : process.uptime();
+  const snapshotTs = manifestPayloadValid ? Number(manifestPayload.snapshot_ts) : null;
+  const snapshotMs = epochMs(snapshotTs);
+  const rawSnapshotAgeSec = snapshotMs == null ? null : (nowMs - snapshotMs) / 1000;
+  const snapshotFutureSkewSec = rawSnapshotAgeSec != null && rawSnapshotAgeSec < 0
+    ? +Math.abs(rawSnapshotAgeSec).toFixed(2)
+    : 0;
+  const snapshotTimestampValid = Boolean(
+    rawSnapshotAgeSec != null
+    && snapshotFutureSkewSec <= maxFutureSkewSec
+  );
+  const snapshotAgeSec = rawSnapshotAgeSec == null
+    ? null
+    : +Math.max(0, rawSnapshotAgeSec).toFixed(2);
+  const snapshotFresh = Boolean(
+    snapshotTimestampValid
+    && snapshotAgeSec != null
+    && snapshotAgeSec <= maxAgeSec
+  );
+
+  const databaseReports = manifestPayloadValid && manifestPayload.databases && typeof manifestPayload.databases === 'object'
+    ? manifestPayload.databases
+    : {};
+  const databaseNames = ['signal', 'paper', 'raw', 'kline'];
+  const databaseChecks = {};
+  const snapshotFiles = {};
+  for (const name of databaseNames) {
+    const report = databaseReports[name] && typeof databaseReports[name] === 'object'
+      ? databaseReports[name]
+      : {};
+    const snapshotPath = typeof report.snapshot_path === 'string' && report.snapshot_path
+      ? report.snapshot_path
+      : null;
+    const artifact = Object.prototype.hasOwnProperty.call(databaseArtifacts, name)
+      ? databaseArtifacts[name]
+      : snapshotPath
+        ? agentArtifactStat(snapshotPath)
+        : { available: false, error_code: 'evaluator_snapshot_database_path_missing' };
+    const expectedSizeBytes = Number(report.snapshot_size_bytes);
+    const actualSizeBytes = artifact?.available && Number.isFinite(Number(artifact.size_bytes))
+      ? Number(artifact.size_bytes)
+      : null;
+    const expectedSizeValid = Number.isFinite(expectedSizeBytes) && expectedSizeBytes > 0;
+    const sizeMatchesManifest = Boolean(
+      expectedSizeValid
+      && actualSizeBytes != null
+      && actualSizeBytes === expectedSizeBytes
+    );
+    snapshotFiles[name] = {
+      available: Boolean(artifact?.available),
+      expected_size_bytes: expectedSizeValid ? expectedSizeBytes : null,
+      actual_size_bytes: actualSizeBytes,
+      size_matches_manifest: sizeMatchesManifest,
+      sha256_revalidation: 'authoritative_python_preflight_only',
+    };
+    databaseChecks[name] = {
+      manifest_report_available: Boolean(Object.keys(report).length),
+      manifest_quick_check_passed: Array.isArray(report.quick_check) && report.quick_check.length === 1 && report.quick_check[0] === 'ok',
+      manifest_sha256_present: typeof report.snapshot_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(report.snapshot_sha256),
+      required_tables_present: Array.isArray(report.missing_required_tables) && report.missing_required_tables.length === 0,
+      required_watermarks_present: Array.isArray(report.missing_required_watermarks) && report.missing_required_watermarks.length === 0,
+      source_read_lock_budget_passed: report.source_read_lock_budget_passed === true,
+      database_budget_passed: report.database_budget_passed === true,
+      snapshot_file_available: Boolean(artifact?.available),
+      snapshot_size_matches_manifest: sizeMatchesManifest,
+    };
+  }
+  const paperSelections = databaseReports.paper?.selected_tables && typeof databaseReports.paper.selected_tables === 'object'
+    ? databaseReports.paper.selected_tables
+    : {};
+  const indexedSelection = {};
+  for (const table of ['candidate_shadow_observations', 'candidate_shadow_virtual_trades']) {
+    const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
+      ? paperSelections[table]
+      : {};
+    indexedSelection[table] = {
+      predicate_strategy: selection.predicate_strategy || null,
+      indexed_time_anchor: selection.indexed_time_anchor || null,
+      source_index_name: selection.source_index_name || null,
+      source_index_columns: Array.isArray(selection.source_index_columns) ? selection.source_index_columns : [],
+      source_index_partial: selection.source_index_partial ?? null,
+      source_query_plan: Array.isArray(selection.source_query_plan) ? selection.source_query_plan : [],
+      source_query_plan_uses_index: selection.source_query_plan_uses_index === true,
+      source_query_plan_uses_range_search: selection.source_query_plan_uses_range_search === true,
+      source_query_plan_full_table_scan_detected: selection.source_query_plan_full_table_scan_detected === true,
+      rows_copied: Number.isFinite(Number(selection.rows_copied)) ? Number(selection.rows_copied) : null,
+      passed: Boolean(
+        selection.included === true
+        && selection.predicate_strategy === 'indexed_epoch_seconds'
+        && selection.indexed_time_anchor === 'observed_at'
+        && typeof selection.source_index_name === 'string'
+        && selection.source_index_name.length > 0
+        && Array.isArray(selection.source_index_columns)
+        && selection.source_index_columns[0] === 'observed_at'
+        && selection.source_index_partial === false
+        && Array.isArray(selection.source_query_plan)
+        && selection.source_query_plan.length > 0
+        && selection.source_query_plan_uses_index === true
+        && selection.source_query_plan_uses_range_search === true
+        && selection.source_query_plan_full_table_scan_detected === false
+      ),
+    };
+  }
+
+  const disk = manifestPayloadValid && manifestPayload.disk_preflight && typeof manifestPayload.disk_preflight === 'object'
+    ? manifestPayload.disk_preflight
+    : {};
+  const producerManifestSha256 = statusPayloadValid
+    ? statusPayload.last_accepted_snapshot?.manifest_sha256 || null
+    : null;
+  const manifestSha256Matched = Boolean(
+    producerManifestSha256
+    && manifestFileSha256
+    && producerManifestSha256 === manifestFileSha256
+  );
+  const manifestContractChecks = {
+    accepted: manifestPayload?.accepted === true,
+    manifest_sha256_matched: manifestSha256Matched,
+    snapshot_timestamp_valid: snapshotTimestampValid,
+    immutable: manifestPayload?.immutable === true,
+    quick_checks_passed: manifestPayload?.quick_checks_passed === true,
+    required_tables_present: manifestPayload?.required_tables_present === true,
+    required_watermarks_present: manifestPayload?.required_watermarks_present === true,
+    cross_database_time_skew_passed: manifestPayload?.cross_database_time_skew_passed === true,
+    source_read_lock_budget_passed: manifestPayload?.source_read_lock_budget_passed === true,
+    indexes_built_after_source_read_lock_release: manifestPayload?.indexes_built_after_source_read_lock_release === true,
+    source_mutation_free: manifestPayload?.source_mutation_free === true,
+    bounded_selective_snapshot: manifestPayload?.bounded_selective_snapshot === true,
+    selection_upper_bounds_consistent: manifestPayload?.selection_upper_bounds_consistent === true,
+    output_cap_passed: manifestPayload?.output_cap_passed === true,
+    partial_artifacts_absent: manifestPayload?.partial_artifacts_absent === true,
+    active_database_reads_forbidden: manifestPayload?.active_database_reads_allowed_for_autoloop === false,
+    disk_preflight_passed: disk.accepted === true,
+    indexed_selection_passed: Object.values(indexedSelection).every((row) => row.passed),
+    database_contracts_passed: databaseNames.every((name) => Object.values(databaseChecks[name]).every(Boolean)),
+  };
+  const manifestContractPassed = manifestPayloadValid && Object.values(manifestContractChecks).every(Boolean);
+  const statusSnapshotId = statusPayloadValid
+    ? statusPayload.snapshot_id || statusPayload.last_accepted_snapshot?.snapshot_id || null
+    : null;
+  const manifestSnapshotId = manifestPayloadValid ? manifestPayload.snapshot_id || null : null;
+  const snapshotIdentityMatched = Boolean(
+    statusSnapshotId
+    && manifestSnapshotId
+    && statusSnapshotId === manifestSnapshotId
+  );
+  const producerFailed = Boolean(statusPayloadValid && statusPayload.status === 'failed');
+  const bundleCandidateAvailable = Boolean(
+    manifestPayloadValid
+    && manifestContractPassed
+    && snapshotIdentityMatched
+    && snapshotFresh
+  );
+  const authoritativePreflightValid = Boolean(
+    authoritativePreflight
+    && typeof authoritativePreflight === 'object'
+    && !Array.isArray(authoritativePreflight)
+    && authoritativePreflight.schema_version === 'evaluator_snapshot_authoritative_preflight_state.v1'
+  );
+  const authoritativePreflightCheckedMs = Date.parse(
+    authoritativePreflightValid ? authoritativePreflight.checked_at || '' : '',
+  );
+  const authoritativePreflightAgeSec = Number.isFinite(authoritativePreflightCheckedMs)
+    ? +Math.max(0, (nowMs - authoritativePreflightCheckedMs) / 1000).toFixed(2)
+    : null;
+  const authoritativePreflightFresh = Boolean(
+    authoritativePreflightAgeSec != null
+    && authoritativePreflightAgeSec <= consumerPreflightMaxAgeSec
+  );
+  const authoritativePreflightMatched = Boolean(
+    authoritativePreflightValid
+    && authoritativePreflight.accepted === true
+    && authoritativePreflight.snapshot_id
+    && authoritativePreflight.snapshot_id === manifestSnapshotId
+    && authoritativePreflight.manifest_sha256
+    && authoritativePreflight.manifest_sha256 === manifestFileSha256
+    && authoritativePreflight.producer_manifest_sha256
+    && authoritativePreflight.producer_manifest_sha256 === producerManifestSha256
+  );
+  const consumerReady = Boolean(
+    bundleCandidateAvailable
+    && authoritativePreflightFresh
+    && authoritativePreflightMatched
+  );
+  const blockers = [];
+  if (statusPayload && !statusPayloadValid) blockers.push('evaluator_snapshot_status_artifact_invalid');
+  if (manifestPayload && !manifestPayloadValid) blockers.push('evaluator_snapshot_manifest_artifact_invalid');
+  if (!manifestContractPassed && manifestPayloadValid) blockers.push('evaluator_snapshot_manifest_contract_blocked');
+  if (manifestPayloadValid && !snapshotIdentityMatched) blockers.push('evaluator_snapshot_status_manifest_identity_mismatch');
+  if (manifestPayloadValid && !snapshotTimestampValid) blockers.push('evaluator_snapshot_future_timestamp');
+  else if (manifestPayloadValid && !snapshotFresh) blockers.push('evaluator_snapshot_stale');
+  for (const name of databaseNames) {
+    if (!snapshotFiles[name].available) blockers.push(`evaluator_snapshot_${name}_file_missing`);
+    else if (!snapshotFiles[name].size_matches_manifest) blockers.push(`evaluator_snapshot_${name}_size_mismatch`);
+  }
+  if (producerFailed) blockers.push(statusPayload.last_failure_code || 'evaluator_snapshot_producer_failed');
+
+  let status = 'disabled';
+  if (enabled) {
+    if (statusPayload && !statusPayloadValid) {
+      status = 'contract_blocked';
+    } else if (producerFailed) {
+      status = 'failed';
+    } else if (!statusPayloadValid && processUptimeSec <= startupGraceSec) {
+      status = 'starting';
+    } else if (!running) {
+      status = 'worker_not_running';
+    } else if (!manifestPayload) {
+      status = workerAgeSec != null && workerAgeSec <= startupGraceSec ? 'starting' : 'contract_blocked';
+    } else if (!manifestPayloadValid || !manifestContractPassed || !snapshotIdentityMatched) {
+      status = 'contract_blocked';
+    } else if (!snapshotTimestampValid) {
+      status = 'contract_blocked';
+    } else if (!snapshotFresh) {
+      status = 'stale';
+    } else {
+      status = 'producer_accepted';
+    }
+  }
+
+  const healthy = status === 'producer_accepted';
+  const degraded = Boolean(enabled && !healthy && status !== 'starting');
+  return {
+    schema_version: 'evaluator_snapshot_worker_health.v1',
+    generated_at: new Date(nowMs).toISOString(),
+    public_safe: true,
+    configured: enabled,
+    enabled,
+    running,
+    pid,
+    pid_alive: pidAlive,
+    lock_pid: lockPid,
+    lock_pid_alive: lockPidAlive,
+    lock_read_error: lockReadError,
+    status,
+    healthy,
+    degraded,
+    consumer_ready: consumerReady,
+    bundle_candidate_available: bundleCandidateAvailable,
+    consumer_state: consumerReady
+      ? 'authoritative_preflight_current'
+      : bundleCandidateAvailable
+        ? 'authoritative_preflight_required'
+        : 'blocked',
+    interval_sec: intervalSec,
+    initial_delay_sec: initialDelaySec,
+    startup_grace_sec: startupGraceSec,
+    max_snapshot_age_sec: maxAgeSec,
+    max_future_skew_sec: maxFutureSkewSec,
+    consumer_preflight_max_age_sec: consumerPreflightMaxAgeSec,
+    max_source_read_lock_sec: maxReadLockSec,
+    worker_age_sec: workerAgeSec,
+    snapshot_id: manifestSnapshotId,
+    producer_snapshot_id: statusSnapshotId,
+    snapshot_identity_matched: snapshotIdentityMatched,
+    snapshot_ts: Number.isFinite(snapshotTs) ? snapshotTs : null,
+    snapshot_age_sec: snapshotAgeSec,
+    snapshot_future_skew_sec: snapshotFutureSkewSec,
+    snapshot_timestamp_valid: snapshotTimestampValid,
+    snapshot_fresh: snapshotFresh,
+    git_commit: manifestPayloadValid ? manifestPayload.git_commit || null : null,
+    manifest_sha256: manifestFileSha256,
+    producer_manifest_sha256: producerManifestSha256,
+    manifest_sha256_matched: manifestSha256Matched,
+    last_attempt_at: statusPayloadValid ? statusPayload.last_attempt_at || null : null,
+    last_success_at: statusPayloadValid ? statusPayload.last_success_at || null : null,
+    last_failure_at: statusPayloadValid ? statusPayload.last_failure_at || null : null,
+    last_failure_code: statusPayloadValid ? statusPayload.last_failure_code || null : null,
+    error_count: statusPayloadValid ? Number(statusPayload.error_count || 0) : 0,
+    status_artifact: statusArtifact,
+    manifest_artifact: manifestArtifact,
+    manifest_contract: manifestContractChecks,
+    databases: databaseChecks,
+    snapshot_files: snapshotFiles,
+    indexed_selection: indexedSelection,
+    authoritative_consumer_preflight: {
+      available: authoritativePreflightValid,
+      accepted: authoritativePreflightValid && authoritativePreflight.accepted === true,
+      checked_at: authoritativePreflightValid ? authoritativePreflight.checked_at || null : null,
+      age_sec: authoritativePreflightAgeSec,
+      fresh: authoritativePreflightFresh,
+      matched_current_bundle: authoritativePreflightMatched,
+      snapshot_id: authoritativePreflightValid ? authoritativePreflight.snapshot_id || null : null,
+      manifest_sha256: authoritativePreflightValid ? authoritativePreflight.manifest_sha256 || null : null,
+      blockers: authoritativePreflightValid && Array.isArray(authoritativePreflight.blockers)
+        ? authoritativePreflight.blockers.map(String)
+        : [],
+    },
+    sha256_verification_scope: {
+      health: 'producer_manifest_anchor_only',
+      authoritative_consumer: 'full_database_sha256_and_quick_check',
+    },
+    source_read_lock: {
+      budget_passed: manifestPayload?.source_read_lock_budget_passed === true,
+      limit_sec: Number.isFinite(Number(manifestPayload?.max_source_read_lock_sec))
+        ? Number(manifestPayload.max_source_read_lock_sec)
+        : null,
+      max_duration_sec: Number.isFinite(Number(statusPayload?.last_accepted_snapshot?.max_source_read_lock_duration_sec))
+        ? Number(statusPayload.last_accepted_snapshot.max_source_read_lock_duration_sec)
+        : null,
+    },
+    cross_database_time_skew: {
+      passed: manifestPayload?.cross_database_time_skew_passed === true,
+      skew_sec: Number.isFinite(Number(manifestPayload?.cross_database_time_skew_sec))
+        ? Number(manifestPayload.cross_database_time_skew_sec)
+        : null,
+      max_allowed_sec: Number.isFinite(Number(manifestPayload?.max_allowed_cross_database_time_skew_sec))
+        ? Number(manifestPayload.max_allowed_cross_database_time_skew_sec)
+        : null,
+    },
+    output_budget: {
+      passed: manifestPayload?.output_cap_passed === true,
+      size_bytes: Number.isFinite(Number(manifestPayload?.output_size_bytes))
+        ? Number(manifestPayload.output_size_bytes)
+        : null,
+      cap_bytes: Number.isFinite(Number(manifestPayload?.output_cap_bytes))
+        ? Number(manifestPayload.output_cap_bytes)
+        : null,
+      disk_preflight_passed: disk.accepted === true,
+      estimated_free_after_bytes: Number.isFinite(Number(disk.estimated_free_after_bytes))
+        ? Number(disk.estimated_free_after_bytes)
+        : null,
+      required_reserve_bytes: Number.isFinite(Number(disk.required_reserve_bytes))
+        ? Number(disk.required_reserve_bytes)
+        : null,
+    },
+    blockers: [...new Set(blockers)],
+    authoritative_consumer_preflight_required: true,
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
+  };
 }
 
 function missedRecoveryRowFromLiveSnapshot(row = {}, section = 'overall') {
@@ -11696,12 +12445,16 @@ const server = http.createServer(async (req, res) => {
     const signalSourceFreshnessHealth = readSignalSourceFreshnessHealth();
     const telegramIngestionHealth = readTelegramIngestionHealth();
     const runtimeFinalEvidenceHealth = readRuntimeFinalEvidenceHealth();
+    const v27ReadModelWorkerHealth = readV27ReadModelWorkerHealth();
+    const evaluatorSnapshotWorkerHealth = readEvaluatorSnapshotWorkerHealth();
     const degraded = Boolean(
       global.__startupError
       || !paperDbHealthIsUsable(paperDbHealth)
       || (paperFastLaneHealth.required && paperFastLaneHealth.status !== 'ok')
       || paperReviewSnapshotHealth.status !== 'ok'
       || signalSourceFreshnessHealth.fail_closed
+      || v27ReadModelWorkerHealth.degraded
+      || evaluatorSnapshotWorkerHealth.degraded
     );
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -11728,6 +12481,8 @@ const server = http.createServer(async (req, res) => {
       runtime_final_evidence: runtimeFinalEvidenceHealth,
       signal_source_freshness_health: signalSourceFreshnessHealth,
       telegram_ingestion_health: telegramIngestionHealth,
+      v27_read_model_worker: v27ReadModelWorkerHealth,
+      evaluator_snapshot_worker: evaluatorSnapshotWorkerHealth,
       raw_path_observer_worker: rawPathObserverSchedulerStatus(),
       raw_dog_discovery_worker: global.__rawDogDiscoveryWorkerStatus || rawDogDiscoveryObserverStatus(),
       raw_dog_discovery_observer: rawDogDiscoveryObserverStatus(),
@@ -17030,6 +17785,11 @@ const server = http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/paper/v27-read-model-health') {
     if (!checkAuth(req, url, res)) return;
     const health = readV27DenominatorReadModelHealth();
+    const modeReadiness = readV27ModeReadiness();
+    const worker = readV27ReadModelWorkerHealth({
+      denominatorHealth: health,
+      modeReadiness,
+    });
     const strict = ['1', 'true', 'yes'].includes(String(url.searchParams.get('strict') || '').toLowerCase());
     const status = health.available
       ? strict && !health.dashboard_safe
@@ -17037,7 +17797,7 @@ const server = http.createServer(async (req, res) => {
         : 200
       : 202;
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(health, null, 2));
+    res.end(JSON.stringify({ ...health, worker }, null, 2));
     return;
   } else if (url.pathname === '/api/paper/v27-read-model-refresh') {
     if (!requirePost(req, res)) return;

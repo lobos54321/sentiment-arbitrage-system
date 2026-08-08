@@ -5,12 +5,12 @@
   "checks": [
     {
       "static_check_id": "dashboard_shell_exec_forbidden",
-      "forbidden_pattern": "\\bexec\\s*\\(",
+      "forbidden_pattern": "(?:(?<![.\\w])exec|\\b(?:child_process|childProcess|cp)\\.exec)\\s*\\(",
       "scan_target": [
         "src/web/dashboard-server.js"
       ],
       "result": "pass",
-      "rationale": "Dashboard routes must not invoke shell-interpreted commands; use execFile with argv arrays for fixed tooling."
+      "rationale": "Dashboard routes must not invoke shell-interpreted child-process commands; SQLite Database.exec is SQL execution, while direct exec(...) or child_process/cp.exec(...) remains forbidden. Use execFile with argv arrays for fixed tooling."
     },
     {
       "static_check_id": "dashboard_unbounded_log_line_parse_forbidden",

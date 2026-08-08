@@ -32,6 +32,7 @@ PRUNABLE_SCHEMA_VERSIONS = {
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
 BUDGET_SCHEMA_VERSION = "evaluator_snapshot_budget.v2"
 PAYLOAD_PROJECTION_SCHEMA_VERSION = "candidate_observation_payload_projection.v1"
+WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
 DEFAULT_MAX_OUTPUT_GIB = 10.0
@@ -48,13 +49,25 @@ DYNAMIC_BUDGET_HEADROOM_NUMERATOR = 5
 DYNAMIC_BUDGET_HEADROOM_DENOMINATOR = 4
 
 
-def recent(*time_columns: str, horizon: str = "review", required: bool = False) -> dict[str, Any]:
-    return {
+def recent(
+    *time_columns: str,
+    horizon: str = "review",
+    required: bool = False,
+    indexed_epoch_seconds_anchor: str | None = None,
+    epoch_seconds_columns: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if indexed_epoch_seconds_anchor and indexed_epoch_seconds_anchor not in time_columns:
+        raise ValueError("indexed epoch-seconds anchor must be a registered time column")
+    rule = {
         "mode": "recent",
         "time_columns": tuple(time_columns),
         "horizon": horizon,
         "required": required,
     }
+    if indexed_epoch_seconds_anchor:
+        rule["indexed_epoch_seconds_anchor"] = indexed_epoch_seconds_anchor
+        rule["epoch_seconds_columns"] = tuple(epoch_seconds_columns)
+    return rule
 
 
 def full(*, required: bool = False) -> dict[str, Any]:
@@ -113,9 +126,21 @@ DATABASE_SPECS = {
             "opportunity_events": ("id", "event_ts", "created_at"),
         },
         "tables": {
-            "candidate_shadow_observations": recent("observed_at", "signal_ts", required=True),
+            "candidate_shadow_observations": recent(
+                "observed_at",
+                "signal_ts",
+                required=True,
+                indexed_epoch_seconds_anchor="observed_at",
+                epoch_seconds_columns=("observed_at",),
+            ),
             "candidate_shadow_virtual_trades": recent(
-                "observed_at", "signal_ts", "entry_ts", "exit_ts", required=True
+                "observed_at",
+                "signal_ts",
+                "entry_ts",
+                "exit_ts",
+                required=True,
+                indexed_epoch_seconds_anchor="observed_at",
+                epoch_seconds_columns=("observed_at",),
             ),
             "paper_decision_events": recent(
                 "event_ts", "signal_ts", "created_at", required=True
@@ -233,6 +258,99 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def bounded_error_text(exc: BaseException, limit: int = 4096) -> str:
+    text = f"{type(exc).__name__}:{exc}"
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def snapshot_failure_code(exc: BaseException) -> str:
+    text = str(exc)
+    known = (
+        "evaluator_snapshot_lock_held",
+        "selective_snapshot_source_index_missing",
+        "selective_snapshot_epoch_seconds_type_invalid",
+        "selective_snapshot_index_anchor_missing",
+        "selective_snapshot_index_anchor_unit_missing",
+        "snapshot_source_read_lock_timeout",
+        "insufficient disk for evaluator snapshot",
+        "concurrent evaluator snapshot failed",
+        "cross-database snapshot acceptance failed",
+        "selective snapshot exceeded bundle output cap",
+        "snapshot manifest size did not converge",
+    )
+    for marker in known:
+        if marker in text:
+            return marker.replace(" ", "_").replace("-", "_")
+    return type(exc).__name__
+
+
+def snapshot_manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    databases = manifest.get("databases") if isinstance(manifest.get("databases"), dict) else {}
+    lock_durations = [
+        float(report.get("source_read_lock_duration_sec") or 0.0)
+        for report in databases.values()
+        if isinstance(report, dict)
+    ]
+    paper = databases.get("paper") if isinstance(databases.get("paper"), dict) else {}
+    selected = paper.get("selected_tables") if isinstance(paper.get("selected_tables"), dict) else {}
+    indexed_selection = {}
+    for table in (
+        "candidate_shadow_observations",
+        "candidate_shadow_virtual_trades",
+    ):
+        report = selected.get(table) if isinstance(selected.get(table), dict) else {}
+        indexed_selection[table] = {
+            "predicate_strategy": report.get("predicate_strategy"),
+            "indexed_time_anchor": report.get("indexed_time_anchor"),
+            "source_index_name": report.get("source_index_name"),
+            "source_index_columns": report.get("source_index_columns") or [],
+            "source_index_partial": report.get("source_index_partial"),
+            "source_query_plan": report.get("source_query_plan") or [],
+            "source_query_plan_uses_index": report.get("source_query_plan_uses_index"),
+            "source_query_plan_uses_range_search": report.get("source_query_plan_uses_range_search"),
+            "source_query_plan_full_table_scan_detected": report.get(
+                "source_query_plan_full_table_scan_detected"
+            ),
+            "rows_copied": report.get("rows_copied"),
+        }
+    disk = manifest.get("disk_preflight") if isinstance(manifest.get("disk_preflight"), dict) else {}
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "snapshot_id": manifest.get("snapshot_id"),
+        "snapshot_ts": manifest.get("snapshot_ts"),
+        "generated_at": manifest.get("generated_at"),
+        "git_commit": manifest.get("git_commit"),
+        "accepted": manifest.get("accepted") is True,
+        "quick_checks_passed": manifest.get("quick_checks_passed") is True,
+        "required_tables_present": manifest.get("required_tables_present") is True,
+        "required_watermarks_present": manifest.get("required_watermarks_present") is True,
+        "cross_database_time_skew_sec": manifest.get("cross_database_time_skew_sec"),
+        "cross_database_time_skew_passed": manifest.get("cross_database_time_skew_passed") is True,
+        "source_read_lock_budget_passed": manifest.get("source_read_lock_budget_passed") is True,
+        "max_source_read_lock_sec": manifest.get("max_source_read_lock_sec"),
+        "max_source_read_lock_duration_sec": round(max(lock_durations), 6) if lock_durations else None,
+        "output_size_bytes": manifest.get("output_size_bytes"),
+        "output_cap_bytes": manifest.get("output_cap_bytes"),
+        "output_cap_passed": manifest.get("output_cap_passed") is True,
+        "disk_preflight": {
+            "accepted": disk.get("accepted") is True,
+            "free_bytes": disk.get("free_bytes"),
+            "required_reserve_bytes": disk.get("required_reserve_bytes"),
+            "estimated_free_after_bytes": disk.get("estimated_free_after_bytes"),
+        },
+        "indexed_selection": indexed_selection,
+        "promotion_allowed": False,
+    }
 
 
 def atomic_bytes(path: Path, payload: bytes) -> None:
@@ -464,6 +582,105 @@ def normalized_timestamp_sql(column: str) -> str:
     )
 
 
+def declared_numeric_timestamp_type(declared_type: str) -> bool:
+    normalized = str(declared_type or "").strip().upper()
+    return bool(
+        "INT" in normalized
+        or any(token in normalized for token in ("REAL", "FLOA", "DOUB", "NUM"))
+    )
+
+
+def source_index_for_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+) -> str | None:
+    candidates: list[tuple[int, str]] = []
+    for row in connection.execute(
+        f"PRAGMA src.index_list({quote_identifier(table)})"
+    ):
+        if len(row) > 4 and int(row[4] or 0):
+            continue
+        name = str(row[1])
+        columns = [
+            str(index_row[2])
+            for index_row in connection.execute(
+                f"PRAGMA src.index_info({quote_identifier(name)})"
+            )
+        ]
+        if columns and columns[0] == column:
+            candidates.append((len(columns), name))
+    if not candidates:
+        return None
+    return sorted(candidates)[0][1]
+
+
+def source_table_reference(table: str, selection: dict[str, Any]) -> str:
+    reference = f"src.{quote_identifier(table)}"
+    source_index_name = selection.get("source_index_name")
+    if source_index_name:
+        reference += f" INDEXED BY {quote_identifier(str(source_index_name))}"
+    return reference
+
+
+def source_index_columns(
+    connection: sqlite3.Connection,
+    index_name: str | None,
+) -> list[str]:
+    if not index_name:
+        return []
+    return [
+        str(row[2])
+        for row in connection.execute(
+            f"PRAGMA src.index_info({quote_identifier(str(index_name))})"
+        )
+    ]
+
+
+def source_query_plan_evidence(
+    connection: sqlite3.Connection,
+    table: str,
+    selection: dict[str, Any],
+) -> dict[str, Any]:
+    index_name = selection.get("source_index_name")
+    indexed_anchor = selection.get("indexed_time_anchor")
+    if not index_name or not indexed_anchor:
+        return {
+            "required": False,
+            "details": [],
+            "uses_declared_index": None,
+            "uses_range_search": None,
+            "full_table_scan_detected": None,
+        }
+    query = (
+        f"EXPLAIN QUERY PLAN SELECT {quote_identifier(str(indexed_anchor))} "
+        f"FROM {source_table_reference(table, selection)} "
+        f"WHERE {selection['predicate_sql']} LIMIT 1"
+    )
+    rows = connection.execute(query, selection["parameters"]).fetchall()
+    details = [str(row[3]) for row in rows]
+    index_token = str(index_name).lower()
+    table_token = str(table).lower()
+    uses_declared_index = any(index_token in detail.lower() for detail in details)
+    uses_range_search = any(
+        "search" in detail.lower() and index_token in detail.lower()
+        for detail in details
+    )
+    full_table_scan_detected = any(
+        "scan" in detail.lower()
+        and table_token in detail.lower()
+        and index_token not in detail.lower()
+        for detail in details
+    )
+    return {
+        "required": True,
+        "details": details,
+        "uses_declared_index": uses_declared_index,
+        "uses_range_search": uses_range_search,
+        "full_table_scan_detected": full_table_scan_detected,
+    }
+
+
 def selection_for_table(
     connection: sqlite3.Connection,
     table: str,
@@ -473,10 +690,11 @@ def selection_for_table(
     long_lower_epoch: float,
     upper_epoch: float,
 ) -> dict[str, Any]:
-    columns = {
-        str(row["name"])
-        for row in connection.execute(f"PRAGMA src.table_info({quote_identifier(table)})")
-    }
+    column_rows = list(
+        connection.execute(f"PRAGMA src.table_info({quote_identifier(table)})")
+    )
+    columns = {str(row["name"]) for row in column_rows}
+    declared_types = {str(row["name"]): str(row["type"] or "") for row in column_rows}
     if rule["mode"] == "full":
         return {
             "mode": "full",
@@ -491,12 +709,58 @@ def selection_for_table(
     time_columns = [name for name in rule.get("time_columns", ()) if name in columns]
     if not time_columns:
         raise RuntimeError(f"selective_snapshot_time_column_missing:{table}")
-    normalized_columns = [normalized_timestamp_sql(column) for column in time_columns]
-    anchor = (
-        normalized_columns[0]
-        if len(normalized_columns) == 1
-        else "COALESCE(" + ", ".join(normalized_columns) + ")"
-    )
+    indexed_anchor = rule.get("indexed_epoch_seconds_anchor")
+    epoch_seconds_columns = {
+        str(name) for name in rule.get("epoch_seconds_columns", ()) if name in columns
+    }
+    source_index_name = None
+    if indexed_anchor:
+        indexed_anchor = str(indexed_anchor)
+        if indexed_anchor not in time_columns:
+            raise RuntimeError(
+                f"selective_snapshot_index_anchor_missing:{table}:{indexed_anchor}"
+            )
+        if indexed_anchor not in epoch_seconds_columns:
+            raise RuntimeError(
+                f"selective_snapshot_index_anchor_unit_missing:{table}:{indexed_anchor}"
+            )
+        invalid_types = sorted(
+            name
+            for name in epoch_seconds_columns
+            if not declared_numeric_timestamp_type(declared_types.get(name, ""))
+        )
+        if invalid_types:
+            raise RuntimeError(
+                f"selective_snapshot_epoch_seconds_type_invalid:{table}:"
+                f"{','.join(invalid_types)}"
+            )
+        source_index_name = source_index_for_column(connection, table, indexed_anchor)
+        if not source_index_name:
+            raise RuntimeError(
+                f"selective_snapshot_source_index_missing:{table}:{indexed_anchor}"
+            )
+        source_index_column_names = source_index_columns(connection, source_index_name)
+        if not source_index_column_names or source_index_column_names[0] != indexed_anchor:
+            raise RuntimeError(
+                f"selective_snapshot_source_index_column_mismatch:"
+                f"{table}:{source_index_name}:{indexed_anchor}"
+            )
+    else:
+        source_index_column_names = []
+    normalized_columns = [
+        quote_identifier(column)
+        if column in epoch_seconds_columns
+        else normalized_timestamp_sql(column)
+        for column in time_columns
+    ]
+    if indexed_anchor:
+        anchor = quote_identifier(indexed_anchor)
+    else:
+        anchor = (
+            normalized_columns[0]
+            if len(normalized_columns) == 1
+            else "COALESCE(" + ", ".join(normalized_columns) + ")"
+        )
     upper_checks = " AND ".join(
         f"({normalized} IS NULL OR {normalized} <= ?)"
         for normalized in normalized_columns
@@ -513,6 +777,13 @@ def selection_for_table(
             "upper_epoch": float(upper_epoch),
             "future_bound_enforced": True,
             "time_semantics": rule.get("time_semantics", "event_time"),
+            "predicate_strategy": (
+                "indexed_epoch_seconds" if source_index_name else "normalized_timestamp"
+            ),
+            "indexed_time_anchor": indexed_anchor,
+            "source_index_name": source_index_name,
+            "source_index_columns": source_index_column_names,
+            "source_index_partial": False if source_index_name else None,
         }
     lower_epoch = long_lower_epoch if rule.get("horizon") == "long" else review_lower_epoch
     return {
@@ -526,6 +797,13 @@ def selection_for_table(
         "upper_epoch": float(upper_epoch),
         "future_bound_enforced": True,
         "time_semantics": rule.get("time_semantics", "event_time"),
+        "predicate_strategy": (
+            "indexed_epoch_seconds" if source_index_name else "normalized_timestamp"
+        ),
+        "indexed_time_anchor": indexed_anchor,
+        "source_index_name": source_index_name,
+        "source_index_columns": source_index_column_names,
+        "source_index_partial": False if source_index_name else None,
     }
 
 
@@ -668,7 +946,7 @@ def copy_candidate_observation_projection(
     selected_columns = ", ".join(quote_identifier(name) for name in source_names)
     cursor = connection.execute(
         f"SELECT {selected_columns} "
-        f"FROM src.{quote_identifier(CANDIDATE_OBSERVATION_TABLE)} "
+        f"FROM {source_table_reference(CANDIDATE_OBSERVATION_TABLE, selection)} "
         f"WHERE {selection['predicate_sql']} "
         f"ORDER BY {quote_identifier('signal_id')}, {quote_identifier('candidate_id')}",
         selection["parameters"],
@@ -871,6 +1149,16 @@ def copy_selected_tables(
             long_lower_epoch=long_lower_epoch,
             upper_epoch=upper_epoch,
         )
+        query_plan = source_query_plan_evidence(connection, table, selection)
+        if query_plan["required"] and (
+            query_plan["uses_declared_index"] is not True
+            or query_plan["uses_range_search"] is not True
+            or query_plan["full_table_scan_detected"] is True
+        ):
+            raise RuntimeError(
+                f"selective_snapshot_source_query_plan_not_indexed:{table}:"
+                f"{selection.get('source_index_name')}:{query_plan['details']}"
+            )
         projection_supported = False
         source_columns: list[sqlite3.Row] = []
         if table == CANDIDATE_OBSERVATION_TABLE:
@@ -891,7 +1179,7 @@ def copy_selected_tables(
             connection.execute(create_sql)
             connection.execute(
                 f"INSERT INTO {quote_identifier(table)} "
-                f"SELECT * FROM src.{quote_identifier(table)} "
+                f"SELECT * FROM {source_table_reference(table, selection)} "
                 f"WHERE {selection['predicate_sql']}",
                 selection["parameters"],
             )
@@ -914,6 +1202,15 @@ def copy_selected_tables(
             "upper_epoch": selection["upper_epoch"],
             "future_bound_enforced": selection["future_bound_enforced"],
             "time_semantics": selection["time_semantics"],
+            "predicate_strategy": selection.get("predicate_strategy"),
+            "indexed_time_anchor": selection.get("indexed_time_anchor"),
+            "source_index_name": selection.get("source_index_name"),
+            "source_index_columns": selection.get("source_index_columns") or [],
+            "source_index_partial": selection.get("source_index_partial"),
+            "source_query_plan": query_plan["details"],
+            "source_query_plan_uses_index": query_plan["uses_declared_index"],
+            "source_query_plan_uses_range_search": query_plan["uses_range_search"],
+            "source_query_plan_full_table_scan_detected": query_plan["full_table_scan_detected"],
             "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
             "storage_projection": storage_projection,
             "indexes_created": [],
@@ -1618,7 +1915,11 @@ def self_test() -> None:
             "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
             "paper": (
                 "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+                "CREATE INDEX idx_candidate_shadow_obs_observed "
+                "ON candidate_shadow_observations(observed_at);"
                 "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+                "CREATE INDEX idx_candidate_shadow_virtual_observed "
+                "ON candidate_shadow_virtual_trades(observed_at);"
                 "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
                 "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
                 "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
@@ -1661,8 +1962,41 @@ def self_test() -> None:
 
 def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     started = utc_iso()
+    status_path = (
+        Path(args.status_out).expanduser().resolve()
+        if args.status_out
+        else None
+    )
+    previous = read_json_object(status_path) if status_path else {}
+    continuous_worker = int(args.max_runs) <= 0
+    current_path = str(Path(args.out_root).expanduser().resolve() / "current")
+    base_status = {
+        "schema_version": WORKER_STATUS_SCHEMA_VERSION,
+        "pid": os.getpid(),
+        "worker_mode": "continuous" if continuous_worker else "bounded",
+        "running": True,
+        "attempt_running": True,
+        "started_at": started,
+        "finished_at": None,
+        "last_attempt_at": started,
+        "last_success_at": previous.get("last_success_at"),
+        "last_failure_at": previous.get("last_failure_at"),
+        "last_failure_code": previous.get("last_failure_code"),
+        "last_error": previous.get("last_error"),
+        "error_count": int(previous.get("error_count") or 0),
+        "status": "running",
+        "accepted": False,
+        "snapshot_id": None,
+        "current": current_path,
+        "last_accepted_snapshot": previous.get("last_accepted_snapshot"),
+        "promotion_allowed": False,
+    }
+    lock_acquired = False
     try:
         with exclusive_lock(Path(args.lock_file).expanduser().resolve()):
+            lock_acquired = True
+            if status_path:
+                atomic_json(status_path, base_status)
             interrupted_partials_removed = cleanup_interrupted_partials(
                 Path(args.out_root).expanduser().resolve()
             )
@@ -1685,29 +2019,51 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 keep_previous=args.keep_previous,
                 snapshot_id=args.snapshot_id,
             )
-        status = {
-            "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
-            "started_at": started,
-            "finished_at": utc_iso(),
-            "status": "completed",
-            "snapshot_id": manifest["snapshot_id"],
-            "accepted": True,
-            "current": str(Path(args.out_root).resolve() / "current"),
-            "interrupted_partials_removed": interrupted_partials_removed,
-            "promotion_allowed": False,
-        }
+            finished = utc_iso()
+            accepted_summary = snapshot_manifest_summary(manifest)
+            accepted_manifest_path = (
+                Path(args.out_root).expanduser().resolve()
+                / "snapshots"
+                / str(manifest["snapshot_id"])
+                / "manifest.json"
+            )
+            accepted_summary["manifest_path"] = str(accepted_manifest_path)
+            accepted_summary["manifest_sha256"] = sha256_file(accepted_manifest_path)
+            status = {
+                **base_status,
+                "running": continuous_worker,
+                "attempt_running": False,
+                "finished_at": finished,
+                "last_success_at": finished,
+                "last_failure_code": None,
+                "last_error": None,
+                "status": "completed",
+                "accepted": True,
+                "snapshot_id": manifest["snapshot_id"],
+                "interrupted_partials_removed": interrupted_partials_removed,
+                "last_accepted_snapshot": accepted_summary,
+            }
+            if status_path:
+                atomic_json(status_path, status)
     except Exception as exc:
+        finished = utc_iso()
+        failure_code = snapshot_failure_code(exc)
         status = {
-            "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
-            "started_at": started,
-            "finished_at": utc_iso(),
+            **base_status,
+            "running": continuous_worker if lock_acquired else False,
+            "attempt_running": False,
+            "finished_at": finished,
+            "last_failure_at": finished,
+            "last_failure_code": failure_code,
+            "last_error": bounded_error_text(exc),
+            "error_count": int(base_status["error_count"]) + 1,
             "status": "failed",
             "accepted": False,
-            "error": f"{type(exc).__name__}:{exc}",
-            "promotion_allowed": False,
+            "error": bounded_error_text(exc),
+            "status_artifact_preserved": not lock_acquired,
         }
-    if args.status_out:
-        atomic_json(Path(args.status_out).expanduser().resolve(), status)
+        if status_path and lock_acquired:
+            atomic_json(status_path, status)
     print(json.dumps(status, sort_keys=True), flush=True)
     return status
 

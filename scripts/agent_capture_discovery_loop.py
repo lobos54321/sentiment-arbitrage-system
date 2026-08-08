@@ -30,7 +30,10 @@ from generate_codex_handoff import (
     build_machine_readable_handoff,
     write_text as write_handoff_text,
 )
-from evaluator_db_contract import evaluator_snapshot_bundle_lease
+from evaluator_db_contract import (
+    evaluator_snapshot_bundle_lease,
+    evaluator_snapshot_provenance,
+)
 from review_agent_verdict import build_verdict, write_json
 
 
@@ -4874,6 +4877,10 @@ def build_run_summary(verdict, paths, diagnostics, tests):
         f"- phase: `discovery_mesh`",
         f"- current_commit: `{verdict.get('current_commit')}`",
         f"- deployment_commit: `{verdict.get('deployment_commit')}`",
+        f"- evaluator_snapshot_id: `{(verdict.get('evaluator_snapshot') or {}).get('snapshot_id')}`",
+        f"- evaluator_snapshot_manifest: `{(verdict.get('evaluator_snapshot') or {}).get('manifest_path')}`",
+        f"- evaluator_snapshot_manifest_sha256: `{(verdict.get('evaluator_snapshot') or {}).get('manifest_sha256')}`",
+        f"- evaluator_snapshot_accepted: `{str(bool((verdict.get('evaluator_snapshot') or {}).get('accepted'))).lower()}`",
         f"- verdict: `{verdict.get('classification')}`",
         f"- blocked_subtype: `{verdict.get('blocked_subtype')}`",
         f"- next_action: `{verdict.get('next_action')}`",
@@ -5445,6 +5452,12 @@ def write_materialized_artifacts(
     diagnostics = diagnostics or []
     markov_paths = markov_paths or {}
     readiness_paths = readiness_paths or {}
+    snapshot_provenance = getattr(args, "evaluator_snapshot", None)
+    snapshot_provenance_required = bool(getattr(args, "evaluator_snapshot_required", False))
+    snapshot_provenance_path = run_dir / "evaluator_snapshot_provenance.json"
+    if isinstance(snapshot_provenance, dict):
+        write_json(snapshot_provenance_path, snapshot_provenance)
+        readiness_paths["evaluator_snapshot_provenance"] = snapshot_provenance_path
     tests = tests or {
         "schema_version": "agent_capture_discovery_tests.v1",
         "generated_at": utc_now(),
@@ -5524,12 +5537,31 @@ def write_materialized_artifacts(
         elif state != "final" and timeout_status:
             verdict_payload["blockers"] = sorted(set((verdict_payload.get("blockers") or []) + [state]))
             verdict_payload["promotion_allowed"] = False
+        if isinstance(snapshot_provenance, dict):
+            verdict_payload["evaluator_snapshot"] = snapshot_provenance
+        if snapshot_provenance_required and (
+            not isinstance(snapshot_provenance, dict)
+            or snapshot_provenance.get("accepted") is not True
+            or not snapshot_provenance.get("snapshot_id")
+            or not snapshot_provenance.get("manifest_sha256")
+        ):
+            verdict_payload["blockers"] = sorted(set(
+                (verdict_payload.get("blockers") or [])
+                + ["evaluator_snapshot_provenance_missing_or_rejected"]
+            ))
+            verdict_payload["classification"] = "BLOCKED_DATA"
+            verdict_payload["promotion_allowed"] = False
         verdict_payload["loop"] = {
             "schema_version": SCHEMA_VERSION,
             "run_id": rid,
             "run_dir": str(run_dir),
             "state": state,
             "report_diagnostics": diagnostics,
+            "evaluator_snapshot_id": (
+                snapshot_provenance.get("snapshot_id")
+                if isinstance(snapshot_provenance, dict)
+                else None
+            ),
         }
         return verdict_payload
 
@@ -5853,6 +5885,11 @@ def write_materialized_artifacts(
         "capture_report": str(capture_path),
         "pnl_cross_report": str(pnl_path) if pnl_path else None,
         "tests": str(tests_path),
+        "evaluator_snapshot_provenance": (
+            str(snapshot_provenance_path)
+            if snapshot_provenance_path.exists()
+            else None
+        ),
     }
     for profile, path in sorted(markov_paths.items()):
         artifact_paths[f"markov_{profile}"] = str(path)
@@ -5941,6 +5978,15 @@ def run_once(args):
         "tests_passed": tests.get("passed"),
         "registry_updated_at": registry.get("updated_at"),
         "run_history_retention": retention,
+        "evaluator_snapshot_id": (
+            (getattr(args, "evaluator_snapshot", None) or {}).get("snapshot_id")
+        ),
+        "evaluator_snapshot_manifest": (
+            (getattr(args, "evaluator_snapshot", None) or {}).get("manifest_path")
+        ),
+        "evaluator_snapshot_manifest_sha256": (
+            (getattr(args, "evaluator_snapshot", None) or {}).get("manifest_sha256")
+        ),
     }
 
 
@@ -6809,6 +6855,8 @@ def main():
             args.raw_db = evidence["databases"]["raw"]
             args.kline_db = evidence["databases"]["kline"]
             args.evidence_manifest = evidence["manifest_path"]
+            args.evaluator_snapshot = evaluator_snapshot_provenance(evidence)
+            args.evaluator_snapshot_required = True
             outputs.append(run_once(args))
         if index + 1 < runs:
             time.sleep(max(1, args.interval_sec))

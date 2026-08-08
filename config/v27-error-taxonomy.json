@@ -1690,6 +1690,104 @@
       "introduced_at": "2026-05-25T00:00:00Z",
       "operator_action": "replace write path registry with an object payload",
       "severity": "critical"
+    },
+    {
+      "category": "dashboard_request",
+      "error_code": "agent_artifact_json_parse_failed",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "quarantine or regenerate the malformed agent artifact before serving it",
+      "severity": "error"
+    },
+    {
+      "category": "governance",
+      "error_code": "agent_capture_loop_run_failed",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "inspect the capture-loop runner status and preserve promotion_allowed=false until a complete run succeeds",
+      "severity": "error"
+    },
+    {
+      "category": "governance",
+      "error_code": "blocked_evaluator_snapshot_required",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "produce and validate the frozen cross-database evaluator snapshot before running AutoLoop",
+      "severity": "warning"
+    },
+    {
+      "category": "governance",
+      "error_code": "evaluator_snapshot_database_path_missing",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "regenerate the accepted evaluator manifest with snapshot-specific database paths before exposing producer health",
+      "severity": "error"
+    },
+    {
+      "category": "concurrency",
+      "error_code": "continuous_worker_running",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "use the supervised continuous read-model worker instead of starting a duplicate manual refresh",
+      "severity": "info"
+    },
+    {
+      "category": "dashboard_request",
+      "error_code": "incident_artifact_not_file",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "select a regular file inside the approved incident-artifact scope",
+      "severity": "warning"
+    },
+    {
+      "category": "access_control",
+      "error_code": "incident_artifact_path_outside_root",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "reject the path and use an artifact located inside the approved incident root",
+      "severity": "error"
+    },
+    {
+      "category": "dashboard_request",
+      "error_code": "invalid_incident_artifact_path",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "supply a normalized relative artifact path without null bytes or traversal",
+      "severity": "warning"
+    },
+    {
+      "category": "dashboard_request",
+      "error_code": "invalid_incident_artifact_scope",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "select one of the published incident artifact scopes",
+      "severity": "warning"
+    },
+    {
+      "category": "dashboard_request",
+      "error_code": "missing_incident_artifact_path",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "provide the relative incident artifact path",
+      "severity": "warning"
+    },
+    {
+      "category": "governance",
+      "error_code": "paper_review_snapshot_refresh_failed",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "inspect the materialized paper-review worker and keep KPI evidence unavailable until refresh succeeds",
+      "severity": "error"
+    },
+    {
+      "category": "governance",
+      "error_code": "raw_dog_discovery_snapshot_missing",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "run the raw-dog observer and wait for a window-matched materialized snapshot",
+      "severity": "warning"
+    },
+    {
+      "category": "governance",
+      "error_code": "raw_dog_discovery_snapshot_read_failed",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "quarantine or regenerate the unreadable raw-dog discovery snapshot",
+      "severity": "error"
+    },
+    {
+      "category": "governance",
+      "error_code": "raw_dog_discovery_snapshot_window_mismatch",
+      "introduced_at": "2026-08-08T00:00:00Z",
+      "operator_action": "regenerate the raw-dog snapshot for the requested evidence window",
+      "severity": "warning"
     }
   ]
 }

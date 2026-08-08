@@ -25,6 +25,21 @@ export AGENT_CAPTURE_DISCOVERY_SCHEDULER_TIMEOUT_SEC="${AGENT_CAPTURE_DISCOVERY_
 export AGENT_CAPTURE_DISCOVERY_SCHEDULER_CAPTURE_HOURS="${AGENT_CAPTURE_DISCOVERY_SCHEDULER_CAPTURE_HOURS:-24,48,72}"
 export AGENT_CAPTURE_MAX_SCAN_ROWS="${AGENT_CAPTURE_MAX_SCAN_ROWS:-250000}"
 export AGENT_CAPTURE_RUN_HISTORY_LIMIT="${AGENT_CAPTURE_RUN_HISTORY_LIMIT:-8}"
+export V27_READ_MODEL_REFRESH_WORKER_ENABLED="${V27_READ_MODEL_REFRESH_WORKER_ENABLED:-true}"
+export V27_READ_MODEL_WORKER_STATUS_PATH="${V27_READ_MODEL_WORKER_STATUS_PATH:-/app/data/v27_read_models/v27_read_model_worker_status.json}"
+export EVALUATOR_SNAPSHOT_WORKER_ENABLED="${EVALUATOR_SNAPSHOT_WORKER_ENABLED:-true}"
+export EVALUATOR_SNAPSHOT_OUT_ROOT="${EVALUATOR_SNAPSHOT_OUT_ROOT:-/app/data/agent_evidence}"
+export EVALUATOR_SNAPSHOT_STATUS="${EVALUATOR_SNAPSHOT_STATUS:-$EVALUATOR_SNAPSHOT_OUT_ROOT/snapshot_status.json}"
+export EVALUATOR_SNAPSHOT_LOCK_FILE="${EVALUATOR_SNAPSHOT_LOCK_FILE:-/tmp/cross-db-evaluator-snapshot.lock}"
+export EVALUATOR_SNAPSHOT_MAX_AGE_SEC="${EVALUATOR_SNAPSHOT_MAX_AGE_SEC:-28800}"
+export EVALUATOR_SNAPSHOT_MAX_SKEW_SEC="${EVALUATOR_SNAPSHOT_MAX_SKEW_SEC:-30}"
+export EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB="${EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB:-5}"
+export EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB="${EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB:-10}"
+export EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS="${EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS:-96}"
+export EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS="${EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS:-840}"
+export EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS="${EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS:-30000}"
+export EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC="${EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC:-300}"
+export EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC="${EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC:-60}"
 export STRATEGY_MEMORY_ARTIFACT_DIR="${STRATEGY_MEMORY_ARTIFACT_DIR:-/app/docs/agents/strategy-memory-seed}"
 export PUMP_FUN_SHADOW_WORKER_ENABLED="${PUMP_FUN_SHADOW_WORKER_ENABLED:-true}"
 export PUMP_FUN_SHADOW_RETENTION_DAYS="${PUMP_FUN_SHADOW_RETENTION_DAYS:-30}"
@@ -241,6 +256,7 @@ echo "[STARTUP] Starting Node.js..."
     V27_MODE_READINESS_PATH=/app/data/v27_read_models/mode_readiness.json \
     V27_RUNTIME_MODE_GATE_ENABLED="${V27_RUNTIME_MODE_GATE_ENABLED:-true}" \
     V27_READ_MODEL_REFRESH_WORKER_ENABLED="${V27_READ_MODEL_REFRESH_WORKER_ENABLED:-true}" \
+    EVALUATOR_SNAPSHOT_WORKER_ENABLED=false \
     NODE_STARTUP_PREFLIGHT_ENABLED=false \
     DASHBOARD_RUNTIME_LOG_DIR=/app/data \
     EMBEDDED_DASHBOARD_ENABLED=false \
@@ -332,27 +348,50 @@ else
   echo "[STARTUP] Candidate shadow observer disabled."
 fi
 
-if [ "${EVALUATOR_SNAPSHOT_WORKER_ENABLED:-true}" = "true" ]; then
-  echo "[STARTUP] Starting bounded cross-DB evaluator snapshot worker..."
-  PYTHONUNBUFFERED=1 python3 scripts/cross_db_evaluator_snapshot.py \
-    --signal-db /app/data/sentiment_arb.db \
-    --paper-db /app/data/paper_trades.db \
-    --raw-db /app/data/raw_signal_outcomes.db \
-    --kline-db /app/data/kline_cache.db \
-    --out-root "${EVALUATOR_SNAPSHOT_OUT_ROOT:-/app/data/agent_evidence}" \
-    --max-skew-sec "${EVALUATOR_SNAPSHOT_MAX_SKEW_SEC:-30}" \
-    --min-free-after-gib "${EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB:-5}" \
-    --max-output-gib "${EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB:-10}" \
-    --review-history-hours "${EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS:-96}" \
-    --long-history-hours "${EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS:-840}" \
-    --source-busy-timeout-ms "${EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS:-30000}" \
-    --keep-previous 0 \
-    --max-runs 0 \
-    --interval-sec "${EVALUATOR_SNAPSHOT_INTERVAL_SEC:-21600}" \
-    --initial-delay-sec "${EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC:-30}" \
-    --status-out "${EVALUATOR_SNAPSHOT_STATUS:-/app/data/agent_evidence/snapshot_status.json}" \
-    --lock-file "${EVALUATOR_SNAPSHOT_LOCK_FILE:-/tmp/cross-db-evaluator-snapshot.lock}" \
-    >> /app/data/cross-db-evaluator-snapshot.log 2>&1 &
+if [ "$EVALUATOR_SNAPSHOT_WORKER_ENABLED" = "true" ]; then
+  echo "[STARTUP] Starting supervised bounded cross-DB evaluator snapshot worker..."
+  (
+    SNAPSHOT_CHILD_PID=""
+    stop_evaluator_snapshot_worker() {
+      if [ -n "$SNAPSHOT_CHILD_PID" ]; then
+        kill -TERM "$SNAPSHOT_CHILD_PID" 2>/dev/null || true
+        wait "$SNAPSHOT_CHILD_PID" 2>/dev/null || true
+      fi
+      exit 0
+    }
+    trap stop_evaluator_snapshot_worker TERM INT
+    while true; do
+      echo "[evaluator-snapshot] $(date -u '+%Y-%m-%dT%H:%M:%SZ') starting" >> /app/data/cross-db-evaluator-snapshot.log
+      PYTHONUNBUFFERED=1 python3 scripts/cross_db_evaluator_snapshot.py \
+        --signal-db /app/data/sentiment_arb.db \
+        --paper-db /app/data/paper_trades.db \
+        --raw-db /app/data/raw_signal_outcomes.db \
+        --kline-db /app/data/kline_cache.db \
+        --out-root "$EVALUATOR_SNAPSHOT_OUT_ROOT" \
+        --max-skew-sec "$EVALUATOR_SNAPSHOT_MAX_SKEW_SEC" \
+        --min-free-after-gib "$EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB" \
+        --max-output-gib "$EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB" \
+        --review-history-hours "$EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS" \
+        --long-history-hours "$EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS" \
+        --source-busy-timeout-ms "$EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS" \
+        --max-source-read-lock-sec "$EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC" \
+        --keep-previous 0 \
+        --max-runs 0 \
+        --interval-sec "${EVALUATOR_SNAPSHOT_INTERVAL_SEC:-21600}" \
+        --initial-delay-sec "${EVALUATOR_SNAPSHOT_INITIAL_DELAY_SEC:-30}" \
+        --status-out "$EVALUATOR_SNAPSHOT_STATUS" \
+        --lock-file "$EVALUATOR_SNAPSHOT_LOCK_FILE" \
+        >> /app/data/cross-db-evaluator-snapshot.log 2>&1 &
+      SNAPSHOT_CHILD_PID=$!
+      set +e
+      wait "$SNAPSHOT_CHILD_PID"
+      EXIT_CODE=$?
+      set -e
+      SNAPSHOT_CHILD_PID=""
+      echo "[evaluator-snapshot] $(date -u '+%Y-%m-%dT%H:%M:%SZ') exited (code $EXIT_CODE), restarting in ${EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC}s" >> /app/data/cross-db-evaluator-snapshot.log
+      sleep "$EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC"
+    done
+  ) &
   EVALUATOR_SNAPSHOT_PID=$!
 else
   echo "[STARTUP] Cross-DB evaluator snapshot worker disabled."

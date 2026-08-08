@@ -33,10 +33,10 @@
     },
     {
       "job_name": "premium_node_server",
-      "entry_point": "node src/index.js --premium",
+      "entry_point": "node --import ./src/runtime/v27-paper-mode-preload.js src/index.js --premium",
       "entry_point_file": "src/index.js",
       "source_file": "scripts/run_zeabur_services.sh",
-      "source_anchor": "node src/index.js --premium",
+      "source_anchor": "node --import ./src/runtime/v27-paper-mode-preload.js src/index.js --premium",
       "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
       "lease_policy": {
         "kind": "supervised_restart_loop",
@@ -114,6 +114,37 @@
         "restart_delay_sec": 10
       },
       "owner": "external_alpha_ops"
+    },
+    {
+      "job_name": "v27_read_model_refresh",
+      "entry_point": "python3 scripts/v27_read_model_refresh.py --loop",
+      "entry_point_file": "scripts/v27_read_model_refresh.py",
+      "source_file": "src/index.js",
+      "source_anchor": "name: 'v27-read-model-refresh'",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "node_sidecar_restart_loop",
+        "status_artifact": "v27_read_model_worker_status.json",
+        "lock_file": "/tmp/v27_read_model_refresh.lock",
+        "restart_delay_sec": 15
+      },
+      "owner": "read_model_ops"
+    },
+    {
+      "job_name": "cross_db_evaluator_snapshot",
+      "entry_point": "python3 scripts/cross_db_evaluator_snapshot.py --max-runs 0",
+      "entry_point_file": "scripts/cross_db_evaluator_snapshot.py",
+      "source_file": "scripts/run_zeabur_services.sh",
+      "source_anchor": "python3 scripts/cross_db_evaluator_snapshot.py",
+      "allowed_modes": ["observe_only", "shadow", "ultra_tiny", "normal_tiny"],
+      "lease_policy": {
+        "kind": "supervised_restart_loop",
+        "pid_env": "EVALUATOR_SNAPSHOT_PID",
+        "restart_delay_sec": 60,
+        "status_artifact": "snapshot_status.json",
+        "lock_file": "/tmp/cross-db-evaluator-snapshot.lock"
+      },
+      "owner": "research_evidence_ops"
     },
     {
       "job_name": "weekly_maintenance_cron",

@@ -7,6 +7,7 @@ function blockedStatus(blocker, context) {
     evidence_databases: context.candidates,
     live_databases: context.live,
     evidence_manifest: context.manifestPath,
+    producer_status_path: context.producerStatusPath,
     snapshot_id: null,
     snapshot_ts: null,
     accepted: false,
@@ -20,6 +21,7 @@ export function runEvaluatorSnapshotPreflight(options) {
     candidates: options.candidates,
     live: options.live,
     manifestPath: options.manifestPath,
+    producerStatusPath: options.producerStatusPath || null,
   };
   const args = [
     options.contractScript,
@@ -29,6 +31,9 @@ export function runEvaluatorSnapshotPreflight(options) {
     '--kline-db', options.candidates.kline,
     '--data-dir', options.dataDir,
     '--manifest-path', options.manifestPath,
+    ...(options.producerStatusPath
+      ? ['--producer-status-path', options.producerStatusPath]
+      : []),
     '--max-age-sec', String(options.maxAgeSec),
     '--live-signal-db', options.live.signal,
     '--live-paper-db', options.live.paper,
@@ -77,16 +82,71 @@ export function runEvaluatorSnapshotPreflight(options) {
       || Number(status.snapshot_ts) <= 0
       || typeof status.manifest_path !== 'string'
       || status.manifest_path.length === 0
+      || typeof status.manifest_sha256 !== 'string'
+      || !/^[a-f0-9]{64}$/i.test(status.manifest_sha256)
+      || typeof status.producer_status_path !== 'string'
+      || status.producer_status_path.length === 0
+      || status.producer_status_schema_version !== 'cross_db_evaluator_snapshot_worker_status.v1'
+      || !status.producer_status
+      || typeof status.producer_status !== 'object'
+      || status.producer_status.last_accepted_snapshot?.snapshot_id !== status.snapshot_id
+      || status.producer_status.last_accepted_snapshot?.manifest_sha256 !== status.manifest_sha256
     )
   ) {
     return blockedStatus('evaluator_snapshot_authoritative_preflight_invalid_contract', context);
   }
+  const authoritativeDatabases = status.databases && typeof status.databases === 'object'
+    ? status.databases
+    : options.candidates;
   return {
     ...status,
-    evidence_db: options.candidates.paper,
-    evidence_databases: options.candidates,
+    evidence_db: authoritativeDatabases.paper,
+    evidence_databases: authoritativeDatabases,
     live_databases: options.live,
-    evidence_manifest: options.manifestPath,
+    evidence_manifest: status.manifest_path || options.manifestPath,
     promotion_allowed: false,
+  };
+}
+
+export function evaluatorSnapshotProvenance(status = {}) {
+  const verified = status?.verified_integrity && typeof status.verified_integrity === 'object'
+    ? status.verified_integrity
+    : {};
+  const databases = status?.databases && typeof status.databases === 'object'
+    ? status.databases
+    : status?.evidence_databases && typeof status.evidence_databases === 'object'
+      ? status.evidence_databases
+      : {};
+  const databaseEvidence = {};
+  for (const name of ['signal', 'paper', 'raw', 'kline']) {
+    const integrity = verified[name] && typeof verified[name] === 'object' ? verified[name] : {};
+    databaseEvidence[name] = {
+      path: databases[name] || null,
+      sha256: integrity.sha256 || null,
+      sha256_matches_manifest: integrity.sha256_matches_manifest === true,
+      quick_check: Array.isArray(integrity.quick_check) ? integrity.quick_check : [],
+    };
+  }
+  return {
+    schema_version: 'evaluator_snapshot_provenance.v1',
+    consumer_verified_at: new Date().toISOString(),
+    contract_schema_version: status.schema_version || null,
+    accepted: status.accepted === true,
+    snapshot_id: status.snapshot_id || null,
+    snapshot_ts: Number.isFinite(Number(status.snapshot_ts)) ? Number(status.snapshot_ts) : null,
+    snapshot_age_sec: Number.isFinite(Number(status.snapshot_age_sec)) ? Number(status.snapshot_age_sec) : null,
+    max_snapshot_age_sec: Number.isFinite(Number(status.max_snapshot_age_sec)) ? Number(status.max_snapshot_age_sec) : null,
+    git_commit: status.git_commit || null,
+    manifest_path: status.manifest_path || status.evidence_manifest || null,
+    manifest_sha256: status.manifest_sha256 || null,
+    producer_status_path: status.producer_status_path || null,
+    producer_status_schema_version: status.producer_status_schema_version || null,
+    producer_manifest_sha256: status.producer_status?.last_accepted_snapshot?.manifest_sha256 || null,
+    databases: databaseEvidence,
+    blockers: Array.isArray(status.blockers) ? status.blockers.map(String) : [],
+    promotion_allowed: false,
+    strategy_change_allowed: false,
+    automatic_runtime_change_allowed: false,
+    paper_enablement_allowed: false,
   };
 }

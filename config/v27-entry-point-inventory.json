@@ -29,8 +29,8 @@
       },
       "route_group": {
         "kind": "all_dashboard_literal_routes",
-        "expected_literal_route_count": 64,
-        "expected_protected_route_count": 58
+        "expected_literal_route_count": 103,
+        "expected_protected_route_count": 98
       },
       "route_registry_required": false,
       "route_registry_reason": "HTTP routing coverage is governed by AccessControlContract, not entry-mode route registry",
@@ -223,11 +223,21 @@
       "entry_point_id": "v27_read_model_refresh_cli",
       "entry_type": "script",
       "code_location": {"file": "scripts/v27_read_model_refresh.py", "anchor": "if __name__ == \"__main__\""},
-      "launcher_location": {"file": "src/web/dashboard-server.js", "anchor": "v27-read-model-refresh-once"},
+      "launcher_location": {"file": "src/index.js", "anchor": "function startV27ReadModelRefreshWorker()"},
       "route_registry_required": false,
       "route_registry_reason": "read model refresh updates governance evidence",
       "arbiter_required": true,
       "arbiter_reason": "manual evidence route requires POST, auth, and audit"
+    },
+    {
+      "entry_point_id": "cross_db_evaluator_snapshot_cli",
+      "entry_type": "script",
+      "code_location": {"file": "scripts/cross_db_evaluator_snapshot.py", "anchor": "if __name__ == \"__main__\""},
+      "launcher_location": {"file": "scripts/run_zeabur_services.sh", "anchor": "python3 scripts/cross_db_evaluator_snapshot.py"},
+      "route_registry_required": false,
+      "route_registry_reason": "snapshot producer materializes immutable evaluator evidence and cannot create entries",
+      "arbiter_required": true,
+      "arbiter_reason": "shared flock, bounded output, source read-lock budget, manifest contract, and consumer preflight arbitrate publication"
     },
     {
       "entry_point_id": "v27_recovery_control_mirror_cli",

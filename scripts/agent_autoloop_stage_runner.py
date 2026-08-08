@@ -51,7 +51,10 @@ from agent_capture_discovery_loop import (
     write_json,
     write_materialized_artifacts,
 )
-from evaluator_db_contract import evaluator_snapshot_bundle_lease
+from evaluator_db_contract import (
+    evaluator_snapshot_bundle_lease,
+    evaluator_snapshot_provenance,
+)
 
 
 SCHEMA_VERSION = "agent_autoloop_stage_runner.v1"
@@ -216,6 +219,8 @@ def args_namespace(args):
         max_scan_rows=args.max_scan_rows,
         oos_probe_hours=args.oos_probe_hours,
         quote_fix_deploy_ts=args.quote_fix_deploy_ts,
+        evaluator_snapshot=getattr(args, "evaluator_snapshot", None),
+        evaluator_snapshot_required=bool(getattr(args, "evaluator_snapshot_required", False)),
     )
 
 
@@ -1155,6 +1160,17 @@ def self_test():
 def execute_stages(args):
     run_dir = run_dir_for(args)
     run_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_provenance = getattr(args, "evaluator_snapshot", None)
+    if bool(getattr(args, "evaluator_snapshot_required", False)):
+        if (
+            not isinstance(snapshot_provenance, dict)
+            or snapshot_provenance.get("accepted") is not True
+            or not snapshot_provenance.get("snapshot_id")
+            or not snapshot_provenance.get("manifest_sha256")
+        ):
+            raise RuntimeError("evaluator_snapshot_provenance_missing_or_rejected")
+    if isinstance(snapshot_provenance, dict):
+        write_json(run_dir / "evaluator_snapshot_provenance.json", snapshot_provenance)
     results = []
     stages = parse_stages(args.stage)
     for stage in stages:
@@ -1181,6 +1197,16 @@ def execute_stages(args):
         "run_dir": str(run_dir),
         "stages": [row.get("stage") for row in results],
         "last_result": results[-1] if results else None,
+        "evaluator_snapshot_id": (
+            snapshot_provenance.get("snapshot_id")
+            if isinstance(snapshot_provenance, dict)
+            else None
+        ),
+        "evaluator_snapshot_manifest_sha256": (
+            snapshot_provenance.get("manifest_sha256")
+            if isinstance(snapshot_provenance, dict)
+            else None
+        ),
     }, sort_keys=True))
 
 
@@ -1258,6 +1284,8 @@ def main(argv=None):
         args.raw_db = evidence["databases"]["raw"]
         args.kline_db = evidence["databases"]["kline"]
         args.evidence_manifest = evidence["manifest_path"]
+        args.evaluator_snapshot = evaluator_snapshot_provenance(evidence)
+        args.evaluator_snapshot_required = True
         execute_stages(args)
 
 

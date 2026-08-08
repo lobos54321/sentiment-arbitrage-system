@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runEvaluatorSnapshotPreflight } from '../src/web/evaluator-snapshot-preflight.js';
+import {
+  evaluatorSnapshotProvenance,
+  runEvaluatorSnapshotPreflight,
+} from '../src/web/evaluator-snapshot-preflight.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const dashboard = fs.readFileSync(path.join(root, 'src/web/dashboard-server.js'), 'utf8');
@@ -44,6 +47,7 @@ function preflightOptions(runner) {
       kline: '/data/kline_cache.db',
     },
     manifestPath: '/snapshot/manifest.json',
+    producerStatusPath: '/snapshot/snapshot_status.json',
     maxAgeSec: 28800,
     timeoutMs: 300000,
     runner,
@@ -60,16 +64,57 @@ test('dashboard delegates acceptance to the authoritative Python contract', () =
       blockers: [],
       snapshot_id: 'snapshot-1',
       snapshot_ts: 123,
-      manifest_path: '/snapshot/manifest.json',
+      manifest_path: '/snapshot/snapshots/snapshot-1/manifest.json',
+      manifest_sha256: 'a'.repeat(64),
+      producer_status_path: '/snapshot/snapshot_status.json',
+      producer_status_schema_version: 'cross_db_evaluator_snapshot_worker_status.v1',
+      producer_status: {
+        status: 'completed',
+        accepted: true,
+        last_accepted_snapshot: {
+          snapshot_id: 'snapshot-1',
+          manifest_sha256: 'a'.repeat(64),
+        },
+        promotion_allowed: false,
+      },
+      databases: {
+        signal: '/snapshot/snapshots/snapshot-1/signal.db',
+        paper: '/snapshot/snapshots/snapshot-1/paper_evidence.db',
+        raw: '/snapshot/snapshots/snapshot-1/raw.db',
+        kline: '/snapshot/snapshots/snapshot-1/kline.db',
+      },
       promotion_allowed: false,
     });
   }));
 
   assert.equal(status.accepted, true);
   assert.equal(status.promotion_allowed, false);
+  assert.equal(status.evidence_db, '/snapshot/snapshots/snapshot-1/paper_evidence.db');
+  assert.equal(status.evidence_manifest, '/snapshot/snapshots/snapshot-1/manifest.json');
   assert.ok(observedArgs.includes('--live-paper-db'));
   assert.ok(observedArgs.includes('/data/paper_trades.db'));
   assert.ok(observedArgs.includes('--manifest-path'));
+  assert.ok(observedArgs.includes('--producer-status-path'));
+  assert.ok(observedArgs.includes('/snapshot/snapshot_status.json'));
+  const provenance = evaluatorSnapshotProvenance({
+    ...status,
+    verified_integrity: {
+      paper: {
+        sha256: 'c'.repeat(64),
+        sha256_matches_manifest: true,
+        quick_check: ['ok'],
+      },
+    },
+  });
+  assert.equal(provenance.schema_version, 'evaluator_snapshot_provenance.v1');
+  assert.equal(provenance.accepted, true);
+  assert.equal(provenance.snapshot_id, 'snapshot-1');
+  assert.equal(provenance.manifest_sha256, 'a'.repeat(64));
+  assert.equal(provenance.producer_status_path, '/snapshot/snapshot_status.json');
+  assert.equal(provenance.producer_manifest_sha256, 'a'.repeat(64));
+  assert.equal(provenance.databases.paper.sha256_matches_manifest, true);
+  assert.deepEqual(provenance.databases.paper.quick_check, ['ok']);
+  assert.equal(provenance.promotion_allowed, false);
 });
 
 test('dashboard preflight fails closed on falsy or malformed authoritative output', () => {
@@ -102,6 +147,36 @@ test('dashboard preflight fails closed on falsy or malformed authoritative outpu
     'evaluator_snapshot_authoritative_preflight_invalid_contract',
   ]);
 
+  const producerMismatch = runEvaluatorSnapshotPreflight(preflightOptions(() => JSON.stringify({
+    schema_version: 'evaluator_snapshot_bundle_contract.v1',
+    accepted: true,
+    blockers: [],
+    snapshot_id: 'snapshot-1',
+    snapshot_ts: 123,
+    manifest_path: '/snapshot/snapshots/snapshot-1/manifest.json',
+    manifest_sha256: 'a'.repeat(64),
+    producer_status_path: '/snapshot/snapshot_status.json',
+    producer_status_schema_version: 'cross_db_evaluator_snapshot_worker_status.v1',
+    producer_status: {
+      last_accepted_snapshot: {
+        snapshot_id: 'snapshot-1',
+        manifest_sha256: 'b'.repeat(64),
+      },
+      promotion_allowed: false,
+    },
+    databases: {
+      signal: '/snapshot/snapshots/snapshot-1/signal.db',
+      paper: '/snapshot/snapshots/snapshot-1/paper_evidence.db',
+      raw: '/snapshot/snapshots/snapshot-1/raw.db',
+      kline: '/snapshot/snapshots/snapshot-1/kline.db',
+    },
+    promotion_allowed: false,
+  })));
+  assert.equal(producerMismatch.accepted, false);
+  assert.deepEqual(producerMismatch.blockers, [
+    'evaluator_snapshot_authoritative_preflight_invalid_contract',
+  ]);
+
   const contradictorySuccess = runEvaluatorSnapshotPreflight(preflightOptions(() => JSON.stringify({
     schema_version: 'wrong-schema',
     accepted: true,
@@ -109,6 +184,7 @@ test('dashboard preflight fails closed on falsy or malformed authoritative outpu
     snapshot_id: 'snapshot-1',
     snapshot_ts: 123,
     manifest_path: '/snapshot/manifest.json',
+    manifest_sha256: 'b'.repeat(64),
     promotion_allowed: false,
   })));
   assert.equal(contradictorySuccess.accepted, false);

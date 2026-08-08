@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import stat
@@ -24,6 +25,8 @@ from cross_db_evaluator_snapshot import (
 SCHEMA_VERSION = "evaluator_db_source_contract.v1"
 SNAPSHOT_SCHEMA_VERSION = "cross_db_evaluator_snapshot.v3"
 SELECTION_SCHEMA_VERSION = "evaluator_snapshot_selection.v1"
+PROVENANCE_SCHEMA_VERSION = "evaluator_snapshot_provenance.v1"
+PRODUCER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 SNAPSHOT_FILES = {
     "signal": "signal.db",
     "paper": "paper_evidence.db",
@@ -187,6 +190,23 @@ def require_evaluator_db_source(
     return status
 
 
+def producer_status_path_for_manifest(
+    manifest_file: Path,
+    explicit_path: str | None = None,
+) -> Path:
+    configured = explicit_path or os.environ.get("EVALUATOR_SNAPSHOT_STATUS")
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    snapshot_dir = manifest_file.parent
+    if snapshot_dir.parent.name == "snapshots":
+        evidence_root = snapshot_dir.parent.parent
+    elif snapshot_dir.name == "current":
+        evidence_root = snapshot_dir.parent
+    else:
+        evidence_root = snapshot_dir.parent
+    return (evidence_root / "snapshot_status.json").resolve(strict=False)
+
+
 def evaluator_snapshot_bundle_status(
     *,
     signal_db: str,
@@ -195,6 +215,7 @@ def evaluator_snapshot_bundle_status(
     kline_db: str,
     data_dir: str,
     manifest_path: str | None = None,
+    producer_status_path: str | None = None,
     max_age_sec: float = 28800,
     now_ts: float | None = None,
     live_databases: dict[str, str] | None = None,
@@ -220,6 +241,10 @@ def evaluator_snapshot_bundle_status(
         Path(manifest_path).expanduser().resolve()
         if manifest_path
         else (Path(paper_db).expanduser().parent / "manifest.json").resolve()
+    )
+    producer_status_file = producer_status_path_for_manifest(
+        manifest_file,
+        producer_status_path,
     )
     blockers: list[str] = []
     candidate_identities: dict[str, tuple[int, int]] = {}
@@ -258,6 +283,10 @@ def evaluator_snapshot_bundle_status(
                     blockers.append(f"active_{candidate_name}_db_forbidden_for_evaluator")
     manifest: dict = {}
     manifest_loaded = False
+    manifest_sha256_value: str | None = None
+    producer_status: dict = {}
+    producer_status_loaded = False
+    producer_acceptance: dict = {}
     snapshot_age_sec_value: float | None = None
     snapshot_upper_epoch: float | None = None
     verified_integrity: dict[str, dict] = {}
@@ -265,6 +294,7 @@ def evaluator_snapshot_bundle_status(
         blockers.append("evaluator_snapshot_manifest_missing")
     else:
         try:
+            manifest_sha256_value = sha256_file(manifest_file)
             parsed_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             if not isinstance(parsed_manifest, dict) or not parsed_manifest:
                 blockers.append("evaluator_snapshot_manifest_invalid_structure")
@@ -273,6 +303,42 @@ def evaluator_snapshot_bundle_status(
                 manifest_loaded = True
         except Exception:
             blockers.append("evaluator_snapshot_manifest_invalid_json")
+    if not producer_status_file.is_file():
+        blockers.append("evaluator_snapshot_producer_status_missing")
+    else:
+        try:
+            parsed_status = json.loads(producer_status_file.read_text(encoding="utf-8"))
+            if not isinstance(parsed_status, dict) or not parsed_status:
+                blockers.append("evaluator_snapshot_producer_status_invalid_structure")
+            else:
+                producer_status = parsed_status
+                producer_status_loaded = True
+                producer_acceptance = (
+                    producer_status.get("last_accepted_snapshot")
+                    if isinstance(producer_status.get("last_accepted_snapshot"), dict)
+                    else {}
+                )
+        except Exception:
+            blockers.append("evaluator_snapshot_producer_status_invalid_json")
+    if producer_status_loaded:
+        if producer_status.get("schema_version") != PRODUCER_STATUS_SCHEMA_VERSION:
+            blockers.append("evaluator_snapshot_producer_status_schema_invalid")
+        if producer_status.get("promotion_allowed") is not False:
+            blockers.append("evaluator_snapshot_producer_promotion_boundary_invalid")
+        if not producer_acceptance:
+            blockers.append("evaluator_snapshot_producer_acceptance_missing")
+    if manifest_loaded and producer_status_loaded and producer_acceptance:
+        if producer_acceptance.get("snapshot_id") != manifest.get("snapshot_id"):
+            blockers.append("evaluator_snapshot_producer_snapshot_id_mismatch")
+        if producer_acceptance.get("manifest_sha256") != manifest_sha256_value:
+            blockers.append("evaluator_snapshot_producer_manifest_sha256_mismatch")
+        producer_manifest_path = producer_acceptance.get("manifest_path")
+        try:
+            producer_manifest_file = Path(str(producer_manifest_path)).expanduser().resolve()
+        except Exception:
+            producer_manifest_file = None
+        if producer_manifest_file != manifest_file:
+            blockers.append("evaluator_snapshot_producer_manifest_path_mismatch")
     if manifest_loaded:
         if manifest.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
             blockers.append("evaluator_snapshot_schema_version_invalid")
@@ -307,11 +373,37 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_selection_upper_bounds_inconsistent")
         if manifest.get("output_cap_passed") is not True:
             blockers.append("evaluator_snapshot_output_cap_failed")
+        disk_preflight = manifest.get("disk_preflight") or {}
+        if not isinstance(disk_preflight, dict) or disk_preflight.get("accepted") is not True:
+            blockers.append("evaluator_snapshot_disk_preflight_failed")
+        else:
+            try:
+                disk_free_bytes = int(disk_preflight.get("free_bytes"))
+                disk_reserve_bytes = int(disk_preflight.get("required_reserve_bytes"))
+                disk_free_after_bytes = int(disk_preflight.get("estimated_free_after_bytes"))
+                disk_cap_bytes = int(disk_preflight.get("selective_snapshot_output_cap_bytes"))
+                if (
+                    disk_free_bytes <= 0
+                    or disk_reserve_bytes < 0
+                    or disk_free_after_bytes < disk_reserve_bytes
+                    or disk_cap_bytes <= 0
+                    or int(disk_preflight.get("temporary_full_backup_bytes") or 0) != 0
+                    or disk_preflight.get("fail_closed_on_insufficient_space") is not True
+                ):
+                    raise ValueError("invalid disk preflight evidence")
+            except (TypeError, ValueError):
+                blockers.append("evaluator_snapshot_disk_preflight_contract_invalid")
         try:
             output_size_bytes = int(manifest.get("output_size_bytes"))
             output_cap_bytes = int(manifest.get("output_cap_bytes"))
             if output_size_bytes <= 0 or output_cap_bytes <= 0 or output_size_bytes > output_cap_bytes:
                 blockers.append("evaluator_snapshot_output_size_contract_invalid")
+            if isinstance(disk_preflight, dict) and disk_preflight.get("accepted") is True:
+                try:
+                    if int(disk_preflight.get("selective_snapshot_output_cap_bytes")) != output_cap_bytes:
+                        blockers.append("evaluator_snapshot_disk_output_cap_mismatch")
+                except (TypeError, ValueError):
+                    blockers.append("evaluator_snapshot_disk_output_cap_mismatch")
         except (TypeError, ValueError):
             output_size_bytes = None
             output_cap_bytes = None
@@ -444,6 +536,38 @@ def evaluator_snapshot_bundle_status(
             for table, selection_report in selected_tables.items():
                 if not isinstance(selection_report, dict) or selection_report.get("included") is not True:
                     continue
+                rule = (DATABASE_SPECS[name].get("tables") or {}).get(table) or {}
+                indexed_anchor = rule.get("indexed_epoch_seconds_anchor")
+                if indexed_anchor:
+                    source_index_name = selection_report.get("source_index_name")
+                    source_index_columns = selection_report.get("source_index_columns")
+                    if (
+                        selection_report.get("predicate_strategy") != "indexed_epoch_seconds"
+                        or selection_report.get("indexed_time_anchor") != indexed_anchor
+                        or not isinstance(source_index_name, str)
+                        or not source_index_name.strip()
+                        or not isinstance(source_index_columns, list)
+                        or not source_index_columns
+                        or source_index_columns[0] != indexed_anchor
+                        or selection_report.get("source_index_partial") is not False
+                    ):
+                        blockers.append(
+                            f"evaluator_snapshot_{name}_indexed_time_selection_invalid:{table}"
+                        )
+                    query_plan = selection_report.get("source_query_plan")
+                    if (
+                        not isinstance(query_plan, list)
+                        or not query_plan
+                        or not all(isinstance(value, str) and value for value in query_plan)
+                        or selection_report.get("source_query_plan_uses_index") is not True
+                        or selection_report.get("source_query_plan_uses_range_search") is not True
+                        or selection_report.get(
+                            "source_query_plan_full_table_scan_detected"
+                        ) is not False
+                    ):
+                        blockers.append(
+                            f"evaluator_snapshot_{name}_indexed_query_plan_invalid:{table}"
+                        )
                 time_semantics = selection_report.get("time_semantics")
                 if time_semantics == "event_time" and selection_report.get("future_bound_enforced") is not True:
                     blockers.append(
@@ -546,6 +670,24 @@ def evaluator_snapshot_bundle_status(
     return {
         "schema_version": "evaluator_snapshot_bundle_contract.v1",
         "manifest_path": str(manifest_file),
+        "manifest_sha256": manifest_sha256_value,
+        "producer_status_path": str(producer_status_file),
+        "producer_status_schema_version": (
+            producer_status.get("schema_version") if producer_status else None
+        ),
+        "producer_status": (
+            {
+                "status": producer_status.get("status"),
+                "accepted": producer_status.get("accepted") is True,
+                "last_success_at": producer_status.get("last_success_at"),
+                "last_failure_at": producer_status.get("last_failure_at"),
+                "last_failure_code": producer_status.get("last_failure_code"),
+                "last_accepted_snapshot": producer_acceptance,
+                "promotion_allowed": False,
+            }
+            if producer_status_loaded
+            else None
+        ),
         "snapshot_id": manifest.get("snapshot_id") if manifest else None,
         "snapshot_ts": manifest.get("snapshot_ts") if manifest else None,
         "snapshot_age_sec": (
@@ -559,6 +701,55 @@ def evaluator_snapshot_bundle_status(
         "accepted": not blockers,
         "blockers": blockers,
         "promotion_allowed": False,
+    }
+
+
+def evaluator_snapshot_provenance(status: dict) -> dict:
+    """Return a bounded immutable consumer record for one accepted bundle.
+
+    The provenance record is safe to copy into AutoLoop artifacts. It contains
+    bundle identity and integrity evidence, never source rows or token-level
+    payloads, and it cannot authorize promotion.
+    """
+    payload = status if isinstance(status, dict) else {}
+    databases = payload.get("databases") if isinstance(payload.get("databases"), dict) else {}
+    verified = payload.get("verified_integrity") if isinstance(payload.get("verified_integrity"), dict) else {}
+    database_evidence = {}
+    for name in sorted(SNAPSHOT_FILES):
+        integrity = verified.get(name) if isinstance(verified.get(name), dict) else {}
+        database_evidence[name] = {
+            "path": databases.get(name),
+            "sha256": integrity.get("sha256"),
+            "sha256_matches_manifest": integrity.get("sha256_matches_manifest") is True,
+            "quick_check": integrity.get("quick_check") if isinstance(integrity.get("quick_check"), list) else [],
+        }
+    return {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "consumer_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "contract_schema_version": payload.get("schema_version"),
+        "accepted": payload.get("accepted") is True,
+        "snapshot_id": payload.get("snapshot_id"),
+        "snapshot_ts": payload.get("snapshot_ts"),
+        "snapshot_age_sec": payload.get("snapshot_age_sec"),
+        "max_snapshot_age_sec": payload.get("max_snapshot_age_sec"),
+        "git_commit": payload.get("git_commit"),
+        "manifest_path": payload.get("manifest_path"),
+        "manifest_sha256": payload.get("manifest_sha256"),
+        "producer_status_path": payload.get("producer_status_path"),
+        "producer_status_schema_version": payload.get(
+            "producer_status_schema_version"
+        ),
+        "producer_manifest_sha256": (
+            (payload.get("producer_status") or {})
+            .get("last_accepted_snapshot", {})
+            .get("manifest_sha256")
+        ),
+        "databases": database_evidence,
+        "blockers": [str(value) for value in (payload.get("blockers") or [])],
+        "promotion_allowed": False,
+        "strategy_change_allowed": False,
+        "automatic_runtime_change_allowed": False,
+        "paper_enablement_allowed": False,
     }
 
 
@@ -616,6 +807,7 @@ def main() -> int:
     parser.add_argument("--kline-db", required=True)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--manifest-path", required=True)
+    parser.add_argument("--producer-status-path")
     parser.add_argument("--max-age-sec", type=float, default=28800)
     parser.add_argument("--live-signal-db")
     parser.add_argument("--live-paper-db")
@@ -630,6 +822,7 @@ def main() -> int:
             kline_db=args.kline_db,
             data_dir=args.data_dir,
             manifest_path=args.manifest_path,
+            producer_status_path=args.producer_status_path,
             max_age_sec=args.max_age_sec,
             live_databases={
                 name: value

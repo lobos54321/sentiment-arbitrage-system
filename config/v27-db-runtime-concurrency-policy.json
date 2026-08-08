@@ -5,8 +5,8 @@
   "source_anchors": [
     {"source_file": "scripts/sqlite_write_coordinator.py", "anchor": "fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)"},
     {"source_file": "scripts/sqlite_write_coordinator.py", "anchor": "_PROCESS_WRITE_LOCK = threading.RLock()"},
-    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "db.execute(f\"PRAGMA busy_timeout = {PAPER_SQLITE_BUSY_TIMEOUT_MS}\")"},
-    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\"):"},
+    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "configure_paper_sqlite_connection("},
+    {"source_file": "scripts/paper_trade_monitor.py", "anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\", timeout_sec=lock_timeout_sec):"},
     {"source_file": "scripts/paper_decision_audit.py", "anchor": "with sqlite_single_writer(\"paper_decision_audit:record_event\"):"},
     {"source_file": "scripts/zeabur_preflight_cleanup.py", "anchor": "PRAGMA wal_checkpoint(TRUNCATE)"},
     {"source_file": "src/market-data/shared-market-runtime.js", "anchor": "client.set(lockKey, token, { PX: lockMs, NX: true })"}
@@ -39,7 +39,7 @@
       "retry_policy": {"attempts": 3, "base_sleep_ms": 350, "timeout_ms": 30000},
       "fallback_action": "rollback_and_retry_then_raise",
       "source_file": "scripts/paper_trade_monitor.py",
-      "source_anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\"):"
+      "source_anchor": "with sqlite_single_writer(f\"paper_trade_monitor:{label}\", timeout_sec=lock_timeout_sec):"
     },
     {
       "store": "sqlite:missed_attribution",

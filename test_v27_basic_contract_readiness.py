@@ -1669,7 +1669,8 @@ def test_access_control_policy_covers_dashboard_routes_and_mutations():
     report = verify_access_control_policy()
 
     assert report["status"] == "pass"
-    assert report["evidence"]["protected_route_count"] == 58
+    assert report["evidence"]["literal_route_count"] == 103
+    assert report["evidence"]["protected_route_count"] == 98
     assert report["evidence"]["mutation_policy_count"] == 12
     assert report["evidence"]["write_path_endpoint_count"] == 6
     assert report["evidence"]["unauthenticated_routes"] == []
@@ -1714,6 +1715,77 @@ if (url.pathname === '/api/open') {
     assert report["status"] == "missing_evidence"
     assert report["blocking_reason"] == "access_control_policy_missing_malformed_or_incomplete"
     assert report["evidence"]["unauthenticated_routes"] == [{"endpoint": "/api/open", "line": 9}]
+
+
+def test_access_control_policy_recognizes_multiline_aliases_and_fail_closed_helper(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text(
+        """
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) { res.writeHead(403); return false; }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) { res.writeHead(401); return false; }
+  return true;
+}
+async function guardedDownload(req, res, url) {
+  if (!checkAuth(req, url, res)) return false;
+  res.end('download');
+  return true;
+}
+if (
+  url.pathname === '/api/download/a'
+  || url.pathname === '/api/download/b'
+) {
+  await guardedDownload(req, res, url);
+}
+""",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "access-policy.json"
+    registry_path = tmp_path / "write-registry.json"
+    write_access_policy(policy_path, source_path)
+    write_write_registry(registry_path)
+
+    report = verify_access_control_policy(policy_path, registry_path)
+
+    assert report["status"] == "pass"
+    assert report["evidence"]["literal_route_count"] == 2
+    assert report["evidence"]["protected_route_count"] == 2
+    assert report["evidence"]["unauthenticated_routes"] == []
+
+
+def test_access_control_policy_blocks_unprotected_duplicate_route_occurrence(tmp_path):
+    source_path = tmp_path / "server.js"
+    source_path.write_text(
+        """
+const DASHBOARD_TOKEN = process.env.DASHBOARD_TOKEN || '';
+function checkAuth(req, url, res) {
+  if (!DASHBOARD_TOKEN) { res.writeHead(403); return false; }
+  const token = url.searchParams.get('token') || req.headers['x-dashboard-token'] || '';
+  if (token !== DASHBOARD_TOKEN) { res.writeHead(401); return false; }
+  return true;
+}
+if (url.pathname === '/api/duplicate') {
+  if (!checkAuth(req, url, res)) return;
+  res.end('protected');
+}
+if (url.pathname === '/api/duplicate') {
+  res.end('unprotected');
+}
+""",
+        encoding="utf-8",
+    )
+    policy_path = tmp_path / "access-policy.json"
+    registry_path = tmp_path / "write-registry.json"
+    write_access_policy(policy_path, source_path)
+    write_write_registry(registry_path)
+
+    report = verify_access_control_policy(policy_path, registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["evidence"]["unauthenticated_routes"][0]["endpoint"] == "/api/duplicate"
+    assert report["evidence"]["protected_route_count"] == 1
 
 
 def test_access_control_policy_blocks_mutation_without_post_guard(tmp_path):
@@ -1818,8 +1890,8 @@ def test_write_path_registry_covers_dashboard_write_paths():
 
     assert report["status"] == "pass"
     assert report["evidence"]["scan_target_count"] == 1
-    assert report["evidence"]["scanned_mutation_count"] == 9
-    assert report["evidence"]["registered_write_path_count"] == 9
+    assert report["evidence"]["scanned_mutation_count"] == 14
+    assert report["evidence"]["registered_write_path_count"] == 14
     assert report["evidence"]["unregistered_mutation_count"] == 0
     assert "sqlite:paper_trades" in report["evidence"]["registered_targets"]
 
@@ -1828,8 +1900,12 @@ def test_direct_database_mutation_ban_covers_break_glass_paths():
     report = verify_direct_database_mutation_ban()
 
     assert report["status"] == "pass"
+    assert report["evidence"]["sqlite_write_path_count"] == 10
     assert report["evidence"]["direct_db_write_path_count"] == 7
     assert report["evidence"]["approved_mutation_path_count"] == 7
+    assert report["evidence"]["internal_observability_write_path_count"] == 3
+    assert report["evidence"]["internal_observability_targets"] == ["sqlite:raw_signal_outcomes"]
+    assert report["evidence"]["internal_observability_violations"] == []
     assert report["evidence"]["unapproved_direct_db_mutations"] == []
     assert report["evidence"]["registry_gate_violations"] == []
     assert report["evidence"]["access_control_violations"] == []
@@ -1910,16 +1986,43 @@ def test_direct_database_mutation_ban_blocks_unapproved_sqlite_mutation(tmp_path
     ]
 
 
+def test_direct_database_mutation_ban_rejects_internal_observer_targeting_operational_store(tmp_path):
+    registry = json.loads(Path("config/v27-write-path-registry.json").read_text(encoding="utf-8"))
+    observer = next(
+        item
+        for item in registry["write_paths"]
+        if item.get("write_path_id") == "dashboard.raw_signal_outcomes.upsert"
+    )
+    observer["target_store"] = "sqlite:paper_trades"
+    registry_path = tmp_path / "write-path-registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    report = verify_direct_database_mutation_ban(registry_path=registry_path)
+
+    assert report["status"] == "missing_evidence"
+    assert report["evidence"]["internal_observability_violations"] == [
+        {
+            "write_path_id": "dashboard.raw_signal_outcomes.upsert",
+            "target_store": "sqlite:paper_trades",
+            "entry_point": "raw_dog_discovery_observer",
+            "endpoint": None,
+            "mode_gate": "observe_only",
+            "reasons": ["target_store_not_allowed_for_internal_observability"],
+        }
+    ]
+
+
 def test_background_job_registry_covers_supervised_runtime_jobs():
     report = verify_background_job_registry()
 
     assert report["status"] == "pass"
-    assert report["evidence"]["job_count"] == 9
-    assert report["evidence"]["restart_loop_job_count"] == 6
+    assert report["evidence"]["job_count"] == 11
+    assert report["evidence"]["restart_loop_job_count"] == 8
     assert report["evidence"]["missing_entry_point_files"] == []
     assert report["evidence"]["missing_source_anchors"] == []
     assert "paper_trade_monitor" in report["evidence"]["job_names"]
     assert "source_resonance_shadow" in report["evidence"]["job_names"]
+    assert "cross_db_evaluator_snapshot" in report["evidence"]["job_names"]
 
 
 def test_background_job_registry_blocks_missing_entry_point(tmp_path):
@@ -1964,13 +2067,13 @@ def test_entry_point_inventory_covers_runtime_routes_scripts_and_deploy():
     report = verify_entry_point_inventory()
 
     assert report["status"] == "pass"
-    assert report["evidence"]["entry_point_count"] == 32
+    assert report["evidence"]["entry_point_count"] == 33
     assert report["evidence"]["entry_type_counts"]["route_group"] == 5
-    assert report["evidence"]["entry_type_counts"]["script"] == 18
-    assert report["evidence"]["dashboard_literal_route_count"] == 64
-    assert report["evidence"]["dashboard_protected_route_count"] == 58
+    assert report["evidence"]["entry_type_counts"]["script"] == 19
+    assert report["evidence"]["dashboard_literal_route_count"] == 103
+    assert report["evidence"]["dashboard_protected_route_count"] == 98
     assert report["evidence"]["route_registry_required_count"] == 2
-    assert report["evidence"]["arbiter_required_count"] == 29
+    assert report["evidence"]["arbiter_required_count"] == 30
     assert report["evidence"]["uncovered_audit_required_routes"] == []
     assert report["evidence"]["location_violations"] == []
 
@@ -2064,6 +2167,61 @@ def test_static_policy_enforcement_blocks_forbidden_pattern(tmp_path):
             "match": "export const value = eval('1 + 1');",
         }
     ]
+
+
+def test_static_policy_shell_exec_rule_allows_sqlite_exec_but_blocks_process_exec(tmp_path):
+    sqlite_source = tmp_path / "sqlite.js"
+    sqlite_source.write_text("db.exec('CREATE TABLE demo(id INTEGER)');\n", encoding="utf-8")
+    shell_source = tmp_path / "shell.js"
+    shell_source.write_text("exec('echo unsafe');\n", encoding="utf-8")
+    forbidden_pattern = r"(?:(?<![.\w])exec|\b(?:child_process|childProcess|cp)\.exec)\s*\("
+
+    sqlite_policy = tmp_path / "sqlite-policy.json"
+    sqlite_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.static_policy_enforcement.v1",
+                "scope": "unit",
+                "failure_action": "ci_fail",
+                "checks": [
+                    {
+                        "static_check_id": "unit_shell_exec_forbidden",
+                        "forbidden_pattern": forbidden_pattern,
+                        "scan_target": str(sqlite_source),
+                        "result": "pass",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sqlite_report = verify_static_policy_enforcement(sqlite_policy)
+    assert sqlite_report["status"] == "pass"
+    assert sqlite_report["evidence"]["forbidden_matches"] == []
+
+    shell_policy = tmp_path / "shell-policy.json"
+    shell_policy.write_text(
+        json.dumps(
+            {
+                "schema_version": "v2.7.0.static_policy_enforcement.v1",
+                "scope": "unit",
+                "failure_action": "ci_fail",
+                "checks": [
+                    {
+                        "static_check_id": "unit_shell_exec_forbidden",
+                        "forbidden_pattern": forbidden_pattern,
+                        "scan_target": str(shell_source),
+                        "result": "pass",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    shell_report = verify_static_policy_enforcement(shell_policy)
+    assert shell_report["status"] == "missing_evidence"
+    assert shell_report["evidence"]["forbidden_match_count"] == 1
+    assert shell_report["evidence"]["forbidden_matches"][0]["match"] == "exec('echo unsafe');"
 
 
 def test_api_response_contract_covers_v27_manual_evidence_post_routes():
@@ -2618,7 +2776,7 @@ def test_service_readiness_probe_contract_covers_health_surfaces():
     assert report["evidence"]["schema_version"] == "v2.7.0.service_readiness_probes.v1"
     assert report["evidence"]["failure_action"] == "service_not_ready"
     assert report["evidence"]["required_fields"] == ["service_name", "probe_id", "health_status", "dependency_status", "checked_at"]
-    assert report["evidence"]["probe_count"] == 6
+    assert report["evidence"]["probe_count"] == 8
     assert report["evidence"]["schema_violations"] == []
     assert report["evidence"]["malformed_probes"] == []
     assert report["evidence"]["source_violations"] == []
@@ -2629,6 +2787,8 @@ def test_service_readiness_probe_contract_covers_health_surfaces():
         "dashboard_status_snapshot",
         "module_health_snapshot",
         "v27_read_model_health",
+        "v27_read_model_worker",
+        "evaluator_snapshot_worker",
         "v27_mode_readiness",
         "zeabur_supervisor_boot",
     } <= probe_ids

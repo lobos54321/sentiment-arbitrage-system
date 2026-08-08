@@ -5,6 +5,7 @@ __pycache__/
 data/*.db
 data/*.db-journal
 data/*.json
+data/v27_event_log/
 data/reviews/
 data/strategy_reflection/
 !data/paper-strategy-registry.json

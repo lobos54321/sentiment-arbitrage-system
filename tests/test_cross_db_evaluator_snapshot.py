@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from collections import namedtuple
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,10 +16,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import cross_db_evaluator_snapshot as snapshot_module  # noqa: E402
 from agent_capture_discovery_loop import sqlite_has_table  # noqa: E402
 from cross_db_evaluator_snapshot import (  # noqa: E402
+    DATABASE_SPECS,
     build_snapshot_bundle,
     candidate_observation_projection_supported,
     cleanup_interrupted_partials,
     database_output_budget_plan,
+    selection_for_table,
+    source_table_reference,
     static_database_output_budgets,
 )
 
@@ -33,7 +37,11 @@ def create_sources(root):
         "signal": "CREATE TABLE premium_signals(id INTEGER, source_message_ts INTEGER)",
         "paper": (
             "CREATE TABLE candidate_shadow_observations(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_obs_observed "
+            "ON candidate_shadow_observations(observed_at);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
+            "CREATE INDEX idx_candidate_shadow_virtual_observed "
+            "ON candidate_shadow_virtual_trades(observed_at);"
             "CREATE TABLE paper_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_decision_events(id INTEGER, event_ts INTEGER);"
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
@@ -120,6 +128,81 @@ def test_dynamic_budget_uses_static_reserve_for_malformed_estimate(
     assert plan["source_compact_estimate_bytes"]["paper"] is None
     assert plan["database_budget_bytes"]["raw"] == static["raw"]
     assert sum(plan["database_budget_bytes"].values()) == 10 * 1024**3
+
+
+def test_candidate_time_selection_forces_observed_at_index(tmp_path):
+    sources = create_sources(tmp_path)
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    try:
+        selection = selection_for_table(
+            connection,
+            "candidate_shadow_observations",
+            DATABASE_SPECS["paper"]["tables"]["candidate_shadow_observations"],
+            review_lower_epoch=100.0,
+            long_lower_epoch=10.0,
+            upper_epoch=200.0,
+        )
+        plan = [
+            str(row[3])
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * "
+                f"FROM {source_table_reference('candidate_shadow_observations', selection)} "
+                f"WHERE {selection['predicate_sql']} "
+                "ORDER BY signal_id",
+                selection["parameters"],
+            )
+        ]
+    finally:
+        connection.close()
+
+    assert selection["predicate_strategy"] == "indexed_epoch_seconds"
+    assert selection["indexed_time_anchor"] == "observed_at"
+    assert selection["source_index_name"] == "idx_candidate_shadow_obs_observed"
+    assert selection["source_index_columns"] == ["observed_at"]
+    assert selection["source_index_partial"] is False
+    assert '\"observed_at\" >= ?' in selection["predicate_sql"]
+    assert "COALESCE(" not in selection["predicate_sql"]
+    assert "typeof(\"observed_at\")" not in selection["predicate_sql"]
+    assert any(
+        "SEARCH" in detail
+        and "idx_candidate_shadow_obs_observed" in detail
+        and "observed_at>?" in detail
+        for detail in plan
+    ), plan
+    assert not any(
+        "SCAN" in detail and "candidate_shadow_observations" in detail
+        for detail in plan
+    ), plan
+
+
+def test_candidate_time_selection_fails_closed_without_source_index(tmp_path):
+    sources = create_sources(tmp_path)
+    source = sqlite3.connect(sources["paper"])
+    source.execute("DROP INDEX idx_candidate_shadow_obs_observed")
+    source.commit()
+    source.close()
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ? AS src", (sources["paper"],))
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="selective_snapshot_source_index_missing:"
+            "candidate_shadow_observations:observed_at",
+        ):
+            selection_for_table(
+                connection,
+                "candidate_shadow_observations",
+                DATABASE_SPECS["paper"]["tables"]["candidate_shadow_observations"],
+                review_lower_epoch=100.0,
+                long_lower_epoch=10.0,
+                upper_epoch=200.0,
+            )
+    finally:
+        connection.close()
 
 
 def test_cross_db_snapshot_publishes_only_after_full_validation(tmp_path):
@@ -238,6 +321,8 @@ def test_candidate_observation_payload_projection_is_lossless_and_compact(tmp_pa
           ON candidate_shadow_observations(signal_id);
         CREATE INDEX idx_candidate_shadow_obs_candidate
           ON candidate_shadow_observations(candidate_id, observed_at);
+        CREATE INDEX idx_candidate_shadow_obs_observed
+          ON candidate_shadow_observations(observed_at);
         """
     )
     expected = {}
@@ -597,6 +682,66 @@ def test_secondary_future_timestamps_exclude_incomplete_as_of_rows(tmp_path):
         snapshot.close()
 
 
+def test_indexed_anchor_preserves_mixed_secondary_timestamp_formats(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    iso_past = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 30))
+    iso_future = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + 3600))
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN signal_ts")
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN entry_ts")
+    paper.execute("ALTER TABLE candidate_shadow_virtual_trades ADD COLUMN exit_ts")
+    paper.executemany(
+        "INSERT INTO candidate_shadow_virtual_trades("
+        "signal_id, observed_at, signal_ts, entry_ts, exit_ts"
+        ") VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, now - 60, now - 90, now - 45, now - 30),
+            (2, now - 60, (now - 90) * 1000, (now - 45) * 1000, (now - 30) * 1000),
+            (3, now - 60, iso_past, iso_past, iso_past),
+            (4, now - 60, now - 90, now - 45, (now + 3600) * 1000),
+            (5, now - 60, iso_past, iso_past, iso_future),
+        ],
+    )
+    paper.commit()
+    paper.close()
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcd",
+    )
+
+    snapshot = sqlite3.connect(report["databases"]["paper"]["snapshot_path"])
+    try:
+        assert snapshot.execute(
+            "SELECT signal_id FROM candidate_shadow_virtual_trades ORDER BY signal_id"
+        ).fetchall() == [(1,), (2,), (3,)]
+    finally:
+        snapshot.close()
+
+    selection = report["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_virtual_trades"
+    ]
+    assert selection["predicate_strategy"] == "indexed_epoch_seconds"
+    assert selection["indexed_time_anchor"] == "observed_at"
+    assert selection["source_index_name"] == "idx_candidate_shadow_virtual_observed"
+    assert selection["source_index_columns"] == ["observed_at"]
+    assert selection["source_index_partial"] is False
+    assert selection["source_query_plan_uses_index"] is True
+    assert selection["source_query_plan_uses_range_search"] is True
+    assert selection["source_query_plan_full_table_scan_detected"] is False
+    assert any(
+        "SEARCH" in detail
+        and "idx_candidate_shadow_virtual_observed" in detail
+        for detail in selection["source_query_plan"]
+    )
+
+
 def test_failed_bundle_does_not_replace_current(tmp_path):
     sources = create_sources(tmp_path)
     out = tmp_path / "evidence"
@@ -839,6 +984,137 @@ def test_locked_source_fails_closed_without_replacing_current(tmp_path):
     current = json.loads((out / "current" / "manifest.json").read_text())
     assert current["snapshot_id"] == first["snapshot_id"]
     assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
+
+
+def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101T000000Z-1234abcd"):
+    out_root = tmp_path / "worker-evidence"
+    return SimpleNamespace(
+        signal_db=sources["signal"],
+        paper_db=sources["paper"],
+        raw_db=sources["raw"],
+        kline_db=sources["kline"],
+        out_root=str(out_root),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        review_history_hours=96,
+        long_history_hours=840,
+        source_busy_timeout_ms=30000,
+        max_source_read_lock_sec=300,
+        keep_previous=0,
+        snapshot_id=snapshot_id,
+        lock_file=str(tmp_path / "snapshot-worker.lock"),
+        status_out=str(out_root / "snapshot_status.json"),
+        max_runs=max_runs,
+        interval_sec=21600,
+        initial_delay_sec=0,
+    )
+
+
+def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    status_path = Path(args.status_out)
+    original_build = snapshot_module.build_snapshot_bundle
+
+    def inspect_running_status(**kwargs):
+        running = json.loads(status_path.read_text(encoding="utf-8"))
+        assert running["schema_version"] == "cross_db_evaluator_snapshot_worker_status.v1"
+        assert running["running"] is True
+        assert running["attempt_running"] is True
+        assert running["status"] == "running"
+        assert running["promotion_allowed"] is False
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", inspect_running_status)
+    status = snapshot_module.run_snapshot_once(args)
+    persisted = json.loads(status_path.read_text(encoding="utf-8"))
+
+    assert status == persisted
+    assert persisted["status"] == "completed"
+    assert persisted["accepted"] is True
+    assert persisted["running"] is True
+    assert persisted["attempt_running"] is False
+    assert persisted["last_success_at"]
+    assert persisted["last_error"] is None
+    accepted = persisted["last_accepted_snapshot"]
+    assert accepted["accepted"] is True
+    assert accepted["quick_checks_passed"] is True
+    assert accepted["source_read_lock_budget_passed"] is True
+    assert accepted["manifest_path"].endswith("/manifest.json")
+    assert len(accepted["manifest_sha256"]) == 64
+    assert accepted["manifest_sha256"] == snapshot_module.sha256_file(Path(accepted["manifest_path"]))
+    assert accepted["indexed_selection"]["candidate_shadow_observations"]["predicate_strategy"] == "indexed_epoch_seconds"
+    assert accepted["indexed_selection"]["candidate_shadow_virtual_trades"]["source_index_name"] == "idx_candidate_shadow_virtual_observed"
+    assert persisted["promotion_allowed"] is False
+
+
+def test_snapshot_worker_failure_preserves_last_accepted_summary(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    status_path = Path(args.status_out)
+    status_path.parent.mkdir(parents=True)
+    previous_summary = {
+        "snapshot_id": "20260101T000000Z-deadbeef",
+        "accepted": True,
+        "promotion_allowed": False,
+    }
+    status_path.write_text(
+        json.dumps({
+            "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
+            "last_success_at": "2026-08-08T00:00:00Z",
+            "last_accepted_snapshot": previous_summary,
+            "error_count": 2,
+        }),
+        encoding="utf-8",
+    )
+
+    def fail_snapshot(**_kwargs):
+        raise RuntimeError(
+            "selective_snapshot_source_index_missing:"
+            "candidate_shadow_observations:observed_at"
+        )
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_snapshot)
+    status = snapshot_module.run_snapshot_once(args)
+    persisted = json.loads(status_path.read_text(encoding="utf-8"))
+
+    assert status == persisted
+    assert persisted["status"] == "failed"
+    assert persisted["accepted"] is False
+    assert persisted["running"] is True
+    assert persisted["last_success_at"] == "2026-08-08T00:00:00Z"
+    assert persisted["last_accepted_snapshot"] == previous_summary
+    assert persisted["last_failure_code"] == "selective_snapshot_source_index_missing"
+    assert persisted["error_count"] == 3
+    assert persisted["promotion_allowed"] is False
+
+
+def test_duplicate_snapshot_worker_does_not_overwrite_active_status(tmp_path):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    status_path = Path(args.status_out)
+    status_path.parent.mkdir(parents=True)
+    active = {
+        "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
+        "pid": 12345,
+        "running": True,
+        "attempt_running": True,
+        "status": "running",
+        "snapshot_id": None,
+        "promotion_allowed": False,
+    }
+    status_path.write_text(json.dumps(active), encoding="utf-8")
+
+    with snapshot_module.exclusive_lock(Path(args.lock_file)):
+        status = snapshot_module.run_snapshot_once(args)
+
+    assert status["accepted"] is False
+    assert status["status"] == "failed"
+    assert status["last_failure_code"] == "evaluator_snapshot_lock_held"
+    assert status["status_artifact_preserved"] is True
+    assert json.loads(status_path.read_text(encoding="utf-8")) == active
 
 
 def test_duplicate_snapshot_id_is_rejected_without_partial(tmp_path):

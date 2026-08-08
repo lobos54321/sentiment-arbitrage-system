@@ -72,6 +72,12 @@
       "pid_env": "SOCIAL_PID",
       "detection_anchor": "kill -0 \"$SOCIAL_PID\"",
       "restart_action": "supervised_restart_loop"
+    },
+    {
+      "job_name": "cross_db_evaluator_snapshot",
+      "pid_env": "EVALUATOR_SNAPSHOT_PID",
+      "detection_anchor": "kill -0 \"$EVALUATOR_SNAPSHOT_PID\"",
+      "restart_action": "supervised_restart_loop"
     }
   ],
   "warm_start_controls": [

@@ -4,11 +4,25 @@ import { test } from 'node:test';
 
 test('startup supervises v27 read model refresh worker', () => {
   const source = fs.readFileSync('src/index.js', 'utf8');
+  const dashboard = fs.readFileSync('src/web/dashboard-server.js', 'utf8');
   const zeaburSupervisor = fs.readFileSync('scripts/run_zeabur_services.sh', 'utf8');
 
   assert.match(source, /function startPaperReviewSnapshotSidecar/);
-  assert.match(source, /review snapshot worker remains managed separately/);
+  assert.match(source, /function startV27ReadModelRefreshWorker/);
+  assert.match(source, /process\.env\.ZEABUR_DATA_DIR\s*\|\|\s*process\.env\.DATA_DIR\s*\|\|\s*'\.\/data'/);
+  assert.match(source, /markerGuard:\s*false/);
+  assert.match(source, /V27_READ_MODEL_WORKER_STATUS_PATH/);
+  assert.match(source, /v27_read_model_worker_status\.json/);
+  assert.match(source, /review snapshot and v27 read-model workers remain managed separately/);
   assert.match(source, /\.\.\.alwaysOnWorkers/);
+  const alwaysOnReadModelIndex = source.indexOf('...startV27ReadModelRefreshWorker()');
+  const sourceShadowEarlyReturnIndex = source.indexOf("if (!envFlag('SOURCE_SHADOW_WORKERS_ENABLED', false))");
+  assert.ok(alwaysOnReadModelIndex >= 0, 'v27 read-model worker must be included in always-on workers');
+  assert.ok(sourceShadowEarlyReturnIndex >= 0, 'source-shadow early return must remain explicit');
+  assert.ok(
+    alwaysOnReadModelIndex < sourceShadowEarlyReturnIndex,
+    'v27 read-model worker must be reachable before source-shadow workers are disabled',
+  );
   assert.match(source, /INDEX_RUNTIME_CHILD_SOURCE_SHADOW_WORKERS_ENABLED/);
   assert.match(source, /PAPER_DB_WRITE_SIDECARS_ENABLED/);
   assert.match(source, /paper DB write sidecars disabled/);
@@ -23,6 +37,8 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(zeaburSupervisor, /scripts\/paper_db_snapshot_request_worker\.py/);
   assert.match(zeaburSupervisor, /PAPER_DB_SNAPSHOT_LOCAL_VERIFY_DIR/);
   assert.match(zeaburSupervisor, /\/tmp\/paper-db-snapshot-verify/);
+  assert.match(zeaburSupervisor, /export V27_READ_MODEL_REFRESH_WORKER_ENABLED=/);
+  assert.match(zeaburSupervisor, /export V27_READ_MODEL_WORKER_STATUS_PATH=/);
   assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);
   assert.match(source, /function startRawPathObserverSupervisor/);
   assert.match(source, /RAW_PATH_OBSERVER_ENABLED/);
@@ -113,6 +129,10 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(source, /V27_LIFECYCLE_MIRROR_LOCK_FILE/);
   assert.match(source, /V27_READ_MODEL_REFRESH_WORKER_ENABLED/);
   assert.match(source, /name:\s*'v27-read-model-refresh'/);
+  assert.match(dashboard, /readV27ReadModelWorkerHealth/);
+  assert.match(dashboard, /v27_read_model_worker:/);
+  assert.match(dashboard, /continuousWorker\.lock_pid_alive\s*\|\|\s*continuousWorker\.running/);
+  assert.match(dashboard, /status:\s*'continuous_worker_running'/);
   assert.match(source, /scripts\/v27_read_model_refresh\.py/);
   assert.match(source, /'--loop'/);
   assert.match(source, /V27_EVENT_LOG_DIR/);

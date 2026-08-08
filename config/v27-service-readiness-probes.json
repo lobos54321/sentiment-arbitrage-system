@@ -8,6 +8,8 @@
     "dashboard_status_snapshot",
     "module_health_snapshot",
     "v27_read_model_health",
+    "v27_read_model_worker",
+    "evaluator_snapshot_worker",
     "v27_mode_readiness",
     "zeabur_supervisor_boot"
   ],
@@ -24,7 +26,7 @@
         "commit_fingerprint": "required"
       },
       "dependency_anchors": [
-        "status: global.__startupError ? 'degraded' : 'ok'",
+        "status: degraded ? 'degraded' : 'ok'",
         "commit: runtimeCommitFingerprint()"
       ]
     },
@@ -79,6 +81,45 @@
       ]
     },
     {
+      "service_name": "v27_read_model_refresh_worker",
+      "probe_id": "v27_read_model_worker",
+      "health_status": "ready",
+      "endpoint": "/health",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "v27_read_model_worker: v27ReadModelWorkerHealth",
+      "dependency_status": {
+        "configured": "required",
+        "process_or_lock_liveness": "required",
+        "artifact_freshness": "required",
+        "governance_blockers_preserved": "required"
+      },
+      "dependency_anchors": [
+        "const v27ReadModelWorkerHealth = readV27ReadModelWorkerHealth();",
+        "v27_read_model_worker: v27ReadModelWorkerHealth",
+        "readiness_blocked means the worker is healthy while governance still blocks the mode"
+      ]
+    },
+    {
+      "service_name": "cross_db_evaluator_snapshot_worker",
+      "probe_id": "evaluator_snapshot_worker",
+      "health_status": "ready",
+      "endpoint": "/health",
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "evaluator_snapshot_worker: evaluatorSnapshotWorkerHealth",
+      "dependency_status": {
+        "producer_status_artifact": "required",
+        "accepted_manifest_contract": "required",
+        "snapshot_freshness": "required",
+        "indexed_selection_evidence": "required",
+        "authoritative_consumer_preflight": "required"
+      },
+      "dependency_anchors": [
+        "const evaluatorSnapshotWorkerHealth = readEvaluatorSnapshotWorkerHealth();",
+        "evaluator_snapshot_worker: evaluatorSnapshotWorkerHealth",
+        "authoritative_consumer_preflight_required: true"
+      ]
+    },
+    {
       "service_name": "v27_mode_readiness_api",
       "probe_id": "v27_mode_readiness",
       "health_status": "ready",
@@ -102,7 +143,7 @@
       "health_status": "ready",
       "endpoint": null,
       "source_file": "scripts/run_zeabur_services.sh",
-      "source_anchor": "[STARTUP] PIDs redis=$REDIS_PID node=$NODE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID scout=$SCOUT_PID resonance=$RESONANCE_PID social=$SOCIAL_PID",
+      "source_anchor": "[STARTUP] PIDs redis=$REDIS_PID dashboard=$DASHBOARD_PID node=$NODE_PID maintenance=$MAINTENANCE_PID lifecycle=$LIFECYCLE_PID paper=$PAPER_PID",
       "dependency_status": {
         "redis_ready_probe": "required",
         "node_pid_probe": "required",

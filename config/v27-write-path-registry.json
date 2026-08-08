@@ -14,7 +14,9 @@
           "UPDATE ",
           "DELETE FROM"
         ],
-        "exclude_patterns": []
+        "exclude_patterns": [
+          "ON CONFLICT"
+        ]
       }
     ]
   },
@@ -162,6 +164,89 @@
       "source_file": "src/web/dashboard-server.js",
       "source_anchor": "DELETE FROM system_state WHERE key = 'trading_paused'",
       "source_anchor_occurrence": 2
+    },
+    {
+      "write_path_id": "dashboard.runtime_events.append",
+      "module": "dashboard_server",
+      "entry_point": "appendDashboardRuntimeEvent",
+      "target_store": "filesystem:dashboard_runtime_events",
+      "write_target": "dashboard-runtime-events.jsonl",
+      "mutation_type": "append_file",
+      "requires_outbox": false,
+      "outbox_reason": "bounded diagnostic request and process telemetry only",
+      "owner": "dashboard_runtime",
+      "mode_gate": "diagnostics",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "fs.appendFileSync(dashboardRuntimeEventsPath",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.raw_signal_outcomes.upsert",
+      "module": "dashboard_raw_dog_observer",
+      "entry_point": "raw_dog_discovery_observer",
+      "target_store": "sqlite:raw_signal_outcomes",
+      "write_target": "raw_signal_outcomes",
+      "mutation_type": "upsert",
+      "mutation_scope": "internal_observability",
+      "requires_outbox": false,
+      "outbox_reason": "derived raw outcome observation is rebuildable from signal and price evidence",
+      "owner": "raw_outcome_observer",
+      "mode_gate": "observe_only",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "INSERT INTO raw_signal_outcomes (",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.raw_price_bars.upsert",
+      "module": "dashboard_raw_dog_observer",
+      "entry_point": "raw_dog_discovery_observer",
+      "target_store": "sqlite:raw_signal_outcomes",
+      "write_target": "raw_price_bars_1m",
+      "mutation_type": "upsert",
+      "mutation_scope": "internal_observability",
+      "requires_outbox": false,
+      "outbox_reason": "durable observation bars are measurement evidence and never create a trading entry",
+      "owner": "raw_path_observer",
+      "mode_gate": "observe_only",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "INSERT INTO raw_price_bars_1m (",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.raw_signal_observations.upsert",
+      "module": "dashboard_raw_dog_observer",
+      "entry_point": "raw_dog_discovery_observer",
+      "target_store": "sqlite:raw_signal_outcomes",
+      "write_target": "raw_signal_observations",
+      "mutation_type": "upsert",
+      "mutation_scope": "internal_observability",
+      "requires_outbox": false,
+      "outbox_reason": "coverage observation is rebuildable measurement evidence and cannot arm an entry",
+      "owner": "raw_outcome_observer",
+      "mode_gate": "observe_only",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "INSERT INTO raw_signal_observations (",
+      "source_anchor_occurrence": 1
+    },
+    {
+      "write_path_id": "dashboard.raw_path_observer_log.append",
+      "module": "dashboard_raw_path_observer",
+      "entry_point": "appendRawPathObserverLog",
+      "target_store": "filesystem:raw_path_observer_log",
+      "write_target": "raw-path-observer.log",
+      "mutation_type": "append_file",
+      "requires_outbox": false,
+      "outbox_reason": "diagnostic child-process output only",
+      "owner": "raw_path_observer",
+      "mode_gate": "diagnostics",
+      "allowed_in_paper_mode": true,
+      "source_file": "src/web/dashboard-server.js",
+      "source_anchor": "fs.appendFileSync(logPath",
+      "source_anchor_occurrence": 1
     }
   ]
 }

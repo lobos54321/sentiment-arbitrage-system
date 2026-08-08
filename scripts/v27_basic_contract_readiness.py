@@ -6310,31 +6310,112 @@ def _source_lines(source_file):
     return source_path.read_text(encoding="utf-8").splitlines(), None
 
 
-def _extract_dashboard_routes(lines):
-    route_line_indexes = []
-    endpoints_by_line = {}
-    for index, line in enumerate(lines):
-        endpoints = re.findall(r"url\.pathname\s*===\s*['\"]([^'\"]+)['\"]", line)
-        if not endpoints:
-            continue
-        route_line_indexes.append(index)
-        endpoints_by_line[index] = endpoints
+def _dashboard_route_headers(lines):
+    """Return one header per logical route condition, including multiline aliases.
 
+    The previous line-by-line scanner treated each line of a multiline
+    ``url.pathname === A || url.pathname === B`` condition as a separate route.
+    That split the first alias away from the auth guard in the shared body.  We
+    keep this deliberately small and deterministic: only JavaScript ``if`` /
+    ``else if`` headers containing literal pathname comparisons are considered.
+    """
+    headers = []
+    index = 0
+    if_pattern = re.compile(r"\b(?:else\s+)?if\s*\(")
+    endpoint_pattern = re.compile(r"url\.pathname\s*===\s*['\"]([^'\"]+)['\"]")
+    while index < len(lines):
+        if not if_pattern.search(lines[index]):
+            index += 1
+            continue
+        start = index
+        end = index
+        header_lines = [lines[index]]
+        paren_balance = lines[index].count("(") - lines[index].count(")")
+        if "url.pathname" not in lines[index] and paren_balance <= 0:
+            index += 1
+            continue
+        while end + 1 < len(lines) and paren_balance > 0:
+            end += 1
+            header_lines.append(lines[end])
+            paren_balance += lines[end].count("(") - lines[end].count(")")
+            if end - start >= 24:
+                break
+        header_text = "\n".join(header_lines)
+        endpoints = endpoint_pattern.findall(header_text) if "{" in header_text else []
+        if endpoints:
+            endpoint_lines = {}
+            for relative_index, text in enumerate(header_lines):
+                for endpoint in endpoint_pattern.findall(text):
+                    endpoint_lines.setdefault(endpoint, start + relative_index + 1)
+            headers.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "indent": len(lines[start]) - len(lines[start].lstrip()),
+                    "endpoints": endpoints,
+                    "endpoint_lines": endpoint_lines,
+                }
+            )
+        index = max(index + 1, end + 1)
+    return headers
+
+
+def _dashboard_auth_guard_helpers(lines):
+    """Find helpers that fail closed through ``checkAuth`` before doing work."""
+    helpers = {}
+    function_pattern = re.compile(r"\b(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(")
+    for index, line in enumerate(lines):
+        match = function_pattern.search(line)
+        if not match:
+            continue
+        name = match.group(1)
+        end = index
+        brace_balance = line.count("{") - line.count("}")
+        saw_open_brace = "{" in line
+        while end + 1 < len(lines) and (not saw_open_brace or brace_balance > 0):
+            end += 1
+            saw_open_brace = saw_open_brace or "{" in lines[end]
+            brace_balance += lines[end].count("{") - lines[end].count("}")
+        body = "\n".join(lines[index:end + 1])
+        fail_closed_auth = re.search(
+            r"if\s*\(\s*!checkAuth\(\s*req\s*,\s*url\s*,\s*res\s*\)\s*\)\s*return(?:\s+false)?\s*;",
+            body,
+        )
+        if fail_closed_auth:
+            helpers[name] = {"definition_line": index + 1, "end_line": end + 1}
+    return helpers
+
+
+def _extract_dashboard_routes(lines):
+    headers = _dashboard_route_headers(lines)
+    auth_helpers = _dashboard_auth_guard_helpers(lines)
     routes = []
-    for route_index, line_index in enumerate(route_line_indexes):
-        next_line_index = route_line_indexes[route_index + 1] if route_index + 1 < len(route_line_indexes) else len(lines)
+    for route_index, header in enumerate(headers):
+        line_index = header["start"]
+        next_line_index = headers[route_index + 1]["start"] if route_index + 1 < len(headers) else len(lines)
         block = lines[line_index:next_line_index]
         check_auth_line = None
+        auth_guard_kind = None
+        auth_guard_helper = None
         post_guard_line = None
         audit_event_line = None
         mutation_markers = []
         for offset, text in enumerate(block):
+            absolute_line = line_index + offset + 1
             if check_auth_line is None and "checkAuth(req, url, res)" in text:
-                check_auth_line = line_index + offset + 1
+                check_auth_line = absolute_line
+                auth_guard_kind = "direct"
+            if check_auth_line is None:
+                for helper_name in auth_helpers:
+                    if re.search(rf"\b{re.escape(helper_name)}\s*\(", text):
+                        check_auth_line = absolute_line
+                        auth_guard_kind = "delegated_helper"
+                        auth_guard_helper = helper_name
+                        break
             if post_guard_line is None and ("req.method !== 'POST'" in text or "requirePost(req, res)" in text):
-                post_guard_line = line_index + offset + 1
+                post_guard_line = absolute_line
             if audit_event_line is None and "requireDashboardAuditEvent(req, res, url" in text:
-                audit_event_line = line_index + offset + 1
+                audit_event_line = absolute_line
             if (
                 "triggerV27" in text
                 or "cleanupOpenPaperPositions(" in text
@@ -6343,14 +6424,18 @@ def _extract_dashboard_routes(lines):
                 or "resumeTrading(" in text
                 or "resetDailyLoss(" in text
             ):
-                mutation_markers.append({"line": line_index + offset + 1, "text": text.strip()})
-        for endpoint in endpoints_by_line.get(line_index, []):
+                mutation_markers.append({"line": absolute_line, "text": text.strip()})
+        for endpoint in header["endpoints"]:
             routes.append(
                 {
                     "endpoint": endpoint,
-                    "line": line_index + 1,
+                    "line": header["endpoint_lines"].get(endpoint, line_index + 1),
+                    "header_start": line_index,
+                    "indent": header["indent"],
                     "has_check_auth": check_auth_line is not None,
                     "check_auth_line": check_auth_line,
+                    "auth_guard_kind": auth_guard_kind,
+                    "auth_guard_helper": auth_guard_helper,
                     "has_post_guard": post_guard_line is not None,
                     "post_guard_line": post_guard_line,
                     "has_audit_event": audit_event_line is not None,
@@ -6358,24 +6443,68 @@ def _extract_dashboard_routes(lines):
                     "mutation_markers": mutation_markers[:5],
                 }
             )
-    return routes
+    for route_index, route in enumerate(routes):
+        inherited_guard = None
+        if not route["has_check_auth"]:
+            for previous in reversed(routes[:route_index]):
+                if previous["header_start"] == route["header_start"]:
+                    continue
+                if previous["indent"] < route["indent"]:
+                    if previous["has_check_auth"]:
+                        inherited_guard = previous
+                    break
+        route["effective_has_check_auth"] = bool(route["has_check_auth"] or inherited_guard)
+        route["inherited_auth_line"] = inherited_guard.get("check_auth_line") if inherited_guard else None
+        route["inherited_auth_endpoint"] = inherited_guard.get("endpoint") if inherited_guard else None
+
+    grouped = {}
+    for route in routes:
+        grouped.setdefault(route["endpoint"], []).append(route)
+
+    merged = []
+    for endpoint, occurrences in grouped.items():
+        protected = all(route["effective_has_check_auth"] for route in occurrences)
+        auth_lines = [
+            route.get("check_auth_line") or route.get("inherited_auth_line")
+            for route in occurrences
+            if route["effective_has_check_auth"]
+        ]
+        direct_route = next((route for route in occurrences if route["has_check_auth"]), None)
+        mutation_markers = []
+        for route in occurrences:
+            mutation_markers.extend(route["mutation_markers"])
+        unprotected_lines = [
+            route["line"] for route in occurrences if not route["effective_has_check_auth"]
+        ]
+        merged.append(
+            {
+                **occurrences[0],
+                "line": min(unprotected_lines) if unprotected_lines else min(route["line"] for route in occurrences),
+                "has_check_auth": protected,
+                "check_auth_line": min(auth_lines) if auth_lines else None,
+                "auth_guard_kind": direct_route.get("auth_guard_kind") if direct_route else ("inherited_route" if protected else None),
+                "auth_guard_helper": direct_route.get("auth_guard_helper") if direct_route else None,
+                "has_post_guard": any(route["has_post_guard"] for route in occurrences),
+                "post_guard_line": next((route["post_guard_line"] for route in occurrences if route["post_guard_line"]), None),
+                "has_audit_event": any(route["has_audit_event"] for route in occurrences),
+                "audit_event_line": next((route["audit_event_line"] for route in occurrences if route["audit_event_line"]), None),
+                "mutation_markers": mutation_markers[:5],
+                "occurrence_count": len(occurrences),
+                "unprotected_occurrence_lines": unprotected_lines,
+            }
+        )
+    return merged
 
 
 def _dashboard_route_block(lines, endpoint):
-    route_line_indexes = []
-    endpoints_by_line = {}
-    for index, line in enumerate(lines):
-        endpoints = re.findall(r"url\.pathname\s*===\s*['\"]([^'\"]+)['\"]", line)
-        if not endpoints:
+    headers = _dashboard_route_headers(lines)
+    blocks = []
+    for route_index, header in enumerate(headers):
+        if endpoint not in header["endpoints"]:
             continue
-        route_line_indexes.append(index)
-        endpoints_by_line[index] = endpoints
-    for route_index, line_index in enumerate(route_line_indexes):
-        if endpoint not in endpoints_by_line.get(line_index, []):
-            continue
-        next_line_index = route_line_indexes[route_index + 1] if route_index + 1 < len(route_line_indexes) else len(lines)
-        return "\n".join(lines[line_index:next_line_index])
-    return ""
+        next_line_index = headers[route_index + 1]["start"] if route_index + 1 < len(headers) else len(lines)
+        blocks.append("\n".join(lines[header["start"]:next_line_index]))
+    return "\n".join(blocks)
 
 
 def _resolve_access_policy(endpoint, defaults, overrides):
@@ -6846,14 +6975,53 @@ def verify_direct_database_mutation_ban(
         )
 
     write_paths = registry.get("write_paths") if isinstance(registry.get("write_paths"), list) else []
-    direct_db_paths = [
+    sqlite_write_paths = [
         item for item in write_paths
         if isinstance(item, dict) and str(item.get("target_store") or "").startswith("sqlite:")
+    ]
+    internal_observability_paths = [
+        item for item in sqlite_write_paths
+        if str(item.get("mutation_scope") or "") == "internal_observability"
+    ]
+    direct_db_paths = [
+        item for item in sqlite_write_paths
+        if str(item.get("mutation_scope") or "") != "internal_observability"
     ]
     direct_by_id = {str(item.get("write_path_id")): item for item in direct_db_paths if item.get("write_path_id")}
     approved_paths = policy.get("approved_mutation_paths") if isinstance(policy.get("approved_mutation_paths"), list) else []
     rules = policy.get("rules") if isinstance(policy.get("rules"), dict) else {}
     required_mode_gate = str(rules.get("required_registry_mode_gate") or "admin_break_glass")
+    internal_policy = policy.get("internal_observability") if isinstance(policy.get("internal_observability"), dict) else {}
+    internal_allowed_targets = set(str(value) for value in (internal_policy.get("allowed_target_stores") or []))
+    internal_allowed_mode_gates = set(str(value) for value in (internal_policy.get("allowed_mode_gates") or []))
+    internal_observability_violations = []
+    for item in internal_observability_paths:
+        write_path_id = str(item.get("write_path_id") or "")
+        target_store = str(item.get("target_store") or "")
+        mode_gate = str(item.get("mode_gate") or "")
+        method, endpoint = _entry_point_endpoint(item.get("entry_point"))
+        reasons = []
+        if not internal_allowed_targets or target_store not in internal_allowed_targets:
+            reasons.append("target_store_not_allowed_for_internal_observability")
+        if not internal_allowed_mode_gates or mode_gate not in internal_allowed_mode_gates:
+            reasons.append("mode_gate_not_allowed_for_internal_observability")
+        if internal_policy.get("require_allowed_in_paper_mode", True) and item.get("allowed_in_paper_mode") is not True:
+            reasons.append("allowed_in_paper_mode_must_be_true")
+        if internal_policy.get("forbid_http_entry_points", True) and method is not None:
+            reasons.append("http_entry_point_forbidden_for_internal_observability")
+        if not str(item.get("outbox_reason") or ""):
+            reasons.append("outbox_reason_required")
+        if reasons:
+            internal_observability_violations.append(
+                {
+                    "write_path_id": write_path_id,
+                    "target_store": target_store,
+                    "entry_point": item.get("entry_point"),
+                    "endpoint": endpoint,
+                    "mode_gate": mode_gate,
+                    "reasons": reasons,
+                }
+            )
     access_by_endpoint = {
         str(item.get("endpoint")): item
         for item in (access_policy.get("endpoint_overrides") or [])
@@ -6947,6 +7115,7 @@ def verify_direct_database_mutation_ban(
         and not registry_gate_violations
         and not access_control_violations
         and not outbox_rationale_violations
+        and not internal_observability_violations
     )
     return _contract(
         "DirectDatabaseMutationBan",
@@ -6959,9 +7128,19 @@ def verify_direct_database_mutation_ban(
             "schema_version": policy.get("schema_version"),
             "default_action": rules.get("default_action"),
             "required_registry_mode_gate": required_mode_gate,
+            "sqlite_write_path_count": len(sqlite_write_paths),
             "direct_db_write_path_count": len(direct_db_paths),
             "approved_mutation_path_count": len(approved_paths),
             "direct_db_targets": sorted({str(item.get("target_store")) for item in direct_db_paths if item.get("target_store")}),
+            "internal_observability_write_path_count": len(internal_observability_paths),
+            "internal_observability_targets": sorted({str(item.get("target_store")) for item in internal_observability_paths if item.get("target_store")}),
+            "internal_observability_policy": {
+                "allowed_target_stores": sorted(internal_allowed_targets),
+                "allowed_mode_gates": sorted(internal_allowed_mode_gates),
+                "require_allowed_in_paper_mode": internal_policy.get("require_allowed_in_paper_mode", True),
+                "forbid_http_entry_points": internal_policy.get("forbid_http_entry_points", True),
+            },
+            "internal_observability_violations": internal_observability_violations,
             "malformed_policy_rows": malformed_policy_rows,
             "duplicate_policy_write_path_ids": sorted(str(item) for item in duplicate_policy_write_path_ids),
             "unapproved_direct_db_mutations": unapproved_direct_db_mutations,
@@ -8208,6 +8387,17 @@ def verify_background_job_registry(registry_path=DEFAULT_BACKGROUND_JOB_REGISTRY
                     violations.append("supervised_restart_loop_restart_delay_positive")
             except (TypeError, ValueError):
                 violations.append("supervised_restart_loop_restart_delay_positive")
+        elif str(lease_policy.get("kind")) == "node_sidecar_restart_loop":
+            restart_loop_jobs += 1
+            if not lease_policy.get("status_artifact"):
+                violations.append("node_sidecar_restart_loop_status_artifact_required")
+            if not lease_policy.get("lock_file"):
+                violations.append("node_sidecar_restart_loop_lock_file_required")
+            try:
+                if int(lease_policy.get("restart_delay_sec", 0)) <= 0:
+                    violations.append("node_sidecar_restart_loop_restart_delay_positive")
+            except (TypeError, ValueError):
+                violations.append("node_sidecar_restart_loop_restart_delay_positive")
         entry_point_file = _resolve_project_file(job.get("entry_point_file"))
         if entry_point_file and not entry_point_file.exists():
             missing_entry_point_files.append({"job_name": job_name, "entry_point_file": job.get("entry_point_file")})

@@ -19,6 +19,11 @@ test('Zeabur startup restores bounded research-only workers', () => {
   assert.match(startup, /AGENT_CAPTURE_DISCOVERY_SCHEDULER_INTERVAL_SEC.*:-21600/);
   assert.match(startup, /AGENT_CAPTURE_MAX_SCAN_ROWS.*:-250000/);
   assert.match(startup, /AGENT_CAPTURE_RUN_HISTORY_LIMIT.*:-8/);
+  assert.match(startup, /export EVALUATOR_SNAPSHOT_WORKER_ENABLED=/);
+  assert.match(startup, /export EVALUATOR_SNAPSHOT_STATUS=/);
+  assert.match(startup, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC.*:-300/);
+  assert.match(startup, /while true; do[\s\S]*cross_db_evaluator_snapshot\.py[\s\S]*restarting in \$\{EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC\}s/);
+  assert.match(startup, /kill -0 "\$EVALUATOR_SNAPSHOT_PID"/);
   assert.match(startup, /PUMP_FUN_SHADOW_WORKER_ENABLED.*:-true/);
   assert.match(startup, /PUMP_FUN_SHADOW_RETENTION_DAYS.*:-30/);
   assert.match(startup, /STRATEGY_MEMORY_ARTIFACT_DIR.*strategy-memory-seed/);
@@ -34,6 +39,10 @@ test('dashboard scheduler is guarded, observable, and reuses the read-only runne
   assert.match(dashboard, /strategy_change_allowed: false/);
   assert.match(dashboard, /paper_enablement_allowed: false/);
   assert.match(dashboard, /blocked_evaluator_snapshot_required/);
+  assert.match(dashboard, /evaluatorSnapshotProvenance\(evaluatorDb\)/);
+  assert.match(dashboard, /evaluator_snapshot: evaluatorSnapshot/);
+  assert.match(dashboard, /evaluator_snapshot_worker: evaluatorSnapshotWorkerHealth/);
+  assert.match(dashboard, /readEvaluatorSnapshotWorkerHealth/);
   assert.match(dashboard, /AGENT_CAPTURE_EVIDENCE_DB/);
   assert.match(dashboard, /'--paper-db', evaluatorDb\.evidence_db/);
   assert.doesNotMatch(dashboard, /runtimeDataDir\(\)/);
@@ -65,6 +74,8 @@ test('every AutoLoop launcher uses the separate evidence DB', () => {
   assert.match(indexRuntime, /AGENT_CAPTURE_EVIDENCE_MANIFEST/);
   assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_AGE_SEC/);
   assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_LOCK_FILE/);
+  assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB/);
+  assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC/);
   assert.match(indexRuntime, /'--paper-db', evidenceDb/);
   assert.doesNotMatch(
     indexRuntime,
@@ -72,6 +83,8 @@ test('every AutoLoop launcher uses the separate evidence DB', () => {
   );
   assert.match(startup, /--paper-db "\$AGENT_CAPTURE_EVIDENCE_DB"/);
   assert.match(startup, /cross_db_evaluator_snapshot\.py/);
+  assert.match(startup, /--max-source-read-lock-sec "\$EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC"/);
+  assert.match(startup, /EVALUATOR_SNAPSHOT_WORKER_ENABLED=false/);
   assert.match(startup, /--signal-db "\$AGENT_CAPTURE_EVIDENCE_SIGNAL_DB"/);
   assert.match(startup, /--raw-db "\$AGENT_CAPTURE_EVIDENCE_RAW_DB"/);
   assert.match(startup, /--kline-db "\$AGENT_CAPTURE_EVIDENCE_KLINE_DB"/);

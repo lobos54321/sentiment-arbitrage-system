@@ -38,12 +38,12 @@
         }
       ],
       "env_vars_hash": "692244f2bdf6db124363c8ea59da8ebf6fbc0cdc141cc5659f85ba7a4c21c29c",
-      "expected_hash": "9aa0ddf59ce3a729ef0e1cef873ba9f23c44e73f11a0bd90bb9b3a24f5d85a7e",
+      "expected_hash": "561a7db0826ff2ee8678b36806e263e6c914411a8018b3a1124d816758be82d6",
       "feature_flag_files": [
         "config/v27-feature-flag-dependencies.json"
       ],
-      "feature_flags_hash": "0db4ff6c80bb1f917173a6d296da276e697caf200e94eed3c2b233295ea4bc62",
-      "loaded_at": "2026-05-27T00:00:00Z",
+      "feature_flags_hash": "55ccca89a37a8f9979c8d4897de7485c02a96cede6b97d5b43bbc1ebb58a9efa",
+      "loaded_at": "2026-08-08T00:00:00Z",
       "metric_registry_file": "config/v27-metric-definition-registry.json",
       "metric_registry_hash": "c3e39b030787aa5d54b309abf3646865988f6c612bd3cfc30b6abd7e047c4b05",
       "policy_bundle_files": [
@@ -70,8 +70,8 @@
       ],
       "provider_config_hash": "12bc8cdc77a00d76809b072dff0496a10f8bdd2cd15ab9d2cbf8c022429253f9",
       "route_registry_file": "config/entry-mode-registry.json",
-      "route_registry_hash": "ac6374e0e9146a6a0c2b93652d1ebf930d88d69f62c628472be04286cb641cb1",
-      "runtime_config_hash": "9aa0ddf59ce3a729ef0e1cef873ba9f23c44e73f11a0bd90bb9b3a24f5d85a7e",
+      "route_registry_hash": "5071bcac2d4102fa145470eae8d54fa6af5638adeb62889eb4693f9b139c3f65",
+      "runtime_config_hash": "561a7db0826ff2ee8678b36806e263e6c914411a8018b3a1124d816758be82d6",
       "source_registry_file": "config/v27-source-registry.json",
       "source_registry_hash": "9eade6bd07e3d8fd6bb1a15d36f5de20d5a36ec859041b1242d6123f8e4e2b72",
       "threshold_catalog_file": "config/v27-threshold-catalog.json",

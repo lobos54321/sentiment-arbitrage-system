@@ -1147,6 +1147,40 @@ function startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }) {
   });
 }
 
+function startV27ReadModelRefreshWorker() {
+  if (!envFlag('V27_READ_MODEL_REFRESH_WORKER_ENABLED', false)) {
+    console.log('[V27ReadModel] disabled by V27_READ_MODEL_REFRESH_WORKER_ENABLED=false');
+    return [];
+  }
+
+  const dataDir = process.env.ZEABUR_DATA_DIR || process.env.DATA_DIR || './data';
+  const eventLogDir = process.env.V27_EVENT_LOG_DIR || join(dataDir, 'v27_event_log');
+  const outputDir = process.env.V27_READ_MODEL_DIR || join(dataDir, 'v27_read_models');
+  const statusPath = process.env.V27_READ_MODEL_WORKER_STATUS_PATH || join(outputDir, 'v27_read_model_worker_status.json');
+  return [
+    startPythonSidecar({
+      name: 'v27-read-model-refresh',
+      markerGuard: false,
+      logPath: process.env.V27_READ_MODEL_REFRESH_LOG || join(dataDir, 'v27-read-model-refresh.log'),
+      args: [
+        'scripts/v27_read_model_refresh.py',
+        '--loop',
+        '--event-log-dir', eventLogDir,
+        '--output-dir', outputDir,
+        '--interval', process.env.V27_READ_MODEL_REFRESH_INTERVAL_SEC || '60',
+        '--initial-delay', process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC || '120',
+        '--lock-file', process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock',
+        '--status-path', statusPath,
+      ],
+      env: {
+        V27_EVENT_LOG_DIR: eventLogDir,
+        V27_READ_MODEL_DIR: outputDir,
+        V27_READ_MODEL_WORKER_STATUS_PATH: statusPath,
+      },
+    }),
+  ];
+}
+
 function startPaperDbSnapshotRequestWorker() {
   if (!envFlag('PAPER_DB_SNAPSHOT_REQUEST_WORKER_ENABLED', true)) {
     console.log('[PaperDbSnapshot] request worker disabled');
@@ -1296,6 +1330,11 @@ function startEvaluatorSnapshotWorker(config) {
         '--out-root', evidenceRoot,
         '--max-skew-sec', process.env.EVALUATOR_SNAPSHOT_MAX_SKEW_SEC || '30',
         '--min-free-after-gib', process.env.EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB || '5',
+        '--max-output-gib', process.env.EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB || '10',
+        '--review-history-hours', process.env.EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS || '96',
+        '--long-history-hours', process.env.EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS || '840',
+        '--source-busy-timeout-ms', process.env.EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS || '30000',
+        '--max-source-read-lock-sec', process.env.EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC || '300',
         '--keep-previous', '0',
         '--max-runs', '0',
         '--interval-sec', process.env.EVALUATOR_SNAPSHOT_INTERVAL_SEC || '21600',
@@ -1449,19 +1488,20 @@ function startShadowDataSidecars(config) {
   const v27RecoveryControlMirrorLog = process.env.V27_RECOVERY_CONTROL_MIRROR_LOG || './data/v27-recovery-control-mirror.log';
   const v27PaperDecisionMirrorLog = process.env.V27_PAPER_DECISION_MIRROR_LOG || './data/v27-paper-decision-mirror.log';
   const v27LifecycleMirrorLog = process.env.V27_LIFECYCLE_MIRROR_LOG || './data/v27-lifecycle-mirror.log';
-  const v27ReadModelLog = process.env.V27_READ_MODEL_REFRESH_LOG || './data/v27-read-model-refresh.log';
   const lifecycleDb = process.env.LIFECYCLE_DB || './data/lifecycle_tracks.db';
 
-  const alwaysOnWorkers = [];
+  const alwaysOnWorkers = [
+    ...startV27ReadModelRefreshWorker(),
+  ];
   if (envFlag('PAPER_REVIEW_SNAPSHOT_WORKER_ENABLED', true)) {
     alwaysOnWorkers.push(startPaperReviewSnapshotSidecar({ paperDb, reviewSnapshotLog }));
   }
   if (!envFlag('SOURCE_SHADOW_WORKERS_ENABLED', false)) {
-    console.log('[ShadowWorkers] source/data workers disabled by SOURCE_SHADOW_WORKERS_ENABLED=false; review snapshot worker remains managed separately');
+    console.log('[ShadowWorkers] source/data workers disabled by SOURCE_SHADOW_WORKERS_ENABLED=false; review snapshot and v27 read-model workers remain managed separately');
     return alwaysOnWorkers;
   }
   if (!paperDbWriteSidecarsEnabled()) {
-    console.log('[ShadowWorkers] paper DB write sidecars disabled by PAPER_DB_WRITE_SIDECARS_ENABLED=false; review snapshot worker remains managed separately');
+    console.log('[ShadowWorkers] paper DB write sidecars disabled by PAPER_DB_WRITE_SIDECARS_ENABLED=false; review snapshot and v27 read-model workers remain managed separately');
     return alwaysOnWorkers;
   }
 
@@ -1963,25 +2003,6 @@ function startShadowDataSidecars(config) {
       env: {
         LIFECYCLE_DB: lifecycleDb,
         V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
-      },
-    }));
-  }
-  if (envFlag('V27_READ_MODEL_REFRESH_WORKER_ENABLED', false)) {
-    workers.push(startPythonSidecar({
-      name: 'v27-read-model-refresh',
-      logPath: v27ReadModelLog,
-      args: [
-        'scripts/v27_read_model_refresh.py',
-        '--loop',
-        '--event-log-dir', process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
-        '--output-dir', process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
-        '--interval', process.env.V27_READ_MODEL_REFRESH_INTERVAL_SEC || '60',
-        '--initial-delay', process.env.V27_READ_MODEL_REFRESH_INITIAL_DELAY_SEC || '120',
-        '--lock-file', process.env.V27_READ_MODEL_REFRESH_LOCK_FILE || '/tmp/v27_read_model_refresh.lock',
-      ],
-      env: {
-        V27_EVENT_LOG_DIR: process.env.V27_EVENT_LOG_DIR || './data/v27_event_log',
-        V27_READ_MODEL_DIR: process.env.V27_READ_MODEL_DIR || './data/v27_read_models',
       },
     }));
   }
