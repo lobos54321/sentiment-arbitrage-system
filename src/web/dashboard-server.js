@@ -8950,6 +8950,39 @@ function publicEvaluatorFailureStage(value) {
   return 'unknown';
 }
 
+function publicEvaluatorCopyTiming(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const boundedNumber = (candidate) => {
+    const numeric = Number(candidate);
+    return Number.isFinite(numeric) && numeric >= 0 ? Number(numeric.toFixed(6)) : null;
+  };
+  const currentTable = EVALUATOR_PUBLIC_COPY_TABLES.has(String(value.current_table || ''))
+    ? String(value.current_table)
+    : null;
+  const completedTables = {};
+  const rawCompleted = value.completed_tables && typeof value.completed_tables === 'object' && !Array.isArray(value.completed_tables)
+    ? value.completed_tables
+    : {};
+  for (const [table, row] of Object.entries(rawCompleted)) {
+    if (!EVALUATOR_PUBLIC_COPY_TABLES.has(table) || !row || typeof row !== 'object' || Array.isArray(row)) continue;
+    completedTables[table] = {
+      duration_sec: boundedNumber(row.duration_sec),
+      rows_copied: Number.isFinite(Number(row.rows_copied)) && Number(row.rows_copied) >= 0
+        ? Math.floor(Number(row.rows_copied))
+        : null,
+      source_lock_elapsed_sec: boundedNumber(row.source_lock_elapsed_sec),
+      source_lock_remaining_sec: boundedNumber(row.source_lock_remaining_sec),
+    };
+  }
+  return {
+    current_table: currentTable,
+    current_table_elapsed_sec: boundedNumber(value.current_table_elapsed_sec),
+    source_lock_elapsed_sec: boundedNumber(value.source_lock_elapsed_sec),
+    source_lock_remaining_sec: boundedNumber(value.source_lock_remaining_sec),
+    completed_tables: completedTables,
+  };
+}
+
 export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
   const enabled = options.enabled === undefined
@@ -9248,6 +9281,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       error_type: publicEvaluatorErrorType(details.error_type),
       stage: publicEvaluatorFailureStage(details.stage),
     };
+    const copyTiming = publicEvaluatorCopyTiming(details.copy_timing);
+    if (copyTiming) producerFailureDetails[name].copy_timing = copyTiming;
   }
   const bundleCandidateAvailable = Boolean(
     manifestPayloadValid

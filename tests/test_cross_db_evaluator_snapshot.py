@@ -527,6 +527,9 @@ def test_candidate_observation_payload_projection_is_lossless_and_compact(tmp_pa
     assert projection["missing_and_null_keys_preserved"] is True
     assert paper_report["source_read_lock_released_before_index_build"] is True
     assert paper_report["source_read_lock_budget_passed"] is True
+    assert selection["source_copy_duration_sec"] >= 0
+    assert selection["source_lock_elapsed_after_table_sec"] >= 0
+    assert selection["source_lock_remaining_after_table_sec"] >= 0
     assert set(selection["indexes_created"]) == {
         "idx_a3_candidate_shadow_obs_signal",
         "idx_a3_candidate_shadow_obs_candidate",
@@ -1261,6 +1264,20 @@ def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_s
                 "error_code": "source_read_lock_budget_exceeded",
                 "error_type": "RuntimeError",
                 "stage": "copy_table:candidate_shadow_observations",
+                "copy_timing": {
+                    "current_table": "candidate_shadow_observations",
+                    "current_table_elapsed_sec": 12.5,
+                    "source_lock_elapsed_sec": 299.9,
+                    "source_lock_remaining_sec": 0.1,
+                    "completed_tables": {
+                        "candidate_shadow_virtual_trades": {
+                            "duration_sec": 2.0,
+                            "rows_copied": 10,
+                            "source_lock_elapsed_sec": 4.0,
+                            "source_lock_remaining_sec": 296.0,
+                        }
+                    },
+                },
             }
         })
 
@@ -1274,6 +1291,20 @@ def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_s
             "error_code": "source_read_lock_budget_exceeded",
             "error_type": "RuntimeError",
             "stage": "copy_table:candidate_shadow_observations",
+            "copy_timing": {
+                "current_table": "candidate_shadow_observations",
+                "current_table_elapsed_sec": 12.5,
+                "source_lock_elapsed_sec": 299.9,
+                "source_lock_remaining_sec": 0.1,
+                "completed_tables": {
+                    "candidate_shadow_virtual_trades": {
+                        "duration_sec": 2.0,
+                        "rows_copied": 10,
+                        "source_lock_elapsed_sec": 4.0,
+                        "source_lock_remaining_sec": 296.0,
+                    }
+                },
+            },
         }
     }
     assert status["next_attempt_delay_sec"] == 60

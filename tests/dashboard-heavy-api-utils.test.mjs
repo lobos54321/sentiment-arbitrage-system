@@ -1983,6 +1983,26 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
           error_code: 'source_read_lock_budget_exceeded',
           error_type: 'RuntimeError',
           stage: 'copy_table:candidate_shadow_observations',
+          copy_timing: {
+            current_table: 'candidate_shadow_observations',
+            current_table_elapsed_sec: 42.1256789,
+            source_lock_elapsed_sec: 299.875,
+            source_lock_remaining_sec: 0.125,
+            completed_tables: {
+              candidate_shadow_virtual_trades: {
+                duration_sec: 3.25,
+                rows_copied: 1234,
+                source_lock_elapsed_sec: 7.5,
+                source_lock_remaining_sec: 292.5,
+                secret: '/app/data/private.db',
+              },
+              '../../private_key': {
+                duration_sec: 1,
+                rows_copied: 999,
+              },
+            },
+            unsafe_path: '/app/data/paper_trades.db',
+          },
           unsafe_extra: '/app/data/paper_trades.db',
         },
         raw: {
@@ -2009,6 +2029,20 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       error_code: 'source_read_lock_budget_exceeded',
       error_type: 'RuntimeError',
       stage: 'copy_table:candidate_shadow_observations',
+      copy_timing: {
+        current_table: 'candidate_shadow_observations',
+        current_table_elapsed_sec: 42.125679,
+        source_lock_elapsed_sec: 299.875,
+        source_lock_remaining_sec: 0.125,
+        completed_tables: {
+          candidate_shadow_virtual_trades: {
+            duration_sec: 3.25,
+            rows_copied: 1234,
+            source_lock_elapsed_sec: 7.5,
+            source_lock_remaining_sec: 292.5,
+          },
+        },
+      },
     },
     raw: {
       error_code: 'snapshot_component_failed',

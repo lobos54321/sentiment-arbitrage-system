@@ -299,14 +299,18 @@ class ConcurrentSnapshotError(RuntimeError):
     """Bounded multi-database failure with public-safe component details."""
 
     def __init__(self, errors: dict[str, dict[str, Any]]):
-        self.errors = {
-            str(name): {
-                "error_code": str((details or {}).get("error_code") or "snapshot_component_failed"),
-                "error_type": str((details or {}).get("error_type") or "Exception"),
-                "stage": str((details or {}).get("stage") or "unknown"),
+        self.errors = {}
+        for name, details in sorted((errors or {}).items()):
+            details = details or {}
+            bounded = {
+                "error_code": str(details.get("error_code") or "snapshot_component_failed"),
+                "error_type": str(details.get("error_type") or "Exception"),
+                "stage": str(details.get("stage") or "unknown"),
             }
-            for name, details in sorted((errors or {}).items())
-        }
+            copy_timing = details.get("copy_timing")
+            if isinstance(copy_timing, dict):
+                bounded["copy_timing"] = copy_timing
+            self.errors[str(name)] = bounded
         summary = ",".join(
             f"{details['error_code']}:{name}:{details['stage']}"
             for name, details in self.errors.items()
@@ -1318,7 +1322,9 @@ def copy_selected_tables(
     review_lower_epoch: float,
     long_lower_epoch: float,
     upper_epoch: float,
-    progress: dict[str, str] | None = None,
+    progress: dict[str, Any] | None = None,
+    lock_started_monotonic: float | None = None,
+    lock_limit_sec: float | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     list[dict[str, str]],
@@ -1331,9 +1337,14 @@ def copy_selected_tables(
     source_tables = set(source_table_sql)
     table_reports: dict[str, dict[str, Any]] = {}
     deferred_indexes: list[tuple[str, str, str]] = []
+    if progress is not None:
+        progress.setdefault("completed_table_timings", {})
     for table, rule in spec["tables"].items():
+        table_started_monotonic = time.monotonic()
         if progress is not None:
             progress["stage"] = f"copy_table:{table}"
+            progress["current_table"] = table
+            progress["current_table_started_monotonic"] = table_started_monotonic
         required = bool(rule.get("required"))
         if table not in source_tables:
             if required:
@@ -1396,6 +1407,18 @@ def copy_selected_tables(
                 "reason": "source_schema_not_projection_compatible",
                 "payload_semantics_preserved": True,
             }
+        table_finished_monotonic = time.monotonic()
+        table_duration_sec = max(0.0, table_finished_monotonic - table_started_monotonic)
+        source_lock_elapsed_sec = (
+            max(0.0, table_finished_monotonic - lock_started_monotonic)
+            if lock_started_monotonic is not None
+            else None
+        )
+        source_lock_remaining_sec = (
+            max(0.0, float(lock_limit_sec) - source_lock_elapsed_sec)
+            if source_lock_elapsed_sec is not None and lock_limit_sec is not None
+            else None
+        )
         table_reports[table] = {
             "included": True,
             "required": required,
@@ -1420,7 +1443,33 @@ def copy_selected_tables(
             "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
             "storage_projection": storage_projection,
             "indexes_created": [],
+            "source_copy_duration_sec": round(table_duration_sec, 6),
+            "source_lock_elapsed_after_table_sec": (
+                round(source_lock_elapsed_sec, 6)
+                if source_lock_elapsed_sec is not None
+                else None
+            ),
+            "source_lock_remaining_after_table_sec": (
+                round(source_lock_remaining_sec, 6)
+                if source_lock_remaining_sec is not None
+                else None
+            ),
         }
+        if progress is not None:
+            progress["completed_table_timings"][table] = {
+                "duration_sec": round(table_duration_sec, 6),
+                "rows_copied": copied_rows,
+                "source_lock_elapsed_sec": (
+                    round(source_lock_elapsed_sec, 6)
+                    if source_lock_elapsed_sec is not None
+                    else None
+                ),
+                "source_lock_remaining_sec": (
+                    round(source_lock_remaining_sec, 6)
+                    if source_lock_remaining_sec is not None
+                    else None
+                ),
+            }
     for table, report in table_reports.items():
         if not report.get("included"):
             continue
@@ -1489,6 +1538,8 @@ def snapshot_one(
         long_lower_epoch=long_lower_epoch,
         upper_epoch=upper_epoch,
         progress=progress,
+        lock_started_monotonic=pin_report.get("pinned_started_monotonic"),
+        lock_limit_sec=pin_report.get("source_read_lock_limit_sec"),
     )
     if progress is not None:
         progress["stage"] = "release_source_read_view"
@@ -1643,7 +1694,8 @@ def snapshot_all_concurrently(
             progress["stage"] = "start_barrier"
             start_barrier.wait(timeout=30)
             pin_started = time.time()
-            lock_deadline = time.monotonic() + float(max_source_read_lock_sec)
+            pin_started_monotonic = time.monotonic()
+            lock_deadline = pin_started_monotonic + float(max_source_read_lock_sec)
 
             def interrupt_expired_read_view() -> int:
                 return 1 if time.monotonic() >= lock_deadline else 0
@@ -1657,6 +1709,7 @@ def snapshot_all_concurrently(
                 "pinned_started_at": utc_iso(pin_started),
                 "pinned_finished_at": utc_iso(pin_finished),
                 "pinned_started_epoch": pin_started,
+                "pinned_started_monotonic": pin_started_monotonic,
                 "pinned_finished_epoch": pin_finished,
                 "pinned_midpoint_epoch": (pin_started + pin_finished) / 2,
                 "source_read_lock_limit_sec": float(max_source_read_lock_sec),
@@ -1697,11 +1750,46 @@ def snapshot_all_concurrently(
                     barrier.abort()
                 except threading.BrokenBarrierError:
                     pass
+            now_monotonic = time.monotonic()
+            current_started = progress.get("current_table_started_monotonic")
+            pin_started_monotonic = locals().get("pin_started_monotonic")
+            completed_timings = progress.get("completed_table_timings")
+            copy_timing = {
+                "current_table": progress.get("current_table"),
+                "current_table_elapsed_sec": (
+                    round(max(0.0, now_monotonic - float(current_started)), 6)
+                    if isinstance(current_started, (int, float))
+                    else None
+                ),
+                "source_lock_elapsed_sec": (
+                    round(max(0.0, now_monotonic - float(pin_started_monotonic)), 6)
+                    if isinstance(pin_started_monotonic, (int, float))
+                    else None
+                ),
+                "source_lock_remaining_sec": (
+                    round(
+                        max(
+                            0.0,
+                            float(max_source_read_lock_sec)
+                            - max(0.0, now_monotonic - float(pin_started_monotonic)),
+                        ),
+                        6,
+                    )
+                    if isinstance(pin_started_monotonic, (int, float))
+                    else None
+                ),
+                "completed_tables": (
+                    dict(completed_timings)
+                    if isinstance(completed_timings, dict)
+                    else {}
+                ),
+            }
             with result_lock:
                 errors[name] = {
                     "error_code": snapshot_component_failure_code(exc),
                     "error_type": type(exc).__name__,
                     "stage": str(progress.get("stage") or "unknown"),
+                    "copy_timing": copy_timing,
                 }
         finally:
             if connection is not None:
