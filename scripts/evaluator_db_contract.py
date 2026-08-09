@@ -22,10 +22,13 @@ from cross_db_evaluator_snapshot import (
     DATABASE_SPECS,
     MIN_CANDIDATE_STAGE_CAP_BYTES,
     MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
+    PARALLEL_PAPER_OPTIONAL_STAGE_TABLES,
+    PARALLEL_PAPER_REQUIRED_STAGE_TABLES,
     PARALLEL_PAPER_STAGE_CONFIGS,
     PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
     PARALLEL_PAPER_STAGE_TABLES,
     PAPER_DECISION_STAGE_TABLE,
+    parallel_paper_stage_inventory_valid,
     normalized_timestamp_sql,
     quote_identifier,
 )
@@ -298,6 +301,8 @@ def evaluator_snapshot_bundle_status(
     producer_acceptance: dict = {}
     snapshot_age_sec_value: float | None = None
     snapshot_upper_epoch: float | None = None
+    manifest_parallel_stage_tables: tuple[str, ...] = ()
+    safe_manifest_parallel_stage_tables: tuple[str, ...] = ()
     verified_integrity: dict[str, dict] = {}
     if not manifest_file.is_file():
         blockers.append("evaluator_snapshot_manifest_missing")
@@ -371,13 +376,25 @@ def evaluator_snapshot_bundle_status(
             blockers.append("evaluator_snapshot_candidate_projection_lock_order_invalid")
         if manifest.get("candidate_stage_removed_before_publish") is not True:
             blockers.append("evaluator_snapshot_candidate_stage_cleanup_invalid")
+        raw_parallel_stage_tables = manifest.get("parallel_paper_stage_tables")
+        if isinstance(raw_parallel_stage_tables, list):
+            manifest_parallel_stage_tables = tuple(
+                str(table) for table in raw_parallel_stage_tables
+            )
+            safe_manifest_parallel_stage_tables = tuple(
+                table
+                for table in manifest_parallel_stage_tables
+                if table in PARALLEL_PAPER_STAGE_CONFIGS
+            )
         if (
             manifest.get("parallel_paper_stage_schema_version")
             != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
-            or list(manifest.get("parallel_paper_stage_tables") or [])
-            != list(PARALLEL_PAPER_STAGE_TABLES)
+            or not parallel_paper_stage_inventory_valid(
+                manifest_parallel_stage_tables
+            )
             or int(manifest.get("parallel_paper_stage_count") or 0)
-            != len(PARALLEL_PAPER_STAGE_TABLES)
+            != len(manifest_parallel_stage_tables)
+            or manifest.get("parallel_paper_stage_inventory_passed") is not True
         ):
             blockers.append("evaluator_snapshot_parallel_paper_stage_inventory_invalid")
         if manifest.get("parallel_paper_stages_all_pinned") is not True:
@@ -463,40 +480,102 @@ def evaluator_snapshot_bundle_status(
                     0,
                     disk_free_bytes - disk_cap_bytes - disk_reserve_bytes,
                 )
+                active_stage_tables = safe_manifest_parallel_stage_tables
+                raw_disk_active_tables = disk_preflight.get(
+                    "parallel_paper_stage_tables"
+                )
+                raw_disk_configured_tables = disk_preflight.get(
+                    "configured_parallel_paper_stage_tables"
+                )
+                raw_disk_omitted_tables = disk_preflight.get(
+                    "omitted_optional_parallel_paper_stage_tables"
+                )
+                if (
+                    not isinstance(raw_disk_active_tables, list)
+                    or not isinstance(raw_disk_configured_tables, list)
+                    or not isinstance(raw_disk_omitted_tables, list)
+                ):
+                    raise ValueError("parallel stage inventory evidence missing")
+                disk_active_tables = tuple(
+                    str(table) for table in raw_disk_active_tables
+                )
+                disk_configured_tables = tuple(
+                    str(table) for table in raw_disk_configured_tables
+                )
+                disk_omitted_tables = tuple(
+                    str(table) for table in raw_disk_omitted_tables
+                )
+                expected_omitted_tables = tuple(
+                    table
+                    for table in PARALLEL_PAPER_OPTIONAL_STAGE_TABLES
+                    if table not in active_stage_tables
+                )
+                expected_stage_shares = {
+                    table: float(
+                        PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
+                    )
+                    for table in active_stage_tables
+                }
+                expected_active_weight_total = float(
+                    CANDIDATE_STAGE_RESIDUAL_SHARE
+                    + sum(expected_stage_shares.values())
+                )
+                expected_candidate_normalized_share = (
+                    CANDIDATE_STAGE_RESIDUAL_SHARE
+                    / expected_active_weight_total
+                )
+                expected_normalized_stage_shares = {
+                    table: share / expected_active_weight_total
+                    for table, share in expected_stage_shares.items()
+                }
                 minimum_stage_total = (
                     MIN_CANDIDATE_STAGE_CAP_BYTES
-                    + len(PARALLEL_PAPER_STAGE_TABLES)
+                    + len(active_stage_tables)
                     * MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
                 )
-                expected_parallel_stage_cap_bytes: dict[str, int] = {}
+                expected_parallel_stage_cap_bytes: dict[str, int] = {
+                    table: 0 for table in active_stage_tables
+                }
                 if expected_total_stage_cap_bytes >= minimum_stage_total:
                     residual_after_minimums = (
                         expected_total_stage_cap_bytes - minimum_stage_total
                     )
                     expected_candidate_stage_cap_bytes = (
                         MIN_CANDIDATE_STAGE_CAP_BYTES
-                        + (
-                            int(
-                                residual_after_minimums
-                                * CANDIDATE_STAGE_RESIDUAL_SHARE
-                            )
+                    )
+                    for table in active_stage_tables:
+                        expected_parallel_stage_cap_bytes[table] = (
+                            MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+                        )
+                    allocation_targets = ("candidate", *active_stage_tables)
+                    allocated = (
+                        expected_candidate_stage_cap_bytes
+                        + sum(expected_parallel_stage_cap_bytes.values())
+                    )
+                    for target in allocation_targets[:-1]:
+                        normalized_share = (
+                            expected_candidate_normalized_share
+                            if target == "candidate"
+                            else expected_normalized_stage_shares[target]
+                        )
+                        extra = (
+                            int(residual_after_minimums * normalized_share)
                             // 4096
                             * 4096
                         )
-                    )
-                    allocated = expected_candidate_stage_cap_bytes
-                    for table in PARALLEL_PAPER_STAGE_TABLES[:-1]:
-                        share = float(
-                            PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
+                        if target == "candidate":
+                            expected_candidate_stage_cap_bytes += extra
+                        else:
+                            expected_parallel_stage_cap_bytes[target] += extra
+                        allocated += extra
+                    final_target = allocation_targets[-1]
+                    final_extra = expected_total_stage_cap_bytes - allocated
+                    if final_target == "candidate":
+                        expected_candidate_stage_cap_bytes += final_extra
+                    else:
+                        expected_parallel_stage_cap_bytes[final_target] += (
+                            final_extra
                         )
-                        extra = int(residual_after_minimums * share) // 4096 * 4096
-                        expected_parallel_stage_cap_bytes[table] = (
-                            MIN_PARALLEL_PAPER_STAGE_CAP_BYTES + extra
-                        )
-                        allocated += expected_parallel_stage_cap_bytes[table]
-                    expected_parallel_stage_cap_bytes[
-                        PARALLEL_PAPER_STAGE_TABLES[-1]
-                    ] = expected_total_stage_cap_bytes - allocated
                 else:
                     remaining = expected_total_stage_cap_bytes
                     expected_candidate_stage_cap_bytes = min(
@@ -504,7 +583,7 @@ def evaluator_snapshot_bundle_status(
                         MIN_CANDIDATE_STAGE_CAP_BYTES,
                     )
                     remaining -= expected_candidate_stage_cap_bytes
-                    for table in PARALLEL_PAPER_STAGE_TABLES:
+                    for table in active_stage_tables:
                         expected_parallel_stage_cap_bytes[table] = min(
                             remaining,
                             MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
@@ -513,17 +592,21 @@ def evaluator_snapshot_bundle_status(
                 raw_stage_shares = disk_preflight.get(
                     "parallel_paper_stage_residual_shares"
                 )
-                if not isinstance(raw_stage_shares, dict):
+                raw_normalized_stage_shares = disk_preflight.get(
+                    "parallel_paper_stage_normalized_shares"
+                )
+                if (
+                    not isinstance(raw_stage_shares, dict)
+                    or not isinstance(raw_normalized_stage_shares, dict)
+                ):
                     raise ValueError("parallel stage shares missing")
                 stage_shares = {
                     str(table): float(value)
                     for table, value in raw_stage_shares.items()
                 }
-                expected_stage_shares = {
-                    table: float(
-                        PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
-                    )
-                    for table in PARALLEL_PAPER_STAGE_TABLES
+                normalized_stage_shares = {
+                    str(table): float(value)
+                    for table, value in raw_normalized_stage_shares.items()
                 }
                 if (
                     disk_free_bytes <= 0
@@ -533,8 +616,12 @@ def evaluator_snapshot_bundle_status(
                     or total_stage_cap_bytes != expected_total_stage_cap_bytes
                     or candidate_stage_cap_bytes
                     != expected_candidate_stage_cap_bytes
+                    or disk_active_tables != active_stage_tables
+                    or disk_configured_tables
+                    != tuple(PARALLEL_PAPER_STAGE_TABLES)
+                    or disk_omitted_tables != expected_omitted_tables
                     or set(parallel_stage_cap_bytes)
-                    != set(PARALLEL_PAPER_STAGE_TABLES)
+                    != set(active_stage_tables)
                     or parallel_stage_cap_bytes
                     != expected_parallel_stage_cap_bytes
                     or candidate_stage_cap_bytes
@@ -544,7 +631,7 @@ def evaluator_snapshot_bundle_status(
                     or any(
                         parallel_stage_cap_bytes[table]
                         < MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-                        for table in PARALLEL_PAPER_STAGE_TABLES
+                        for table in active_stage_tables
                     )
                     or candidate_stage_minimum_cap_bytes
                     != MIN_CANDIDATE_STAGE_CAP_BYTES
@@ -555,18 +642,49 @@ def evaluator_snapshot_bundle_status(
                         - CANDIDATE_STAGE_RESIDUAL_SHARE
                     )
                     > 1e-9
-                    or set(stage_shares) != set(PARALLEL_PAPER_STAGE_TABLES)
+                    or set(stage_shares) != set(active_stage_tables)
                     or any(
                         abs(stage_shares[table] - expected_stage_shares[table])
                         > 1e-9
-                        for table in PARALLEL_PAPER_STAGE_TABLES
+                        for table in active_stage_tables
                     )
+                    or set(normalized_stage_shares)
+                    != set(active_stage_tables)
+                    or any(
+                        abs(
+                            normalized_stage_shares[table]
+                            - expected_normalized_stage_shares[table]
+                        )
+                        > 1e-9
+                        for table in active_stage_tables
+                    )
+                    or abs(
+                        float(
+                            disk_preflight.get(
+                                "parallel_paper_stage_active_weight_total"
+                            )
+                        )
+                        - expected_active_weight_total
+                    )
+                    > 1e-9
+                    or abs(
+                        float(
+                            disk_preflight.get(
+                                "candidate_stage_normalized_share"
+                            )
+                        )
+                        - expected_candidate_normalized_share
+                    )
+                    > 1e-9
                     or int(
                         disk_preflight.get(
                             "temporary_paper_decision_stage_cap_bytes"
                         )
                     )
-                    != parallel_stage_cap_bytes[PAPER_DECISION_STAGE_TABLE]
+                    != parallel_stage_cap_bytes.get(
+                        PAPER_DECISION_STAGE_TABLE,
+                        0,
+                    )
                     or disk_preflight.get("candidate_stage_budget_mode")
                     != CANDIDATE_STAGE_BUDGET_MODE
                     or estimated_peak_working_bytes
@@ -724,7 +842,20 @@ def evaluator_snapshot_bundle_status(
             if name == "paper":
                 pinned_read_views = report.get("pinned_read_views") or []
                 parallel_stage_reports = report.get("parallel_paper_stages") or {}
+                raw_report_parallel_stage_tables = report.get(
+                    "parallel_paper_stage_tables"
+                )
+                active_parallel_stage_tables = safe_manifest_parallel_stage_tables
                 try:
+                    if not isinstance(
+                        raw_report_parallel_stage_tables,
+                        list,
+                    ):
+                        raise ValueError("parallel stage table inventory missing")
+                    report_parallel_stage_tables = tuple(
+                        str(table)
+                        for table in raw_report_parallel_stage_tables
+                    )
                     if not isinstance(parallel_stage_reports, dict):
                         raise ValueError("parallel stage reports missing")
                     parallel_stage_caps = disk_preflight.get(
@@ -752,16 +883,34 @@ def evaluator_snapshot_bundle_status(
                         "paper_main_selective_copy",
                         *{
                             str(PARALLEL_PAPER_STAGE_CONFIGS[table]["role"])
-                            for table in PARALLEL_PAPER_STAGE_TABLES
+                            for table in active_parallel_stage_tables
                         },
                     }
+                    optional_absence_valid = all(
+                        table in active_parallel_stage_tables
+                        or (
+                            (selected_tables.get(table) or {}).get("included")
+                            is False
+                            and (selected_tables.get(table) or {}).get("required")
+                            is False
+                            and (selected_tables.get(table) or {}).get("reason")
+                            == "optional_source_table_missing"
+                        )
+                        for table in PARALLEL_PAPER_OPTIONAL_STAGE_TABLES
+                    )
                     if (
-                        report.get("parallel_paper_stage_count")
-                        != len(PARALLEL_PAPER_STAGE_TABLES)
+                        not parallel_paper_stage_inventory_valid(
+                            active_parallel_stage_tables
+                        )
+                        or report_parallel_stage_tables
+                        != active_parallel_stage_tables
+                        or report.get("parallel_paper_stage_count")
+                        != len(active_parallel_stage_tables)
                         or set(parallel_stage_reports)
-                        != set(PARALLEL_PAPER_STAGE_TABLES)
+                        != set(active_parallel_stage_tables)
                         or set(parallel_lock_durations)
-                        != set(PARALLEL_PAPER_STAGE_TABLES)
+                        != set(active_parallel_stage_tables)
+                        or not optional_absence_valid
                         or report.get("parallel_paper_stages_all_pinned") is not True
                         or report.get(
                             "parallel_paper_stages_all_merged_after_source_read_lock_release"
@@ -773,13 +922,13 @@ def evaluator_snapshot_bundle_status(
                         is not True
                         or not isinstance(pinned_read_views, list)
                         or len(pinned_read_views)
-                        != 1 + len(PARALLEL_PAPER_STAGE_TABLES)
+                        != 1 + len(active_parallel_stage_tables)
                         or roles != expected_paper_roles
                         or main_lock_duration_sec < 0
                         or any(
                             not math.isfinite(float(parallel_lock_durations[table]))
                             or float(parallel_lock_durations[table]) < 0
-                            for table in PARALLEL_PAPER_STAGE_TABLES
+                            for table in active_parallel_stage_tables
                         )
                         or abs(
                             reported_max_lock_duration_sec
@@ -787,14 +936,14 @@ def evaluator_snapshot_bundle_status(
                                 main_lock_duration_sec,
                                 *[
                                     float(parallel_lock_durations[table])
-                                    for table in PARALLEL_PAPER_STAGE_TABLES
+                                    for table in active_parallel_stage_tables
                                 ],
                             )
                         )
                         > 0.001
                     ):
                         raise ValueError("invalid parallel paper stage inventory")
-                    for table in PARALLEL_PAPER_STAGE_TABLES:
+                    for table in active_parallel_stage_tables:
                         config = PARALLEL_PAPER_STAGE_CONFIGS[table]
                         stage_report = parallel_stage_reports.get(table) or {}
                         selection_report = selected_tables.get(table) or {}
@@ -1100,7 +1249,7 @@ def evaluator_snapshot_bundle_status(
             "paper_main_selective_copy",
             *{
                 str(PARALLEL_PAPER_STAGE_CONFIGS[table]["role"])
-                for table in PARALLEL_PAPER_STAGE_TABLES
+                for table in safe_manifest_parallel_stage_tables
             },
             "raw_main_selective_copy",
             "kline_main_selective_copy",
@@ -1123,9 +1272,10 @@ def evaluator_snapshot_bundle_status(
                 manifest.get("max_allowed_cross_database_time_skew_sec")
             )
             if (
-                len(all_pinned_read_views) != 4 + len(PARALLEL_PAPER_STAGE_TABLES)
+                len(all_pinned_read_views)
+                != 4 + len(safe_manifest_parallel_stage_tables)
                 or int(manifest.get("pinned_read_view_count"))
-                != 4 + len(PARALLEL_PAPER_STAGE_TABLES)
+                != 4 + len(safe_manifest_parallel_stage_tables)
                 or pinned_roles != expected_pinned_roles
                 or len(pinned_roles) != len(all_pinned_read_views)
                 or any(

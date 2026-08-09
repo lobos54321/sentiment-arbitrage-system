@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import itertools
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -40,28 +41,48 @@ MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
 CANDIDATE_STAGE_BUDGET_MODE = "shared_residual_disk_after_output_and_reserve"
 PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v1"
 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES = 3 * 4096
-CANDIDATE_STAGE_RESIDUAL_SHARE = 0.25
+CANDIDATE_STAGE_RESIDUAL_SHARE = 0.20
 PARALLEL_PAPER_STAGE_CONFIGS = {
     "paper_decision_events": {
         "schema": "paper_decision_stage",
         "filename": ".paper-decision-events-stage.db",
         "role": "paper_decision_events_parallel_stage",
-        "residual_share": 0.30,
+        "residual_share": 0.25,
+        "required": True,
     },
     "a_class_decision_events": {
         "schema": "a_class_decision_stage",
         "filename": ".a-class-decision-events-stage.db",
         "role": "a_class_decision_events_parallel_stage",
-        "residual_share": 0.30,
+        "residual_share": 0.25,
+        "required": True,
     },
     "opportunity_events": {
         "schema": "opportunity_events_stage",
         "filename": ".opportunity-events-stage.db",
         "role": "opportunity_events_parallel_stage",
-        "residual_share": 0.15,
+        "residual_share": 0.10,
+        "required": True,
+    },
+    "opportunity_event_path_samples": {
+        "schema": "opportunity_path_samples_stage",
+        "filename": ".opportunity-event-path-samples-stage.db",
+        "role": "opportunity_event_path_samples_parallel_stage",
+        "residual_share": 0.20,
+        "required": False,
     },
 }
 PARALLEL_PAPER_STAGE_TABLES = tuple(PARALLEL_PAPER_STAGE_CONFIGS)
+PARALLEL_PAPER_REQUIRED_STAGE_TABLES = tuple(
+    table
+    for table, config in PARALLEL_PAPER_STAGE_CONFIGS.items()
+    if config.get("required") is True
+)
+PARALLEL_PAPER_OPTIONAL_STAGE_TABLES = tuple(
+    table
+    for table, config in PARALLEL_PAPER_STAGE_CONFIGS.items()
+    if config.get("required") is not True
+)
 PAPER_DECISION_STAGE_SCHEMA_VERSION = PARALLEL_PAPER_STAGE_SCHEMA_VERSION
 PAPER_DECISION_STAGE_SCHEMA = PARALLEL_PAPER_STAGE_CONFIGS["paper_decision_events"]["schema"]
 PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
@@ -286,6 +307,52 @@ CANDIDATE_OBSERVATION_PROJECTION_REQUIRED_COLUMNS = {
     "candidate_id",
     "payload_json",
 }
+
+
+def parallel_paper_stage_tables_for_schema(
+    connection: sqlite3.Connection,
+    *,
+    schema: str = "main",
+) -> tuple[str, ...]:
+    schema = _schema_prefix(schema)
+    source_tables = {
+        str(row[0])
+        for row in connection.execute(
+            f"SELECT name FROM {schema}.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    missing_required = [
+        table
+        for table in PARALLEL_PAPER_REQUIRED_STAGE_TABLES
+        if table not in source_tables
+    ]
+    if missing_required:
+        raise RuntimeError(
+            "snapshot missing required tables: " + ",".join(missing_required)
+        )
+    return tuple(
+        table for table in PARALLEL_PAPER_STAGE_TABLES if table in source_tables
+    )
+
+
+def active_parallel_paper_stage_tables(
+    connection: sqlite3.Connection,
+) -> tuple[str, ...]:
+    return parallel_paper_stage_tables_for_schema(connection, schema="src")
+
+
+def parallel_paper_stage_inventory_valid(tables: Any) -> bool:
+    if not isinstance(tables, (list, tuple)):
+        return False
+    normalized = tuple(str(table) for table in tables)
+    expected_order = tuple(
+        table for table in PARALLEL_PAPER_STAGE_TABLES if table in normalized
+    )
+    return bool(
+        normalized == expected_order
+        and len(set(normalized)) == len(normalized)
+        and set(PARALLEL_PAPER_REQUIRED_STAGE_TABLES).issubset(normalized)
+    )
 
 
 def utc_iso(epoch: float | None = None) -> str:
@@ -824,7 +891,7 @@ def inspect_source_page_reports(
     source_paths: dict[str, Path],
     *,
     busy_timeout_ms: int = 30000,
-) -> dict[str, dict[str, int]]:
+) -> dict[str, dict[str, Any]]:
     reports = {}
     for name, source in source_paths.items():
         if not source.is_file():
@@ -832,7 +899,23 @@ def inspect_source_page_reports(
         connection = readonly_connection(source, busy_timeout_ms=busy_timeout_ms)
         try:
             try:
-                reports[name] = source_page_stats(connection, source)
+                report: dict[str, Any] = source_page_stats(connection, source)
+                if name == "paper":
+                    report["parallel_paper_stage_tables"] = list(
+                        parallel_paper_stage_tables_for_schema(
+                            connection,
+                            schema="main",
+                        )
+                    )
+                reports[name] = report
+            except RuntimeError as exc:
+                raise ConcurrentSnapshotError({
+                    name: {
+                        "error_code": snapshot_component_failure_code(exc),
+                        "error_type": type(exc).__name__,
+                        "stage": "source_metadata",
+                    }
+                }) from exc
             except sqlite3.Error as exc:
                 raise ConcurrentSnapshotError({
                     name: {
@@ -1877,11 +1960,17 @@ def snapshot_one(
     candidate_stage_removed = True
     parallel_paper_stage_results: dict[str, dict[str, Any]] = {}
     parallel_paper_stage_reports: dict[str, dict[str, Any]] = {}
+    parallel_stage_tables = tuple(parallel_paper_stage_states or ())
+    if (
+        parallel_paper_stage_states is not None
+        and not parallel_paper_stage_inventory_valid(parallel_stage_tables)
+    ):
+        raise RuntimeError("parallel_paper_stage_failed:inventory_invalid")
     pinned_read_views = [pin_report]
     all_source_read_views_released_at = read_view_released
     if parallel_paper_stage_states:
         join_timeout = float(pin_report["source_read_lock_limit_sec"]) + 60.0
-        for table in PARALLEL_PAPER_STAGE_TABLES:
+        for table in parallel_stage_tables:
             runtime = parallel_paper_stage_states.get(table)
             if runtime is None:
                 raise RuntimeError(f"parallel_paper_stage_missing:{table}")
@@ -1891,7 +1980,7 @@ def snapshot_one(
                 runtime["cancel_event"].set()
                 stage_thread.join(timeout=30)
                 raise RuntimeError(f"parallel_paper_stage_timeout:{table}")
-        for table in PARALLEL_PAPER_STAGE_TABLES:
+        for table in parallel_stage_tables:
             runtime = parallel_paper_stage_states[table]
             stage_state = runtime["state"]
             if stage_state.get("exception") is not None:
@@ -1911,7 +2000,7 @@ def snapshot_one(
                 all_source_read_views_released_at,
                 float(result["source_read_view_released_epoch"]),
             )
-        for table in PARALLEL_PAPER_STAGE_TABLES:
+        for table in parallel_stage_tables:
             result = parallel_paper_stage_results[table]
             config = PARALLEL_PAPER_STAGE_CONFIGS[table]
             stage_schema = str(config["schema"])
@@ -2096,7 +2185,7 @@ def snapshot_one(
     all_parallel_stages_pinned = bool(
         not parallel_paper_stage_states
         or (
-            set(parallel_paper_stage_results) == set(PARALLEL_PAPER_STAGE_TABLES)
+            tuple(parallel_paper_stage_results) == parallel_stage_tables
             and all(
                 bool(result.get("pinned_read_view"))
                 for result in parallel_paper_stage_results.values()
@@ -2154,6 +2243,7 @@ def snapshot_one(
             index_build_started >= all_source_read_views_released_at
         ),
         "parallel_paper_stages": parallel_paper_stage_reports,
+        "parallel_paper_stage_tables": list(parallel_stage_tables),
         "parallel_paper_stage_count": len(parallel_paper_stage_reports),
         "parallel_paper_stages_all_pinned": all_parallel_stages_pinned,
         "parallel_paper_stages_all_merged_after_source_read_lock_release": (
@@ -2404,7 +2494,7 @@ def build_parallel_table_stage(
 def snapshot_all_concurrently(
     source_paths: dict[str, Path],
     partial_dir: Path,
-    source_page_reports: dict[str, dict[str, int]],
+    source_page_reports: dict[str, dict[str, Any]],
     *,
     review_lower_epoch: float,
     long_lower_epoch: float,
@@ -2412,6 +2502,7 @@ def snapshot_all_concurrently(
     database_budgets: dict[str, int],
     candidate_stage_budget_bytes: int,
     parallel_paper_stage_budget_bytes: dict[str, int],
+    expected_parallel_paper_stage_tables: tuple[str, ...],
     busy_timeout_ms: int,
     max_source_read_lock_sec: float,
 ) -> dict[str, dict[str, Any]]:
@@ -2444,7 +2535,21 @@ def snapshot_all_concurrently(
             progress["stage"] = "attach_source"
             connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
             candidate_stage_path = None
+            active_parallel_stage_tables: tuple[str, ...] = ()
             if name == "paper":
+                active_parallel_stage_tables = active_parallel_paper_stage_tables(
+                    connection
+                )
+                if active_parallel_stage_tables != expected_parallel_paper_stage_tables:
+                    raise RuntimeError(
+                        "parallel_paper_stage_failed:source_inventory_drift"
+                    )
+                if set(parallel_paper_stage_budget_bytes) != set(
+                    active_parallel_stage_tables
+                ):
+                    raise RuntimeError(
+                        "parallel_paper_stage_failed:disk_budget_inventory_mismatch"
+                    )
                 candidate_stage_path = partial_dir / ".candidate-observation-stage.db"
                 connection.execute(
                     f"ATTACH DATABASE ? AS {quote_identifier(CANDIDATE_STAGE_SCHEMA)}",
@@ -2465,9 +2570,9 @@ def snapshot_all_concurrently(
                     f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.max_page_count={stage_max_pages}"
                 )
                 parallel_pin_barrier = threading.Barrier(
-                    1 + len(PARALLEL_PAPER_STAGE_TABLES)
+                    1 + len(active_parallel_stage_tables)
                 )
-                for table in PARALLEL_PAPER_STAGE_TABLES:
+                for table in active_parallel_stage_tables:
                     config = PARALLEL_PAPER_STAGE_CONFIGS[table]
                     stage_path = partial_dir / str(config["filename"])
                     start_event = threading.Event()
@@ -2568,10 +2673,8 @@ def snapshot_all_concurrently(
                         "pin_barrier"
                     ].wait(timeout=30)
                 except threading.BrokenBarrierError as barrier_exc:
-                    for table in PARALLEL_PAPER_STAGE_TABLES:
-                        stage_exception = parallel_stage_runtimes[table]["state"].get(
-                            "exception"
-                        )
+                    for table, runtime in parallel_stage_runtimes.items():
+                        stage_exception = runtime["state"].get("exception")
                         if stage_exception is not None:
                             progress["stage"] = f"copy_table:{table}"
                             progress["current_table"] = table
@@ -2729,38 +2832,82 @@ def disk_preflight(
     root: Path,
     min_free_after_gib: float,
     max_output_gib: float,
+    *,
+    parallel_stage_tables: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(root)
     bounded_output = int(float(max_output_gib) * 1024**3)
     reserve = int(float(min_free_after_gib) * 1024**3)
+    active_stage_tables = tuple(
+        PARALLEL_PAPER_STAGE_TABLES
+        if parallel_stage_tables is None
+        else (str(table) for table in parallel_stage_tables)
+    )
+    if not parallel_paper_stage_inventory_valid(active_stage_tables):
+        raise ValueError(
+            f"invalid parallel paper stage inventory for disk preflight: "
+            f"{active_stage_tables}"
+        )
+    omitted_optional_stages = tuple(
+        table
+        for table in PARALLEL_PAPER_OPTIONAL_STAGE_TABLES
+        if table not in active_stage_tables
+    )
+    configured_stage_shares = {
+        table: float(PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"])
+        for table in active_stage_tables
+    }
+    active_weight_total = float(
+        CANDIDATE_STAGE_RESIDUAL_SHARE + sum(configured_stage_shares.values())
+    )
+    if not math.isfinite(active_weight_total) or active_weight_total <= 0:
+        raise ValueError("parallel paper stage active weight total must be positive")
+    candidate_normalized_share = (
+        float(CANDIDATE_STAGE_RESIDUAL_SHARE) / active_weight_total
+    )
+    normalized_stage_shares = {
+        table: share / active_weight_total
+        for table, share in configured_stage_shares.items()
+    }
     total_stage_cap = max(0, int(usage.free) - bounded_output - reserve)
     minimum_stage_total = (
         MIN_CANDIDATE_STAGE_CAP_BYTES
-        + len(PARALLEL_PAPER_STAGE_TABLES) * MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+        + len(active_stage_tables) * MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
     )
-    parallel_stage_caps: dict[str, int] = {}
+    parallel_stage_caps: dict[str, int] = {
+        table: 0 for table in active_stage_tables
+    }
     if total_stage_cap >= minimum_stage_total:
         residual_after_minimums = total_stage_cap - minimum_stage_total
-        candidate_extra = (
-            int(residual_after_minimums * CANDIDATE_STAGE_RESIDUAL_SHARE)
-            // 4096
-            * 4096
-        )
-        candidate_stage_cap = MIN_CANDIDATE_STAGE_CAP_BYTES + candidate_extra
-        allocated = candidate_stage_cap
-        for table in PARALLEL_PAPER_STAGE_TABLES[:-1]:
-            share = float(PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"])
-            extra = int(residual_after_minimums * share) // 4096 * 4096
-            parallel_stage_caps[table] = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES + extra
-            allocated += parallel_stage_caps[table]
-        last_table = PARALLEL_PAPER_STAGE_TABLES[-1]
-        parallel_stage_caps[last_table] = total_stage_cap - allocated
+        candidate_stage_cap = MIN_CANDIDATE_STAGE_CAP_BYTES
+        for table in active_stage_tables:
+            parallel_stage_caps[table] = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+        allocation_targets = ("candidate", *active_stage_tables)
+        allocated = candidate_stage_cap + sum(parallel_stage_caps.values())
+        for target in allocation_targets[:-1]:
+            normalized_share = (
+                candidate_normalized_share
+                if target == "candidate"
+                else normalized_stage_shares[target]
+            )
+            extra = int(residual_after_minimums * normalized_share) // 4096 * 4096
+            if target == "candidate":
+                candidate_stage_cap += extra
+            else:
+                parallel_stage_caps[target] += extra
+            allocated += extra
+        final_target = allocation_targets[-1]
+        final_extra = total_stage_cap - allocated
+        if final_target == "candidate":
+            candidate_stage_cap += final_extra
+        else:
+            parallel_stage_caps[final_target] += final_extra
     else:
         remaining = total_stage_cap
         candidate_stage_cap = min(remaining, MIN_CANDIDATE_STAGE_CAP_BYTES)
         remaining -= candidate_stage_cap
-        for table in PARALLEL_PAPER_STAGE_TABLES:
+        for table in active_stage_tables:
             parallel_stage_caps[table] = min(
                 remaining,
                 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
@@ -2776,7 +2923,7 @@ def disk_preflight(
         and all(
             parallel_stage_caps.get(table, 0)
             >= MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-            for table in PARALLEL_PAPER_STAGE_TABLES
+            for table in active_stage_tables
         )
         and candidate_stage_cap + sum(parallel_stage_caps.values())
         == total_stage_cap
@@ -2793,12 +2940,22 @@ def disk_preflight(
             PAPER_DECISION_STAGE_TABLE,
             0,
         ),
+        "configured_parallel_paper_stage_tables": list(
+            PARALLEL_PAPER_STAGE_TABLES
+        ),
+        "parallel_paper_stage_tables": list(active_stage_tables),
+        "omitted_optional_parallel_paper_stage_tables": list(
+            omitted_optional_stages
+        ),
         "candidate_stage_residual_share": CANDIDATE_STAGE_RESIDUAL_SHARE,
-        "parallel_paper_stage_residual_shares": {
-            table: PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
-            for table in PARALLEL_PAPER_STAGE_TABLES
-        },
-        "paper_decision_stage_residual_share": PAPER_DECISION_STAGE_RESIDUAL_SHARE,
+        "parallel_paper_stage_residual_shares": configured_stage_shares,
+        "parallel_paper_stage_active_weight_total": active_weight_total,
+        "candidate_stage_normalized_share": candidate_normalized_share,
+        "parallel_paper_stage_normalized_shares": normalized_stage_shares,
+        "paper_decision_stage_residual_share": configured_stage_shares.get(
+            PAPER_DECISION_STAGE_TABLE,
+            0.0,
+        ),
         "candidate_stage_budget_mode": CANDIDATE_STAGE_BUDGET_MODE,
         "candidate_stage_minimum_cap_bytes": MIN_CANDIDATE_STAGE_CAP_BYTES,
         "parallel_paper_stage_minimum_cap_bytes": MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
@@ -3022,10 +3179,23 @@ def build_snapshot_bundle(
             source_paths,
             busy_timeout_ms=int(source_busy_timeout_ms),
         )
+        inspected_parallel_stage_tables = tuple(
+            source_page_reports["paper"].get(
+                "parallel_paper_stage_tables"
+            )
+            or ()
+        )
+        if not parallel_paper_stage_inventory_valid(
+            inspected_parallel_stage_tables
+        ):
+            raise RuntimeError(
+                "parallel_paper_stage_failed:source_inventory_invalid"
+            )
         preflight = disk_preflight(
             root,
             min_free_after_gib,
             max_output_gib,
+            parallel_stage_tables=inspected_parallel_stage_tables,
         )
         candidate_stage_budget_bytes = int(
             preflight["temporary_candidate_stage_cap_bytes"]
@@ -3050,6 +3220,9 @@ def build_snapshot_bundle(
             database_budgets=output_budgets,
             candidate_stage_budget_bytes=candidate_stage_budget_bytes,
             parallel_paper_stage_budget_bytes=parallel_paper_stage_budget_bytes,
+            expected_parallel_paper_stage_tables=(
+                inspected_parallel_stage_tables
+            ),
             busy_timeout_ms=int(source_busy_timeout_ms),
             max_source_read_lock_sec=float(max_source_read_lock_sec),
         )
@@ -3100,8 +3273,29 @@ def build_snapshot_bundle(
             for report in database_reports.values()
         )
         paper_report = database_reports.get("paper") or {}
+        paper_selected_tables = paper_report.get("selected_tables") or {}
+        active_parallel_stage_tables = tuple(
+            paper_report.get("parallel_paper_stage_tables") or ()
+        )
         parallel_paper_stage_count = int(
             paper_report.get("parallel_paper_stage_count") or 0
+        )
+        optional_parallel_stage_absence_valid = all(
+            table in active_parallel_stage_tables
+            or (
+                (paper_selected_tables.get(table) or {}).get("included") is False
+                and (paper_selected_tables.get(table) or {}).get("required") is False
+                and (paper_selected_tables.get(table) or {}).get("reason")
+                == "optional_source_table_missing"
+            )
+            for table in PARALLEL_PAPER_OPTIONAL_STAGE_TABLES
+        )
+        parallel_paper_stage_inventory_passed = bool(
+            parallel_paper_stage_inventory_valid(active_parallel_stage_tables)
+            and parallel_paper_stage_count == len(active_parallel_stage_tables)
+            and tuple((paper_report.get("parallel_paper_stages") or {}).keys())
+            == active_parallel_stage_tables
+            and optional_parallel_stage_absence_valid
         )
         parallel_paper_stages_all_pinned = (
             paper_report.get("parallel_paper_stages_all_pinned") is True
@@ -3154,7 +3348,7 @@ def build_snapshot_bundle(
             and indexes_built_after_source_read_lock_release
             and candidate_projection_after_source_read_lock_release
             and candidate_stage_removed_before_publish
-            and parallel_paper_stage_count == len(PARALLEL_PAPER_STAGE_TABLES)
+            and parallel_paper_stage_inventory_passed
             and parallel_paper_stages_all_pinned
             and parallel_paper_stages_all_merged_after_source_read_lock_release
             and parallel_paper_stages_all_removed_before_publish
@@ -3191,8 +3385,11 @@ def build_snapshot_bundle(
             "parallel_paper_stage_schema_version": (
                 PARALLEL_PAPER_STAGE_SCHEMA_VERSION
             ),
-            "parallel_paper_stage_tables": list(PARALLEL_PAPER_STAGE_TABLES),
+            "parallel_paper_stage_tables": list(active_parallel_stage_tables),
             "parallel_paper_stage_count": parallel_paper_stage_count,
+            "parallel_paper_stage_inventory_passed": (
+                parallel_paper_stage_inventory_passed
+            ),
             "parallel_paper_stages_all_pinned": parallel_paper_stages_all_pinned,
             "parallel_paper_stages_all_merged_after_source_read_lock_release": (
                 parallel_paper_stages_all_merged_after_source_read_lock_release
@@ -3323,7 +3520,12 @@ def self_test() -> None:
                 "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
                 "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
                 "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
-                "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)"
+                "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts);"
+                "CREATE TABLE opportunity_event_path_samples("
+                "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
+                "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
+                "CREATE INDEX idx_opportunity_path_samples_key_ts "
+                "ON opportunity_event_path_samples(opportunity_key, sample_ts)"
             ),
             "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
             "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",

@@ -47,7 +47,12 @@ def create_live_sources(root):
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
             "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
             "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
-            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)",
+            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts);"
+            "CREATE TABLE opportunity_event_path_samples("
+            "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
+            "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
+            "CREATE INDEX idx_opportunity_path_samples_key_ts "
+            "ON opportunity_event_path_samples(opportunity_key, sample_ts)",
         ),
         "raw": ("raw_signal_outcomes.db", "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)"),
         "kline": ("kline_cache.db", "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)"),
@@ -63,9 +68,19 @@ def create_live_sources(root):
     return sources
 
 
-def create_valid_bundle(tmp_path, monkeypatch):
+def create_valid_bundle(
+    tmp_path,
+    monkeypatch,
+    *,
+    include_optional_path_samples: bool = True,
+):
     live = tmp_path / "live"
     sources = create_live_sources(live)
+    if not include_optional_path_samples:
+        paper = sqlite3.connect(sources["paper"])
+        paper.execute("DROP TABLE opportunity_event_path_samples")
+        paper.commit()
+        paper.close()
     monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
     out = live / "agent_evidence"
     manifest = build_snapshot_bundle(
@@ -203,6 +218,178 @@ def test_valid_cross_db_snapshot_bundle_is_required(tmp_path, monkeypatch):
     )
     assert rejected["accepted"] is False
     assert "active_paper_db_forbidden_for_evaluator" in rejected["blockers"]
+
+
+def test_optional_path_stage_absence_is_accepted_by_authoritative_consumer(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        include_optional_path_samples=False,
+    )
+
+    status = require_evaluator_snapshot_bundle(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
+    )
+
+    manifest = json.loads((out / "current" / "manifest.json").read_text())
+    paper_report = manifest["databases"]["paper"]
+    assert status["accepted"] is True
+    assert manifest["parallel_paper_stage_inventory_passed"] is True
+    assert manifest["parallel_paper_stage_tables"] == [
+        "paper_decision_events",
+        "a_class_decision_events",
+        "opportunity_events",
+    ]
+    assert paper_report["selected_tables"]["opportunity_event_path_samples"] == {
+        "included": False,
+        "required": False,
+        "reason": "optional_source_table_missing",
+    }
+    assert "opportunity_event_path_samples" not in paper_report[
+        "parallel_paper_stages"
+    ]
+    disk = manifest["disk_preflight"]
+    assert disk["parallel_paper_stage_tables"] == manifest[
+        "parallel_paper_stage_tables"
+    ]
+    assert disk["omitted_optional_parallel_paper_stage_tables"] == [
+        "opportunity_event_path_samples"
+    ]
+    assert "opportunity_event_path_samples" not in disk[
+        "temporary_parallel_paper_stage_cap_bytes"
+    ]
+    assert (
+        disk["temporary_candidate_stage_cap_bytes"]
+        + sum(disk["temporary_parallel_paper_stage_cap_bytes"].values())
+        == disk["temporary_stage_total_cap_bytes"]
+    )
+
+
+def test_optional_absent_stage_cannot_retain_hidden_disk_cap(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        include_optional_path_samples=False,
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["disk_preflight"][
+        "temporary_parallel_paper_stage_cap_bytes"
+    ]["opportunity_event_path_samples"] = 12288
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status[
+        "blockers"
+    ]
+
+
+def test_unknown_parallel_stage_name_is_rejected_without_consumer_crash(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["parallel_paper_stage_tables"].append("unknown_parallel_stage")
+    manifest["parallel_paper_stage_count"] = len(
+        manifest["parallel_paper_stage_tables"]
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_inventory_invalid"
+        in status["blockers"]
+    )
+
+
+def test_non_list_report_stage_inventory_is_rejected_without_consumer_crash(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["databases"]["paper"]["parallel_paper_stage_tables"] = 123
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+def test_required_parallel_stage_cannot_be_removed_from_manifest_inventory(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["parallel_paper_stage_tables"] = [
+        table
+        for table in manifest["parallel_paper_stage_tables"]
+        if table != "opportunity_events"
+    ]
+    manifest["parallel_paper_stage_count"] = len(
+        manifest["parallel_paper_stage_tables"]
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_inventory_invalid"
+        in status["blockers"]
+    )
 
 
 def test_missing_producer_acceptance_status_is_rejected(tmp_path, monkeypatch):

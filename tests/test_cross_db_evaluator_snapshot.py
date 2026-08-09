@@ -51,7 +51,12 @@ def create_sources(root):
             "CREATE TABLE a_class_mode_runtime_state(id INTEGER, updated_at INTEGER);"
             "CREATE TABLE paper_trades(id INTEGER, entry_time INTEGER);"
             "CREATE TABLE opportunity_events(id INTEGER, event_ts INTEGER);"
-            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts)"
+            "CREATE INDEX idx_opportunity_events_recent ON opportunity_events(event_ts);"
+            "CREATE TABLE opportunity_event_path_samples("
+            "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
+            "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
+            "CREATE INDEX idx_opportunity_path_samples_key_ts "
+            "ON opportunity_event_path_samples(opportunity_key, sample_ts)"
         ),
         "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
         "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",
@@ -65,6 +70,15 @@ def create_sources(root):
         connection.close()
         sources[name] = str(path)
     return sources
+
+
+def test_parallel_stage_required_flags_match_selection_contract():
+    for table, config in snapshot_module.PARALLEL_PAPER_STAGE_CONFIGS.items():
+        assert config["required"] is bool(
+            snapshot_module.DATABASE_SPECS["paper"]["tables"][table].get(
+                "required"
+            )
+        )
 
 
 def test_bundled_self_test_uses_projection_compatible_schema(capsys):
@@ -156,10 +170,24 @@ def test_disk_preflight_sizes_stage_from_residual_space_not_output_fraction(
     assert report["temporary_stage_total_cap_bytes"] == expected_total_stage
     assert report["temporary_candidate_stage_cap_bytes"] == expected_candidate
     assert report["temporary_parallel_paper_stage_cap_bytes"] == expected_parallel
+    assert report["configured_parallel_paper_stage_tables"] == list(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    )
+    assert report["parallel_paper_stage_tables"] == list(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    )
+    assert report["omitted_optional_parallel_paper_stage_tables"] == []
+    assert report["parallel_paper_stage_active_weight_total"] == pytest.approx(1.0)
+    assert report["candidate_stage_normalized_share"] == pytest.approx(
+        snapshot_module.CANDIDATE_STAGE_RESIDUAL_SHARE
+    )
+    assert report["parallel_paper_stage_normalized_shares"] == pytest.approx(
+        report["parallel_paper_stage_residual_shares"]
+    )
     assert report["temporary_paper_decision_stage_cap_bytes"] == expected_parallel[
         "paper_decision_events"
     ]
-    assert report["temporary_candidate_stage_cap_bytes"] > 5 * gib
+    assert report["temporary_candidate_stage_cap_bytes"] >= 5 * gib
     assert all(
         value > 2 * gib
         for value in report["temporary_parallel_paper_stage_cap_bytes"].values()
@@ -199,7 +227,9 @@ def test_minimum_stage_capacity_supports_empty_table_and_order_index(
 ):
     sources = create_sources(tmp_path)
     output_cap_bytes = int(0.1 * 1024**3)
-    free_bytes = output_cap_bytes + 49152
+    free_bytes = output_cap_bytes + (
+        1 + len(snapshot_module.PARALLEL_PAPER_STAGE_TABLES)
+    ) * 12288
     monkeypatch.setattr(
         snapshot_module.shutil,
         "disk_usage",
@@ -228,6 +258,158 @@ def test_minimum_stage_capacity_supports_empty_table_and_order_index(
     assert report["disk_preflight"]["temporary_paper_decision_stage_cap_bytes"] == 12288
     assert report["candidate_stage_removed_before_publish"] is True
     assert report["paper_decision_parallel_stage_removed_before_publish"] is True
+
+
+def test_optional_opportunity_path_stage_is_skipped_when_source_table_is_absent(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE opportunity_event_path_samples")
+    paper.commit()
+    paper.close()
+    output_cap_bytes = int(0.1 * 1024**3)
+    active_stage_count = len(
+        snapshot_module.PARALLEL_PAPER_REQUIRED_STAGE_TABLES
+    )
+    minimum_active_stage_bytes = (1 + active_stage_count) * 12288
+    free_bytes = output_cap_bytes + minimum_active_stage_bytes
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(
+            total=2 * output_cap_bytes,
+            used=2 * output_cap_bytes - free_bytes,
+            free=free_bytes,
+        ),
+    )
+
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "optional-path-stage-evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abca",
+    )
+
+    expected_stages = [
+        table
+        for table in snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+        if table != "opportunity_event_path_samples"
+    ]
+    paper_report = report["databases"]["paper"]
+    optional_selection = paper_report["selected_tables"][
+        "opportunity_event_path_samples"
+    ]
+    assert report["accepted"] is True
+    assert report["parallel_paper_stage_inventory_passed"] is True
+    assert report["parallel_paper_stage_tables"] == expected_stages
+    assert report["parallel_paper_stage_count"] == len(expected_stages)
+    assert report["pinned_read_view_count"] == 4 + len(expected_stages)
+    assert paper_report["parallel_paper_stage_tables"] == expected_stages
+    assert paper_report["parallel_paper_stage_count"] == len(expected_stages)
+    assert set(paper_report["parallel_paper_stages"]) == set(expected_stages)
+    disk = report["disk_preflight"]
+    assert disk["temporary_stage_total_cap_bytes"] == minimum_active_stage_bytes
+    assert disk["temporary_candidate_stage_cap_bytes"] == 12288
+    assert disk["parallel_paper_stage_tables"] == expected_stages
+    assert disk["configured_parallel_paper_stage_tables"] == list(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    )
+    assert disk["omitted_optional_parallel_paper_stage_tables"] == [
+        "opportunity_event_path_samples"
+    ]
+    assert disk["temporary_parallel_paper_stage_cap_bytes"] == {
+        table: 12288 for table in expected_stages
+    }
+    assert "opportunity_event_path_samples" not in disk[
+        "temporary_parallel_paper_stage_cap_bytes"
+    ]
+    assert (
+        sum(disk["temporary_parallel_paper_stage_cap_bytes"].values())
+        + disk["temporary_candidate_stage_cap_bytes"]
+        == disk["temporary_stage_total_cap_bytes"]
+    )
+    assert disk["parallel_paper_stage_active_weight_total"] == pytest.approx(0.8)
+    assert disk["candidate_stage_normalized_share"] == pytest.approx(0.25)
+    assert disk["parallel_paper_stage_normalized_shares"] == pytest.approx(
+        {
+            "paper_decision_events": 0.3125,
+            "a_class_decision_events": 0.3125,
+            "opportunity_events": 0.125,
+        }
+    )
+    assert optional_selection == {
+        "included": False,
+        "required": False,
+        "reason": "optional_source_table_missing",
+    }
+    snapshot_dir = Path(paper_report["snapshot_path"]).parent
+    assert not (snapshot_dir / ".opportunity-event-path-samples-stage.db").exists()
+
+
+def test_required_parallel_stage_table_absence_fails_closed(tmp_path):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP TABLE opportunity_events")
+    paper.commit()
+    paper.close()
+    out = tmp_path / "required-stage-missing-evidence"
+
+    with pytest.raises(
+        snapshot_module.ConcurrentSnapshotError,
+        match="snapshot_missing_required_tables",
+    ):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T000000Z-1234abcb",
+        )
+
+    assert not (out / "current").exists()
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcb.partial").exists()
+
+
+def test_parallel_stage_inventory_drift_after_preflight_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "parallel-stage-inventory-drift"
+    drifted_inventory = tuple(
+        table
+        for table in snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+        if table != "opportunity_event_path_samples"
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "active_parallel_paper_stage_tables",
+        lambda _connection: drifted_inventory,
+    )
+
+    with pytest.raises(
+        snapshot_module.ConcurrentSnapshotError,
+        match="parallel_paper_stage_failed",
+    ):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            snapshot_id="20260101T000000Z-1234abcc",
+        )
+
+    assert not (out / "current").exists()
+    assert not (out / "snapshots" / ".20260101T000000Z-1234abcc.partial").exists()
 
 
 def test_parallel_paper_decision_stage_uses_fixed_4k_pages_with_large_source_pages(
@@ -1012,6 +1194,25 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
             now - 40,
         ),
     )
+    expected_path_payload = {
+        "quote": {"source": "jupiter", "executable": True},
+        "future_path_field": {"preserve": [1, 2, 3]},
+    }
+    paper.execute(
+        """
+        INSERT INTO opportunity_event_path_samples
+          (id, opportunity_key, sample_ts, raw_payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            1,
+            "opportunity:1",
+            now - 30,
+            json.dumps(expected_path_payload, sort_keys=True),
+            now - 30,
+            now - 30,
+        ),
+    )
     paper.commit()
     paper.close()
 
@@ -1059,7 +1260,9 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
     paper_report = report["databases"]["paper"]
     selection = paper_report["selected_tables"]["paper_decision_events"]
     stage = selection["parallel_stage"]
-    assert paper_report["parallel_paper_stage_count"] == 3
+    assert paper_report["parallel_paper_stage_count"] == len(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    )
     assert paper_report["parallel_paper_stages_all_pinned"] is True
     assert paper_report[
         "parallel_paper_stages_all_merged_after_source_read_lock_release"
@@ -1088,7 +1291,9 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
     ] is True
     assert paper_report["source_read_lock_duration_sec"] == max(
         paper_report["main_source_read_lock_duration_sec"],
-        paper_report["paper_decision_source_read_lock_duration_sec"],
+        *paper_report[
+            "parallel_paper_source_read_lock_duration_sec"
+        ].values(),
     )
     roles = {row["role"] for row in paper_report["pinned_read_views"]}
     assert roles == {
@@ -1096,8 +1301,11 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         "paper_decision_events_parallel_stage",
         "a_class_decision_events_parallel_stage",
         "opportunity_events_parallel_stage",
+        "opportunity_event_path_samples_parallel_stage",
     }
-    assert report["pinned_read_view_count"] == 7
+    assert report["pinned_read_view_count"] == 4 + len(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    )
     for table in snapshot_module.PARALLEL_PAPER_STAGE_TABLES:
         table_selection = paper_report["selected_tables"][table]
         table_stage = table_selection["parallel_stage"]
@@ -1130,6 +1338,12 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         assert opportunity_row[0] == "TOKEN"
         assert json.loads(opportunity_row[1]) == []
         assert json.loads(opportunity_row[2]) == expected_opportunity_payload
+        path_row = snapshot.execute(
+            "SELECT opportunity_key, raw_payload_json "
+            "FROM opportunity_event_path_samples"
+        ).fetchone()
+        assert path_row[0] == "opportunity:1"
+        assert json.loads(path_row[1]) == expected_path_payload
         assert snapshot.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     finally:
         snapshot.close()

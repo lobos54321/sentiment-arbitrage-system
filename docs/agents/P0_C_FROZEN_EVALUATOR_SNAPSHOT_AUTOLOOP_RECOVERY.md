@@ -400,7 +400,21 @@ Accepted snapshot → AutoLoop 血缘：
 - 每条 stage 的 deadline、pre-barrier、cancel、budget、quick-check、row mismatch 和 cleanup failure 都保留 public-safe component code；共同 barrier 前的单路失败会传播真实 table/code，不会退化为模糊 barrier error；
 - 本地正反例当前通过：Python snapshot/consumer `122 passed`，完整 Python gate `362 passed`，Node 20 完整 gate `71 passed`；逐表 payload 保真、逐表 deadline、逐表 budget tamper、逐表 nested tamper、7-view lineage tamper 和 pre-barrier failure propagation 均有覆盖；
 - 独立 maker/checker 审查未发现可执行 correctness regression；实际源文件复核确认 checker 输出中的重复行只是展示伪影，不存在于代码；
-- 当前三路实现尚未提交或部署；P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+- 三路实现已作为 PR #78 的 exact SHA `bd19afc427d6972104eba5aba1e9e26ef667f0f3` fast-forward 到 `main` 并由 Zeabur 成功部署；P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+
+### 2026-08-09｜生产第五轮收敛：opportunity path samples 独立冻结
+
+- `bd19afc` 首次生产 snapshot 在 300.10 秒处继续 fail-closed，但前三张独立事件 stage 均不再成为主路径断点；新断点为 `copy_table:opportunity_event_path_samples`；
+- 本轮实测 main paper 在进入 path samples 前累计约 110.57 秒：candidate observations 274,680 行约 90.61 秒、virtual trades 117,277 行约 13.07 秒、paper missed attribution 34,377 行约 6.68 秒，其余已完成表均低于 0.1 秒；path samples 本身运行约 189.53 秒后触及总 300 秒 ceiling；
+- 新受控实现只增加当前有直接生产证据的 `opportunity_event_path_samples` 独立 pinned stage，不提高 300 秒上限、不缩短 840h long-history window，也不把其他未证明的表顺手迁移；
+- path stage 复用完整行 staging 契约，保留 `raw_payload_json` 和未来未知字段，并参与 exact role/count/skew、stage disk cap、rows copied/merged、quick-check、lock duration、merge-after-release 和 cleanup 验证；
+- paper lineage 从 7 个 read views 增加到 8 个：signal/paper/raw/kline main views，加 P9、A_CLASS、opportunity event 与 opportunity path sample 四条 stage views；
+- 当 path samples 表存在时，disk residual 配置权重为 candidate 20%、P9 25%、A_CLASS 25%、opportunity event 10%、opportunity path 20%；总 output cap 与 reserve 不变，所有 cap、configured/active inventory、raw/normalized share 与 omitted optional inventory 均由 producer、consumer 和 Dashboard 独立重算；
+- `opportunity_event_path_samples` 在 selection contract 中仍保持 optional：源库缺表时不创建伪 stage，也不保留闲置 cap；candidate 与三张 required stage 按 active weight 归一化分配全部 residual 空间。最小受限空间正例证明 candidate + 三张 required stage 各获得 12,288 bytes 后仍能生成合法 bundle；
+- inspection 阶段先记录实际 active stage inventory，进入 pinned source view 前再次核对；inspection→pin 之间任何表 inventory 漂移均 fail-closed，不允许磁盘预算和实际 stage 集合分叉；
+- 独立反方审查共经历四轮：第一轮发现 optional 表被隐式必需化；第二轮发现未知 manifest stage 可触发 `KeyError`；第三轮发现非 list report inventory 可触发 `TypeError` 以及 optional 缺表会闲置磁盘份额；上述问题均修复并增加篡改/缺表/漂移回归，第四轮未发现新的可执行 correctness issue；
+- 最终门禁：Python snapshot/consumer focused `132 passed`，Node 20 Dashboard focused `63 passed`，完整 Python gate `372 passed`，完整 Node 20 gate `72 passed`，Basic Readiness `136/136`、`normal_tiny_ready=false`、mode-gate scope 为 `final_scope_covered`；
+- 当前四路 path-stage 修复只存在于隔离分支，尚未提交、推送、建 PR 或部署；生产仍为 `bd19afc`，没有发布 partial/current manifest，paper DB 仍为 `ok`、integrity marker 不存在，AutoLoop 返回 `blocked_evaluator_snapshot_required`，P0-D 继续锁定。
 
 尚未声称完成的生产证据：
 

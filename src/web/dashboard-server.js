@@ -9252,18 +9252,66 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const diskTotalStageCapBytes = Number(disk.temporary_stage_total_cap_bytes);
   const diskCandidateStageCapBytes = Number(disk.temporary_candidate_stage_cap_bytes);
   const parallelPaperStageConfigs = {
-    paper_decision_events: { role: 'paper_decision_events_parallel_stage', residualShare: 0.30 },
-    a_class_decision_events: { role: 'a_class_decision_events_parallel_stage', residualShare: 0.30 },
-    opportunity_events: { role: 'opportunity_events_parallel_stage', residualShare: 0.15 },
+    paper_decision_events: {
+      role: 'paper_decision_events_parallel_stage', residualShare: 0.25, required: true,
+    },
+    a_class_decision_events: {
+      role: 'a_class_decision_events_parallel_stage', residualShare: 0.25, required: true,
+    },
+    opportunity_events: {
+      role: 'opportunity_events_parallel_stage', residualShare: 0.10, required: true,
+    },
+    opportunity_event_path_samples: {
+      role: 'opportunity_event_path_samples_parallel_stage',
+      residualShare: 0.20,
+      required: false,
+    },
   };
   const parallelPaperStageTables = Object.keys(parallelPaperStageConfigs);
+  const requiredParallelPaperStageTables = parallelPaperStageTables.filter(
+    (table) => parallelPaperStageConfigs[table].required === true,
+  );
+  const rawManifestParallelStageTables = Array.isArray(manifestPayload?.parallel_paper_stage_tables)
+    ? manifestPayload.parallel_paper_stage_tables.map(String)
+    : [];
+  const activeParallelPaperStageTables = rawManifestParallelStageTables.filter(
+    (table) => Object.hasOwn(parallelPaperStageConfigs, table),
+  );
+  const orderedActiveParallelStageTables = parallelPaperStageTables.filter(
+    (table) => activeParallelPaperStageTables.includes(table),
+  );
+  const optionalParallelStageAbsenceValid = parallelPaperStageTables.every((table) => {
+    if (parallelPaperStageConfigs[table].required === true || activeParallelPaperStageTables.includes(table)) {
+      return true;
+    }
+    const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
+      ? paperSelections[table]
+      : {};
+    return selection.included === false
+      && selection.required === false
+      && selection.reason === 'optional_source_table_missing';
+  });
+  const parallelPaperStageInventoryValid = Boolean(
+    rawManifestParallelStageTables.length === activeParallelPaperStageTables.length
+    && activeParallelPaperStageTables.length === new Set(activeParallelPaperStageTables).size
+    && activeParallelPaperStageTables.every(
+      (table, index) => table === orderedActiveParallelStageTables[index],
+    )
+    && requiredParallelPaperStageTables.every(
+      (table) => activeParallelPaperStageTables.includes(table),
+    )
+    && optionalParallelStageAbsenceValid
+    && manifestPayload?.parallel_paper_stage_inventory_passed === true
+  );
   const rawDiskParallelStageCaps = disk.temporary_parallel_paper_stage_cap_bytes
     && typeof disk.temporary_parallel_paper_stage_cap_bytes === 'object'
     && !Array.isArray(disk.temporary_parallel_paper_stage_cap_bytes)
     ? disk.temporary_parallel_paper_stage_cap_bytes
     : {};
   const diskParallelStageCaps = Object.fromEntries(
-    parallelPaperStageTables.map((table) => [table, Number(rawDiskParallelStageCaps[table])]),
+    activeParallelPaperStageTables.map(
+      (table) => [table, Number(rawDiskParallelStageCaps[table])],
+    ),
   );
   const diskPaperDecisionStageCapBytes = diskParallelStageCaps.paper_decision_events;
   const diskCandidateStageMinimumBytes = Number(disk.candidate_stage_minimum_cap_bytes);
@@ -9271,26 +9319,50 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const diskPeakBytes = Number(disk.estimated_peak_working_bytes);
   const diskFreeAtPeakBytes = Number(disk.estimated_free_at_peak_bytes);
   const expectedDiskTotalStageCapBytes = Math.max(0, diskFreeBytes - diskOutputCapBytes - diskReserveBytes);
-  const stageMinimumTotal = 12288 * (1 + parallelPaperStageTables.length);
-  const residualAfterMinimums = Math.max(0, expectedDiskTotalStageCapBytes - stageMinimumTotal);
-  const expectedDiskCandidateStageCapBytes = expectedDiskTotalStageCapBytes >= stageMinimumTotal
-    ? 12288 + Math.floor((residualAfterMinimums * 0.25) / 4096) * 4096
-    : Math.min(expectedDiskTotalStageCapBytes, 12288);
-  const expectedDiskParallelStageCaps = {};
+  const configuredCandidateShare = 0.20;
+  const expectedActiveWeightTotal = configuredCandidateShare + activeParallelPaperStageTables.reduce(
+    (sum, table) => sum + parallelPaperStageConfigs[table].residualShare,
+    0,
+  );
+  const expectedCandidateNormalizedShare = configuredCandidateShare / expectedActiveWeightTotal;
+  const expectedNormalizedStageShares = Object.fromEntries(
+    activeParallelPaperStageTables.map((table) => [
+      table,
+      parallelPaperStageConfigs[table].residualShare / expectedActiveWeightTotal,
+    ]),
+  );
+  const stageMinimumTotal = 12288 * (1 + activeParallelPaperStageTables.length);
+  const expectedDiskParallelStageCaps = Object.fromEntries(
+    activeParallelPaperStageTables.map((table) => [table, 0]),
+  );
+  let expectedDiskCandidateStageCapBytes;
   if (expectedDiskTotalStageCapBytes >= stageMinimumTotal) {
-    let allocated = expectedDiskCandidateStageCapBytes;
-    for (const table of parallelPaperStageTables.slice(0, -1)) {
-      const extra = Math.floor(
-        (residualAfterMinimums * parallelPaperStageConfigs[table].residualShare) / 4096,
-      ) * 4096;
-      expectedDiskParallelStageCaps[table] = 12288 + extra;
-      allocated += expectedDiskParallelStageCaps[table];
+    const residualAfterMinimums = expectedDiskTotalStageCapBytes - stageMinimumTotal;
+    expectedDiskCandidateStageCapBytes = 12288;
+    for (const table of activeParallelPaperStageTables) {
+      expectedDiskParallelStageCaps[table] = 12288;
     }
-    const lastTable = parallelPaperStageTables.at(-1);
-    expectedDiskParallelStageCaps[lastTable] = expectedDiskTotalStageCapBytes - allocated;
+    const allocationTargets = ['candidate', ...activeParallelPaperStageTables];
+    let allocated = expectedDiskCandidateStageCapBytes
+      + Object.values(expectedDiskParallelStageCaps).reduce((sum, value) => sum + value, 0);
+    for (const target of allocationTargets.slice(0, -1)) {
+      const normalizedShare = target === 'candidate'
+        ? expectedCandidateNormalizedShare
+        : expectedNormalizedStageShares[target];
+      const extra = Math.floor((residualAfterMinimums * normalizedShare) / 4096) * 4096;
+      if (target === 'candidate') expectedDiskCandidateStageCapBytes += extra;
+      else expectedDiskParallelStageCaps[target] += extra;
+      allocated += extra;
+    }
+    const finalTarget = allocationTargets.at(-1);
+    const finalExtra = expectedDiskTotalStageCapBytes - allocated;
+    if (finalTarget === 'candidate') expectedDiskCandidateStageCapBytes += finalExtra;
+    else expectedDiskParallelStageCaps[finalTarget] += finalExtra;
   } else {
-    let remaining = expectedDiskTotalStageCapBytes - expectedDiskCandidateStageCapBytes;
-    for (const table of parallelPaperStageTables) {
+    let remaining = expectedDiskTotalStageCapBytes;
+    expectedDiskCandidateStageCapBytes = Math.min(remaining, 12288);
+    remaining -= expectedDiskCandidateStageCapBytes;
+    for (const table of activeParallelPaperStageTables) {
       expectedDiskParallelStageCaps[table] = Math.min(Math.max(0, remaining), 12288);
       remaining -= expectedDiskParallelStageCaps[table];
     }
@@ -9300,6 +9372,24 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && !Array.isArray(disk.parallel_paper_stage_residual_shares)
     ? disk.parallel_paper_stage_residual_shares
     : {};
+  const diskNormalizedStageShares = disk.parallel_paper_stage_normalized_shares
+    && typeof disk.parallel_paper_stage_normalized_shares === 'object'
+    && !Array.isArray(disk.parallel_paper_stage_normalized_shares)
+    ? disk.parallel_paper_stage_normalized_shares
+    : {};
+  const diskActiveStageTables = Array.isArray(disk.parallel_paper_stage_tables)
+    ? disk.parallel_paper_stage_tables.map(String)
+    : [];
+  const diskConfiguredStageTables = Array.isArray(disk.configured_parallel_paper_stage_tables)
+    ? disk.configured_parallel_paper_stage_tables.map(String)
+    : [];
+  const diskOmittedStageTables = Array.isArray(disk.omitted_optional_parallel_paper_stage_tables)
+    ? disk.omitted_optional_parallel_paper_stage_tables.map(String)
+    : [];
+  const expectedOmittedStageTables = parallelPaperStageTables.filter(
+    (table) => parallelPaperStageConfigs[table].required !== true
+      && !activeParallelPaperStageTables.includes(table),
+  );
   const diskPreflightPassed = Boolean(
     disk.accepted === true
     && [
@@ -9319,18 +9409,38 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && diskParallelStageMinimumBytes === 12288
     && diskTotalStageCapBytes === expectedDiskTotalStageCapBytes
     && diskCandidateStageCapBytes === expectedDiskCandidateStageCapBytes
-    && parallelPaperStageTables.every(
+    && diskActiveStageTables.length === activeParallelPaperStageTables.length
+    && diskActiveStageTables.every(
+      (table, index) => table === activeParallelPaperStageTables[index],
+    )
+    && diskConfiguredStageTables.length === parallelPaperStageTables.length
+    && diskConfiguredStageTables.every(
+      (table, index) => table === parallelPaperStageTables[index],
+    )
+    && diskOmittedStageTables.length === expectedOmittedStageTables.length
+    && diskOmittedStageTables.every(
+      (table, index) => table === expectedOmittedStageTables[index],
+    )
+    && Object.keys(rawDiskParallelStageCaps).length === activeParallelPaperStageTables.length
+    && activeParallelPaperStageTables.every(
       (table) => diskParallelStageCaps[table] === expectedDiskParallelStageCaps[table],
     )
     && diskCandidateStageCapBytes + Object.values(diskParallelStageCaps).reduce((sum, value) => sum + value, 0)
       === diskTotalStageCapBytes
     && diskCandidateStageCapBytes >= diskCandidateStageMinimumBytes
-    && parallelPaperStageTables.every(
+    && activeParallelPaperStageTables.every(
       (table) => diskParallelStageCaps[table] >= diskParallelStageMinimumBytes,
     )
-    && Number(disk.candidate_stage_residual_share) === 0.25
-    && parallelPaperStageTables.every(
+    && Number(disk.candidate_stage_residual_share) === configuredCandidateShare
+    && activeParallelPaperStageTables.every(
       (table) => Number(diskStageShares[table]) === parallelPaperStageConfigs[table].residualShare,
+    )
+    && Object.keys(diskStageShares).length === activeParallelPaperStageTables.length
+    && Number(disk.parallel_paper_stage_active_weight_total) === expectedActiveWeightTotal
+    && Number(disk.candidate_stage_normalized_share) === expectedCandidateNormalizedShare
+    && Object.keys(diskNormalizedStageShares).length === activeParallelPaperStageTables.length
+    && activeParallelPaperStageTables.every(
+      (table) => Number(diskNormalizedStageShares[table]) === expectedNormalizedStageShares[table],
     )
     && Number(disk.temporary_paper_decision_stage_cap_bytes) === diskPaperDecisionStageCapBytes
     && disk.candidate_stage_budget_mode === 'shared_residual_disk_after_output_and_reserve'
@@ -9351,7 +9461,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const expectedPinnedRoles = new Set([
     'signal_main_selective_copy',
     'paper_main_selective_copy',
-    ...parallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
+    ...activeParallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
     'raw_main_selective_copy',
     'kline_main_selective_copy',
   ]);
@@ -9359,7 +9469,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const pinnedMidpoints = allPinnedReadViews
     .map((row) => Number(row.pinned_midpoint_epoch))
     .filter((value) => Number.isFinite(value));
-  const expectedPinnedViewCount = 4 + parallelPaperStageTables.length;
+  const expectedPinnedViewCount = 4 + activeParallelPaperStageTables.length;
   const recomputedPinnedSkew = pinnedMidpoints.length === expectedPinnedViewCount
     ? Math.max(...pinnedMidpoints) - Math.min(...pinnedMidpoints)
     : null;
@@ -9403,10 +9513,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   );
   const expectedPaperPinnedRoles = new Set([
     'paper_main_selective_copy',
-    ...parallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
+    ...activeParallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
   ]);
   const parallelPaperStages = {};
-  for (const table of parallelPaperStageTables) {
+  for (const table of activeParallelPaperStageTables) {
     const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
       ? paperSelections[table]
       : {};
@@ -9484,29 +9594,32 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   }
   const paperMainLockDuration = Number(paperReport.main_source_read_lock_duration_sec);
   const paperReportedMaxLockDuration = Number(paperReport.source_read_lock_duration_sec);
-  const parallelLockDurationValues = parallelPaperStageTables.map(
+  const parallelLockDurationValues = activeParallelPaperStageTables.map(
     (table) => Number(rawParallelLockDurations[table]),
   );
+  const paperReportParallelStageTables = Array.isArray(paperReport.parallel_paper_stage_tables)
+    ? paperReport.parallel_paper_stage_tables.map(String)
+    : [];
   const parallelPaperStagesPassed = Boolean(
-    manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
-    && Array.isArray(manifestPayload?.parallel_paper_stage_tables)
-    && manifestPayload.parallel_paper_stage_tables.length === parallelPaperStageTables.length
-    && manifestPayload.parallel_paper_stage_tables.every(
-      (table, index) => table === parallelPaperStageTables[index],
-    )
-    && Number(manifestPayload?.parallel_paper_stage_count) === parallelPaperStageTables.length
+    parallelPaperStageInventoryValid
+    && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
+    && Number(manifestPayload?.parallel_paper_stage_count) === activeParallelPaperStageTables.length
     && manifestPayload?.parallel_paper_stages_all_pinned === true
     && manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true
     && manifestPayload?.parallel_paper_stages_all_removed_before_publish === true
-    && Number(paperReport.parallel_paper_stage_count) === parallelPaperStageTables.length
+    && paperReportParallelStageTables.length === activeParallelPaperStageTables.length
+    && paperReportParallelStageTables.every(
+      (table, index) => table === activeParallelPaperStageTables[index],
+    )
+    && Number(paperReport.parallel_paper_stage_count) === activeParallelPaperStageTables.length
     && paperReport.parallel_paper_stages_all_pinned === true
     && paperReport.parallel_paper_stages_all_merged_after_source_read_lock_release === true
     && paperReport.parallel_paper_stages_all_removed_before_publish === true
-    && Object.keys(rawParallelPaperStages).length === parallelPaperStageTables.length
-    && parallelPaperStageTables.every((table) => Object.hasOwn(rawParallelPaperStages, table))
-    && Object.keys(rawParallelLockDurations).length === parallelPaperStageTables.length
-    && parallelPaperStageTables.every((table) => Object.hasOwn(rawParallelLockDurations, table))
-    && paperPinnedReadViews.length === 1 + parallelPaperStageTables.length
+    && Object.keys(rawParallelPaperStages).length === activeParallelPaperStageTables.length
+    && activeParallelPaperStageTables.every((table) => Object.hasOwn(rawParallelPaperStages, table))
+    && Object.keys(rawParallelLockDurations).length === activeParallelPaperStageTables.length
+    && activeParallelPaperStageTables.every((table) => Object.hasOwn(rawParallelLockDurations, table))
+    && paperPinnedReadViews.length === 1 + activeParallelPaperStageTables.length
     && paperPinnedRoles.size === expectedPaperPinnedRoles.size
     && [...expectedPaperPinnedRoles].every((role) => paperPinnedRoles.has(role))
     && Number.isFinite(paperMainLockDuration)
@@ -9517,7 +9630,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       paperReportedMaxLockDuration
       - Math.max(paperMainLockDuration, ...parallelLockDurationValues)
     ) <= 0.001
-    && parallelPaperStageTables.every((table) => parallelPaperStages[table].passed)
+    && activeParallelPaperStageTables.every((table) => parallelPaperStages[table].passed)
   );
   const paperDecisionStage = parallelPaperStages.paper_decision_events || {};
   const paperDecisionParallelStagePassed = Boolean(
@@ -9554,15 +9667,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     indexes_built_after_source_read_lock_release: manifestPayload?.indexes_built_after_source_read_lock_release === true,
     candidate_projection_after_source_read_lock_release: manifestPayload?.candidate_projection_after_source_read_lock_release === true,
     candidate_stage_removed_before_publish: manifestPayload?.candidate_stage_removed_before_publish === true,
-    parallel_paper_stage_inventory_passed: Boolean(
-      manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
-      && Array.isArray(manifestPayload?.parallel_paper_stage_tables)
-      && manifestPayload.parallel_paper_stage_tables.length === parallelPaperStageTables.length
-      && manifestPayload.parallel_paper_stage_tables.every(
-        (table, index) => table === parallelPaperStageTables[index],
-      )
-      && Number(manifestPayload?.parallel_paper_stage_count) === parallelPaperStageTables.length
-    ),
+    parallel_paper_stage_inventory_passed: parallelPaperStageInventoryValid,
     parallel_paper_stages_all_pinned: manifestPayload?.parallel_paper_stages_all_pinned === true,
     parallel_paper_stages_all_merged_after_source_read_lock_release: manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true,
     parallel_paper_stages_all_removed_before_publish: manifestPayload?.parallel_paper_stages_all_removed_before_publish === true,
@@ -9801,7 +9906,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     parallel_paper_stages: {
       passed: parallelPaperStagesPassed,
       schema_version: manifestPayload?.parallel_paper_stage_schema_version || null,
-      expected_tables: parallelPaperStageTables,
+      configured_tables: parallelPaperStageTables,
+      active_tables: activeParallelPaperStageTables,
+      expected_tables: activeParallelPaperStageTables,
+      optional_absence_valid: optionalParallelStageAbsenceValid,
       stage_count: Object.keys(parallelPaperStages).length,
       pinned_read_view_count: paperPinnedReadViews.length,
       stages: parallelPaperStages,
