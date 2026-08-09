@@ -2373,6 +2373,8 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
           error_code: 'source_read_lock_budget_exceeded',
           error_type: 'RuntimeError',
           stage: 'copy_table:candidate_shadow_observations',
+          sqlite_errorcode: 5,
+          sqlite_errorname: 'SQLITE_BUSY',
           copy_timing: {
             current_table: 'candidate_shadow_observations',
             current_table_elapsed_sec: 42.1256789,
@@ -2399,6 +2401,8 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
           error_code: '/app/data/raw.db?token=secret',
           error_type: 'SELECT * FROM secrets',
           stage: 'copy_table:../../private_key',
+          sqlite_errorcode: -1,
+          sqlite_errorname: 'SQLITE_BUSY /app/data/raw.db',
         },
         unexpected: {
           error_code: 'should_not_be_public',
@@ -2406,6 +2410,7 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
         },
       },
       consecutive_failure_count: 1,
+      consecutive_failure_code_count: 1,
       next_attempt_delay_sec: 60,
       next_attempt_at: '2026-08-08T04:01:00.000Z',
     },
@@ -2419,6 +2424,8 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       error_code: 'source_read_lock_budget_exceeded',
       error_type: 'RuntimeError',
       stage: 'copy_table:candidate_shadow_observations',
+      sqlite_errorcode: 5,
+      sqlite_errorname: 'SQLITE_BUSY',
       copy_timing: {
         current_table: 'candidate_shadow_observations',
         current_table_elapsed_sec: 42.125679,
@@ -2442,10 +2449,12 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   });
   assert.equal(failed.failure_retry_sec, 60);
   assert.equal(failed.consecutive_failure_count, 1);
+  assert.equal(failed.consecutive_failure_code_count, 1);
   assert.equal(failed.next_attempt_delay_sec, 60);
   assert.equal(failed.next_attempt_at, '2026-08-08T04:01:00.000Z');
   assert.equal(JSON.stringify(failed).includes('/app/data/paper_trades.db'), false);
   assert.equal(JSON.stringify(failed).includes('/app/data/raw.db'), false);
+  assert.equal(JSON.stringify(failed).includes('SQLITE_BUSY /app/data/raw.db'), false);
   assert.equal(JSON.stringify(failed).includes('SELECT * FROM secrets'), false);
   assert.equal(JSON.stringify(failed).includes('private_key'), false);
   assert.equal(Object.hasOwn(failed.last_failure_details, 'unexpected'), false);

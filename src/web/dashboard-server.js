@@ -9716,6 +9716,14 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       error_type: publicEvaluatorErrorType(details.error_type),
       stage: publicEvaluatorFailureStage(details.stage),
     };
+    const sqliteErrorCode = Number(details.sqlite_errorcode);
+    const sqliteErrorName = String(details.sqlite_errorname || '');
+    if (Number.isInteger(sqliteErrorCode) && sqliteErrorCode >= 0) {
+      producerFailureDetails[name].sqlite_errorcode = sqliteErrorCode;
+    }
+    if (/^SQLITE_[A-Z0-9_]+$/.test(sqliteErrorName)) {
+      producerFailureDetails[name].sqlite_errorname = sqliteErrorName;
+    }
     const copyTiming = publicEvaluatorCopyTiming(details.copy_timing);
     if (copyTiming) producerFailureDetails[name].copy_timing = copyTiming;
   }
@@ -9846,6 +9854,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       && statusPayload.consecutive_failure_count != null
       && Number.isFinite(Number(statusPayload.consecutive_failure_count))
       ? Number(statusPayload.consecutive_failure_count)
+      : null,
+    consecutive_failure_code_count: statusPayloadValid
+      && statusPayload.consecutive_failure_code_count != null
+      && Number.isFinite(Number(statusPayload.consecutive_failure_code_count))
+      ? Number(statusPayload.consecutive_failure_code_count)
       : null,
     success_interval_sec: statusPayloadValid
       && statusPayload.success_interval_sec != null

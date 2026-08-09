@@ -505,6 +505,89 @@ def test_parallel_paper_failures_preserve_actionable_code(failure_code):
     assert snapshot_module.snapshot_failure_code(error) == failure_code
 
 
+@pytest.mark.parametrize(
+    "causal_code",
+    [
+        "snapshot_source_read_lock_timeout",
+        "selective_snapshot_exceeded_database_budget",
+    ],
+)
+def test_concurrent_failure_code_ignores_barrier_and_cancel_fallout(causal_code):
+    error = snapshot_module.ConcurrentSnapshotError(
+        {
+            "paper": {
+                "error_code": causal_code,
+                "error_type": "RuntimeError",
+                "stage": "copy_table:paper_decision_events",
+            },
+            "signal": {
+                "error_code": "BrokenBarrierError",
+                "error_type": "BrokenBarrierError",
+                "stage": "pinned_barrier",
+            },
+            "raw": {
+                "error_code": "parallel_paper_stage_barrier_broken",
+                "error_type": "RuntimeError",
+                "stage": "pinned_barrier",
+            },
+            "kline": {
+                "error_code": "parallel_paper_stage_cancelled",
+                "error_type": "RuntimeError",
+                "stage": "pinned_barrier",
+            },
+        }
+    )
+
+    assert snapshot_module.snapshot_failure_code(error) == causal_code
+
+
+def test_concurrent_failure_code_keeps_distinct_real_causes_generic():
+    error = snapshot_module.ConcurrentSnapshotError(
+        {
+            "paper": {
+                "error_code": "snapshot_source_read_lock_timeout",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:paper_decision_events",
+            },
+            "raw": {
+                "error_code": "selective_snapshot_exceeded_database_budget",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:raw_signal_outcomes",
+            },
+            "signal": {
+                "error_code": "BrokenBarrierError",
+                "error_type": "BrokenBarrierError",
+                "stage": "pinned_barrier",
+            },
+        }
+    )
+
+    assert snapshot_module.snapshot_failure_code(error) == (
+        "concurrent_evaluator_snapshot_failed"
+    )
+
+
+def test_concurrent_failure_code_does_not_promote_barrier_only_fallout():
+    error = snapshot_module.ConcurrentSnapshotError(
+        {
+            "signal": {
+                "error_code": "BrokenBarrierError",
+                "error_type": "BrokenBarrierError",
+                "stage": "pinned_barrier",
+            },
+            "raw": {
+                "error_code": "parallel_paper_stage_barrier_broken",
+                "error_type": "RuntimeError",
+                "stage": "pinned_barrier",
+            },
+        }
+    )
+
+    assert snapshot_module.snapshot_failure_code(error) == (
+        "concurrent_evaluator_snapshot_failed"
+    )
+
+
 def test_dynamic_budget_reclaims_unused_small_database_reserves_for_paper():
     gib = 1024**3
     reports = {
@@ -1514,6 +1597,224 @@ def test_parallel_paper_stage_deadline_fails_closed_and_cleans_partial(
         assert not (partial / config["filename"]).exists()
 
 
+def test_parallel_stage_sqlite_busy_is_classified_and_preserves_identity(tmp_path):
+    source = tmp_path / "busy-paper.db"
+    destination = tmp_path / "paper-decision-stage.db"
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        """
+        CREATE TABLE paper_decision_events(
+          id INTEGER PRIMARY KEY,
+          event_ts REAL NOT NULL,
+          payload_json TEXT
+        );
+        CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);
+        INSERT INTO paper_decision_events VALUES (1, 1, '{}');
+        """
+    )
+    source_db.commit()
+    source_db.close()
+
+    blocker = sqlite3.connect(source, timeout=0.01, isolation_level=None)
+    blocker.execute("BEGIN EXCLUSIVE")
+    start_event = threading.Event()
+    start_event.set()
+    copy_start_event = threading.Event()
+    copy_start_event.set()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                "snapshot_source_read_lock_timeout:paper:"
+                "attach_source:paper_decision_events"
+            ),
+        ) as raised:
+            snapshot_module.build_parallel_table_stage(
+                source=source,
+                destination=destination,
+                table="paper_decision_events",
+                role="paper_decision_events_parallel_stage",
+                rule=DATABASE_SPECS["paper"]["tables"]["paper_decision_events"],
+                source_page_report={
+                    "source_size_bytes": source.stat().st_size,
+                    "page_size": 4096,
+                    "page_count": 1,
+                    "freelist_count": 0,
+                    "estimated_compact_bytes": source.stat().st_size,
+                },
+                review_lower_epoch=0,
+                long_lower_epoch=0,
+                upper_epoch=time.time() + 60,
+                budget_bytes=1024 * 1024,
+                busy_timeout_ms=5,
+                max_source_read_lock_sec=300,
+                start_event=start_event,
+                pinned_barrier=threading.Barrier(1),
+                copy_start_event=copy_start_event,
+                cancel_event=threading.Event(),
+            )
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    error_code, error_name = snapshot_module.sqlite_error_identity(raised.value)
+    assert error_code is not None
+    assert error_code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    assert error_name in {"SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_BUSY_TIMEOUT"}
+    destination.unlink(missing_ok=True)
+
+
+def test_parallel_stage_sqlite_full_is_classified_as_stage_budget(tmp_path, monkeypatch):
+    source = tmp_path / "full-paper.db"
+    destination = tmp_path / "paper-decision-stage.db"
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        """
+        CREATE TABLE paper_decision_events(
+          id INTEGER PRIMARY KEY,
+          event_ts REAL NOT NULL,
+          payload_json TEXT
+        );
+        CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);
+        INSERT INTO paper_decision_events VALUES (1, 1, '{}');
+        """
+    )
+    source_db.commit()
+    source_db.close()
+
+    full_error = sqlite3.OperationalError("database or disk is full")
+    full_error.sqlite_errorcode = sqlite3.SQLITE_FULL
+    full_error.sqlite_errorname = "SQLITE_FULL"
+
+    def fail_with_full(*_args, **_kwargs):
+        raise full_error
+
+    monkeypatch.setattr(snapshot_module, "stage_single_source_table", fail_with_full)
+    start_event = threading.Event()
+    start_event.set()
+    copy_start_event = threading.Event()
+    copy_start_event.set()
+    with pytest.raises(
+        RuntimeError,
+        match="parallel_paper_stage_budget_exceeded:paper_decision_events",
+    ) as raised:
+        snapshot_module.build_parallel_table_stage(
+            source=source,
+            destination=destination,
+            table="paper_decision_events",
+            role="paper_decision_events_parallel_stage",
+            rule=DATABASE_SPECS["paper"]["tables"]["paper_decision_events"],
+            source_page_report={
+                "source_size_bytes": source.stat().st_size,
+                "page_size": 4096,
+                "page_count": 1,
+                "freelist_count": 0,
+                "estimated_compact_bytes": source.stat().st_size,
+            },
+            review_lower_epoch=0,
+            long_lower_epoch=0,
+            upper_epoch=time.time() + 60,
+            budget_bytes=1024 * 1024,
+            busy_timeout_ms=5,
+            max_source_read_lock_sec=300,
+            start_event=start_event,
+            pinned_barrier=threading.Barrier(1),
+            copy_start_event=copy_start_event,
+            cancel_event=threading.Event(),
+        )
+    assert snapshot_module.sqlite_error_identity(raised.value) == (
+        sqlite3.SQLITE_FULL,
+        "SQLITE_FULL",
+    )
+
+
+def test_concurrent_snapshot_error_preserves_public_safe_sqlite_identity():
+    error = snapshot_module.ConcurrentSnapshotError(
+        {
+            "paper": {
+                "error_code": "snapshot_source_read_lock_timeout",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:paper_decision_events",
+                "sqlite_errorcode": sqlite3.SQLITE_BUSY,
+                "sqlite_errorname": "SQLITE_BUSY",
+                "unsafe_message": "/app/data/private.db",
+            }
+        }
+    )
+
+    assert error.errors == {
+        "paper": {
+            "error_code": "snapshot_source_read_lock_timeout",
+            "error_type": "RuntimeError",
+            "stage": "copy_table:paper_decision_events",
+            "sqlite_errorcode": sqlite3.SQLITE_BUSY,
+            "sqlite_errorname": "SQLITE_BUSY",
+        }
+    }
+    assert "/app/data/private.db" not in str(error)
+
+
+def test_main_snapshot_sqlite_full_is_classified_as_database_budget(
+    tmp_path,
+    monkeypatch,
+):
+    sources = {
+        name: Path(path)
+        for name, path in create_sources(tmp_path).items()
+    }
+    source_reports = snapshot_module.inspect_source_page_reports(sources)
+    partial_dir = tmp_path / "main-full-partial"
+    partial_dir.mkdir()
+
+    def fail_main_snapshot(*_args, **_kwargs):
+        full_error = sqlite3.OperationalError("database or disk is full")
+        full_error.sqlite_errorcode = sqlite3.SQLITE_FULL
+        full_error.sqlite_errorname = "SQLITE_FULL"
+        raise full_error
+
+    monkeypatch.setattr(snapshot_module, "snapshot_one", fail_main_snapshot)
+    stage_budget = 1024 * 1024
+    with pytest.raises(snapshot_module.ConcurrentSnapshotError) as raised:
+        snapshot_module.snapshot_all_concurrently(
+            sources,
+            partial_dir,
+            source_reports,
+            review_lower_epoch=0,
+            long_lower_epoch=0,
+            upper_epoch=time.time() + 60,
+            database_budgets={name: stage_budget for name in sources},
+            candidate_stage_budget_bytes=stage_budget,
+            parallel_paper_stage_budget_bytes={
+                table: stage_budget
+                for table in source_reports["paper"][
+                    "parallel_paper_stage_tables"
+                ]
+            },
+            expected_parallel_paper_stage_tables=tuple(
+                source_reports["paper"]["parallel_paper_stage_tables"]
+            ),
+            busy_timeout_ms=50,
+            max_source_read_lock_sec=300,
+        )
+
+    assert set(raised.value.errors) == set(sources)
+    full_details = [
+        details
+        for details in raised.value.errors.values()
+        if details.get("sqlite_errorcode") == sqlite3.SQLITE_FULL
+    ]
+    assert full_details
+    for details in full_details:
+        assert details["error_code"] == (
+            "selective_snapshot_exceeded_database_budget"
+        )
+        assert details["sqlite_errorname"] == "SQLITE_FULL"
+    assert snapshot_module.snapshot_failure_code(raised.value) == (
+        "selective_snapshot_exceeded_database_budget"
+    )
+    assert "database or disk is full" not in str(raised.value)
+
+
 def test_parallel_stage_pre_barrier_failure_preserves_component_code_and_cleans(
     tmp_path,
     monkeypatch,
@@ -2025,9 +2326,9 @@ def test_locked_source_fails_closed_without_replacing_current(tmp_path):
     lock.execute("BEGIN EXCLUSIVE")
     try:
         with pytest.raises(
-            RuntimeError,
-            match="snapshot_source_inspection_failed:paper:source_page_stats",
-        ):
+            snapshot_module.ConcurrentSnapshotError,
+            match="snapshot_source_read_lock_timeout:paper:source_page_stats",
+        ) as raised:
             build_snapshot_bundle(
                 sources=sources,
                 out_root=str(out),
@@ -2041,6 +2342,19 @@ def test_locked_source_fails_closed_without_replacing_current(tmp_path):
     finally:
         lock.rollback()
         lock.close()
+    details = raised.value.errors["paper"]
+    assert details["error_code"] == "snapshot_source_read_lock_timeout"
+    assert details["error_type"] == "OperationalError"
+    assert details["stage"] == "source_page_stats"
+    assert details["sqlite_errorcode"] & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
+    assert details["sqlite_errorname"] in {
+        "SQLITE_BUSY",
+        "SQLITE_LOCKED",
+        "SQLITE_BUSY_TIMEOUT",
+    }
     current = json.loads((out / "current" / "manifest.json").read_text())
     assert current["snapshot_id"] == first["snapshot_id"]
     assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
@@ -2228,6 +2542,129 @@ def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_s
         interval_sec=21600,
         failure_retry_sec=60,
     ) == 60
+
+
+def test_new_failure_code_resets_code_specific_backoff_without_hiding_history(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    status_path = Path(args.status_out)
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
+                "last_failure_code": "source_read_lock_budget_exceeded",
+                "consecutive_failure_count": 11,
+                "error_count": 11,
+                "promotion_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_with_busy(**_kwargs):
+        raise snapshot_module.ConcurrentSnapshotError(
+            {
+                "paper": {
+                    "error_code": "snapshot_source_read_lock_timeout",
+                    "error_type": "RuntimeError",
+                    "stage": "copy_table:paper_decision_events",
+                    "sqlite_errorcode": sqlite3.SQLITE_BUSY,
+                    "sqlite_errorname": "SQLITE_BUSY",
+                },
+                "signal": {
+                    "error_code": "BrokenBarrierError",
+                    "error_type": "BrokenBarrierError",
+                    "stage": "pinned_barrier",
+                },
+                "raw": {
+                    "error_code": "BrokenBarrierError",
+                    "error_type": "BrokenBarrierError",
+                    "stage": "pinned_barrier",
+                },
+                "kline": {
+                    "error_code": "parallel_paper_stage_cancelled",
+                    "error_type": "RuntimeError",
+                    "stage": "pinned_barrier",
+                },
+            }
+        )
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_with_busy)
+    first = snapshot_module.run_snapshot_once(args)
+    assert first["accepted"] is False
+    assert first["last_failure_code"] == "snapshot_source_read_lock_timeout"
+    assert first["consecutive_failure_count"] == 12
+    assert first["consecutive_failure_code_count"] == 1
+    assert first["next_attempt_delay_sec"] == 60
+    assert first["last_failure_details"]["paper"]["sqlite_errorcode"] == (
+        sqlite3.SQLITE_BUSY
+    )
+    assert first["last_failure_details"]["paper"]["sqlite_errorname"] == (
+        "SQLITE_BUSY"
+    )
+
+    second = snapshot_module.run_snapshot_once(args)
+    assert second["consecutive_failure_count"] == 13
+    assert second["consecutive_failure_code_count"] == 2
+    assert second["next_attempt_delay_sec"] == 900
+
+
+def test_legacy_same_code_streak_is_preserved_when_code_count_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    status_path = Path(args.status_out)
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "cross_db_evaluator_snapshot_worker_status.v1",
+                "last_failure_code": "snapshot_source_read_lock_timeout",
+                "consecutive_failure_count": 4,
+                "error_count": 4,
+                "promotion_allowed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_with_busy(**_kwargs):
+        raise snapshot_module.ConcurrentSnapshotError(
+            {
+                "paper": {
+                    "error_code": "snapshot_source_read_lock_timeout",
+                    "error_type": "RuntimeError",
+                    "stage": "source_page_stats",
+                    "sqlite_errorcode": sqlite3.SQLITE_BUSY,
+                    "sqlite_errorname": "SQLITE_BUSY",
+                }
+            }
+        )
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_with_busy)
+    status = snapshot_module.run_snapshot_once(args)
+
+    assert status["consecutive_failure_count"] == 5
+    assert status["consecutive_failure_code_count"] == 5
+    assert status["next_attempt_delay_sec"] == 21600
+
+
+def test_code_specific_backoff_falls_back_to_legacy_global_count():
+    assert snapshot_module.snapshot_next_attempt_delay_sec(
+        {
+            "accepted": False,
+            "last_failure_code": "snapshot_source_read_lock_timeout",
+            "consecutive_failure_count": 3,
+        },
+        interval_sec=21600,
+        failure_retry_sec=60,
+    ) == 3600
 
 
 @pytest.mark.parametrize(

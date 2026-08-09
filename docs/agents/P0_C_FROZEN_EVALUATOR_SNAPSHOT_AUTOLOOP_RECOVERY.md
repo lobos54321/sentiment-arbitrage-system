@@ -414,7 +414,20 @@ Accepted snapshot → AutoLoop 血缘：
 - inspection 阶段先记录实际 active stage inventory，进入 pinned source view 前再次核对；inspection→pin 之间任何表 inventory 漂移均 fail-closed，不允许磁盘预算和实际 stage 集合分叉；
 - 独立反方审查共经历四轮：第一轮发现 optional 表被隐式必需化；第二轮发现未知 manifest stage 可触发 `KeyError`；第三轮发现非 list report inventory 可触发 `TypeError` 以及 optional 缺表会闲置磁盘份额；上述问题均修复并增加篡改/缺表/漂移回归，第四轮未发现新的可执行 correctness issue；
 - 最终门禁：Python snapshot/consumer focused `132 passed`，Node 20 Dashboard focused `63 passed`，完整 Python gate `372 passed`，完整 Node 20 gate `72 passed`，Basic Readiness `136/136`、`normal_tiny_ready=false`、mode-gate scope 为 `final_scope_covered`；
-- 当前四路 path-stage 修复只存在于隔离分支，尚未提交、推送、建 PR 或部署；生产仍为 `bd19afc`，没有发布 partial/current manifest，paper DB 仍为 `ok`、integrity marker 不存在，AutoLoop 返回 `blocked_evaluator_snapshot_required`，P0-D 继续锁定。
+- 四路 path-stage 修复已作为 PR #79 的 exact SHA `9cec0b13cfff4ff6006b43f24ef0258f8c0803b4` fast-forward 到 `main`；post-push CI 与 Zeabur exact-SHA deployment 均成功，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+
+### 2026-08-09｜生产第六轮收敛：瞬时 SQLite BUSY 分类与按故障类别退避
+
+- `9cec0b1` 首次 production snapshot 没有再以 300 秒 ceiling 结束；attempt 于 `2026-08-09T00:38:24.907829Z` 开始，在约 260 秒处由 `paper_decision_events` stage 抛出裸 `OperationalError` 并 fail-closed；没有发布 manifest/current，paper DB 仍为 `ok` 且 integrity marker 不存在；
+- 随后的生产只读探针在 5 秒 busy timeout 下连续两次返回 SQLite error code `5 / SQLITE_BUSY`，第三次及以后恢复；另一次只读 attach + stage inventory + disk preflight 在约 11.25 秒后成功，证明当前直接证据是瞬时锁竞争，而不是 output/reserve 预检失败；
+- 同一生产预检确认 active stages 为 P9、A_CLASS、opportunity events、opportunity path samples；free space 约 27.48GB、10GB output cap、5GB reserve 与约 11.37GB stage residual 均通过，不能把本次失败无证据归因为 `SQLITE_FULL`；
+- 当前受控修复沿 Python exception cause/context 提取 SQLite `errorcode/errorname`：`SQLITE_BUSY/LOCKED` 稳定映射为 `snapshot_source_read_lock_timeout`，`SQLITE_FULL` 稳定映射为对应 stage budget failure；原始 SQLite message、路径、SQL 和行数据不进入 status/health；
+- bounded component evidence 只允许公开非负整数 `sqlite_errorcode` 与匹配 `SQLITE_[A-Z0-9_]+` 的 `sqlite_errorname`；Dashboard 对恶意路径化 error name 和未知字段继续丢弃；
+- retry cadence 新增 `consecutive_failure_code_count`：全局 `consecutive_failure_count` 保留完整历史，但当 failure code 从旧的 read-lock ceiling 变为新的瞬时 BUSY class 时，同类计数从 1 重新开始，因此首次为 60 秒、第二次 900 秒、第三次 3600 秒、持续同类失败才进入 21600 秒；不同根因不会借用旧故障的 6 小时惩罚；
+- inspection、parallel stage 与 main destination 三类 SQLite 路径均有正反例：真实 exclusive-lock、synthetic `SQLITE_FULL`、public-safe identity、跨故障类别 backoff、同类 backoff、legacy fallback 以及 parallel barrier/cancel fallout 的因果根类选择；唯一真实 BUSY 或 budget 根因不会再被 peer barrier failure 稀释，两个不同真实根因仍保持 `concurrent_evaluator_snapshot_failed`；
+- 独立反方审查共五轮：依次发现 inspection BUSY 未分类、legacy 同类 streak 迁移错误、main destination `SQLITE_FULL` 未分类、parallel fallout 覆盖真实根因与中途治理 hash 漂移；所有代码问题均修复并新增回归，最终轮确认 SQLite 分类、安全诊断与按 failure code 退避一致，未发现新的可执行 correctness issue；
+- 最终完整门禁为 Python `383 passed`、Node 20 `72 passed`、Basic Readiness `136/136`、`normal_tiny_ready=false`、mode-gate scope `final_scope_covered`；generated client、spec validation、Python/Node syntax、JSON 与 `git diff --check` 全部通过；
+- 本轮修复已完成本地实现与独立审查，尚待提交、PR、exact-SHA CI 和生产部署；生产仍正确没有 accepted manifest，AutoLoop 继续 `blocked_evaluator_snapshot_required`，P0-D 继续锁定。
 
 尚未声称完成的生产证据：
 

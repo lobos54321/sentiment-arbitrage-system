@@ -399,6 +399,38 @@ def bounded_error_text(exc: BaseException, limit: int = 4096) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
+def sqlite_error_identity(exc: BaseException) -> tuple[int | None, str | None]:
+    """Return the first SQLite error identity in a bounded exception chain."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error):
+            raw_code = getattr(current, "sqlite_errorcode", None)
+            try:
+                code = int(raw_code) if raw_code is not None else None
+            except (TypeError, ValueError):
+                code = None
+            raw_name = getattr(current, "sqlite_errorname", None)
+            name = str(raw_name) if raw_name else None
+            return code, name
+        current = current.__cause__ or current.__context__
+    return None, None
+
+
+def sqlite_primary_error_code(exc: BaseException) -> int | None:
+    code, _name = sqlite_error_identity(exc)
+    return (code & 0xFF) if code is not None else None
+
+
+def sqlite_busy_or_locked(exc: BaseException) -> bool:
+    return sqlite_primary_error_code(exc) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+
+
+def sqlite_full_error(exc: BaseException) -> bool:
+    return sqlite_primary_error_code(exc) == sqlite3.SQLITE_FULL
+
+
 class ConcurrentSnapshotError(RuntimeError):
     """Bounded multi-database failure with public-safe component details."""
 
@@ -414,6 +446,12 @@ class ConcurrentSnapshotError(RuntimeError):
             copy_timing = details.get("copy_timing")
             if isinstance(copy_timing, dict):
                 bounded["copy_timing"] = copy_timing
+            sqlite_errorcode = details.get("sqlite_errorcode")
+            sqlite_errorname = details.get("sqlite_errorname")
+            if isinstance(sqlite_errorcode, int):
+                bounded["sqlite_errorcode"] = sqlite_errorcode
+            if isinstance(sqlite_errorname, str) and sqlite_errorname:
+                bounded["sqlite_errorname"] = sqlite_errorname
             self.errors[str(name)] = bounded
         summary = ",".join(
             f"{details['error_code']}:{name}:{details['stage']}"
@@ -489,8 +527,11 @@ def snapshot_next_attempt_delay_sec(
     if status.get("last_failure_code") == "evaluator_snapshot_lock_held":
         return max(SUSTAINED_FAILURE_RETRY_SEC, success_interval)
     first_retry = max(MIN_FAILURE_RETRY_SEC, int(failure_retry_sec))
+    failure_count_value = status.get("consecutive_failure_code_count")
+    if failure_count_value is None:
+        failure_count_value = status.get("consecutive_failure_count")
     try:
-        consecutive_failures = max(1, int(status.get("consecutive_failure_count") or 1))
+        consecutive_failures = max(1, int(failure_count_value or 1))
     except (TypeError, ValueError):
         consecutive_failures = 1
     if consecutive_failures == 1:
@@ -502,15 +543,31 @@ def snapshot_next_attempt_delay_sec(
     return max(first_retry, SUSTAINED_FAILURE_RETRY_SEC, success_interval)
 
 
+CONCURRENT_SNAPSHOT_FALLOUT_CODES = frozenset(
+    {
+        "BrokenBarrierError",
+        "parallel_paper_stage_barrier_broken",
+        "parallel_paper_stage_cancelled",
+        "paper_decision_parallel_stage_barrier_broken",
+        "paper_decision_parallel_stage_cancelled",
+    }
+)
+
+
 def snapshot_failure_code(exc: BaseException) -> str:
     text = str(exc)
     if isinstance(exc, ConcurrentSnapshotError):
-        component_codes = {
+        component_codes = [
             str(details.get("error_code") or "snapshot_component_failed")
             for details in exc.errors.values()
+        ]
+        causal_codes = {
+            code
+            for code in component_codes
+            if code not in CONCURRENT_SNAPSHOT_FALLOUT_CODES
         }
-        if len(component_codes) == 1:
-            return next(iter(component_codes))
+        if len(causal_codes) == 1:
+            return next(iter(causal_codes))
         return "concurrent_evaluator_snapshot_failed"
     known = (
         "evaluator_snapshot_lock_held",
@@ -917,13 +974,21 @@ def inspect_source_page_reports(
                     }
                 }) from exc
             except sqlite3.Error as exc:
-                raise ConcurrentSnapshotError({
-                    name: {
-                        "error_code": "snapshot_source_inspection_failed",
-                        "error_type": type(exc).__name__,
-                        "stage": "source_page_stats",
-                    }
-                }) from exc
+                sqlite_errorcode, sqlite_errorname = sqlite_error_identity(exc)
+                details: dict[str, Any] = {
+                    "error_code": (
+                        "snapshot_source_read_lock_timeout"
+                        if sqlite_busy_or_locked(exc)
+                        else "snapshot_source_inspection_failed"
+                    ),
+                    "error_type": type(exc).__name__,
+                    "stage": "source_page_stats",
+                }
+                if sqlite_errorcode is not None:
+                    details["sqlite_errorcode"] = sqlite_errorcode
+                if sqlite_errorname:
+                    details["sqlite_errorname"] = sqlite_errorname
+                raise ConcurrentSnapshotError({name: details}) from exc
         finally:
             connection.close()
     return reports
@@ -2480,6 +2545,13 @@ def build_parallel_table_stage(
             ) from exc
         if "interrupted" in str(exc).lower() and cancel_event.is_set():
             raise RuntimeError("parallel_paper_stage_cancelled") from exc
+        if sqlite_busy_or_locked(exc):
+            raise RuntimeError(
+                f"snapshot_source_read_lock_timeout:paper:"
+                f"{progress.get('stage') or f'copy_table:{table}'}:{table}"
+            ) from exc
+        if sqlite_full_error(exc):
+            raise RuntimeError(f"parallel_paper_stage_budget_exceeded:{table}") from exc
         raise
     finally:
         if connection is not None:
@@ -2703,6 +2775,7 @@ def snapshot_all_concurrently(
             with result_lock:
                 reports[name] = report
         except Exception as exc:
+            sqlite_errorcode, sqlite_errorname = sqlite_error_identity(exc)
             if parallel_stage_runtimes:
                 for runtime in parallel_stage_runtimes.values():
                     runtime["cancel_event"].set()
@@ -2728,6 +2801,15 @@ def snapshot_all_concurrently(
                     f"source_read_lock_budget_exceeded:{name}:"
                     f"{progress.get('stage') or 'unknown'}:"
                     f"{float(max_source_read_lock_sec):.3f}s"
+                )
+            elif isinstance(exc, sqlite3.OperationalError) and sqlite_busy_or_locked(exc):
+                exc = RuntimeError(
+                    f"snapshot_source_read_lock_timeout:{name}:"
+                    f"{progress.get('stage') or 'unknown'}"
+                )
+            elif isinstance(exc, sqlite3.OperationalError) and sqlite_full_error(exc):
+                exc = RuntimeError(
+                    f"selective snapshot exceeded database budget for {name}"
                 )
             for barrier in (start_barrier, pinned_barrier):
                 try:
@@ -2768,13 +2850,18 @@ def snapshot_all_concurrently(
                     else {}
                 ),
             }
+            error_details: dict[str, Any] = {
+                "error_code": snapshot_component_failure_code(exc),
+                "error_type": type(exc).__name__,
+                "stage": str(progress.get("stage") or "unknown"),
+                "copy_timing": copy_timing,
+            }
+            if sqlite_errorcode is not None:
+                error_details["sqlite_errorcode"] = sqlite_errorcode
+            if sqlite_errorname:
+                error_details["sqlite_errorname"] = sqlite_errorname
             with result_lock:
-                errors[name] = {
-                    "error_code": snapshot_component_failure_code(exc),
-                    "error_type": type(exc).__name__,
-                    "stage": str(progress.get("stage") or "unknown"),
-                    "copy_timing": copy_timing,
-                }
+                errors[name] = error_details
         finally:
             alive_parallel_runtimes = [
                 runtime
@@ -3576,6 +3663,26 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         int(getattr(args, "failure_retry_sec", DEFAULT_FAILURE_RETRY_SEC)),
     )
     current_path = str(Path(args.out_root).expanduser().resolve() / "current")
+    try:
+        previous_failure_count = max(
+            0,
+            int(previous.get("consecutive_failure_count") or 0),
+        )
+    except (TypeError, ValueError):
+        previous_failure_count = 0
+    previous_code_count_raw = previous.get("consecutive_failure_code_count")
+    if previous_code_count_raw is None:
+        previous_failure_code_count = (
+            previous_failure_count if previous.get("last_failure_code") else 0
+        )
+    else:
+        try:
+            previous_failure_code_count = max(
+                0,
+                int(previous_code_count_raw or 0),
+            )
+        except (TypeError, ValueError):
+            previous_failure_code_count = 0
     base_status = {
         "schema_version": WORKER_STATUS_SCHEMA_VERSION,
         "pid": os.getpid(),
@@ -3591,7 +3698,8 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         "last_failure_details": previous.get("last_failure_details"),
         "last_error": previous.get("last_error"),
         "error_count": int(previous.get("error_count") or 0),
-        "consecutive_failure_count": int(previous.get("consecutive_failure_count") or 0),
+        "consecutive_failure_count": previous_failure_count,
+        "consecutive_failure_code_count": previous_failure_code_count,
         "success_interval_sec": interval_sec,
         "failure_retry_sec": failure_retry_sec,
         "next_attempt_delay_sec": None,
@@ -3658,6 +3766,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "completed",
                 "accepted": True,
                 "consecutive_failure_count": 0,
+                "consecutive_failure_code_count": 0,
                 "snapshot_id": manifest["snapshot_id"],
                 "interrupted_partials_removed": interrupted_partials_removed,
                 "last_accepted_snapshot": accepted_summary,
@@ -3675,10 +3784,20 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         failure_code = snapshot_failure_code(exc)
         failure_details = snapshot_failure_details(exc)
         consecutive_failure_count = int(base_status["consecutive_failure_count"]) + 1
+        previous_failure_code = str(base_status.get("last_failure_code") or "")
+        previous_failure_code_count = int(
+            base_status.get("consecutive_failure_code_count") or 0
+        )
+        consecutive_failure_code_count = (
+            previous_failure_code_count + 1
+            if previous_failure_code == failure_code
+            else 1
+        )
         retry_status = {
             "accepted": False,
             "last_failure_code": failure_code,
             "consecutive_failure_count": consecutive_failure_count,
+            "consecutive_failure_code_count": consecutive_failure_code_count,
         }
         next_attempt_delay = snapshot_next_attempt_delay_sec(
             retry_status,
@@ -3698,6 +3817,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             "status": "failed",
             "accepted": False,
             "consecutive_failure_count": consecutive_failure_count,
+            "consecutive_failure_code_count": consecutive_failure_code_count,
             "error": bounded_error_text(exc),
             "status_artifact_preserved": not lock_acquired,
             "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
