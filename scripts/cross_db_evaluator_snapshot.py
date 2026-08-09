@@ -39,15 +39,20 @@ CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
 CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal_candidate"
 MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
 CANDIDATE_STAGE_BUDGET_MODE = "shared_residual_disk_after_output_and_reserve"
-PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v1"
+PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v2"
+PARALLEL_PAPER_STAGE_STORAGE_MODE = "constraint_free_full_fidelity"
 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES = 3 * 4096
-CANDIDATE_STAGE_RESIDUAL_SHARE = 0.20
+# Production measurements on 2026-08-09 showed that the aggregate temporary
+# budget was sufficient, but the old fixed shares stranded capacity while the
+# P9 stage hit SQLITE_FULL. Keep the total cap and reserve unchanged; only
+# rebalance the existing residual pool around observed peak stage sizes.
+CANDIDATE_STAGE_RESIDUAL_SHARE = 0.12
 PARALLEL_PAPER_STAGE_CONFIGS = {
     "paper_decision_events": {
         "schema": "paper_decision_stage",
         "filename": ".paper-decision-events-stage.db",
         "role": "paper_decision_events_parallel_stage",
-        "residual_share": 0.25,
+        "residual_share": 0.36,
         "required": True,
     },
     "a_class_decision_events": {
@@ -61,7 +66,7 @@ PARALLEL_PAPER_STAGE_CONFIGS = {
         "schema": "opportunity_events_stage",
         "filename": ".opportunity-events-stage.db",
         "role": "opportunity_events_parallel_stage",
-        "residual_share": 0.10,
+        "residual_share": 0.07,
         "required": True,
     },
     "opportunity_event_path_samples": {
@@ -368,6 +373,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -464,6 +473,14 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
     text = str(exc)
     known = (
         "source_read_lock_budget_exceeded",
+        "parallel_paper_stage_column_contract_mismatch",
+        "parallel_paper_stage_destination_schema_invalid",
+        "parallel_paper_stage_destination_schema_mismatch",
+        "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_stage_table_columns_missing",
+        "parallel_stage_duplicate_columns",
+        "parallel_stage_table_missing",
+        "parallel_stage_destination_collision",
         "selective_snapshot_source_query_plan_not_indexed",
         "selective_snapshot_source_index_missing",
         "selective_snapshot_epoch_seconds_type_invalid",
@@ -572,6 +589,14 @@ def snapshot_failure_code(exc: BaseException) -> str:
     known = (
         "evaluator_snapshot_lock_held",
         "source_read_lock_budget_exceeded",
+        "parallel_paper_stage_column_contract_mismatch",
+        "parallel_paper_stage_destination_schema_invalid",
+        "parallel_paper_stage_destination_schema_mismatch",
+        "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_stage_table_columns_missing",
+        "parallel_stage_duplicate_columns",
+        "parallel_stage_table_missing",
+        "parallel_stage_destination_collision",
         "selective_snapshot_source_index_missing",
         "selective_snapshot_epoch_seconds_type_invalid",
         "selective_snapshot_index_anchor_missing",
@@ -1603,6 +1628,86 @@ def create_deferred_indexes(
         table_reports[table].setdefault("indexes_created", []).append(name)
 
 
+def table_column_contract(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    schema: str = "main",
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(schema)):
+        raise ValueError(f"unsupported SQLite schema: {schema}")
+    rows = list(
+        connection.execute(
+            f"PRAGMA {schema}.table_xinfo({quote_identifier(table)})"
+        )
+    )
+    if not rows:
+        raise RuntimeError(f"parallel_stage_table_columns_missing:{table}")
+    hidden_columns = [
+        str(row["name"])
+        for row in rows
+        if int(row["hidden"] or 0) != 0
+    ]
+    if hidden_columns:
+        raise RuntimeError(
+            "parallel_paper_stage_generated_columns_unsupported:"
+            f"{table}:{','.join(hidden_columns)}"
+        )
+    columns = [
+        {
+            "name": str(row["name"]),
+            "declared_type": str(row["type"] or ""),
+        }
+        for row in rows
+    ]
+    names = [column["name"] for column in columns]
+    if len(names) != len(set(names)):
+        raise RuntimeError(f"parallel_stage_duplicate_columns:{table}")
+    canonical = json.dumps(
+        columns,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "columns": columns,
+        "column_names": names,
+        "column_count": len(columns),
+        "sha256": sha256_text(canonical),
+    }
+
+
+def constraint_free_stage_create_sql(
+    table: str,
+    column_contract: dict[str, Any],
+) -> str:
+    definitions = []
+    for column in column_contract.get("columns") or []:
+        name = quote_identifier(str(column["name"]))
+        declared_type = str(column.get("declared_type") or "").strip()
+        definitions.append(f"{name} {declared_type}" if declared_type else name)
+    if not definitions:
+        raise RuntimeError(f"parallel_stage_table_columns_missing:{table}")
+    return f"CREATE TABLE {quote_identifier(table)} ({', '.join(definitions)})"
+
+
+def stage_table_index_count(
+    connection: sqlite3.Connection,
+    table: str,
+    *,
+    schema: str = "main",
+) -> int:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(schema)):
+        raise ValueError(f"unsupported SQLite schema: {schema}")
+    return int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {schema}.sqlite_master "
+            "WHERE type='index' AND tbl_name=?",
+            (table,),
+        ).fetchone()[0]
+    )
+
+
 def stage_single_source_table(
     connection: sqlite3.Connection,
     table: str,
@@ -1614,7 +1719,11 @@ def stage_single_source_table(
     progress: dict[str, Any] | None = None,
     lock_started_monotonic: float | None = None,
     lock_limit_sec: float | None = None,
-) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+) -> tuple[
+    dict[str, Any],
+    list[tuple[str, str, str]],
+    dict[str, Any] | None,
+]:
     table_started_monotonic = time.monotonic()
     if progress is not None:
         progress["stage"] = f"copy_table:{table}"
@@ -1631,7 +1740,7 @@ def stage_single_source_table(
             "included": False,
             "required": False,
             "reason": "optional_source_table_missing",
-        }, []
+        }, [], None
     create_sql = str(source_row["sql"] or "")
     if not create_sql:
         raise RuntimeError(f"snapshot source table schema missing: {table}")
@@ -1653,10 +1762,35 @@ def stage_single_source_table(
             f"selective_snapshot_source_query_plan_not_indexed:{table}:"
             f"{selection.get('source_index_name')}:{query_plan['details']}"
         )
-    connection.execute(create_sql)
+    source_column_contract = table_column_contract(
+        connection,
+        table,
+        schema="src",
+    )
+    stage_create_sql = constraint_free_stage_create_sql(
+        table,
+        source_column_contract,
+    )
+    connection.execute(stage_create_sql)
+    stage_column_contract = table_column_contract(connection, table, schema="main")
+    stage_index_count = stage_table_index_count(connection, table, schema="main")
+    stage_column_contract_passed = bool(
+        stage_column_contract["sha256"] == source_column_contract["sha256"]
+        and stage_column_contract["column_names"]
+        == source_column_contract["column_names"]
+        and stage_index_count == 0
+    )
+    if not stage_column_contract_passed:
+        raise RuntimeError(
+            f"parallel_paper_stage_column_contract_mismatch:{table}"
+        )
+    column_sql = ", ".join(
+        quote_identifier(name)
+        for name in source_column_contract["column_names"]
+    )
     connection.execute(
-        f"INSERT INTO {quote_identifier(table)} "
-        f"SELECT * FROM {source_table_reference(table, selection)} "
+        f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
+        f"SELECT {column_sql} FROM {source_table_reference(table, selection)} "
         f"WHERE {selection['predicate_sql']}",
         selection["parameters"],
     )
@@ -1709,6 +1843,15 @@ def stage_single_source_table(
             "reason": "parallel_full_fidelity_stage",
             "payload_semantics_preserved": True,
         },
+        "stage_schema_mode": PARALLEL_PAPER_STAGE_STORAGE_MODE,
+        "source_create_sql_sha256": sha256_text(create_sql),
+        "stage_create_sql_sha256": sha256_text(stage_create_sql),
+        "source_column_contract_sha256": source_column_contract["sha256"],
+        "stage_column_contract_sha256": stage_column_contract["sha256"],
+        "stage_column_count": stage_column_contract["column_count"],
+        "stage_column_contract_passed": stage_column_contract_passed,
+        "stage_index_count": stage_index_count,
+        "source_constraints_deferred_off_source_lock": True,
         "indexes_created": [],
         "source_copy_duration_sec": round(table_duration_sec, 6),
         "source_lock_elapsed_after_table_sec": (
@@ -1729,7 +1872,13 @@ def stage_single_source_table(
             "source_lock_elapsed_sec": report["source_lock_elapsed_after_table_sec"],
             "source_lock_remaining_sec": report["source_lock_remaining_after_table_sec"],
         }
-    return report, deferred_indexes
+    destination_schema = {
+        "create_sql": create_sql,
+        "create_sql_sha256": sha256_text(create_sql),
+        "column_names": list(source_column_contract["column_names"]),
+        "column_contract_sha256": source_column_contract["sha256"],
+    }
+    return report, deferred_indexes, destination_schema
 
 
 def merge_staged_table(
@@ -1737,7 +1886,8 @@ def merge_staged_table(
     *,
     stage_schema: str,
     table: str,
-) -> int:
+    destination_schema: dict[str, Any],
+) -> dict[str, Any]:
     schema = quote_identifier(stage_schema)
     row = connection.execute(
         f"SELECT sql FROM {schema}.sqlite_master WHERE type='table' AND name=?",
@@ -1750,12 +1900,69 @@ def merge_staged_table(
         (table,),
     ).fetchone():
         raise RuntimeError(f"parallel_stage_destination_collision:{table}")
-    connection.execute(str(row["sql"]))
-    connection.execute(
-        f"INSERT INTO {quote_identifier(table)} "
-        f"SELECT * FROM {schema}.{quote_identifier(table)}"
+    stage_contract = table_column_contract(
+        connection,
+        table,
+        schema=stage_schema,
     )
-    return int(connection.execute("SELECT changes()").fetchone()[0])
+    if (
+        stage_contract["sha256"]
+        != destination_schema.get("column_contract_sha256")
+        or stage_table_index_count(connection, table, schema=stage_schema) != 0
+    ):
+        raise RuntimeError(
+            f"parallel_paper_stage_column_contract_mismatch:{table}"
+        )
+    create_sql = str(destination_schema.get("create_sql") or "")
+    expected_create_sql_sha256 = str(
+        destination_schema.get("create_sql_sha256") or ""
+    )
+    column_names = [
+        str(name) for name in destination_schema.get("column_names") or []
+    ]
+    if (
+        not create_sql
+        or not column_names
+        or sha256_text(create_sql) != expected_create_sql_sha256
+    ):
+        raise RuntimeError(
+            f"parallel_paper_stage_destination_schema_invalid:{table}"
+        )
+    connection.execute(create_sql)
+    destination_row = connection.execute(
+        "SELECT sql FROM main.sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    destination_create_sql = str(
+        destination_row["sql"] if destination_row is not None else ""
+    )
+    destination_contract = table_column_contract(
+        connection,
+        table,
+        schema="main",
+    )
+    destination_schema_restored = bool(
+        sha256_text(destination_create_sql) == expected_create_sql_sha256
+        and destination_contract["sha256"]
+        == destination_schema.get("column_contract_sha256")
+        and destination_contract["column_names"] == column_names
+    )
+    if not destination_schema_restored:
+        raise RuntimeError(
+            f"parallel_paper_stage_destination_schema_mismatch:{table}"
+        )
+    column_sql = ", ".join(quote_identifier(name) for name in column_names)
+    connection.execute(
+        f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
+        f"SELECT {column_sql} FROM {schema}.{quote_identifier(table)}"
+    )
+    return {
+        "rows_merged": int(connection.execute("SELECT changes()").fetchone()[0]),
+        "destination_create_sql_sha256": sha256_text(destination_create_sql),
+        "destination_column_contract_sha256": destination_contract["sha256"],
+        "destination_schema_restored": destination_schema_restored,
+        "source_constraints_rebuilt_after_source_read_lock_release": True,
+    }
 
 
 def copy_selected_tables(
@@ -2078,16 +2285,30 @@ def snapshot_one(
                 (str(stage_path),),
             )
             merge_started = time.time()
-            rows_merged = merge_staged_table(
+            merge_result = merge_staged_table(
                 connection,
                 stage_schema=stage_schema,
                 table=table,
+                destination_schema=result.get("destination_schema") or {},
             )
+            rows_merged = int(merge_result.get("rows_merged") or 0)
             expected_rows = int(
                 (result.get("table_report") or {}).get("rows_copied") or 0
             )
             if rows_merged != expected_rows:
                 raise RuntimeError(f"parallel_paper_stage_row_count_mismatch:{table}")
+            destination_schema_restored_after_source_read_lock_release = bool(
+                merge_started >= all_source_read_views_released_at
+                and merge_result.get("destination_schema_restored") is True
+                and merge_result.get(
+                    "source_constraints_rebuilt_after_source_read_lock_release"
+                )
+                is True
+            )
+            if not destination_schema_restored_after_source_read_lock_release:
+                raise RuntimeError(
+                    f"parallel_paper_stage_destination_schema_mismatch:{table}"
+                )
             connection.commit()
             merge_finished = time.time()
             connection.execute(f"DETACH DATABASE {quote_identifier(stage_schema)}")
@@ -2097,6 +2318,44 @@ def snapshot_one(
                 "role": config["role"],
                 "full_fidelity_row_copy": True,
                 "payload_semantics_preserved": True,
+                "stage_schema_mode": result.get("stage_schema_mode"),
+                "source_create_sql_sha256": result.get(
+                    "source_create_sql_sha256"
+                ),
+                "stage_create_sql_sha256": result.get(
+                    "stage_create_sql_sha256"
+                ),
+                "destination_create_sql_sha256": merge_result.get(
+                    "destination_create_sql_sha256"
+                ),
+                "source_column_contract_sha256": result.get(
+                    "source_column_contract_sha256"
+                ),
+                "stage_column_contract_sha256": result.get(
+                    "stage_column_contract_sha256"
+                ),
+                "destination_column_contract_sha256": merge_result.get(
+                    "destination_column_contract_sha256"
+                ),
+                "stage_column_count": result.get("stage_column_count"),
+                "stage_column_contract_passed": result.get(
+                    "stage_column_contract_passed"
+                )
+                is True,
+                "stage_index_count": result.get("stage_index_count"),
+                "source_constraints_deferred_off_source_lock": result.get(
+                    "source_constraints_deferred_off_source_lock"
+                )
+                is True,
+                "destination_schema_restored_after_source_read_lock_release": (
+                    destination_schema_restored_after_source_read_lock_release
+                ),
+                "source_constraints_rebuilt_after_source_read_lock_release": (
+                    merge_result.get(
+                        "source_constraints_rebuilt_after_source_read_lock_release"
+                    )
+                    is True
+                ),
                 "stage_rows_copied": expected_rows,
                 "rows_merged": rows_merged,
                 "row_count_matched": rows_merged == expected_rows,
@@ -2147,6 +2406,44 @@ def snapshot_one(
                 "quick_check": result.get("quick_check") or [],
                 "full_fidelity_row_copy": True,
                 "payload_semantics_preserved": True,
+                "stage_schema_mode": result.get("stage_schema_mode"),
+                "source_create_sql_sha256": result.get(
+                    "source_create_sql_sha256"
+                ),
+                "stage_create_sql_sha256": result.get(
+                    "stage_create_sql_sha256"
+                ),
+                "destination_create_sql_sha256": merge_result.get(
+                    "destination_create_sql_sha256"
+                ),
+                "source_column_contract_sha256": result.get(
+                    "source_column_contract_sha256"
+                ),
+                "stage_column_contract_sha256": result.get(
+                    "stage_column_contract_sha256"
+                ),
+                "destination_column_contract_sha256": merge_result.get(
+                    "destination_column_contract_sha256"
+                ),
+                "stage_column_count": int(result.get("stage_column_count") or 0),
+                "stage_column_contract_passed": result.get(
+                    "stage_column_contract_passed"
+                )
+                is True,
+                "stage_index_count": int(result.get("stage_index_count") or 0),
+                "source_constraints_deferred_off_source_lock": result.get(
+                    "source_constraints_deferred_off_source_lock"
+                )
+                is True,
+                "destination_schema_restored_after_source_read_lock_release": (
+                    destination_schema_restored_after_source_read_lock_release
+                ),
+                "source_constraints_rebuilt_after_source_read_lock_release": (
+                    merge_result.get(
+                        "source_constraints_rebuilt_after_source_read_lock_release"
+                    )
+                    is True
+                ),
             }
     if candidate_source_columns is not None:
         if candidate_stage_path is None or not candidate_stage_path.is_file():
@@ -2474,7 +2771,7 @@ def build_parallel_table_stage(
                 )
         if cancel_event.is_set():
             raise RuntimeError("parallel_paper_stage_cancelled")
-        table_report, deferred_indexes = stage_single_source_table(
+        table_report, deferred_indexes, destination_schema = stage_single_source_table(
             connection,
             table,
             rule,
@@ -2485,6 +2782,8 @@ def build_parallel_table_stage(
             lock_started_monotonic=pin_started_monotonic,
             lock_limit_sec=max_source_read_lock_sec,
         )
+        if not isinstance(destination_schema, dict):
+            raise RuntimeError(f"parallel_paper_stage_destination_schema_invalid:{table}")
         progress["stage"] = "release_parallel_source_read_view"
         connection.commit()
         read_view_released = time.time()
@@ -2496,14 +2795,33 @@ def build_parallel_table_stage(
         if stage_size_bytes <= 0 or stage_size_bytes > int(budget_bytes):
             raise RuntimeError("parallel_paper_stage_budget_exceeded")
         quick_check = sqlite3.connect(destination)
+        quick_check.row_factory = sqlite3.Row
         try:
             quick_check_rows = [
                 str(row[0]) for row in quick_check.execute("PRAGMA quick_check").fetchall()
             ]
+            persisted_stage_index_count = stage_table_index_count(
+                quick_check,
+                table,
+                schema="main",
+            )
+            persisted_stage_contract = table_column_contract(
+                quick_check,
+                table,
+                schema="main",
+            )
         finally:
             quick_check.close()
         if quick_check_rows != ["ok"]:
             raise RuntimeError("parallel_paper_stage_quick_check_failed")
+        if (
+            persisted_stage_index_count != 0
+            or persisted_stage_contract["sha256"]
+            != destination_schema["column_contract_sha256"]
+        ):
+            raise RuntimeError(
+                f"parallel_paper_stage_column_contract_mismatch:{table}"
+            )
         duration_sec = read_view_released - pin_started
         return {
             "schema_version": PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
@@ -2517,6 +2835,18 @@ def build_parallel_table_stage(
             "quick_check": quick_check_rows,
             "table_report": table_report,
             "deferred_indexes": deferred_indexes,
+            "destination_schema": destination_schema,
+            "stage_schema_mode": PARALLEL_PAPER_STAGE_STORAGE_MODE,
+            "source_create_sql_sha256": destination_schema["create_sql_sha256"],
+            "stage_create_sql_sha256": table_report["stage_create_sql_sha256"],
+            "source_column_contract_sha256": destination_schema[
+                "column_contract_sha256"
+            ],
+            "stage_column_contract_sha256": persisted_stage_contract["sha256"],
+            "stage_column_count": persisted_stage_contract["column_count"],
+            "stage_column_contract_passed": True,
+            "stage_index_count": persisted_stage_index_count,
+            "source_constraints_deferred_off_source_lock": True,
             "pinned_read_view": pin_report,
             "source_read_view_released_at": utc_iso(read_view_released),
             "source_read_view_released_epoch": read_view_released,

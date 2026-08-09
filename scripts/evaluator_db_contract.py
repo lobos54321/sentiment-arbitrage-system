@@ -26,6 +26,7 @@ from cross_db_evaluator_snapshot import (
     PARALLEL_PAPER_REQUIRED_STAGE_TABLES,
     PARALLEL_PAPER_STAGE_CONFIGS,
     PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
+    PARALLEL_PAPER_STAGE_STORAGE_MODE,
     PARALLEL_PAPER_STAGE_TABLES,
     PAPER_DECISION_STAGE_TABLE,
     parallel_paper_stage_inventory_valid,
@@ -60,6 +61,66 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def valid_sha256_hex(value: object) -> bool:
+    text = str(value or "").lower()
+    return len(text) == 64 and all(
+        character in "0123456789abcdef" for character in text
+    )
+
+
+def sqlite_table_schema_evidence(
+    path: Path,
+    tables: tuple[str, ...] | list[str],
+) -> dict[str, dict]:
+    uri = f"file:{quote(str(path.resolve()), safe='/')}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True, timeout=30)
+    connection.row_factory = sqlite3.Row
+    evidence: dict[str, dict] = {}
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        for table in tables:
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if row is None or not row["sql"]:
+                continue
+            columns = list(
+                connection.execute(
+                    f"PRAGMA table_xinfo({quote_identifier(table)})"
+                )
+            )
+            visible_columns = [
+                {
+                    "name": str(column["name"]),
+                    "declared_type": str(column["type"] or ""),
+                }
+                for column in columns
+                if int(column["hidden"] or 0) == 0
+            ]
+            canonical_columns = json.dumps(
+                visible_columns,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            evidence[str(table)] = {
+                "create_sql_sha256": sha256_text(str(row["sql"])),
+                "column_contract_sha256": sha256_text(canonical_columns),
+                "column_count": len(visible_columns),
+                "hidden_column_count": len(columns) - len(visible_columns),
+                "columns": visible_columns,
+            }
+    finally:
+        connection.close()
+    return evidence
 
 
 def sqlite_quick_check(path: Path) -> list[str]:
@@ -847,6 +908,10 @@ def evaluator_snapshot_bundle_status(
                 )
                 active_parallel_stage_tables = safe_manifest_parallel_stage_tables
                 try:
+                    final_stage_schema_evidence = sqlite_table_schema_evidence(
+                        candidate,
+                        active_parallel_stage_tables,
+                    )
                     if not isinstance(
                         raw_report_parallel_stage_tables,
                         list,
@@ -910,6 +975,8 @@ def evaluator_snapshot_bundle_status(
                         != set(active_parallel_stage_tables)
                         or set(parallel_lock_durations)
                         != set(active_parallel_stage_tables)
+                        or set(final_stage_schema_evidence)
+                        != set(active_parallel_stage_tables)
                         or not optional_absence_valid
                         or report.get("parallel_paper_stages_all_pinned") is not True
                         or report.get(
@@ -959,10 +1026,100 @@ def evaluator_snapshot_bundle_status(
                         lock_duration_sec = float(
                             stage_report.get("source_read_lock_duration_sec")
                         )
+                        final_schema = final_stage_schema_evidence.get(table) or {}
+                        final_columns = final_schema.get("columns") or []
+                        expected_stage_definitions = []
+                        for column in final_columns:
+                            column_name = quote_identifier(str(column["name"]))
+                            declared_type = str(
+                                column.get("declared_type") or ""
+                            ).strip()
+                            expected_stage_definitions.append(
+                                f"{column_name} {declared_type}"
+                                if declared_type
+                                else column_name
+                            )
+                        expected_stage_create_sql_sha256 = sha256_text(
+                            f"CREATE TABLE {quote_identifier(table)} "
+                            f"({', '.join(expected_stage_definitions)})"
+                        )
+                        source_create_sql_sha256 = str(
+                            stage_report.get("source_create_sql_sha256") or ""
+                        )
+                        stage_create_sql_sha256 = str(
+                            stage_report.get("stage_create_sql_sha256") or ""
+                        )
+                        destination_create_sql_sha256 = str(
+                            stage_report.get("destination_create_sql_sha256")
+                            or ""
+                        )
+                        source_column_contract_sha256 = str(
+                            stage_report.get("source_column_contract_sha256")
+                            or ""
+                        )
+                        stage_column_contract_sha256 = str(
+                            stage_report.get("stage_column_contract_sha256")
+                            or ""
+                        )
+                        destination_column_contract_sha256 = str(
+                            stage_report.get(
+                                "destination_column_contract_sha256"
+                            )
+                            or ""
+                        )
+                        stage_column_count = int(
+                            stage_report.get("stage_column_count")
+                        )
+                        stage_index_count = int(
+                            stage_report.get("stage_index_count")
+                        )
                         if (
                             stage_report.get("schema_version")
                             != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
                             or stage_report.get("role") != config["role"]
+                            or stage_report.get("stage_schema_mode")
+                            != PARALLEL_PAPER_STAGE_STORAGE_MODE
+                            or not all(
+                                valid_sha256_hex(value)
+                                for value in (
+                                    source_create_sql_sha256,
+                                    stage_create_sql_sha256,
+                                    destination_create_sql_sha256,
+                                    source_column_contract_sha256,
+                                    stage_column_contract_sha256,
+                                    destination_column_contract_sha256,
+                                )
+                            )
+                            or source_create_sql_sha256
+                            != destination_create_sql_sha256
+                            or source_create_sql_sha256
+                            != final_schema.get("create_sql_sha256")
+                            or stage_create_sql_sha256
+                            != expected_stage_create_sql_sha256
+                            or source_column_contract_sha256
+                            != stage_column_contract_sha256
+                            or source_column_contract_sha256
+                            != destination_column_contract_sha256
+                            or source_column_contract_sha256
+                            != final_schema.get("column_contract_sha256")
+                            or stage_column_count
+                            != int(final_schema.get("column_count"))
+                            or int(final_schema.get("hidden_column_count")) != 0
+                            or stage_report.get("stage_column_contract_passed")
+                            is not True
+                            or stage_index_count != 0
+                            or stage_report.get(
+                                "source_constraints_deferred_off_source_lock"
+                            )
+                            is not True
+                            or stage_report.get(
+                                "destination_schema_restored_after_source_read_lock_release"
+                            )
+                            is not True
+                            or stage_report.get(
+                                "source_constraints_rebuilt_after_source_read_lock_release"
+                            )
+                            is not True
                             or stage_size_bytes <= 0
                             or stage_budget_bytes != int(parallel_stage_caps[table])
                             or stage_size_bytes > stage_budget_bytes
@@ -985,6 +1142,43 @@ def evaluator_snapshot_bundle_status(
                             or nested_stage.get("schema_version")
                             != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
                             or nested_stage.get("role") != config["role"]
+                            or nested_stage.get("stage_schema_mode")
+                            != PARALLEL_PAPER_STAGE_STORAGE_MODE
+                            or nested_stage.get("source_create_sql_sha256")
+                            != source_create_sql_sha256
+                            or nested_stage.get("stage_create_sql_sha256")
+                            != stage_create_sql_sha256
+                            or nested_stage.get("destination_create_sql_sha256")
+                            != destination_create_sql_sha256
+                            or nested_stage.get(
+                                "source_column_contract_sha256"
+                            )
+                            != source_column_contract_sha256
+                            or nested_stage.get(
+                                "stage_column_contract_sha256"
+                            )
+                            != stage_column_contract_sha256
+                            or nested_stage.get(
+                                "destination_column_contract_sha256"
+                            )
+                            != destination_column_contract_sha256
+                            or int(nested_stage.get("stage_column_count"))
+                            != stage_column_count
+                            or nested_stage.get("stage_column_contract_passed")
+                            is not True
+                            or int(nested_stage.get("stage_index_count")) != 0
+                            or nested_stage.get(
+                                "source_constraints_deferred_off_source_lock"
+                            )
+                            is not True
+                            or nested_stage.get(
+                                "destination_schema_restored_after_source_read_lock_release"
+                            )
+                            is not True
+                            or nested_stage.get(
+                                "source_constraints_rebuilt_after_source_read_lock_release"
+                            )
+                            is not True
                             or nested_stage.get("full_fidelity_row_copy") is not True
                             or nested_stage.get("payload_semantics_preserved") is not True
                             or nested_stage.get("row_count_matched") is not True
@@ -1032,7 +1226,7 @@ def evaluator_snapshot_bundle_status(
                         != int(paper_alias.get("rows_merged"))
                     ):
                         raise ValueError("paper decision compatibility alias mismatch")
-                except (KeyError, TypeError, ValueError):
+                except (KeyError, TypeError, ValueError, sqlite3.Error):
                     blockers.append(
                         "evaluator_snapshot_parallel_paper_stage_contract_invalid"
                     )

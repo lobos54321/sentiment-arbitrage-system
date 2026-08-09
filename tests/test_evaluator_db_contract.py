@@ -783,6 +783,7 @@ def test_parallel_paper_decision_stage_tampering_is_rejected(tmp_path, monkeypat
         "paper_decision_events",
         "a_class_decision_events",
         "opportunity_events",
+        "opportunity_event_path_samples",
     ),
 )
 def test_each_parallel_paper_stage_nested_tampering_is_rejected(
@@ -809,6 +810,90 @@ def test_each_parallel_paper_stage_nested_tampering_is_rejected(
         kline_db=str(out / "current" / "kline.db"),
         data_dir=str(live),
         manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    (
+        ("stage_schema_mode", "source_schema_with_constraints"),
+        ("source_create_sql_sha256", "0" * 64),
+        ("stage_create_sql_sha256", "0" * 64),
+        ("destination_create_sql_sha256", "0" * 64),
+        ("source_column_contract_sha256", "0" * 64),
+        ("stage_column_contract_sha256", "0" * 64),
+        ("destination_column_contract_sha256", "0" * 64),
+        ("stage_column_count", 999),
+        ("stage_column_contract_passed", False),
+        ("stage_index_count", 1),
+        ("source_constraints_deferred_off_source_lock", False),
+        (
+            "destination_schema_restored_after_source_read_lock_release",
+            False,
+        ),
+        (
+            "source_constraints_rebuilt_after_source_read_lock_release",
+            False,
+        ),
+    ),
+)
+def test_parallel_stage_schema_contract_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+    field,
+    tampered_value,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    stage_table = "opportunity_events"
+    paper_report["parallel_paper_stages"][stage_table][field] = tampered_value
+    paper_report["selected_tables"][stage_table]["parallel_stage"][
+        field
+    ] = tampered_value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+def test_final_snapshot_schema_drift_is_rejected_even_if_manifest_claims_restored(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    paper_path = (out / "current" / "paper_evidence.db").resolve()
+    paper = sqlite3.connect(paper_path)
+    paper.execute("ALTER TABLE opportunity_events ADD COLUMN injected TEXT")
+    paper.commit()
+    paper.close()
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(paper_path),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(out / "current" / "manifest.json"),
     )
 
     assert status["accepted"] is False

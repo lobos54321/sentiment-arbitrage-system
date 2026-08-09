@@ -8872,6 +8872,14 @@ const EVALUATOR_PUBLIC_FAILURE_CODES = new Set([
   'parallel_paper_stage_row_count_mismatch',
   'parallel_paper_stage_cleanup_failed',
   'parallel_paper_stage_failed',
+  'parallel_paper_stage_column_contract_mismatch',
+  'parallel_paper_stage_destination_schema_invalid',
+  'parallel_paper_stage_destination_schema_mismatch',
+  'parallel_paper_stage_generated_columns_unsupported',
+  'parallel_stage_table_columns_missing',
+  'parallel_stage_duplicate_columns',
+  'parallel_stage_table_missing',
+  'parallel_stage_destination_collision',
   'paper_decision_parallel_stage_start_timeout',
   'paper_decision_parallel_stage_cancelled',
   'paper_decision_parallel_stage_barrier_broken',
@@ -9253,13 +9261,13 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const diskCandidateStageCapBytes = Number(disk.temporary_candidate_stage_cap_bytes);
   const parallelPaperStageConfigs = {
     paper_decision_events: {
-      role: 'paper_decision_events_parallel_stage', residualShare: 0.25, required: true,
+      role: 'paper_decision_events_parallel_stage', residualShare: 0.36, required: true,
     },
     a_class_decision_events: {
       role: 'a_class_decision_events_parallel_stage', residualShare: 0.25, required: true,
     },
     opportunity_events: {
-      role: 'opportunity_events_parallel_stage', residualShare: 0.10, required: true,
+      role: 'opportunity_events_parallel_stage', residualShare: 0.07, required: true,
     },
     opportunity_event_path_samples: {
       role: 'opportunity_event_path_samples_parallel_stage',
@@ -9319,7 +9327,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const diskPeakBytes = Number(disk.estimated_peak_working_bytes);
   const diskFreeAtPeakBytes = Number(disk.estimated_free_at_peak_bytes);
   const expectedDiskTotalStageCapBytes = Math.max(0, diskFreeBytes - diskOutputCapBytes - diskReserveBytes);
-  const configuredCandidateShare = 0.20;
+  const configuredCandidateShare = 0.12;
   const expectedActiveWeightTotal = configuredCandidateShare + activeParallelPaperStageTables.reduce(
     (sum, table) => sum + parallelPaperStageConfigs[table].residualShare,
     0,
@@ -9390,6 +9398,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     (table) => parallelPaperStageConfigs[table].required !== true
       && !activeParallelPaperStageTables.includes(table),
   );
+  const shareMatches = (actual, expected) => Number.isFinite(Number(actual))
+    && Math.abs(Number(actual) - Number(expected)) <= 1e-9;
   const diskPreflightPassed = Boolean(
     disk.accepted === true
     && [
@@ -9431,16 +9441,28 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && activeParallelPaperStageTables.every(
       (table) => diskParallelStageCaps[table] >= diskParallelStageMinimumBytes,
     )
-    && Number(disk.candidate_stage_residual_share) === configuredCandidateShare
+    && shareMatches(disk.candidate_stage_residual_share, configuredCandidateShare)
     && activeParallelPaperStageTables.every(
-      (table) => Number(diskStageShares[table]) === parallelPaperStageConfigs[table].residualShare,
+      (table) => shareMatches(
+        diskStageShares[table],
+        parallelPaperStageConfigs[table].residualShare,
+      ),
     )
     && Object.keys(diskStageShares).length === activeParallelPaperStageTables.length
-    && Number(disk.parallel_paper_stage_active_weight_total) === expectedActiveWeightTotal
-    && Number(disk.candidate_stage_normalized_share) === expectedCandidateNormalizedShare
+    && shareMatches(
+      disk.parallel_paper_stage_active_weight_total,
+      expectedActiveWeightTotal,
+    )
+    && shareMatches(
+      disk.candidate_stage_normalized_share,
+      expectedCandidateNormalizedShare,
+    )
     && Object.keys(diskNormalizedStageShares).length === activeParallelPaperStageTables.length
     && activeParallelPaperStageTables.every(
-      (table) => Number(diskNormalizedStageShares[table]) === expectedNormalizedStageShares[table],
+      (table) => shareMatches(
+        diskNormalizedStageShares[table],
+        expectedNormalizedStageShares[table],
+      ),
     )
     && Number(disk.temporary_paper_decision_stage_cap_bytes) === diskPaperDecisionStageCapBytes
     && disk.candidate_stage_budget_mode === 'shared_residual_disk_after_output_and_reserve'
@@ -9516,6 +9538,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     ...activeParallelPaperStageTables.map((table) => parallelPaperStageConfigs[table].role),
   ]);
   const parallelPaperStages = {};
+  const sha256Pattern = /^[a-f0-9]{64}$/i;
   for (const table of activeParallelPaperStageTables) {
     const selection = paperSelections[table] && typeof paperSelections[table] === 'object'
       ? paperSelections[table]
@@ -9533,6 +9556,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const rowsMerged = Number(stage.rows_merged);
     const selectionRowsCopied = Number(selection.rows_copied);
     const lockDurationSec = Number(stage.source_read_lock_duration_sec);
+    const sourceCreateSqlSha256 = String(stage.source_create_sql_sha256 || '');
+    const stageCreateSqlSha256 = String(stage.stage_create_sql_sha256 || '');
+    const destinationCreateSqlSha256 = String(stage.destination_create_sql_sha256 || '');
+    const sourceColumnContractSha256 = String(stage.source_column_contract_sha256 || '');
+    const stageColumnContractSha256 = String(stage.stage_column_contract_sha256 || '');
+    const destinationColumnContractSha256 = String(stage.destination_column_contract_sha256 || '');
+    const stageColumnCount = Number(stage.stage_column_count);
+    const rawStageIndexCount = stage.stage_index_count;
+    const stageIndexCount = Number.isInteger(rawStageIndexCount)
+      ? rawStageIndexCount
+      : null;
     parallelPaperStages[table] = {
       schema_version: stage.schema_version || null,
       role: stage.role || null,
@@ -9546,9 +9580,55 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         ? Number(stage.merge_duration_sec)
         : null,
       removed_before_publish: stage.removed_before_publish === true,
+      stage_schema_mode: stage.stage_schema_mode || null,
+      source_create_sql_sha256: sha256Pattern.test(sourceCreateSqlSha256)
+        ? sourceCreateSqlSha256
+        : null,
+      stage_create_sql_sha256: sha256Pattern.test(stageCreateSqlSha256)
+        ? stageCreateSqlSha256
+        : null,
+      destination_create_sql_sha256: sha256Pattern.test(destinationCreateSqlSha256)
+        ? destinationCreateSqlSha256
+        : null,
+      source_column_contract_sha256: sha256Pattern.test(sourceColumnContractSha256)
+        ? sourceColumnContractSha256
+        : null,
+      stage_column_contract_sha256: sha256Pattern.test(stageColumnContractSha256)
+        ? stageColumnContractSha256
+        : null,
+      destination_column_contract_sha256: sha256Pattern.test(destinationColumnContractSha256)
+        ? destinationColumnContractSha256
+        : null,
+      stage_column_count: Number.isInteger(stageColumnCount) ? stageColumnCount : null,
+      stage_index_count: Number.isInteger(stageIndexCount) ? stageIndexCount : null,
+      stage_column_contract_passed: stage.stage_column_contract_passed === true,
+      source_constraints_deferred_off_source_lock:
+        stage.source_constraints_deferred_off_source_lock === true,
+      destination_schema_restored_after_source_read_lock_release:
+        stage.destination_schema_restored_after_source_read_lock_release === true,
+      source_constraints_rebuilt_after_source_read_lock_release:
+        stage.source_constraints_rebuilt_after_source_read_lock_release === true,
       passed: Boolean(
-        stage.schema_version === 'parallel_paper_event_stage.v1'
+        stage.schema_version === 'parallel_paper_event_stage.v2'
         && stage.role === parallelPaperStageConfigs[table].role
+        && stage.stage_schema_mode === 'constraint_free_full_fidelity'
+        && sha256Pattern.test(sourceCreateSqlSha256)
+        && sha256Pattern.test(stageCreateSqlSha256)
+        && sha256Pattern.test(destinationCreateSqlSha256)
+        && sourceCreateSqlSha256 === destinationCreateSqlSha256
+        && sha256Pattern.test(sourceColumnContractSha256)
+        && sha256Pattern.test(stageColumnContractSha256)
+        && sha256Pattern.test(destinationColumnContractSha256)
+        && sourceColumnContractSha256 === stageColumnContractSha256
+        && sourceColumnContractSha256 === destinationColumnContractSha256
+        && Number.isInteger(stageColumnCount)
+        && stageColumnCount > 0
+        && stage.stage_column_contract_passed === true
+        && Number.isInteger(rawStageIndexCount)
+        && stageIndexCount === 0
+        && stage.source_constraints_deferred_off_source_lock === true
+        && stage.destination_schema_restored_after_source_read_lock_release === true
+        && stage.source_constraints_rebuilt_after_source_read_lock_release === true
         && Number.isFinite(stageSizeBytes)
         && stageSizeBytes > 0
         && Number.isFinite(stageBudgetBytes)
@@ -9574,8 +9654,22 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && stage.quick_check[0] === 'ok'
         && stage.full_fidelity_row_copy === true
         && stage.payload_semantics_preserved === true
-        && nested.schema_version === 'parallel_paper_event_stage.v1'
+        && nested.schema_version === 'parallel_paper_event_stage.v2'
         && nested.role === parallelPaperStageConfigs[table].role
+        && nested.stage_schema_mode === stage.stage_schema_mode
+        && nested.source_create_sql_sha256 === sourceCreateSqlSha256
+        && nested.stage_create_sql_sha256 === stageCreateSqlSha256
+        && nested.destination_create_sql_sha256 === destinationCreateSqlSha256
+        && nested.source_column_contract_sha256 === sourceColumnContractSha256
+        && nested.stage_column_contract_sha256 === stageColumnContractSha256
+        && nested.destination_column_contract_sha256 === destinationColumnContractSha256
+        && Number(nested.stage_column_count) === stageColumnCount
+        && nested.stage_column_contract_passed === true
+        && Number.isInteger(nested.stage_index_count)
+        && nested.stage_index_count === 0
+        && nested.source_constraints_deferred_off_source_lock === true
+        && nested.destination_schema_restored_after_source_read_lock_release === true
+        && nested.source_constraints_rebuilt_after_source_read_lock_release === true
         && nested.full_fidelity_row_copy === true
         && nested.payload_semantics_preserved === true
         && nested.row_count_matched === true
@@ -9602,7 +9696,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     : [];
   const parallelPaperStagesPassed = Boolean(
     parallelPaperStageInventoryValid
-    && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v1'
+    && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v2'
     && Number(manifestPayload?.parallel_paper_stage_count) === activeParallelPaperStageTables.length
     && manifestPayload?.parallel_paper_stages_all_pinned === true
     && manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true

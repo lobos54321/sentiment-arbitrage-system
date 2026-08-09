@@ -429,6 +429,20 @@ Accepted snapshot → AutoLoop 血缘：
 - 最终完整门禁为 Python `383 passed`、Node 20 `72 passed`、Basic Readiness `136/136`、`normal_tiny_ready=false`、mode-gate scope `final_scope_covered`；generated client、spec validation、Python/Node syntax、JSON 与 `git diff --check` 全部通过；
 - 本轮修复已完成本地实现与独立审查，尚待提交、PR、exact-SHA CI 和生产部署；生产仍正确没有 accepted manifest，AutoLoop 继续 `blocked_evaluator_snapshot_required`，P0-D 继续锁定。
 
+### 2026-08-09｜生产第七轮收敛：stage 容量重分配与锁外约束恢复
+
+- PR #80 exact SHA `a56b628e0304a40bdac6d63dc7a3d90cf1eaa4c8` 已 fast-forward 到 `main`，post-push CI 与 Zeabur exact-SHA deployment 均成功；生产 paper DB 继续为 `ok`、约 25.58GB，integrity marker 不存在；
+- PR #80 将旧的裸 `OperationalError` 成功拆分：生产先观测到 `paper_decision_events / SQLITE_FULL / parallel_paper_stage_budget_exceeded`，随后观测到 source inspection `SQLITE_BUSY / snapshot_source_read_lock_timeout`，不同 failure code 各自从 60 秒开始有界退避；没有发布 partial/current manifest；
+- 生产实时 stage 文件证据显示 aggregate temporary space 足够但固定份额失衡：A_CLASS 峰值约 2.49GB、path samples 约 1.99GB、candidate 约 1.13GB、opportunity events 约 0.71GB，而 P9 仍继续增长并在不同轮次触及固定 cap 或 300 秒 ceiling；
+- 当前受控实现保持 output cap、5GB reserve、300 秒每视图 ceiling、96h/840h 选择窗口不变，只把既有 residual 权重调整为 candidate 12%、P9 36%、A_CLASS 25%、opportunity events 7%、path samples 20%；optional path 表缺失时仍按 active weights 归一化回收全部 residual；
+- 生产 schema 核对发现 `opportunity_events` 与 `opportunity_event_path_samples` 的 source table 带 UNIQUE autoindex；旧 stage 在 active-source read lock 内复制 source `CREATE TABLE`，会同步维护 PK/UNIQUE 约束和 autoindex，放大同盘写 I/O；
+- stage schema 已升级为 `parallel_paper_event_stage.v2 / constraint_free_full_fidelity`：持锁阶段只创建名称和 declared type 完全一致的列，不创建 PK、NOT NULL、UNIQUE、CHECK、DEFAULT、AUTOINCREMENT 或任何 index；所有列和值仍显式、完整复制；generated/hidden column 目前 fail-closed；
+- 所有 source views 释放后，producer 才以 source sqlite_master 中的原始 `CREATE TABLE` 恢复最终冻结表，随后合并完整行并构建显式索引；source/stage/destination CREATE hash、列契约 hash、stage index count=0、约束锁外恢复和最终 schema 都进入 manifest；
+- authoritative consumer 会重新打开最终 immutable `paper_evidence.db`，独立计算每张 stage 表的实际 CREATE SQL 与列契约，拒绝 manifest 自洽伪造、stage 隐藏索引、约束未恢复、列漂移或最终数据库 schema 漂移；Dashboard 只执行 public-safe 轻量一致性检查，不冒充 authoritative 重算；
+- 新正反例已覆盖：带 AUTOINCREMENT/UNIQUE/CHECK/DEFAULT 的 source table 在 stage 中无约束无索引、在最终库中完整恢复并继续拒绝重复 key/非法 CHECK；13 种 stage schema evidence 篡改、实际最终 DB `ALTER TABLE` 漂移及 Dashboard aggregate/nested 分叉均 fail-closed；
+- 第一轮独立反方审查发现两项 fail-closed 缺口：新 schema 错误被泛化为 `RuntimeError`，以及 Dashboard 会把 `stage_index_count:null` 数值化为 0；现已为八类 schema failure 保留稳定 code，并要求 aggregate/nested 原始 index count 都必须是整数 0；对应回归均已增加；
+- 第二轮独立反方审查未发现新的可执行 correctness issue；当前本地 gate 为 producer/consumer focused Python `167 passed`、Dashboard Node 20 `63 passed`、恢复矩阵 Python `335 passed`、GitHub exact Python groups `157 + 70 + 180 passed`、Node 20 完整矩阵 `72 passed`，Basic Readiness 无 blocker、`normal_tiny_ready=false`；本轮尚未提交、建 PR 或部署，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+
 尚未声称完成的生产证据：
 
 - 尚未生成新的 production accepted snapshot；

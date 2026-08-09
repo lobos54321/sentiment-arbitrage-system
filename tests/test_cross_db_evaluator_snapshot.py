@@ -187,11 +187,19 @@ def test_disk_preflight_sizes_stage_from_residual_space_not_output_fraction(
     assert report["temporary_paper_decision_stage_cap_bytes"] == expected_parallel[
         "paper_decision_events"
     ]
-    assert report["temporary_candidate_stage_cap_bytes"] >= 5 * gib
-    assert all(
-        value > 2 * gib
-        for value in report["temporary_parallel_paper_stage_cap_bytes"].values()
-    )
+    assert report["temporary_candidate_stage_cap_bytes"] > 2 * gib
+    assert report["temporary_parallel_paper_stage_cap_bytes"][
+        "paper_decision_events"
+    ] > 8 * gib
+    assert report["temporary_parallel_paper_stage_cap_bytes"][
+        "a_class_decision_events"
+    ] > 6 * gib
+    assert report["temporary_parallel_paper_stage_cap_bytes"][
+        "opportunity_events"
+    ] > 1 * gib
+    assert report["temporary_parallel_paper_stage_cap_bytes"][
+        "opportunity_event_path_samples"
+    ] > 4 * gib
     assert report["estimated_peak_working_bytes"] == 35 * gib
     assert report["estimated_free_at_peak_bytes"] == 5 * gib
     assert report["estimated_free_at_peak_bytes"] == report["required_reserve_bytes"]
@@ -334,12 +342,12 @@ def test_optional_opportunity_path_stage_is_skipped_when_source_table_is_absent(
         == disk["temporary_stage_total_cap_bytes"]
     )
     assert disk["parallel_paper_stage_active_weight_total"] == pytest.approx(0.8)
-    assert disk["candidate_stage_normalized_share"] == pytest.approx(0.25)
+    assert disk["candidate_stage_normalized_share"] == pytest.approx(0.15)
     assert disk["parallel_paper_stage_normalized_shares"] == pytest.approx(
         {
-            "paper_decision_events": 0.3125,
+            "paper_decision_events": 0.45,
             "a_class_decision_events": 0.3125,
-            "opportunity_events": 0.125,
+            "opportunity_events": 0.0875,
         }
     )
     assert optional_selection == {
@@ -487,6 +495,14 @@ def test_parallel_paper_decision_stage_uses_fixed_4k_pages_with_large_source_pag
         "parallel_paper_stage_row_count_mismatch",
         "parallel_paper_stage_cleanup_failed",
         "parallel_paper_stage_failed",
+        "parallel_paper_stage_column_contract_mismatch",
+        "parallel_paper_stage_destination_schema_invalid",
+        "parallel_paper_stage_destination_schema_mismatch",
+        "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_stage_table_columns_missing",
+        "parallel_stage_duplicate_columns",
+        "parallel_stage_table_missing",
+        "parallel_stage_destination_collision",
         "paper_decision_parallel_stage_start_timeout",
         "paper_decision_parallel_stage_cancelled",
         "paper_decision_parallel_stage_barrier_broken",
@@ -1394,12 +1410,50 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         table_stage = table_selection["parallel_stage"]
         aggregate = paper_report["parallel_paper_stages"][table]
         assert table_selection["rows_copied"] == 1
-        assert table_stage["schema_version"] == "parallel_paper_event_stage.v1"
+        assert table_stage["schema_version"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+        )
+        assert table_stage["stage_schema_mode"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
+        )
         assert table_stage["full_fidelity_row_copy"] is True
         assert table_stage["payload_semantics_preserved"] is True
+        assert table_stage["stage_column_contract_passed"] is True
+        assert table_stage["stage_index_count"] == 0
+        assert table_stage["source_constraints_deferred_off_source_lock"] is True
+        assert table_stage[
+            "destination_schema_restored_after_source_read_lock_release"
+        ] is True
+        assert table_stage[
+            "source_constraints_rebuilt_after_source_read_lock_release"
+        ] is True
+        assert table_stage["source_create_sql_sha256"] == table_stage[
+            "destination_create_sql_sha256"
+        ]
+        assert table_stage["source_column_contract_sha256"] == table_stage[
+            "stage_column_contract_sha256"
+        ] == table_stage["destination_column_contract_sha256"]
         assert table_stage["row_count_matched"] is True
         assert aggregate["rows_copied"] == aggregate["rows_merged"] == 1
         assert aggregate["stage_page_size"] == 4096
+        assert aggregate["stage_schema_mode"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
+        )
+        assert aggregate["stage_column_contract_passed"] is True
+        assert aggregate["stage_index_count"] == 0
+        assert aggregate["source_constraints_deferred_off_source_lock"] is True
+        assert aggregate[
+            "destination_schema_restored_after_source_read_lock_release"
+        ] is True
+        assert aggregate[
+            "source_constraints_rebuilt_after_source_read_lock_release"
+        ] is True
+        assert aggregate["source_create_sql_sha256"] == aggregate[
+            "destination_create_sql_sha256"
+        ]
+        assert aggregate["source_column_contract_sha256"] == aggregate[
+            "stage_column_contract_sha256"
+        ] == aggregate["destination_column_contract_sha256"]
         assert aggregate["removed_before_publish"] is True
     snapshot = sqlite3.connect(paper_report["snapshot_path"])
     try:
@@ -1434,6 +1488,119 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
     for config in snapshot_module.PARALLEL_PAPER_STAGE_CONFIGS.values():
         assert not (snapshot_dir / config["filename"]).exists()
     assert not (snapshot_dir / ".candidate-observation-stage.db").exists()
+
+
+def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lock(
+    tmp_path,
+):
+    source = tmp_path / "source-paper.db"
+    stage_path = tmp_path / "opportunity-stage.db"
+    final_path = tmp_path / "paper-evidence.db"
+    source_create_sql = """
+        CREATE TABLE opportunity_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          opportunity_key TEXT NOT NULL UNIQUE,
+          event_ts REAL NOT NULL,
+          state TEXT NOT NULL DEFAULT 'OPEN' CHECK(state IN ('OPEN','CLOSED')),
+          raw_payload_json TEXT NOT NULL
+        )
+    """.strip()
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        source_create_sql
+        + ";"
+        + "CREATE INDEX idx_opportunity_events_recent "
+        + "ON opportunity_events(event_ts);"
+    )
+    source_db.execute(
+        "INSERT INTO opportunity_events"
+        "(opportunity_key,event_ts,state,raw_payload_json) VALUES (?,?,?,?)",
+        ("opportunity:1", time.time() - 30, "OPEN", '{"future_key":1}'),
+    )
+    source_db.commit()
+    source_db.close()
+
+    stage = sqlite3.connect(stage_path)
+    stage.row_factory = sqlite3.Row
+    stage.execute("ATTACH DATABASE ? AS src", (str(source),))
+    report, deferred_indexes, destination_schema = (
+        snapshot_module.stage_single_source_table(
+            stage,
+            "opportunity_events",
+            DATABASE_SPECS["paper"]["tables"]["opportunity_events"],
+            review_lower_epoch=time.time() - 3600,
+            long_lower_epoch=time.time() - 3600,
+            upper_epoch=time.time() + 1,
+        )
+    )
+    stage.commit()
+    stage.execute("DETACH DATABASE src")
+    stage_create_sql = stage.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='opportunity_events'"
+    ).fetchone()[0]
+    assert report["rows_copied"] == 1
+    assert report["stage_schema_mode"] == (
+        snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
+    )
+    assert report["stage_index_count"] == 0
+    assert report["stage_column_contract_passed"] is True
+    assert report["source_constraints_deferred_off_source_lock"] is True
+    assert snapshot_module.stage_table_index_count(
+        stage,
+        "opportunity_events",
+    ) == 0
+    for forbidden in ("UNIQUE", "NOT NULL", "CHECK", "AUTOINCREMENT", "DEFAULT"):
+        assert forbidden not in stage_create_sql.upper()
+    stage.close()
+
+    final = sqlite3.connect(final_path)
+    final.row_factory = sqlite3.Row
+    final.execute("ATTACH DATABASE ? AS staged", (str(stage_path),))
+    merged = snapshot_module.merge_staged_table(
+        final,
+        stage_schema="staged",
+        table="opportunity_events",
+        destination_schema=destination_schema,
+    )
+    for _table, _name, sql in deferred_indexes:
+        final.execute(sql)
+    final.commit()
+    final.execute("DETACH DATABASE staged")
+
+    final_create_sql = final.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='opportunity_events'"
+    ).fetchone()[0]
+    assert merged["rows_merged"] == 1
+    assert merged["destination_schema_restored"] is True
+    assert merged[
+        "source_constraints_rebuilt_after_source_read_lock_release"
+    ] is True
+    assert snapshot_module.sha256_text(final_create_sql) == (
+        snapshot_module.sha256_text(source_create_sql)
+    )
+    assert tuple(
+        final.execute(
+            "SELECT opportunity_key,state,raw_payload_json FROM opportunity_events"
+        ).fetchone()
+    ) == ("opportunity:1", "OPEN", '{"future_key":1}')
+    index_rows = list(final.execute("PRAGMA index_list(opportunity_events)"))
+    assert any(row[2] == 1 and row[3] == "u" for row in index_rows)
+    assert any(row[1] == "idx_opportunity_events_recent" for row in index_rows)
+    with pytest.raises(sqlite3.IntegrityError):
+        final.execute(
+            "INSERT INTO opportunity_events"
+            "(opportunity_key,event_ts,state,raw_payload_json) VALUES (?,?,?,?)",
+            ("opportunity:1", time.time(), "OPEN", "{}"),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        final.execute(
+            "INSERT INTO opportunity_events"
+            "(opportunity_key,event_ts,state,raw_payload_json) VALUES (?,?,?,?)",
+            ("opportunity:2", time.time(), "INVALID", "{}"),
+        )
+    final.rollback()
+    assert final.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    final.close()
 
 
 def test_candidate_projection_requires_integer_primary_key_rowid_alias(tmp_path):

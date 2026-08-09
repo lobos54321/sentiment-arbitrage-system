@@ -1674,6 +1674,22 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       },
     ],
   });
+  const stageSchemaEvidence = (columnCount = 10) => ({
+    schema_version: 'parallel_paper_event_stage.v2',
+    stage_schema_mode: 'constraint_free_full_fidelity',
+    source_create_sql_sha256: '1'.repeat(64),
+    stage_create_sql_sha256: '2'.repeat(64),
+    destination_create_sql_sha256: '1'.repeat(64),
+    source_column_contract_sha256: '3'.repeat(64),
+    stage_column_contract_sha256: '3'.repeat(64),
+    destination_column_contract_sha256: '3'.repeat(64),
+    stage_column_count: columnCount,
+    stage_column_contract_passed: true,
+    stage_index_count: 0,
+    source_constraints_deferred_off_source_lock: true,
+    destination_schema_restored_after_source_read_lock_release: true,
+    source_constraints_rebuilt_after_source_read_lock_release: true,
+  });
   return {
     statusPayload: {
       schema_version: 'cross_db_evaluator_snapshot_worker_status.v1',
@@ -1718,7 +1734,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       indexes_built_after_source_read_lock_release: true,
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
-      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v1',
+      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v2',
       parallel_paper_stage_tables: [
         'paper_decision_events',
         'a_class_decision_events',
@@ -1749,12 +1765,12 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         temporary_stage_total_cap_bytes: 100000,
         temporary_candidate_stage_cap_bytes: 16384,
         temporary_parallel_paper_stage_cap_bytes: {
-          paper_decision_events: 20480,
+          paper_decision_events: 24576,
           a_class_decision_events: 20480,
           opportunity_events: 12288,
-          opportunity_event_path_samples: 30368,
+          opportunity_event_path_samples: 26272,
         },
-        temporary_paper_decision_stage_cap_bytes: 20480,
+        temporary_paper_decision_stage_cap_bytes: 24576,
         configured_parallel_paper_stage_tables: [
           'paper_decision_events',
           'a_class_decision_events',
@@ -1768,22 +1784,22 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           'opportunity_event_path_samples',
         ],
         omitted_optional_parallel_paper_stage_tables: [],
-        candidate_stage_residual_share: 0.20,
+        candidate_stage_residual_share: 0.12,
         parallel_paper_stage_residual_shares: {
-          paper_decision_events: 0.25,
+          paper_decision_events: 0.36,
           a_class_decision_events: 0.25,
-          opportunity_events: 0.10,
+          opportunity_events: 0.07,
           opportunity_event_path_samples: 0.20,
         },
         parallel_paper_stage_active_weight_total: 1.0,
-        candidate_stage_normalized_share: 0.20,
+        candidate_stage_normalized_share: 0.12,
         parallel_paper_stage_normalized_shares: {
-          paper_decision_events: 0.25,
+          paper_decision_events: 0.36,
           a_class_decision_events: 0.25,
-          opportunity_events: 0.10,
+          opportunity_events: 0.07,
           opportunity_event_path_samples: 0.20,
         },
-        paper_decision_stage_residual_share: 0.25,
+        paper_decision_stage_residual_share: 0.36,
         candidate_stage_budget_mode: 'shared_residual_disk_after_output_and_reserve',
         candidate_stage_minimum_cap_bytes: 12288,
         parallel_paper_stage_minimum_cap_bytes: 12288,
@@ -1819,10 +1835,10 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           parallel_paper_stages_all_removed_before_publish: true,
           parallel_paper_stages: {
             paper_decision_events: {
-              schema_version: 'parallel_paper_event_stage.v1',
+              ...stageSchemaEvidence(10),
               role: 'paper_decision_events_parallel_stage',
               stage_size_bytes: 20000,
-              stage_budget_bytes: 20480,
+              stage_budget_bytes: 24576,
               stage_page_size: 4096,
               rows_copied: 4100,
               rows_merged: 4100,
@@ -1836,7 +1852,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               payload_semantics_preserved: true,
             },
             a_class_decision_events: {
-              schema_version: 'parallel_paper_event_stage.v1',
+              ...stageSchemaEvidence(8),
               role: 'a_class_decision_events_parallel_stage',
               stage_size_bytes: 18000,
               stage_budget_bytes: 20480,
@@ -1853,7 +1869,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               payload_semantics_preserved: true,
             },
             opportunity_events: {
-              schema_version: 'parallel_paper_event_stage.v1',
+              ...stageSchemaEvidence(7),
               role: 'opportunity_events_parallel_stage',
               stage_size_bytes: 12000,
               stage_budget_bytes: 12288,
@@ -1870,10 +1886,10 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               payload_semantics_preserved: true,
             },
             opportunity_event_path_samples: {
-              schema_version: 'parallel_paper_event_stage.v1',
+              ...stageSchemaEvidence(6),
               role: 'opportunity_event_path_samples_parallel_stage',
               stage_size_bytes: 24000,
-              stage_budget_bytes: 30368,
+              stage_budget_bytes: 26272,
               stage_page_size: 4096,
               rows_copied: 5000,
               rows_merged: 5000,
@@ -1888,12 +1904,12 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             },
           },
           paper_decision_parallel_stage_used: true,
-          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v1',
+          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v2',
           paper_decision_parallel_read_view_pinned: true,
           paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
           paper_decision_parallel_stage_removed_before_publish: true,
           paper_decision_parallel_stage_size_bytes: 20000,
-          paper_decision_parallel_stage_budget_bytes: 20480,
+          paper_decision_parallel_stage_budget_bytes: 24576,
           paper_decision_parallel_stage_page_size: 4096,
           paper_decision_parallel_stage_rows_merged: 4100,
           paper_decision_parallel_stage_merge_duration_sec: 0.25,
@@ -2022,7 +2038,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 4100,
               parallel_stage: {
-                schema_version: 'parallel_paper_event_stage.v1',
+                ...stageSchemaEvidence(10),
                 role: 'paper_decision_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
@@ -2032,7 +2048,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 quick_check: ['ok'],
                 stage_page_size: 4096,
                 stage_size_bytes: 20000,
-                stage_budget_bytes: 20480,
+                stage_budget_bytes: 24576,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -2052,7 +2068,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 3000,
               parallel_stage: {
-                schema_version: 'parallel_paper_event_stage.v1',
+                ...stageSchemaEvidence(8),
                 role: 'a_class_decision_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
@@ -2082,7 +2098,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 2000,
               parallel_stage: {
-                schema_version: 'parallel_paper_event_stage.v1',
+                ...stageSchemaEvidence(7),
                 role: 'opportunity_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
@@ -2106,7 +2122,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               upper_bound_columns: ['sample_ts', 'created_at', 'updated_at'],
               rows_copied: 5000,
               parallel_stage: {
-                schema_version: 'parallel_paper_event_stage.v1',
+                ...stageSchemaEvidence(6),
                 role: 'opportunity_event_path_samples_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
@@ -2116,7 +2132,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 quick_check: ['ok'],
                 stage_page_size: 4096,
                 stage_size_bytes: 24000,
-                stage_budget_bytes: 30368,
+                stage_budget_bytes: 26272,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -2255,38 +2271,38 @@ test('evaluator snapshot worker health accepts an explicitly absent optional pat
   manifestPayload.pinned_read_view_count = 7;
   manifestPayload.cross_database_time_skew_sec = 0.35;
   const disk = manifestPayload.disk_preflight;
-  disk.temporary_candidate_stage_cap_bytes = 24576;
+  disk.temporary_candidate_stage_cap_bytes = 16384;
   disk.temporary_parallel_paper_stage_cap_bytes = {
-    paper_decision_events: 24576,
+    paper_decision_events: 32768,
     a_class_decision_events: 24576,
     opportunity_events: 26272,
   };
-  disk.temporary_paper_decision_stage_cap_bytes = 24576;
+  disk.temporary_paper_decision_stage_cap_bytes = 32768;
   disk.parallel_paper_stage_tables = activeTables;
   disk.omitted_optional_parallel_paper_stage_tables = [
     'opportunity_event_path_samples',
   ];
   disk.parallel_paper_stage_residual_shares = {
-    paper_decision_events: 0.25,
+    paper_decision_events: 0.36,
     a_class_decision_events: 0.25,
-    opportunity_events: 0.10,
+    opportunity_events: 0.07,
   };
   disk.parallel_paper_stage_active_weight_total = 0.80;
-  disk.candidate_stage_normalized_share = 0.25;
+  disk.candidate_stage_normalized_share = 0.15;
   disk.parallel_paper_stage_normalized_shares = {
-    paper_decision_events: 0.3125,
+    paper_decision_events: 0.45,
     a_class_decision_events: 0.3125,
-    opportunity_events: 0.125,
+    opportunity_events: 0.0875,
   };
   paperReport.parallel_paper_stage_tables = activeTables;
   paperReport.parallel_paper_stage_count = activeTables.length;
   delete paperReport.parallel_paper_stages.opportunity_event_path_samples;
   delete paperReport.parallel_paper_source_read_lock_duration_sec.opportunity_event_path_samples;
-  paperReport.parallel_paper_stages.paper_decision_events.stage_budget_bytes = 24576;
+  paperReport.parallel_paper_stages.paper_decision_events.stage_budget_bytes = 32768;
   paperReport.parallel_paper_stages.a_class_decision_events.stage_budget_bytes = 24576;
   paperReport.parallel_paper_stages.opportunity_events.stage_budget_bytes = 26272;
-  paperReport.paper_decision_parallel_stage_budget_bytes = 24576;
-  paperReport.selected_tables.paper_decision_events.parallel_stage.stage_budget_bytes = 24576;
+  paperReport.paper_decision_parallel_stage_budget_bytes = 32768;
+  paperReport.selected_tables.paper_decision_events.parallel_stage.stage_budget_bytes = 32768;
   paperReport.selected_tables.a_class_decision_events.parallel_stage.stage_budget_bytes = 24576;
   paperReport.selected_tables.opportunity_events.parallel_stage.stage_budget_bytes = 26272;
   paperReport.pinned_read_views = paperReport.pinned_read_views.filter(
@@ -2608,7 +2624,11 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
     paperDecisionBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
   );
 
-  for (const table of ['a_class_decision_events', 'opportunity_events']) {
+  for (const table of [
+    'a_class_decision_events',
+    'opportunity_events',
+    'opportunity_event_path_samples',
+  ]) {
     const parallelStageManifest = structuredClone(fixture.manifestPayload);
     parallelStageManifest.databases.paper.parallel_paper_stages[table].rows_merged += 1;
     parallelStageManifest.databases.paper.parallel_paper_stages[table].removed_before_publish = false;
@@ -2629,6 +2649,64 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       parallelStageBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
     );
   }
+
+  for (const [field, tamperedValue] of [
+    ['stage_schema_mode', 'source_schema_with_constraints'],
+    ['source_create_sql_sha256', '0'.repeat(64)],
+    ['stage_create_sql_sha256', '0'.repeat(64)],
+    ['destination_create_sql_sha256', '0'.repeat(64)],
+    ['source_column_contract_sha256', '0'.repeat(64)],
+    ['stage_column_contract_sha256', '0'.repeat(64)],
+    ['destination_column_contract_sha256', '0'.repeat(64)],
+    ['stage_column_count', 999],
+    ['stage_column_contract_passed', false],
+    ['stage_index_count', 1],
+    ['source_constraints_deferred_off_source_lock', false],
+    ['destination_schema_restored_after_source_read_lock_release', false],
+    ['source_constraints_rebuilt_after_source_read_lock_release', false],
+  ]) {
+    const stageSchemaManifest = structuredClone(fixture.manifestPayload);
+    const table = 'opportunity_events';
+    stageSchemaManifest.databases.paper.parallel_paper_stages[table][field] = tamperedValue;
+    const stageSchemaBlocked = readEvaluatorSnapshotWorkerHealth({
+      ...base,
+      manifestPayload: stageSchemaManifest,
+    });
+    assert.equal(stageSchemaBlocked.status, 'contract_blocked');
+    assert.equal(stageSchemaBlocked.consumer_ready, false);
+    assert.equal(
+      stageSchemaBlocked.manifest_contract.parallel_paper_stages_passed,
+      false,
+    );
+    assert.equal(
+      stageSchemaBlocked.parallel_paper_stages.stages[table].passed,
+      false,
+    );
+    assert.ok(
+      stageSchemaBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+    );
+  }
+
+  const nullIndexManifest = structuredClone(fixture.manifestPayload);
+  nullIndexManifest.databases.paper.parallel_paper_stages.opportunity_events.stage_index_count = null;
+  nullIndexManifest.databases.paper.selected_tables.opportunity_events.parallel_stage.stage_index_count = null;
+  const nullIndexBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: nullIndexManifest,
+  });
+  assert.equal(nullIndexBlocked.status, 'contract_blocked');
+  assert.equal(nullIndexBlocked.consumer_ready, false);
+  assert.equal(
+    nullIndexBlocked.parallel_paper_stages.stages.opportunity_events.stage_index_count,
+    null,
+  );
+  assert.equal(
+    nullIndexBlocked.parallel_paper_stages.stages.opportunity_events.passed,
+    false,
+  );
+  assert.ok(
+    nullIndexBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+  );
 
   const shaBlocked = readEvaluatorSnapshotWorkerHealth({
     ...base,
