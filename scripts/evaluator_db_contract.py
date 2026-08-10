@@ -30,23 +30,25 @@ from cross_db_evaluator_snapshot import (
     PARALLEL_PAPER_STAGE_STORAGE_MODE,
     PARALLEL_PAPER_STAGE_TABLES,
     PAPER_DECISION_STAGE_TABLE,
+    SHARED_STAGE_ADVISORY_FORMULA,
+    SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES,
+    SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES,
+    SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES,
+    SHARED_STAGE_ADVISORY_SCHEMA_VERSION,
     SHARED_STAGE_BUDGET_ALLOCATION_MODE,
     SHARED_STAGE_BUDGET_SCHEMA_VERSION,
-    SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES,
     SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
     SHARED_STAGE_HASH_CANONICALIZATION,
-    SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES,
     SHARED_STAGE_PAGE_SIZE,
-    SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA,
-    SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION,
-    SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES,
     SHARED_STAGE_TARGET_CANDIDATE,
+    allocate_shared_stage_residual,
     parallel_paper_stage_inventory_valid,
     normalized_timestamp_sql,
     quote_identifier,
     shared_stage_budget_evidence_sha256,
     shared_stage_budget_plan_sha256,
-    shared_stage_physical_upper_bound,
+    shared_stage_advisory_demand,
+    shared_stage_history_required_bytes,
     shared_stage_target_filename,
     shared_stage_target_minimum_bytes,
     shared_stage_target_names,
@@ -331,15 +333,16 @@ def validate_shared_stage_estimate_contract(
     target: str,
     report: dict,
 ) -> int:
-    evidence = report.get("estimate_evidence")
+    """Validate advisory demand without treating it as a capacity proof."""
+    evidence = report.get("advisory_evidence")
     if not isinstance(evidence, dict):
-        raise ValueError(f"shared stage estimate evidence missing:{target}")
+        raise ValueError(f"shared stage advisory evidence missing:{target}")
 
     def nonnegative_int(name: str) -> int:
         value = evidence.get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(
-                f"shared stage estimate numeric invalid:{target}:{name}"
+                f"shared stage advisory numeric invalid:{target}:{name}"
             )
         return value
 
@@ -352,20 +355,10 @@ def validate_shared_stage_estimate_contract(
     unused_bytes = nonnegative_int("source_dbstat_unused_bytes")
     max_payload_bytes = nonnegative_int("source_dbstat_max_payload_bytes")
     cell_upper_count = nonnegative_int("source_dbstat_cell_upper_count")
-    structural_bytes = nonnegative_int("source_structural_overhead_bytes")
-    selected_payload_upper = nonnegative_int("selected_payload_upper_bytes")
-    table_upper = nonnegative_int("table_storage_upper_bytes")
-    candidate_index_upper = nonnegative_int(
-        "candidate_order_index_upper_bytes"
-    )
     sample_limit = nonnegative_int("sample_limit_rows")
     sample_rows = nonnegative_int("sample_rows")
-    pinned_read_view_id = str(
-        evidence.get("pinned_read_view_id") or ""
-    )
-    pinned_read_view_role = str(
-        evidence.get("pinned_read_view_role") or ""
-    )
+    pinned_read_view_id = str(evidence.get("pinned_read_view_id") or "")
+    pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
 
     if (
         evidence.get("source_measurement_trust_boundary")
@@ -374,17 +367,18 @@ def validate_shared_stage_estimate_contract(
         or not pinned_read_view_role
         or evidence.get("estimate_started_after_pin") is not True
         or evidence.get("estimate_completed_before_copy") is not True
-        or evidence.get("upper_bound_schema_version")
-        != SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION
-        or evidence.get("upper_bound_formula")
-        != SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA
+        or evidence.get("query_bounded") is not True
+        or evidence.get("physical_upper_bound_claimed") is not False
+        or evidence.get("advisory_schema_version")
+        != SHARED_STAGE_ADVISORY_SCHEMA_VERSION
+        or evidence.get("advisory_formula") != SHARED_STAGE_ADVISORY_FORMULA
         or evidence.get("capacity_sample_used") is not False
-        or evidence.get("row_record_overhead_upper_bytes")
-        != SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
-        or evidence.get("index_record_overhead_upper_bytes")
-        != SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
-        or evidence.get("btree_root_reserve_pages")
-        != SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+        or evidence.get("advisory_row_overhead_bytes")
+        != SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
+        or evidence.get("advisory_index_overhead_bytes")
+        != SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
+        or evidence.get("advisory_root_reserve_pages")
+        != SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
         or sample_limit != SHARED_STAGE_ESTIMATE_SAMPLE_ROWS
         or sample_rows > sample_limit
         or page_count <= 0
@@ -396,11 +390,8 @@ def validate_shared_stage_estimate_contract(
         or unused_bytes > physical_bytes
         or max_payload_bytes > payload_bytes
         or selected_rows > source_rows_upper
-        or structural_bytes != physical_bytes - payload_bytes
-        or selected_payload_upper
-        != min(payload_bytes, selected_rows * max_payload_bytes)
     ):
-        raise ValueError(f"shared stage estimate evidence invalid:{target}")
+        raise ValueError(f"shared stage advisory evidence invalid:{target}")
 
     average_diagnostic = evidence.get("average_row_bytes_diagnostic")
     max_diagnostic = evidence.get("sample_max_row_bytes_diagnostic")
@@ -411,7 +402,7 @@ def validate_shared_stage_estimate_contract(
         or float(average_diagnostic) < 0
     ):
         raise ValueError(
-            f"shared stage estimate diagnostic invalid:{target}:average"
+            f"shared stage advisory diagnostic invalid:{target}:average"
         )
     if max_diagnostic is not None and (
         isinstance(max_diagnostic, bool)
@@ -419,14 +410,12 @@ def validate_shared_stage_estimate_contract(
         or max_diagnostic < 0
     ):
         raise ValueError(
-            f"shared stage estimate diagnostic invalid:{target}:maximum"
+            f"shared stage advisory diagnostic invalid:{target}:maximum"
         )
 
     candidate_order_index_storage: dict[str, int] | None = None
     if target == SHARED_STAGE_TARGET_CANDIDATE:
-        candidate_order_name = evidence.get(
-            "candidate_order_source_index_name"
-        )
+        candidate_order_name = evidence.get("candidate_order_source_index_name")
         candidate_order_columns = evidence.get(
             "candidate_order_source_index_columns"
         )
@@ -458,13 +447,11 @@ def validate_shared_stage_estimate_contract(
             not isinstance(candidate_order_name, str)
             or not candidate_order_name
             or candidate_order_columns != ["signal_id"]
-            or evidence.get("candidate_order_source_index_partial")
-            is not False
+            or evidence.get("candidate_order_source_index_partial") is not False
             or candidate_order_page_count <= 0
             or candidate_order_page_size < 512
             or candidate_order_page_size > 65536
-            or candidate_order_page_size
-            & (candidate_order_page_size - 1)
+            or candidate_order_page_size & (candidate_order_page_size - 1)
             or candidate_order_physical
             != candidate_order_page_count * candidate_order_page_size
             or candidate_order_payload > candidate_order_physical
@@ -477,9 +464,7 @@ def validate_shared_stage_estimate_contract(
             or evidence.get("source_row_count_upper_basis")
             != "exact_signal_index_entry_count"
         ):
-            raise ValueError(
-                "candidate signal-order index evidence invalid"
-            )
+            raise ValueError("candidate signal-order index evidence invalid")
         candidate_order_index_storage = {
             "page_count": candidate_order_page_count,
             "page_size": candidate_order_page_size,
@@ -510,15 +495,18 @@ def validate_shared_stage_estimate_contract(
             "candidate_order_source_index_dbstat_cell_upper_count",
             "candidate_order_source_index_structural_overhead_bytes",
         )
-        if any(evidence.get(field) not in (None, [], {}) for field in candidate_order_fields):
+        if any(
+            evidence.get(field) not in (None, [], {})
+            for field in candidate_order_fields
+        ):
             raise ValueError("unexpected candidate index evidence")
 
     source_index_name = evidence.get("source_index_name")
     query_plan = evidence.get("source_query_plan")
     if source_index_name:
         if (
-            report.get("estimate_strategy")
-            != "dbstat_physical_upper_bound_with_indexed_row_count"
+            report.get("advisory_strategy")
+            != "dbstat_proportional_advisory_with_indexed_row_count"
             or not isinstance(source_index_name, str)
             or not isinstance(query_plan, list)
             or not query_plan
@@ -527,13 +515,11 @@ def validate_shared_stage_estimate_contract(
             or evidence.get("source_query_plan_full_table_scan_detected")
             is not False
         ):
-            raise ValueError(
-                f"shared stage indexed estimate invalid:{target}"
-            )
+            raise ValueError(f"shared stage indexed advisory invalid:{target}")
     else:
         if (
-            report.get("estimate_strategy")
-            != "dbstat_full_btree_physical_upper_bound"
+            report.get("advisory_strategy")
+            != "dbstat_full_btree_advisory_demand"
             or selected_rows != source_rows_upper
             or query_plan not in ([], None)
             or evidence.get("source_query_plan_uses_index") is not None
@@ -541,13 +527,12 @@ def validate_shared_stage_estimate_contract(
             or evidence.get("source_query_plan_full_table_scan_detected")
             is not None
         ):
-            raise ValueError(
-                f"shared stage full-btree estimate invalid:{target}"
-            )
+            raise ValueError(f"shared stage full-btree advisory invalid:{target}")
 
-    expected = shared_stage_physical_upper_bound(
+    expected = shared_stage_advisory_demand(
         target=target,
         selected_row_count=selected_rows,
+        source_row_count_upper=source_rows_upper,
         storage={
             "page_count": page_count,
             "page_size": page_size,
@@ -556,25 +541,18 @@ def validate_shared_stage_estimate_contract(
             "unused_bytes": unused_bytes,
             "max_payload_bytes": max_payload_bytes,
             "cell_upper_count": cell_upper_count,
-            "structural_overhead_bytes": structural_bytes,
+            "structural_overhead_bytes": physical_bytes - payload_bytes,
         },
         candidate_order_index_storage=candidate_order_index_storage,
     )
-    if (
-        selected_payload_upper
-        != int(expected["selected_payload_upper_bytes"])
-        or structural_bytes
-        != int(expected["source_structural_overhead_bytes"])
-        or table_upper != int(expected["table_storage_upper_bytes"])
-        or candidate_index_upper
-        != int(expected["candidate_order_index_upper_bytes"])
-        or int(report.get("estimated_required_bytes"))
-        != int(expected["estimated_required_bytes"])
+    for field, expected_value in expected.items():
+        if nonnegative_int(field) != int(expected_value):
+            raise ValueError(f"shared stage advisory mismatch:{target}:{field}")
+    if int(report.get("advisory_required_bytes")) != int(
+        expected["advisory_required_bytes"]
     ):
-        raise ValueError(
-            f"shared stage physical upper bound mismatch:{target}"
-        )
-    return int(expected["estimated_required_bytes"])
+        raise ValueError(f"shared stage advisory total mismatch:{target}")
+    return int(expected["advisory_required_bytes"])
 
 
 def validate_shared_stage_budget_contract(
@@ -596,9 +574,17 @@ def validate_shared_stage_budget_contract(
         != SHARED_STAGE_HASH_CANONICALIZATION
         or shared.get("accepted") is not True
         or shared.get("capacity_sufficient") is not True
-        or shared.get("all_estimates_bounded") is not True
+        or shared.get("all_advisory_queries_bounded") is not True
+        or shared.get("physical_upper_bound_claimed") is not False
+        or shared.get("global_hard_cap_enforced") is not True
+        or shared.get("per_target_max_page_count_enforced") is not True
+        or shared.get("capacity_sufficient_basis")
+        != "minimum_and_verified_history_high_water"
         or shared.get("pinned_read_view_binding_required") is not True
-        or shared.get("all_estimates_pinned_read_view_bound") is not True
+        or shared.get(
+            "all_advisory_estimates_pinned_read_view_bound"
+        )
+        is not True
         or manifest.get(
             "shared_stage_estimates_bound_to_copy_read_views"
         )
@@ -678,7 +664,6 @@ def validate_shared_stage_budget_contract(
         or actual_total > total_cap
         or unconsumed != total_cap - actual_total
         or shared.get("all_targets_within_grant") is not True
-        or shared.get("all_targets_within_estimated_upper_bound") is not True
         or shared.get("all_target_row_counts_bound_to_snapshot") is not True
         or shared.get("cleanup_completed") is not True
         or shared.get("stage_files_removed") is not True
@@ -702,82 +687,175 @@ def validate_shared_stage_budget_contract(
     grants: dict[str, int] = {}
     actuals: dict[str, int] = {}
     baselines: dict[str, int] = {}
+    advisories: dict[str, int] = {}
+    history_grants: dict[str, int] = {}
+    allocation_weights: dict[str, int] = {}
     borrowed_total = 0
+    advisory_exceeded_targets: list[str] = []
+    cap_hit_targets: list[str] = []
     for target in expected_targets:
         report = raw_targets.get(target)
         if not isinstance(report, dict):
             raise ValueError(f"shared stage target missing:{target}")
         minimum = shared_stage_target_minimum_bytes(target)
-        validated_estimate = validate_shared_stage_estimate_contract(
+        validated_advisory = validate_shared_stage_estimate_contract(
             target,
             report,
         )
+        advisory = int(report.get("advisory_required_bytes"))
         baseline = int(report.get("baseline_required_bytes"))
-        estimate = int(report.get("estimated_required_bytes"))
         grant = int(report.get("granted_cap_bytes"))
         actual = int(report.get("actual_usage_bytes"))
         high_water = int(report.get("high_water_bytes"))
         actual_rows_copied = int(report.get("actual_rows_copied"))
         borrowed = int(report.get("borrowed_shared_pool_bytes"))
-        estimate_evidence = report.get("estimate_evidence") or {}
-        estimated_rows = int(estimate_evidence.get("selected_row_count"))
+        allocation_weight = int(report.get("allocation_weight_bytes"))
+        advisory_shortfall = int(report.get("advisory_shortfall_bytes"))
+        history_high_water = int(report.get("history_high_water_bytes"))
+        history_grant = int(report.get("history_granted_cap_bytes"))
+        history_cap_hit = report.get("history_cap_hit") is True
+        history_copy_completed = report.get("history_copy_completed") is True
+        history_state = str(report.get("history_state") or "")
+        previous = (
+            {
+                "high_water_bytes": history_high_water,
+                "granted_cap_bytes": history_grant,
+                "cap_hit": history_cap_hit,
+                "copy_completed": history_copy_completed,
+            }
+            if history_state != "none"
+            else {}
+        )
+        expected_baseline, expected_history_state = (
+            shared_stage_history_required_bytes(target, previous)
+        )
+        advisory_evidence = report.get("advisory_evidence") or {}
+        advisory_rows = int(advisory_evidence.get("selected_row_count"))
         row_count_binding_mode = str(
-            estimate_evidence.get("row_count_binding_mode") or ""
+            advisory_evidence.get("row_count_binding_mode") or ""
         )
         row_count_bound = bool(
             (
                 row_count_binding_mode == "exact_selected_rows"
-                and actual_rows_copied == estimated_rows
+                and actual_rows_copied == advisory_rows
             )
             or (
                 row_count_binding_mode == "full_source_row_upper"
-                and actual_rows_copied <= estimated_rows
+                and actual_rows_copied <= advisory_rows
             )
         )
         utilization = float(report.get("utilization_ratio"))
+        advisory_exceeded = actual > advisory
+        advisory_delta = actual - advisory
+        if history_cap_hit:
+            cap_hit_targets.append(target)
+        if advisory_exceeded:
+            advisory_exceeded_targets.append(target)
         if (
             report.get("stage_filename") != shared_stage_target_filename(target)
             or int(report.get("minimum_cap_bytes")) != minimum
-            or report.get("estimate_bounded") is not True
-            or estimate != validated_estimate
-            or estimate < minimum
-            or baseline < max(minimum, estimate)
+            or report.get("advisory_query_bounded") is not True
+            or report.get("physical_upper_bound_claimed") is not False
+            or advisory != validated_advisory
+            or advisory < minimum
+            or advisory % SHARED_STAGE_PAGE_SIZE != 0
+            or history_state != expected_history_state
+            or (
+                history_state == "none"
+                and (
+                    history_high_water != 0
+                    or history_grant != 0
+                    or history_cap_hit
+                    or history_copy_completed
+                )
+            )
+            or baseline != expected_baseline
+            or baseline < minimum
             or grant < baseline
             or grant % SHARED_STAGE_PAGE_SIZE != 0
             or borrowed != grant - baseline
+            or advisory_shortfall != max(0, advisory - grant)
             or actual <= 0
             or actual > grant
-            or actual > estimate
             or high_water != actual
             or actual_rows_copied < 0
             or not row_count_bound
             or report.get("row_count_bound_to_snapshot") is not True
-            or report.get("within_estimated_upper_bound") is not True
+            or report.get("advisory_exceeded") is not advisory_exceeded
+            or int(report.get("advisory_delta_bytes")) != advisory_delta
             or report.get("copy_completed") is not True
             or report.get("cap_hit") is not False
             or report.get("within_grant") is not True
             or not math.isfinite(utilization)
             or abs(utilization - (actual / grant)) > 1e-6
+            or not isinstance(report.get("evidence_sources"), list)
+            or not report.get("evidence_sources")
         ):
             raise ValueError(f"shared stage target contract invalid:{target}")
         grants[target] = grant
         actuals[target] = actual
         baselines[target] = baseline
+        advisories[target] = advisory
+        history_grants[target] = history_grant
+        allocation_weights[target] = allocation_weight
         borrowed_total += borrowed
     minimum_total = sum(
         shared_stage_target_minimum_bytes(target)
         for target in expected_targets
     )
     baseline_total = sum(baselines.values())
+    advisory_total = sum(advisories.values())
     residual_pool = total_cap - baseline_total
+    expected_priority = cap_hit_targets or list(expected_targets)
+    expected_weights = {
+        target: max(
+            SHARED_STAGE_PAGE_SIZE,
+            advisories[target],
+            history_grants[target],
+        )
+        for target in expected_priority
+    }
+    expected_allocations = allocate_shared_stage_residual(
+        residual_bytes=residual_pool,
+        priority_targets=expected_priority,
+        weights=expected_weights,
+    )
+    for target in expected_targets:
+        expected_weight = int(expected_weights.get(target, 0))
+        expected_extra = int(expected_allocations.get(target, 0))
+        if (
+            allocation_weights[target] != expected_weight
+            or grants[target] != baselines[target] + expected_extra
+        ):
+            raise ValueError(
+                f"shared stage allocation mismatch:{target}"
+            )
+    raw_advisory_exceeded = shared.get("targets_exceeding_advisory")
     if (
-        sum(grants.values()) != total_cap
+        borrowing_priority != expected_priority
+        or not isinstance(raw_advisory_exceeded, list)
+        or [str(target) for target in raw_advisory_exceeded]
+        != advisory_exceeded_targets
+        or int(shared.get("advisory_miss_count"))
+        != len(advisory_exceeded_targets)
+        or bool(shared.get("history_used"))
+        != any(
+            str((raw_targets.get(target) or {}).get("history_state") or "")
+            != "none"
+            for target in expected_targets
+        )
+        or sum(grants.values()) != total_cap
         or sum(actuals.values()) != actual_total
         or int(shared.get("minimum_total_bytes")) != minimum_total
         or int(shared.get("baseline_required_total_bytes"))
         != baseline_total
+        or int(shared.get("advisory_demand_total_bytes"))
+        != advisory_total
+        or int(shared.get("allocation_weight_total_bytes"))
+        != sum(expected_weights.values())
         or int(shared.get("residual_pool_bytes")) != residual_pool
         or residual_pool < 0
+        or residual_pool % SHARED_STAGE_PAGE_SIZE != 0
         or borrowed_total != residual_pool
     ):
         raise ValueError("shared stage target totals mismatch")
@@ -905,7 +983,7 @@ def validate_shared_stage_estimate_read_view_bindings(
         raise ValueError("shared stage pinned target inventory invalid")
     for target, expected_role in expected_roles.items():
         report = targets.get(target) or {}
-        evidence = report.get("estimate_evidence") or {}
+        evidence = report.get("advisory_evidence") or {}
         pinned_view = views_by_role.get(expected_role) or {}
         if (
             evidence.get("source_measurement_trust_boundary")
@@ -917,7 +995,7 @@ def validate_shared_stage_estimate_read_view_bindings(
             != pinned_view.get("read_view_id")
         ):
             raise ValueError(
-                f"shared stage estimate read-view mismatch:{target}"
+                f"shared stage advisory read-view mismatch:{target}"
             )
 
 

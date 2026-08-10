@@ -43,34 +43,32 @@ CANDIDATE_STAGE_BUDGET_MODE = "shared_stage_budget_coordinator"
 PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v2"
 PARALLEL_PAPER_STAGE_STORAGE_MODE = "constraint_free_full_fidelity"
 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES = 3 * 4096
-SHARED_STAGE_BUDGET_SCHEMA_VERSION = "shared_stage_budget.v1"
+SHARED_STAGE_BUDGET_SCHEMA_VERSION = "shared_stage_budget.v2"
 SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
-    "history_high_water_plus_bounded_source_estimate"
+    "history_high_water_plus_advisory_source_demand"
 )
 SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
 SHARED_STAGE_PAGE_SIZE = 4096
 SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
 SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 20.0
-# Capacity is derived from DBSTAT physical/payload maxima, never from samples.
-# These constants cover the largest SQLite varints, cell pointer, and the extra
-# record serial/value bytes introduced when a source INTEGER PRIMARY KEY alias
-# becomes an ordinary column in a constraint-free stage table.
-SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES = 32
-SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES = 32
-SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES = 2
-SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION = (
-    "sqlite_dbstat_physical_upper_bound.v2"
+# Source measurements are advisory allocation evidence, not a physical size
+# proof. SQLite record packing can legitimately make a 4096-byte destination
+# larger than any table-level DBSTAT extrapolation. Safety is therefore enforced
+# only by the global disk cap plus per-file max_page_count; a low advisory demand
+# may fail SQLITE_FULL, persist a high-water mark, and converge on the next run.
+SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES = 32
+SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES = 32
+SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES = 2
+SHARED_STAGE_ADVISORY_SCHEMA_VERSION = "sqlite_dbstat_advisory_demand.v1"
+SHARED_STAGE_ADVISORY_FORMULA = (
+    "source_physical_times_selected_row_fraction_plus_per_row_overhead_"
+    "plus_root_reserve_plus_candidate_signal_index_fraction"
 )
 SHARED_STAGE_HASH_CANONICALIZATION = "json_sorted_float64_bits.v1"
 SOURCE_DBSTAT_VIRTUAL_TABLE = "__a3_source_dbstat"
-SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA = (
-    "selected_payload_upper_plus_full_source_structural_overhead_"
-    "plus_per_row_record_overhead_plus_root_reserve"
-    "+full_source_signal_index_physical_upper_for_candidate"
-)
 SHARED_STAGE_COMPLETED_HISTORY_HEADROOM = 1.10
 SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM = 1.20
-SHARED_STAGE_CAP_HIT_HEADROOM = 1.35
+SHARED_STAGE_CAP_HIT_EXTRA_PAGES = 1
 SHARED_STAGE_HIDDEN_FILE_RE = re.compile(r"^\..+-stage\.db(?:-(?:journal|wal|shm))?$")
 PARALLEL_PAPER_STAGE_CONFIGS = {
     "paper_decision_events": {
@@ -405,6 +403,45 @@ def shared_stage_target_minimum_bytes(target: str) -> int:
     )
 
 
+def shared_stage_failure_aliases(target: str) -> tuple[str, ...]:
+    target = str(target)
+    if target == SHARED_STAGE_TARGET_CANDIDATE:
+        return (
+            SHARED_STAGE_TARGET_CANDIDATE,
+            CANDIDATE_OBSERVATION_TABLE,
+            CANDIDATE_STAGE_TABLE,
+            CANDIDATE_STAGE_SCHEMA,
+            shared_stage_target_filename(target),
+        )
+    if target in PARALLEL_PAPER_STAGE_CONFIGS:
+        config = PARALLEL_PAPER_STAGE_CONFIGS[target]
+        return (
+            target,
+            str(config["schema"]),
+            str(config["filename"]),
+        )
+    raise ValueError(f"unknown shared stage target: {target}")
+
+
+def shared_stage_failure_targets_target(
+    target: str,
+    details: dict[str, Any],
+) -> bool:
+    """Map a public-safe failure stage/current-table back to one stage target."""
+    aliases = set(shared_stage_failure_aliases(target))
+    stage = str(details.get("stage") or "")
+    copy_timing = details.get("copy_timing")
+    current_table = (
+        str(copy_timing.get("current_table") or "")
+        if isinstance(copy_timing, dict)
+        else ""
+    )
+    return bool(
+        current_table in aliases
+        or any(alias and alias in stage for alias in aliases)
+    )
+
+
 def round_up_stage_page(value: Any) -> int:
     try:
         numeric = max(0, int(math.ceil(float(value))))
@@ -415,6 +452,23 @@ def round_up_stage_page(value: Any) -> int:
         // SHARED_STAGE_PAGE_SIZE
         * SHARED_STAGE_PAGE_SIZE
     )
+
+
+def remaining_source_read_lock_wait(
+    *,
+    deadline_monotonic: float,
+    max_wait_sec: float = 30.0,
+    database: str,
+    stage: str,
+    limit_sec: float,
+) -> float:
+    remaining = float(deadline_monotonic) - time.monotonic()
+    if remaining <= 0:
+        raise RuntimeError(
+            f"source_read_lock_budget_exceeded:{database}:{stage}:"
+            f"{float(limit_sec):.3f}s"
+        )
+    return min(max(0.001, float(max_wait_sec)), remaining)
 
 
 def utc_iso(epoch: float | None = None) -> str:
@@ -511,6 +565,10 @@ def validated_shared_stage_budget_history(
         != SHARED_STAGE_BUDGET_ALLOCATION_MODE
         or payload.get("capacity_sufficient") is not True
         or payload.get("grants_sum_matches_total_cap") is not True
+        or payload.get("all_advisory_queries_bounded") is not True
+        or payload.get("physical_upper_bound_claimed") is not False
+        or payload.get("global_hard_cap_enforced") is not True
+        or payload.get("per_target_max_page_count_enforced") is not True
         or payload.get("fixed_percentage_allocation_used") is not False
         or history_total_cap <= 0
         or history_total_granted != history_total_cap
@@ -570,11 +628,21 @@ def validated_shared_stage_budget_history(
                 "reason": "history_numeric_invalid",
                 "targets": {},
             }
+        copy_completed = raw.get("copy_completed") is True
+        cap_hit = raw.get("cap_hit") is True
         if (
             granted < shared_stage_target_minimum_bytes(target)
             or granted % SHARED_STAGE_PAGE_SIZE != 0
             or high_water < 0
             or high_water > granted
+            or (
+                cap_hit
+                and (
+                    copy_completed
+                    or high_water
+                    < max(0, granted - SHARED_STAGE_PAGE_SIZE)
+                )
+            )
         ):
             return {
                 "accepted": False,
@@ -584,8 +652,8 @@ def validated_shared_stage_budget_history(
         sanitized_targets[target] = {
             "granted_cap_bytes": granted,
             "high_water_bytes": high_water,
-            "copy_completed": raw.get("copy_completed") is True,
-            "cap_hit": raw.get("cap_hit") is True,
+            "copy_completed": copy_completed,
+            "cap_hit": cap_hit,
             "evidence_source": str(
                 raw.get("evidence_source") or "worker_status"
             )[:80],
@@ -1112,13 +1180,15 @@ def capture_shared_stage_budget_failure(
         high_water = int(usage["high_water_bytes"])
         actual_total += high_water
         grant = max(0, int(report.get("granted_cap_bytes") or 0))
-        target_failure = False
+        advisory = max(0, int(report.get("advisory_required_bytes") or 0))
         copy_completed = False
+        explicit_budget_failure = False
         for details in failure_details.values():
-            stage = str(details.get("stage") or "")
             code = str(details.get("error_code") or "")
-            if target in stage:
-                target_failure = True
+            component_targets_stage = shared_stage_failure_targets_target(
+                target,
+                details,
+            )
             copy_timing = details.get("copy_timing")
             completed = (
                 copy_timing.get("completed_tables")
@@ -1142,8 +1212,12 @@ def capture_shared_stage_budget_failure(
                 and target in completed_parallel
             ):
                 copy_completed = True
-            if target_failure and code == "parallel_paper_stage_budget_exceeded":
-                report["cap_hit"] = True
+            if component_targets_stage and code in {
+                "parallel_paper_stage_budget_exceeded",
+                "paper_decision_parallel_stage_budget_exceeded",
+                "selective_snapshot_exceeded_database_budget",
+            }:
+                explicit_budget_failure = True
         report.update(
             {
                 "actual_usage_bytes": high_water,
@@ -1155,13 +1229,14 @@ def capture_shared_stage_budget_failure(
                 "file_present": usage["file_present"],
                 "file_count": usage["file_count"],
                 "copy_completed": copy_completed,
+                "advisory_exceeded": high_water > advisory,
+                "advisory_delta_bytes": high_water - advisory,
                 "cap_hit": bool(
-                    report.get("cap_hit") is True
-                    or (
-                        grant > 0
-                        and high_water
-                        >= max(0, grant - SHARED_STAGE_PAGE_SIZE)
-                    )
+                    not copy_completed
+                    and explicit_budget_failure
+                    and grant > 0
+                    and high_water
+                    >= max(0, grant - SHARED_STAGE_PAGE_SIZE)
                 ),
                 "evidence_source": "partial_stage_files_before_cleanup",
                 "within_grant": high_water <= grant if grant > 0 else False,
@@ -1186,6 +1261,17 @@ def capture_shared_stage_budget_failure(
     evidence["all_targets_within_grant"] = all(
         (report or {}).get("within_grant") is True
         for report in evidence["targets"].values()
+    )
+    evidence["targets_exceeding_advisory"] = [
+        target
+        for target in active_targets
+        if (evidence["targets"].get(target) or {}).get(
+            "advisory_exceeded"
+        )
+        is True
+    ]
+    evidence["advisory_miss_count"] = len(
+        evidence["targets_exceeding_advisory"]
     )
     evidence["unregistered_stage_files"] = unregistered
     evidence["no_unregistered_stage_files"] = not unregistered
@@ -1230,23 +1316,23 @@ def finalize_shared_stage_budget_success(
                 int(stage_report.get("rows_copied") or 0),
             )
         grant = max(0, int(report.get("granted_cap_bytes") or 0))
-        estimate = max(0, int(report.get("estimated_required_bytes") or 0))
-        estimate_evidence = report.get("estimate_evidence") or {}
-        estimated_rows = max(
+        advisory = max(0, int(report.get("advisory_required_bytes") or 0))
+        advisory_evidence = report.get("advisory_evidence") or {}
+        advisory_rows = max(
             0,
-            int(estimate_evidence.get("selected_row_count") or 0),
+            int(advisory_evidence.get("selected_row_count") or 0),
         )
         row_count_binding_mode = str(
-            estimate_evidence.get("row_count_binding_mode") or ""
+            advisory_evidence.get("row_count_binding_mode") or ""
         )
         row_count_bound = bool(
             (
                 row_count_binding_mode == "exact_selected_rows"
-                and actual_rows_copied == estimated_rows
+                and actual_rows_copied == advisory_rows
             )
             or (
                 row_count_binding_mode == "full_source_row_upper"
-                and actual_rows_copied <= estimated_rows
+                and actual_rows_copied <= advisory_rows
             )
         )
         actual_total += actual
@@ -1256,9 +1342,8 @@ def finalize_shared_stage_budget_success(
                 "high_water_bytes": actual,
                 "actual_rows_copied": actual_rows_copied,
                 "row_count_bound_to_snapshot": row_count_bound,
-                "within_estimated_upper_bound": (
-                    estimate > 0 and actual <= estimate
-                ),
+                "advisory_exceeded": actual > advisory,
+                "advisory_delta_bytes": actual - advisory,
                 "copy_completed": True,
                 "cap_hit": False,
                 "within_grant": grant > 0 and actual <= grant,
@@ -1279,9 +1364,13 @@ def finalize_shared_stage_budget_success(
         (report or {}).get("within_grant") is True
         for report in targets.values()
     )
-    evidence["all_targets_within_estimated_upper_bound"] = all(
-        (report or {}).get("within_estimated_upper_bound") is True
-        for report in targets.values()
+    evidence["targets_exceeding_advisory"] = [
+        target
+        for target in evidence.get("active_targets") or []
+        if (targets.get(target) or {}).get("advisory_exceeded") is True
+    ]
+    evidence["advisory_miss_count"] = len(
+        evidence["targets_exceeding_advisory"]
     )
     evidence["all_target_row_counts_bound_to_snapshot"] = all(
         (report or {}).get("row_count_bound_to_snapshot") is True
@@ -1296,7 +1385,6 @@ def finalize_shared_stage_budget_success(
     evidence["accepted"] = bool(
         plan.get("accepted") is True
         and evidence["all_targets_within_grant"] is True
-        and evidence["all_targets_within_estimated_upper_bound"] is True
         and evidence["all_target_row_counts_bound_to_snapshot"] is True
         and evidence["actual_total_bytes"]
         <= int(evidence.get("total_cap_bytes") or 0)
@@ -1934,82 +2022,89 @@ def source_table_storage_bytes(
     return source_table_storage_report(connection, table)["physical_bytes"]
 
 
-def shared_stage_physical_upper_bound(
+def shared_stage_advisory_demand(
     *,
     target: str,
     selected_row_count: int,
+    source_row_count_upper: int,
     storage: dict[str, int],
     candidate_order_index_storage: dict[str, int] | None = None,
 ) -> dict[str, int]:
-    """Derive a deterministic stage-file upper bound without sample averages.
+    """Return a deterministic allocation hint, never a physical size proof.
 
-    DBSTAT payload and mx_payload bound all logical record bytes. The complete
-    source-btree non-payload region bounds page headers, cell pointers, unused
-    bytes and overflow-page structure for any selected subset. Per-row constants
-    cover the extra rowid/record bytes introduced by the constraint-free stage.
-
-    Candidate staging uses a signal_id-only index. Its bound is derived from the
-    complete existing source signal_id index btree, not from candidate_id or an
-    average row sample. The source index already contains every source key,
-    interior separator and overflow page; the added per-cell and root reserve
-    covers rebuilding the selected subset in the 4096-byte stage database.
+    The source btree physical size is scaled by the selected-row fraction and
+    padded with explicit per-row and root-page allowances. SQLite record packing
+    can still make the destination larger, so callers must enforce safety with
+    the global stage cap and each file's ``max_page_count``. A cap hit is valid
+    fail-closed evidence for the next attempt's high-water allocation.
     """
     rows = max(0, int(selected_row_count))
+    source_rows = max(0, int(source_row_count_upper))
+    if rows > source_rows:
+        raise RuntimeError("shared_stage_advisory_row_count_invalid")
     minimum = shared_stage_target_minimum_bytes(target)
-    if rows == 0:
-        return {
-            "selected_payload_upper_bytes": 0,
-            "source_structural_overhead_bytes": int(
-                storage["structural_overhead_bytes"]
-            ),
-            "table_storage_upper_bytes": minimum,
-            "candidate_order_index_upper_bytes": 0,
-            "estimated_required_bytes": minimum,
-        }
-    source_payload = max(0, int(storage["payload_bytes"]))
-    max_payload = max(0, int(storage["max_payload_bytes"]))
-    selected_payload_upper = min(source_payload, rows * max_payload)
-    structural = max(0, int(storage["structural_overhead_bytes"]))
-    page_size = max(SHARED_STAGE_PAGE_SIZE, int(storage["page_size"]))
-    root_reserve = page_size * SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
-    table_storage_upper = round_up_stage_page(
-        selected_payload_upper
-        + structural
-        + rows * SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
-        + root_reserve
+
+    def scaled_physical(physical_bytes: int) -> int:
+        physical = max(0, int(physical_bytes))
+        if rows <= 0 or source_rows <= 0:
+            return 0
+        return (physical * rows + source_rows - 1) // source_rows
+
+    root_reserve = (
+        SHARED_STAGE_PAGE_SIZE * SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
     )
-    candidate_index_upper = 0
+    table_scaled_physical = scaled_physical(storage["physical_bytes"])
+    table_row_overhead = rows * SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
+    table_advisory = round_up_stage_page(
+        max(minimum, table_scaled_physical + table_row_overhead + root_reserve)
+    )
+
+    candidate_index_scaled_physical = 0
+    candidate_index_row_overhead = 0
+    candidate_index_advisory = 0
     if target == SHARED_STAGE_TARGET_CANDIDATE:
         if not isinstance(candidate_order_index_storage, dict):
             raise RuntimeError(
                 "shared_stage_estimate_candidate_order_index_missing"
             )
-        index_physical = max(
-            0,
-            int(candidate_order_index_storage["physical_bytes"]),
-        )
         index_cells = max(
             0,
             int(candidate_order_index_storage["cell_upper_count"]),
         )
-        index_page_size = max(
-            SHARED_STAGE_PAGE_SIZE,
-            int(candidate_order_index_storage["page_size"]),
+        if index_cells != source_rows:
+            raise RuntimeError(
+                "shared_stage_estimate_candidate_order_index_invalid"
+            )
+        candidate_index_scaled_physical = scaled_physical(
+            candidate_order_index_storage["physical_bytes"]
         )
-        candidate_index_upper = round_up_stage_page(
-            index_physical
-            + index_cells * SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
-            + index_page_size * SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+        candidate_index_row_overhead = (
+            rows * SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
         )
-    estimated_required = round_up_stage_page(
-        max(minimum, table_storage_upper + candidate_index_upper)
+        candidate_index_advisory = round_up_stage_page(
+            candidate_index_scaled_physical
+            + candidate_index_row_overhead
+            + root_reserve
+        )
+
+    advisory_required = round_up_stage_page(
+        max(minimum, table_advisory + candidate_index_advisory)
     )
     return {
-        "selected_payload_upper_bytes": selected_payload_upper,
-        "source_structural_overhead_bytes": structural,
-        "table_storage_upper_bytes": table_storage_upper,
-        "candidate_order_index_upper_bytes": candidate_index_upper,
-        "estimated_required_bytes": estimated_required,
+        "source_row_fraction_numerator": rows,
+        "source_row_fraction_denominator": source_rows,
+        "table_scaled_physical_advisory_bytes": table_scaled_physical,
+        "table_row_overhead_advisory_bytes": table_row_overhead,
+        "table_root_reserve_advisory_bytes": root_reserve,
+        "table_advisory_bytes": table_advisory,
+        "candidate_order_index_scaled_physical_advisory_bytes": (
+            candidate_index_scaled_physical
+        ),
+        "candidate_order_index_row_overhead_advisory_bytes": (
+            candidate_index_row_overhead
+        ),
+        "candidate_order_index_advisory_bytes": candidate_index_advisory,
+        "advisory_required_bytes": advisory_required,
     }
 
 
@@ -2129,7 +2224,7 @@ def estimate_shared_stage_target_requirement(
         sample_rows = 0
         average_row_bytes: float | None = None
         sample_max_row_bytes: int | None = None
-        estimate_strategy = "dbstat_physical_upper_bound_with_indexed_row_count"
+        estimate_strategy = "dbstat_proportional_advisory_with_indexed_row_count"
         storage = source_table_storage_report(connection, table)
         if candidate_order_source_index_name:
             candidate_order_index_storage = source_table_storage_report(
@@ -2181,30 +2276,30 @@ def estimate_shared_stage_target_requirement(
                 average_row_bytes = sum(diagnostic_sizes) / sample_rows
                 sample_max_row_bytes = max(diagnostic_sizes)
         else:
-            estimate_strategy = "dbstat_full_btree_physical_upper_bound"
+            estimate_strategy = "dbstat_full_btree_advisory_demand"
             selected_rows = total_rows
 
         if selected_rows is None:
             raise RuntimeError(
                 f"shared_stage_estimate_row_count_missing:{table}"
             )
-        physical_upper = shared_stage_physical_upper_bound(
+        advisory = shared_stage_advisory_demand(
             target=target,
             selected_row_count=selected_rows,
+            source_row_count_upper=int(total_rows or 0),
             storage=storage,
             candidate_order_index_storage=candidate_order_index_storage,
         )
-        estimated_bytes = int(physical_upper["estimated_required_bytes"])
+        advisory_bytes = int(advisory["advisory_required_bytes"])
         minimum = shared_stage_target_minimum_bytes(target)
         return {
             "target": target,
             "source_table": table,
             "strategy": estimate_strategy,
-            "bounded": True,
-            "upper_bound_schema_version": (
-                SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION
-            ),
-            "upper_bound_formula": SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA,
+            "query_bounded": True,
+            "physical_upper_bound_claimed": False,
+            "advisory_schema_version": SHARED_STAGE_ADVISORY_SCHEMA_VERSION,
+            "advisory_formula": SHARED_STAGE_ADVISORY_FORMULA,
             "capacity_sample_used": False,
             "source_measurement_trust_boundary": (
                 "same_pinned_read_view_as_copy"
@@ -2238,25 +2333,16 @@ def estimate_shared_stage_target_requirement(
             "source_dbstat_unused_bytes": storage["unused_bytes"],
             "source_dbstat_max_payload_bytes": storage["max_payload_bytes"],
             "source_dbstat_cell_upper_count": storage["cell_upper_count"],
-            "source_structural_overhead_bytes": physical_upper[
-                "source_structural_overhead_bytes"
-            ],
-            "selected_payload_upper_bytes": physical_upper[
-                "selected_payload_upper_bytes"
-            ],
-            "row_record_overhead_upper_bytes": (
-                SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
+            "advisory_row_overhead_bytes": (
+                SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
             ),
-            "index_record_overhead_upper_bytes": (
-                SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
+            "advisory_index_overhead_bytes": (
+                SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
             ),
-            "btree_root_reserve_pages": SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES,
-            "table_storage_upper_bytes": physical_upper[
-                "table_storage_upper_bytes"
-            ],
-            "candidate_order_index_upper_bytes": physical_upper[
-                "candidate_order_index_upper_bytes"
-            ],
+            "advisory_root_reserve_pages": (
+                SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
+            ),
+            **advisory,
             "candidate_order_source_index_name": (
                 candidate_order_source_index_name
             ),
@@ -2306,7 +2392,7 @@ def estimate_shared_stage_target_requirement(
                 if candidate_order_index_storage
                 else None
             ),
-            "estimated_required_bytes": estimated_bytes,
+            "advisory_required_bytes": advisory_bytes,
             "minimum_cap_bytes": minimum,
             "source_index_name": selection.get("source_index_name"),
             "source_query_plan": plan["details"],
@@ -2443,7 +2529,7 @@ def estimate_shared_stage_requirements(
             sample_rows = 0
             average_row_bytes: float | None = None
             sample_max_row_bytes: int | None = None
-            estimate_strategy = "dbstat_physical_upper_bound_with_indexed_row_count"
+            estimate_strategy = "dbstat_proportional_advisory_with_indexed_row_count"
             storage: dict[str, int] = {}
             try:
                 storage = source_table_storage_report(connection, table)
@@ -2503,10 +2589,9 @@ def estimate_shared_stage_requirements(
                         average_row_bytes = sum(diagnostic_sizes) / sample_rows
                         sample_max_row_bytes = max(diagnostic_sizes)
                 else:
-                    estimate_strategy = "dbstat_full_btree_physical_upper_bound"
-                    # A table without a validated range index reserves the full
-                    # btree cell count and payload. It may not use a normalized
-                    # timestamp scan to claim a smaller capacity requirement.
+                    estimate_strategy = "dbstat_full_btree_advisory_demand"
+                    # Without a validated range index, the advisory demand uses
+                    # the full source btree and its cell-count upper bound.
                     selected_rows = total_rows
             except sqlite3.OperationalError as exc:
                 error_text = str(exc).lower()
@@ -2534,28 +2619,32 @@ def estimate_shared_stage_requirements(
                 raise RuntimeError(
                     f"shared_stage_estimate_row_count_missing:{table}"
                 )
-            physical_upper = shared_stage_physical_upper_bound(
+            advisory = shared_stage_advisory_demand(
                 target=target,
                 selected_row_count=selected_rows,
+                source_row_count_upper=int(total_rows or 0),
                 storage=storage,
                 candidate_order_index_storage=candidate_order_index_storage,
             )
-            estimated_bytes = int(physical_upper["estimated_required_bytes"])
+            advisory_bytes = int(advisory["advisory_required_bytes"])
             estimates[target] = {
                 "target": target,
                 "source_table": table,
                 "strategy": estimate_strategy,
-                "bounded": True,
-                "upper_bound_schema_version": (
-                    SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION
+                "query_bounded": True,
+                "physical_upper_bound_claimed": False,
+                "advisory_schema_version": (
+                    SHARED_STAGE_ADVISORY_SCHEMA_VERSION
                 ),
-                "upper_bound_formula": (
-                    SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA
-                ),
+                "advisory_formula": SHARED_STAGE_ADVISORY_FORMULA,
                 "capacity_sample_used": False,
                 "source_measurement_trust_boundary": (
-                    "producer_attested_bound_to_immutable_snapshot_rows_and_high_water"
+                    "standalone_diagnostic_connection"
                 ),
+                "pinned_read_view_id": None,
+                "pinned_read_view_role": None,
+                "estimate_started_after_pin": False,
+                "estimate_completed_before_copy": False,
                 "row_count_binding_mode": (
                     "exact_selected_rows"
                     if selection.get("source_index_name")
@@ -2583,27 +2672,16 @@ def estimate_shared_stage_requirements(
                 "source_dbstat_cell_upper_count": storage[
                     "cell_upper_count"
                 ],
-                "source_structural_overhead_bytes": physical_upper[
-                    "source_structural_overhead_bytes"
-                ],
-                "selected_payload_upper_bytes": physical_upper[
-                    "selected_payload_upper_bytes"
-                ],
-                "row_record_overhead_upper_bytes": (
-                    SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
+                "advisory_row_overhead_bytes": (
+                    SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
                 ),
-                "index_record_overhead_upper_bytes": (
-                    SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
+                "advisory_index_overhead_bytes": (
+                    SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
                 ),
-                "btree_root_reserve_pages": (
-                    SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+                "advisory_root_reserve_pages": (
+                    SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
                 ),
-                "table_storage_upper_bytes": physical_upper[
-                    "table_storage_upper_bytes"
-                ],
-                "candidate_order_index_upper_bytes": physical_upper[
-                    "candidate_order_index_upper_bytes"
-                ],
+                **advisory,
                 "candidate_order_source_index_name": (
                     candidate_order_source_index_name
                 ),
@@ -2655,7 +2733,7 @@ def estimate_shared_stage_requirements(
                     if candidate_order_index_storage
                     else None
                 ),
-                "estimated_required_bytes": estimated_bytes,
+                "advisory_required_bytes": advisory_bytes,
                 "minimum_cap_bytes": minimum,
                 "source_index_name": selection.get("source_index_name"),
                 "source_query_plan": plan["details"],
@@ -2677,8 +2755,13 @@ def estimate_shared_stage_requirements(
         "generated_at": utc_iso(),
         "active_targets": list(active_targets),
         "targets": estimates,
-        "all_estimates_bounded": all(
-            report.get("bounded") is True for report in estimates.values()
+        "all_advisory_queries_bounded": all(
+            report.get("query_bounded") is True
+            for report in estimates.values()
+        ),
+        "physical_upper_bound_claimed": any(
+            report.get("physical_upper_bound_claimed") is True
+            for report in estimates.values()
         ),
     }
 
@@ -4158,11 +4241,15 @@ class SharedStageBudgetCoordinator:
                     "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
                     "generated_at": utc_iso(),
                     "active_targets": list(self.active_targets),
-                    "all_estimates_bounded": all(
-                        report.get("bounded") is True
+                    "all_advisory_queries_bounded": all(
+                        report.get("query_bounded") is True
                         for report in self._estimates.values()
                     ),
-                    "all_estimates_pinned_read_view_bound": all(
+                    "physical_upper_bound_claimed": any(
+                        report.get("physical_upper_bound_claimed") is True
+                        for report in self._estimates.values()
+                    ),
+                    "all_advisory_estimates_pinned_read_view_bound": all(
                         report.get("source_measurement_trust_boundary")
                         == "same_pinned_read_view_as_copy"
                         and report.get("estimate_started_after_pin") is True
@@ -4239,9 +4326,12 @@ class SharedStageBudgetCoordinator:
         except threading.BrokenBarrierError:
             pass
 
-    def error_target(self) -> str | None:
+    def root_error(self) -> tuple[str | None, BaseException | None]:
         with self._lock:
-            return self._error_target
+            return self._error_target, self._error
+
+    def error_target(self) -> str | None:
+        return self.root_error()[0]
 
     def plan(self) -> dict[str, Any] | None:
         with self._lock:
@@ -4338,9 +4428,11 @@ def build_parallel_table_stage(
             resolved_budget_bytes = budget_coordinator.submit_estimate(
                 table,
                 estimate,
-                timeout_sec=max(
-                    0.001,
-                    lock_deadline - time.monotonic(),
+                timeout_sec=remaining_source_read_lock_wait(
+                    deadline_monotonic=lock_deadline,
+                    database="paper",
+                    stage=f"shared_stage_estimate_coordinator:{table}",
+                    limit_sec=float(max_source_read_lock_sec),
                 ),
             )
         if resolved_budget_bytes < MIN_PARALLEL_PAPER_STAGE_CAP_BYTES:
@@ -4351,7 +4443,23 @@ def build_parallel_table_stage(
             f"PRAGMA max_page_count={max(1, resolved_budget_bytes // page_size)}"
         )
         progress["stage"] = "parallel_pinned_barrier"
-        pinned_barrier.wait(timeout=30)
+        try:
+            pinned_barrier.wait(
+                timeout=remaining_source_read_lock_wait(
+                    deadline_monotonic=lock_deadline,
+                    database="paper",
+                    stage=f"parallel_pinned_barrier:{table}",
+                    limit_sec=float(max_source_read_lock_sec),
+                )
+            )
+        except threading.BrokenBarrierError as exc:
+            if time.monotonic() >= lock_deadline:
+                raise RuntimeError(
+                    f"source_read_lock_budget_exceeded:paper:"
+                    f"parallel_pinned_barrier:{table}:"
+                    f"{float(max_source_read_lock_sec):.3f}s"
+                ) from exc
+            raise
         while not copy_start_event.wait(timeout=0.1):
             if cancel_event.is_set():
                 raise RuntimeError("parallel_paper_stage_cancelled")
@@ -4659,11 +4767,9 @@ def snapshot_all_concurrently(
                                 cancel_event=stage_cancel,
                             )
                         except Exception as stage_exc:
-                            if shared_budget_coordinator is not None:
-                                shared_budget_coordinator.abort(
-                                    stage_exc,
-                                    target=stage_table,
-                                )
+                            # Publish the concrete stage error before aborting
+                            # the coordinator; waiters must never wake to an
+                            # error target whose shared state is still empty.
                             state["exception"] = stage_exc
                             state["error"] = {
                                 "error_code": snapshot_component_failure_code(
@@ -4672,6 +4778,11 @@ def snapshot_all_concurrently(
                                 "error_type": type(stage_exc).__name__,
                                 "stage": stage_table,
                             }
+                            if shared_budget_coordinator is not None:
+                                shared_budget_coordinator.abort(
+                                    stage_exc,
+                                    target=stage_table,
+                                )
                             try:
                                 parallel_pin_barrier.abort()
                             except threading.BrokenBarrierError:
@@ -4742,24 +4853,28 @@ def snapshot_all_concurrently(
                         shared_budget_coordinator.submit_estimate(
                             SHARED_STAGE_TARGET_CANDIDATE,
                             candidate_estimate,
-                            timeout_sec=max(
-                                0.001,
-                                lock_deadline - time.monotonic(),
+                            timeout_sec=remaining_source_read_lock_wait(
+                                deadline_monotonic=lock_deadline,
+                                database="paper",
+                                stage=(
+                                    "shared_stage_estimate_coordinator:"
+                                    f"{SHARED_STAGE_TARGET_CANDIDATE}"
+                                ),
+                                limit_sec=float(max_source_read_lock_sec),
                             ),
                         )
                     )
                 except BaseException:
-                    root_target = shared_budget_coordinator.error_target()
-                    if root_target in parallel_stage_runtimes:
-                        root_exception = parallel_stage_runtimes[
-                            root_target
-                        ]["state"].get("exception")
-                        if root_exception is not None:
+                    root_target, root_exception = (
+                        shared_budget_coordinator.root_error()
+                    )
+                    if root_exception is not None:
+                        if root_target:
                             progress["stage"] = (
                                 f"copy_table:{root_target}"
                             )
                             progress["current_table"] = root_target
-                            raise root_exception
+                        raise root_exception
                     for table, runtime in parallel_stage_runtimes.items():
                         stage_exception = runtime["state"].get(
                             "exception"
@@ -4790,17 +4905,56 @@ def snapshot_all_concurrently(
                 try:
                     next(iter(parallel_stage_runtimes.values()))[
                         "pin_barrier"
-                    ].wait(timeout=30)
+                    ].wait(
+                        timeout=remaining_source_read_lock_wait(
+                            deadline_monotonic=lock_deadline,
+                            database=name,
+                            stage="paper_parallel_pinned_barrier",
+                            limit_sec=float(max_source_read_lock_sec),
+                        )
+                    )
                 except threading.BrokenBarrierError as barrier_exc:
+                    if shared_budget_coordinator is not None:
+                        root_target, root_exception = (
+                            shared_budget_coordinator.root_error()
+                        )
+                        if root_exception is not None:
+                            if root_target:
+                                progress["stage"] = (
+                                    f"copy_table:{root_target}"
+                                )
+                                progress["current_table"] = root_target
+                            raise root_exception
                     for table, runtime in parallel_stage_runtimes.items():
                         stage_exception = runtime["state"].get("exception")
                         if stage_exception is not None:
                             progress["stage"] = f"copy_table:{table}"
                             progress["current_table"] = table
                             raise stage_exception
+                    if time.monotonic() >= lock_deadline:
+                        raise RuntimeError(
+                            "source_read_lock_budget_exceeded:paper:"
+                            "paper_parallel_pinned_barrier:"
+                            f"{float(max_source_read_lock_sec):.3f}s"
+                        ) from barrier_exc
                     raise RuntimeError("parallel_paper_stage_barrier_broken") from barrier_exc
             progress["stage"] = "pinned_barrier"
-            pinned_barrier.wait(timeout=30)
+            try:
+                pinned_barrier.wait(
+                    timeout=remaining_source_read_lock_wait(
+                        deadline_monotonic=lock_deadline,
+                        database=name,
+                        stage="pinned_barrier",
+                        limit_sec=float(max_source_read_lock_sec),
+                    )
+                )
+            except threading.BrokenBarrierError as barrier_exc:
+                if time.monotonic() >= lock_deadline:
+                    raise RuntimeError(
+                        f"source_read_lock_budget_exceeded:{name}:"
+                        f"pinned_barrier:{float(max_source_read_lock_sec):.3f}s"
+                    ) from barrier_exc
+                raise
             for runtime in parallel_stage_runtimes.values():
                 runtime["copy_start_event"].set()
             report = snapshot_one(
@@ -5009,7 +5163,8 @@ def shared_stage_budget_plan_hash_payload(
         "actual_total_bytes",
         "unconsumed_bytes",
         "all_targets_within_grant",
-        "all_targets_within_estimated_upper_bound",
+        "targets_exceeding_advisory",
+        "advisory_miss_count",
         "all_target_row_counts_bound_to_snapshot",
         "no_unregistered_stage_files",
         "cleanup_completed",
@@ -5029,7 +5184,8 @@ def shared_stage_budget_plan_hash_payload(
             "high_water_bytes",
             "actual_rows_copied",
             "row_count_bound_to_snapshot",
-            "within_estimated_upper_bound",
+            "advisory_exceeded",
+            "advisory_delta_bytes",
             "logical_high_water_bytes",
             "allocated_high_water_bytes",
             "file_present",
@@ -5102,6 +5258,78 @@ def shared_stage_budget_evidence_sha256(evidence: dict[str, Any]) -> str:
     )
 
 
+def shared_stage_history_required_bytes(
+    target: str,
+    previous: dict[str, Any] | None,
+) -> tuple[int, str]:
+    """Return the hard baseline justified by verified prior high-water evidence."""
+    minimum = shared_stage_target_minimum_bytes(target)
+    if not isinstance(previous, dict) or not previous:
+        return minimum, "none"
+    high_water = round_up_stage_page(previous.get("high_water_bytes") or 0)
+    granted = round_up_stage_page(previous.get("granted_cap_bytes") or 0)
+    if previous.get("cap_hit") is True:
+        required = round_up_stage_page(
+            max(minimum, high_water, granted)
+            + SHARED_STAGE_CAP_HIT_EXTRA_PAGES * SHARED_STAGE_PAGE_SIZE
+        )
+        return required, "cap_hit"
+    if previous.get("copy_completed") is True:
+        required = round_up_stage_page(
+            max(minimum, high_water * SHARED_STAGE_COMPLETED_HISTORY_HEADROOM)
+        )
+        return required, "completed"
+    required = round_up_stage_page(
+        max(minimum, high_water * SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM)
+    )
+    return required, "incomplete"
+
+
+def allocate_shared_stage_residual(
+    *,
+    residual_bytes: int,
+    priority_targets: tuple[str, ...] | list[str],
+    weights: dict[str, int],
+) -> dict[str, int]:
+    """Allocate every residual page deterministically by integer weights."""
+    targets = tuple(str(target) for target in priority_targets)
+    residual = int(residual_bytes)
+    if residual < 0 or residual % SHARED_STAGE_PAGE_SIZE != 0:
+        raise ValueError("shared stage residual must be non-negative and page-aligned")
+    if len(targets) != len(set(targets)):
+        raise ValueError("shared stage allocation priority contains duplicates")
+    if not targets:
+        if residual:
+            raise ValueError("shared stage residual has no allocation target")
+        return {}
+    normalized_weights = {
+        target: max(SHARED_STAGE_PAGE_SIZE, int(weights.get(target) or 0))
+        for target in targets
+    }
+    total_weight = sum(normalized_weights.values())
+    total_pages = residual // SHARED_STAGE_PAGE_SIZE
+    page_allocations: dict[str, int] = {}
+    remainders: list[tuple[int, int, str]] = []
+    allocated_pages = 0
+    for index, target in enumerate(targets):
+        numerator = total_pages * normalized_weights[target]
+        pages = numerator // total_weight
+        remainder = numerator % total_weight
+        page_allocations[target] = pages
+        allocated_pages += pages
+        remainders.append((remainder, -index, target))
+    remaining_pages = total_pages - allocated_pages
+    for _remainder, _negative_index, target in sorted(
+        remainders,
+        reverse=True,
+    )[:remaining_pages]:
+        page_allocations[target] += 1
+    return {
+        target: page_allocations[target] * SHARED_STAGE_PAGE_SIZE
+        for target in targets
+    }
+
+
 def build_shared_stage_budget_plan(
     *,
     total_cap_bytes: int,
@@ -5120,6 +5348,8 @@ def build_shared_stage_budget_plan(
         or tuple(estimates.get("active_targets") or ()) != active_targets
         or set(estimate_targets) != set(active_targets)
         or estimates.get("schema_version") != SHARED_STAGE_BUDGET_SCHEMA_VERSION
+        or estimates.get("all_advisory_queries_bounded") is not True
+        or estimates.get("physical_upper_bound_claimed") is not False
     ):
         raise ValueError("shared stage estimate inventory invalid")
     history_report = validated_shared_stage_budget_history(history)
@@ -5135,13 +5365,21 @@ def build_shared_stage_budget_plan(
         estimate = estimate_targets.get(target) or {}
         minimum = shared_stage_target_minimum_bytes(target)
         try:
-            estimated_required = round_up_stage_page(
-                max(minimum, int(estimate.get("estimated_required_bytes") or 0))
+            advisory_required = round_up_stage_page(
+                max(minimum, int(estimate.get("advisory_required_bytes") or 0))
             )
         except (TypeError, ValueError, OverflowError):
             raise ValueError(
-                f"shared stage estimate invalid for {target}"
+                f"shared stage advisory invalid for {target}"
             ) from None
+        if (
+            estimate.get("query_bounded") is not True
+            or estimate.get("physical_upper_bound_claimed") is not False
+            or estimate.get("advisory_schema_version")
+            != SHARED_STAGE_ADVISORY_SCHEMA_VERSION
+            or estimate.get("advisory_formula") != SHARED_STAGE_ADVISORY_FORMULA
+        ):
+            raise ValueError(f"shared stage advisory contract invalid for {target}")
         previous = history_targets.get(target) or {}
         previous_high_water = round_up_stage_page(
             previous.get("high_water_bytes") or 0
@@ -5149,32 +5387,16 @@ def build_shared_stage_budget_plan(
         previous_grant = round_up_stage_page(
             previous.get("granted_cap_bytes") or 0
         )
-        cap_hit = previous.get("cap_hit") is True
-        completed = previous.get("copy_completed") is True
-        history_required = 0
-        history_state = "none"
-        if previous:
-            if cap_hit:
-                history_state = "cap_hit"
-                history_required = round_up_stage_page(
-                    max(previous_high_water, previous_grant)
-                    * SHARED_STAGE_CAP_HIT_HEADROOM
-                )
-                cap_hit_targets.append(target)
-            elif completed:
-                history_state = "completed"
-                history_required = round_up_stage_page(
-                    previous_high_water
-                    * SHARED_STAGE_COMPLETED_HISTORY_HEADROOM
-                )
-            else:
-                history_state = "incomplete"
-                history_required = round_up_stage_page(
-                    previous_high_water
-                    * SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM
-                )
+        history_required, history_state = shared_stage_history_required_bytes(
+            target,
+            previous,
+        )
+        cap_hit = history_state == "cap_hit"
+        completed = history_state == "completed"
+        if cap_hit:
+            cap_hit_targets.append(target)
         baseline_required = round_up_stage_page(
-            max(minimum, estimated_required, history_required)
+            max(minimum, history_required)
         )
         baseline_total += baseline_required
         target_reports[target] = {
@@ -5189,14 +5411,17 @@ def build_shared_stage_budget_plan(
                 is True
             ),
             "minimum_cap_bytes": minimum,
-            "estimated_required_bytes": estimated_required,
-            "estimate_strategy": estimate.get("strategy"),
-            "estimate_bounded": estimate.get("bounded") is True,
-            "estimate_evidence": {
+            "advisory_required_bytes": advisory_required,
+            "advisory_strategy": estimate.get("strategy"),
+            "advisory_query_bounded": estimate.get("query_bounded") is True,
+            "physical_upper_bound_claimed": False,
+            "advisory_evidence": {
                 key: estimate.get(key)
                 for key in (
-                    "upper_bound_schema_version",
-                    "upper_bound_formula",
+                    "advisory_schema_version",
+                    "advisory_formula",
+                    "query_bounded",
+                    "physical_upper_bound_claimed",
                     "capacity_sample_used",
                     "source_measurement_trust_boundary",
                     "pinned_read_view_id",
@@ -5218,13 +5443,19 @@ def build_shared_stage_budget_plan(
                     "source_dbstat_unused_bytes",
                     "source_dbstat_max_payload_bytes",
                     "source_dbstat_cell_upper_count",
-                    "source_structural_overhead_bytes",
-                    "selected_payload_upper_bytes",
-                    "row_record_overhead_upper_bytes",
-                    "index_record_overhead_upper_bytes",
-                    "btree_root_reserve_pages",
-                    "table_storage_upper_bytes",
-                    "candidate_order_index_upper_bytes",
+                    "advisory_row_overhead_bytes",
+                    "advisory_index_overhead_bytes",
+                    "advisory_root_reserve_pages",
+                    "source_row_fraction_numerator",
+                    "source_row_fraction_denominator",
+                    "table_scaled_physical_advisory_bytes",
+                    "table_row_overhead_advisory_bytes",
+                    "table_root_reserve_advisory_bytes",
+                    "table_advisory_bytes",
+                    "candidate_order_index_scaled_physical_advisory_bytes",
+                    "candidate_order_index_row_overhead_advisory_bytes",
+                    "candidate_order_index_advisory_bytes",
+                    "advisory_required_bytes",
                     "candidate_order_source_index_name",
                     "candidate_order_source_index_columns",
                     "candidate_order_source_index_partial",
@@ -5249,49 +5480,57 @@ def build_shared_stage_budget_plan(
             "history_cap_hit": cap_hit,
             "history_copy_completed": completed,
             "baseline_required_bytes": baseline_required,
+            "allocation_weight_bytes": 0,
             "granted_cap_bytes": 0,
             "borrowed_shared_pool_bytes": 0,
+            "advisory_shortfall_bytes": 0,
             "evidence_sources": [
-                "bounded_source_estimate",
+                "advisory_source_demand",
                 *( ["previous_worker_high_water"] if previous else [] ),
             ],
         }
     total_cap = max(0, int(total_cap_bytes))
-    all_estimates_pinned_read_view_bound = all(
-        (report.get("estimate_evidence") or {}).get(
+    all_advisory_estimates_pinned_read_view_bound = all(
+        (report.get("advisory_evidence") or {}).get(
             "source_measurement_trust_boundary"
         )
         == "same_pinned_read_view_as_copy"
-        and (report.get("estimate_evidence") or {}).get(
+        and (report.get("advisory_evidence") or {}).get(
             "estimate_started_after_pin"
         )
         is True
-        and (report.get("estimate_evidence") or {}).get(
+        and (report.get("advisory_evidence") or {}).get(
             "estimate_completed_before_copy"
         )
         is True
         and bool(
-            (report.get("estimate_evidence") or {}).get(
+            (report.get("advisory_evidence") or {}).get(
                 "pinned_read_view_id"
             )
         )
         and bool(
-            (report.get("estimate_evidence") or {}).get(
+            (report.get("advisory_evidence") or {}).get(
                 "pinned_read_view_role"
             )
         )
         for report in target_reports.values()
     )
+    all_advisory_queries_bounded = all(
+        report["advisory_query_bounded"] is True
+        for report in target_reports.values()
+    )
+    physical_upper_bound_claimed = any(
+        report["physical_upper_bound_claimed"] is True
+        for report in target_reports.values()
+    )
     capacity_sufficient = bool(
         total_cap > 0
         and baseline_total <= total_cap
-        and all(
-            report["estimate_bounded"] is True
-            for report in target_reports.values()
-        )
+        and all_advisory_queries_bounded
+        and not physical_upper_bound_claimed
         and (
             not require_pinned_view_binding
-            or all_estimates_pinned_read_view_bound
+            or all_advisory_estimates_pinned_read_view_bound
         )
     )
     residual_pool = max(0, total_cap - baseline_total)
@@ -5299,44 +5538,44 @@ def build_shared_stage_budget_plan(
         target: int(report["baseline_required_bytes"])
         for target, report in target_reports.items()
     }
-    borrowing_priority = list(cap_hit_targets)
-    if not borrowing_priority and active_targets:
-        borrowing_priority = [
-            max(
-                active_targets,
-                key=lambda target: (
-                    int(target_reports[target]["baseline_required_bytes"]),
-                    -active_targets.index(target),
-                ),
-            )
-        ]
-    if capacity_sufficient and residual_pool > 0 and borrowing_priority:
-        remaining = residual_pool
-        weight_total = sum(
-            max(1, int(target_reports[target]["baseline_required_bytes"]))
-            for target in borrowing_priority
+    borrowing_priority = tuple(cap_hit_targets or active_targets)
+    allocation_weights = {
+        target: max(
+            SHARED_STAGE_PAGE_SIZE,
+            int(target_reports[target]["advisory_required_bytes"]),
+            int(target_reports[target]["history_granted_cap_bytes"]),
         )
-        for target in borrowing_priority[:-1]:
-            weight = max(
-                1,
-                int(target_reports[target]["baseline_required_bytes"]),
-            )
-            extra = (
-                int(residual_pool * weight / weight_total)
-                // SHARED_STAGE_PAGE_SIZE
-                * SHARED_STAGE_PAGE_SIZE
-            )
-            extra = min(remaining, max(0, extra))
-            grants[target] += extra
-            remaining -= extra
-        grants[borrowing_priority[-1]] += remaining
-    for target, grant in grants.items():
+        for target in borrowing_priority
+    }
+    residual_allocations = (
+        allocate_shared_stage_residual(
+            residual_bytes=residual_pool,
+            priority_targets=borrowing_priority,
+            weights=allocation_weights,
+        )
+        if capacity_sufficient
+        else {target: 0 for target in borrowing_priority}
+    )
+    for target in active_targets:
+        baseline = int(target_reports[target]["baseline_required_bytes"])
+        extra = int(residual_allocations.get(target, 0))
+        grant = baseline + extra
+        grants[target] = grant
+        target_reports[target]["allocation_weight_bytes"] = int(
+            allocation_weights.get(target, 0)
+        )
         target_reports[target]["granted_cap_bytes"] = grant
-        target_reports[target]["borrowed_shared_pool_bytes"] = max(
+        target_reports[target]["borrowed_shared_pool_bytes"] = extra
+        target_reports[target]["advisory_shortfall_bytes"] = max(
             0,
-            grant - int(target_reports[target]["baseline_required_bytes"]),
+            int(target_reports[target]["advisory_required_bytes"]) - grant,
         )
     total_granted = sum(grants.values())
+    advisory_demand_total = sum(
+        int(report["advisory_required_bytes"])
+        for report in target_reports.values()
+    )
+    allocation_weight_total = sum(allocation_weights.values())
     plan = {
         "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
         "allocation_mode": SHARED_STAGE_BUDGET_ALLOCATION_MODE,
@@ -5351,8 +5590,10 @@ def build_shared_stage_budget_plan(
             for target in active_targets
         ),
         "baseline_required_total_bytes": baseline_total,
+        "advisory_demand_total_bytes": advisory_demand_total,
         "residual_pool_bytes": residual_pool,
-        "borrowing_priority_targets": borrowing_priority,
+        "borrowing_priority_targets": list(borrowing_priority),
+        "allocation_weight_total_bytes": allocation_weight_total,
         "history_used": history_report.get("accepted") is True,
         "history_reason": history_report.get("reason"),
         "history_attempt_id": history_report.get("attempt_id"),
@@ -5360,23 +5601,26 @@ def build_shared_stage_budget_plan(
         "pinned_read_view_binding_required": bool(
             require_pinned_view_binding
         ),
-        "all_estimates_pinned_read_view_bound": (
-            all_estimates_pinned_read_view_bound
+        "all_advisory_estimates_pinned_read_view_bound": (
+            all_advisory_estimates_pinned_read_view_bound
+        ),
+        "all_advisory_queries_bounded": all_advisory_queries_bounded,
+        "physical_upper_bound_claimed": physical_upper_bound_claimed,
+        "global_hard_cap_enforced": True,
+        "per_target_max_page_count_enforced": True,
+        "capacity_sufficient_basis": (
+            "minimum_and_verified_history_high_water"
         ),
         "targets": target_reports,
         "total_granted_bytes": total_granted,
         "grants_sum_matches_total_cap": total_granted == total_cap,
         "capacity_sufficient": capacity_sufficient,
-        "all_estimates_bounded": all(
-            report["estimate_bounded"] is True
-            for report in target_reports.values()
-        ),
         "accepted": bool(
             capacity_sufficient
             and total_granted == total_cap
             and (
                 not require_pinned_view_binding
-                or all_estimates_pinned_read_view_bound
+                or all_advisory_estimates_pinned_read_view_bound
             )
             and all(
                 int(report["granted_cap_bytes"])
@@ -5388,6 +5632,8 @@ def build_shared_stage_budget_plan(
         "actual_total_bytes": None,
         "unconsumed_bytes": None,
         "all_targets_within_grant": None,
+        "targets_exceeding_advisory": None,
+        "advisory_miss_count": None,
         "no_unregistered_stage_files": None,
         "cleanup_completed": None,
     }
@@ -5435,14 +5681,20 @@ def disk_preflight(
             "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
             "generated_at": utc_iso(),
             "active_targets": list(active_targets),
-            "all_estimates_bounded": True,
+            "all_advisory_queries_bounded": True,
+            "physical_upper_bound_claimed": False,
             "targets": {
                 target: {
                     "target": target,
                     "source_table": target,
-                    "strategy": "minimum_only_test_fallback",
-                    "bounded": True,
-                    "estimated_required_bytes": (
+                    "strategy": "minimum_only_advisory_fallback",
+                    "query_bounded": True,
+                    "physical_upper_bound_claimed": False,
+                    "advisory_schema_version": (
+                        SHARED_STAGE_ADVISORY_SCHEMA_VERSION
+                    ),
+                    "advisory_formula": SHARED_STAGE_ADVISORY_FORMULA,
+                    "advisory_required_bytes": (
                         shared_stage_target_minimum_bytes(target)
                     ),
                     "minimum_cap_bytes": (
@@ -5927,7 +6179,7 @@ def build_snapshot_bundle(
             )
             is True
             and shared_stage_budget.get(
-                "all_estimates_pinned_read_view_bound"
+                "all_advisory_estimates_pinned_read_view_bound"
             )
             is True
             and paper_report.get(

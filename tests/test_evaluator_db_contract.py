@@ -995,13 +995,16 @@ def test_pinned_read_view_lineage_tampering_is_rejected(tmp_path, monkeypatch):
         "stage_files_not_removed",
         "unregistered_stage_file",
         "optional_target_inventory_drift",
-        "baseline_below_estimate",
+        "baseline_below_history_requirement",
         "negative_actual",
         "null_grant",
-        "estimate_sample_used",
-        "estimate_payload_upper_tamper",
-        "estimate_physical_bytes_tamper",
-        "estimate_formula_tamper",
+        "advisory_sample_used",
+        "advisory_scaled_physical_tamper",
+        "advisory_physical_bytes_tamper",
+        "advisory_formula_tamper",
+        "advisory_claims_physical_upper",
+        "allocation_weight_tamper",
+        "advisory_miss_inventory_tamper",
         "plan_hash_mismatch",
     ),
 )
@@ -1052,11 +1055,9 @@ def test_shared_stage_budget_tampering_is_rejected(
     elif mutation == "optional_target_inventory_drift":
         shared["active_targets"].remove("opportunity_event_path_samples")
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "baseline_below_estimate":
-        p9["baseline_required_bytes"] = p9["estimated_required_bytes"] - 4096
-        p9["borrowed_shared_pool_bytes"] = (
-            p9["granted_cap_bytes"] - p9["baseline_required_bytes"]
-        )
+    elif mutation == "baseline_below_history_requirement":
+        p9["baseline_required_bytes"] -= 4096
+        p9["borrowed_shared_pool_bytes"] += 4096
         shared["baseline_required_total_bytes"] -= 4096
         shared["residual_pool_bytes"] += 4096
         synchronize_shared_budget_copies(manifest)
@@ -1070,19 +1071,33 @@ def test_shared_stage_budget_tampering_is_rejected(
     elif mutation == "null_grant":
         p9["granted_cap_bytes"] = None
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "estimate_sample_used":
-        p9["estimate_evidence"]["capacity_sample_used"] = True
+    elif mutation == "advisory_sample_used":
+        p9["advisory_evidence"]["capacity_sample_used"] = True
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "estimate_payload_upper_tamper":
-        p9["estimate_evidence"]["selected_payload_upper_bytes"] += 4096
+    elif mutation == "advisory_scaled_physical_tamper":
+        p9["advisory_evidence"][
+            "table_scaled_physical_advisory_bytes"
+        ] += 4096
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "estimate_physical_bytes_tamper":
-        p9["estimate_evidence"]["source_dbstat_physical_bytes"] += 4096
+    elif mutation == "advisory_physical_bytes_tamper":
+        p9["advisory_evidence"]["source_dbstat_physical_bytes"] += 4096
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "estimate_formula_tamper":
-        p9["estimate_evidence"]["upper_bound_formula"] = (
+    elif mutation == "advisory_formula_tamper":
+        p9["advisory_evidence"]["advisory_formula"] = (
             "edge_sample_average_times_selected_rows"
         )
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "advisory_claims_physical_upper":
+        p9["physical_upper_bound_claimed"] = True
+        p9["advisory_evidence"]["physical_upper_bound_claimed"] = True
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "allocation_weight_tamper":
+        p9["allocation_weight_bytes"] += 4096
+        shared["allocation_weight_total_bytes"] += 4096
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "advisory_miss_inventory_tamper":
+        shared["targets_exceeding_advisory"] = ["paper_decision_events"]
+        shared["advisory_miss_count"] = 1
         synchronize_shared_budget_copies(manifest)
     elif mutation == "plan_hash_mismatch":
         shared["plan_sha256"] = "0" * 64
@@ -1111,8 +1126,8 @@ def test_shared_stage_budget_tampering_is_rejected(
 @pytest.mark.parametrize(
     "mutation",
     (
-        "estimate_read_view_id_mismatch",
-        "estimate_read_view_role_mismatch",
+        "advisory_read_view_id_mismatch",
+        "advisory_read_view_role_mismatch",
         "manifest_binding_flag_false",
         "paper_binding_flag_false",
         "pinned_view_id_mismatch",
@@ -1130,13 +1145,13 @@ def test_shared_stage_read_view_binding_tampering_is_rejected(
     p9 = shared["targets"]["paper_decision_events"]
     candidate = shared["targets"]["candidate_shadow_observations"]
     paper_report = manifest["databases"]["paper"]
-    if mutation == "estimate_read_view_id_mismatch":
-        p9["estimate_evidence"]["pinned_read_view_id"] = candidate[
-            "estimate_evidence"
+    if mutation == "advisory_read_view_id_mismatch":
+        p9["advisory_evidence"]["pinned_read_view_id"] = candidate[
+            "advisory_evidence"
         ]["pinned_read_view_id"]
         synchronize_shared_budget_copies(manifest)
-    elif mutation == "estimate_read_view_role_mismatch":
-        p9["estimate_evidence"]["pinned_read_view_role"] = (
+    elif mutation == "advisory_read_view_role_mismatch":
+        p9["advisory_evidence"]["pinned_read_view_role"] = (
             "paper_main_selective_copy"
         )
         synchronize_shared_budget_copies(manifest)
