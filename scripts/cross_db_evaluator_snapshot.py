@@ -65,6 +65,11 @@ SHARED_STAGE_ADVISORY_FORMULA = (
     "plus_root_reserve_plus_candidate_signal_index_fraction"
 )
 SHARED_STAGE_HASH_CANONICALIZATION = "json_sorted_float64_bits.v1"
+SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION = (
+    "shared_stage_budget_history_anchor.v1"
+)
+SHARED_STAGE_HISTORY_ANCHOR_DIRECTORY = "shared_stage_budget_anchors"
+SHARED_STAGE_ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 SOURCE_DBSTAT_VIRTUAL_TABLE = "__a3_source_dbstat"
 SHARED_STAGE_COMPLETED_HISTORY_HEADROOM = 1.10
 SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM = 1.20
@@ -514,8 +519,66 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def shared_stage_budget_anchor_path(
+    status_path: Path,
+    attempt_id: Any,
+) -> Path:
+    normalized_attempt_id = str(attempt_id or "")
+    if not SHARED_STAGE_ATTEMPT_ID_RE.fullmatch(normalized_attempt_id):
+        raise ValueError("shared stage anchor attempt id invalid")
+    return (
+        status_path.parent
+        / SHARED_STAGE_HISTORY_ANCHOR_DIRECTORY
+        / f"{normalized_attempt_id}.json"
+    )
+
+
+def shared_stage_budget_anchor_payload(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    attempt_id = str(evidence.get("attempt_id") or "")
+    evidence_sha256 = str(evidence.get("evidence_sha256") or "")
+    if not SHARED_STAGE_ATTEMPT_ID_RE.fullmatch(attempt_id):
+        raise ValueError("shared stage anchor attempt id invalid")
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256)
+        or shared_stage_budget_evidence_sha256(evidence) != evidence_sha256
+        or evidence.get("captured_before_cleanup") is not True
+        or evidence.get("cleanup_completed") is not True
+        or evidence.get("stage_files_removed") is not True
+        or evidence.get("no_unregistered_stage_files") is not True
+    ):
+        raise ValueError("shared stage anchor evidence invalid")
+    return {
+        "schema_version": SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION,
+        "attempt_id": attempt_id,
+        "evidence_sha256": evidence_sha256,
+        "anchor_source": "atomic_worker_attempt_sidecar",
+        "immutable": True,
+    }
+
+
+def write_shared_stage_budget_anchor(
+    status_path: Path,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    anchor = shared_stage_budget_anchor_payload(evidence)
+    anchor_path = shared_stage_budget_anchor_path(
+        status_path,
+        anchor["attempt_id"],
+    )
+    if anchor_path.exists():
+        if read_json_object(anchor_path) != anchor:
+            raise RuntimeError("shared_stage_history_anchor_collision")
+        return anchor
+    atomic_json(anchor_path, anchor)
+    return anchor
+
+
 def validated_shared_stage_budget_history(
     payload: Any,
+    *,
+    trusted_anchor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"accepted": False, "reason": "history_missing", "targets": {}}
@@ -549,6 +612,34 @@ def validated_shared_stage_budget_history(
         return {
             "accepted": False,
             "reason": "history_evidence_hash_invalid",
+            "targets": {},
+        }
+    attempt_id = str(payload.get("attempt_id") or "")
+    if not SHARED_STAGE_ATTEMPT_ID_RE.fullmatch(attempt_id):
+        return {
+            "accepted": False,
+            "reason": "history_attempt_id_invalid",
+            "targets": {},
+        }
+    if not isinstance(trusted_anchor, dict):
+        return {
+            "accepted": False,
+            "reason": "history_anchor_missing",
+            "targets": {},
+        }
+    if (
+        trusted_anchor.get("schema_version")
+        != SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION
+        or trusted_anchor.get("anchor_source")
+        != "atomic_worker_attempt_sidecar"
+        or trusted_anchor.get("immutable") is not True
+        or str(trusted_anchor.get("attempt_id") or "") != attempt_id
+        or str(trusted_anchor.get("evidence_sha256") or "")
+        != evidence_sha256
+    ):
+        return {
+            "accepted": False,
+            "reason": "history_anchor_mismatch",
             "targets": {},
         }
     try:
@@ -654,9 +745,7 @@ def validated_shared_stage_budget_history(
             "high_water_bytes": high_water,
             "copy_completed": copy_completed,
             "cap_hit": cap_hit,
-            "evidence_source": str(
-                raw.get("evidence_source") or "worker_status"
-            )[:80],
+            "evidence_source": str(raw.get("evidence_source") or "")[:80],
         }
     if sum(
         int(report["granted_cap_bytes"])
@@ -679,10 +768,48 @@ def validated_shared_stage_budget_history(
         and stage_files_removed
         and no_unregistered
     )
+    evidence_sources = {
+        str(report.get("evidence_source") or "")
+        for report in sanitized_targets.values()
+    }
+    source_invariants_valid = bool(
+        payload.get("captured_before_cleanup") is True
+        and str(payload.get("captured_at") or "")
+        and (
+            (
+                payload.get("accepted") is True
+                and evidence_sources == {"accepted_producer_stage_report"}
+                and all(
+                    report.get("copy_completed") is True
+                    and report.get("cap_hit") is not True
+                    for report in sanitized_targets.values()
+                )
+            )
+            or (
+                payload.get("accepted") is not True
+                and evidence_sources
+                == {"partial_stage_files_before_cleanup"}
+                and str(payload.get("failure_code") or "")
+                and isinstance(payload.get("failure_components"), list)
+                and bool(payload.get("failure_components"))
+            )
+        )
+    )
+    accepted = bool(accepted and source_invariants_valid)
     return {
         "accepted": accepted,
-        "reason": "history_accepted" if accepted else "history_cleanup_invalid",
-        "attempt_id": str(payload.get("attempt_id") or "")[:80],
+        "reason": (
+            "history_accepted"
+            if accepted
+            else (
+                "history_source_invariants_invalid"
+                if cleanup_completed and stage_files_removed and no_unregistered
+                else "history_cleanup_invalid"
+            )
+        ),
+        "attempt_id": attempt_id,
+        "evidence_sha256": evidence_sha256,
+        "anchor_schema_version": trusted_anchor.get("schema_version"),
         "active_targets": list(active_targets),
         "targets": sanitized_targets if accepted else {},
     }
@@ -4218,11 +4345,13 @@ class SharedStageBudgetCoordinator:
         parallel_stage_tables: tuple[str, ...],
         history: dict[str, Any] | None,
         attempt_id: str,
+        history_anchor: dict[str, Any] | None = None,
     ) -> None:
         self.active_targets = shared_stage_target_names(parallel_stage_tables)
         self.total_cap_bytes = int(total_cap_bytes)
         self.parallel_stage_tables = tuple(parallel_stage_tables)
         self.history = history
+        self.history_anchor = history_anchor
         self.attempt_id = str(attempt_id)
         self._lock = threading.Lock()
         self._estimates: dict[str, dict[str, Any]] = {}
@@ -4265,6 +4394,7 @@ class SharedStageBudgetCoordinator:
                 parallel_stage_tables=self.parallel_stage_tables,
                 estimates=estimates,
                 history=self.history,
+                history_anchor=self.history_anchor,
                 attempt_id=self.attempt_id,
                 require_pinned_view_binding=True,
             )
@@ -4608,6 +4738,7 @@ def snapshot_all_concurrently(
     parallel_paper_stage_budget_bytes: dict[str, int] | None = None,
     shared_stage_total_cap_bytes: int | None = None,
     shared_stage_history: dict[str, Any] | None = None,
+    shared_stage_history_anchor: dict[str, Any] | None = None,
     shared_stage_attempt_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     names = tuple(DATABASE_SPECS)
@@ -4670,6 +4801,7 @@ def snapshot_all_concurrently(
                         total_cap_bytes=int(shared_stage_total_cap_bytes),
                         parallel_stage_tables=active_parallel_stage_tables,
                         history=shared_stage_history,
+                        history_anchor=shared_stage_history_anchor,
                         attempt_id=str(shared_stage_attempt_id),
                     )
                     shared_budget_coordinator_holder["paper"] = (
@@ -5336,6 +5468,7 @@ def build_shared_stage_budget_plan(
     parallel_stage_tables: tuple[str, ...],
     estimates: dict[str, Any],
     history: dict[str, Any] | None = None,
+    history_anchor: dict[str, Any] | None = None,
     attempt_id: str | None = None,
     require_pinned_view_binding: bool = False,
 ) -> dict[str, Any]:
@@ -5352,7 +5485,21 @@ def build_shared_stage_budget_plan(
         or estimates.get("physical_upper_bound_claimed") is not False
     ):
         raise ValueError("shared stage estimate inventory invalid")
-    history_report = validated_shared_stage_budget_history(history)
+    history_report = validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=history_anchor,
+    )
+    if (
+        history_report.get("accepted") is True
+        and str(history_report.get("attempt_id") or "")
+        == str(attempt_id or "")
+    ):
+        history_report = {
+            "accepted": False,
+            "reason": "history_attempt_id_reused",
+            "targets": {},
+        }
+    history_validation_required = history is not None
     history_targets = (
         history_report.get("targets")
         if history_report.get("accepted") is True
@@ -5526,6 +5673,10 @@ def build_shared_stage_budget_plan(
     capacity_sufficient = bool(
         total_cap > 0
         and baseline_total <= total_cap
+        and (
+            not history_validation_required
+            or history_report.get("accepted") is True
+        )
         and all_advisory_queries_bounded
         and not physical_upper_bound_claimed
         and (
@@ -5597,6 +5748,11 @@ def build_shared_stage_budget_plan(
         "history_used": history_report.get("accepted") is True,
         "history_reason": history_report.get("reason"),
         "history_attempt_id": history_report.get("attempt_id"),
+        "history_evidence_sha256": history_report.get("evidence_sha256"),
+        "history_anchor_schema_version": history_report.get(
+            "anchor_schema_version"
+        ),
+        "history_lineage_validated": history_report.get("accepted") is True,
         "fixed_percentage_allocation_used": False,
         "pinned_read_view_binding_required": bool(
             require_pinned_view_binding
@@ -5649,6 +5805,7 @@ def disk_preflight(
     parallel_stage_tables: tuple[str, ...] | list[str] | None = None,
     shared_stage_estimates: dict[str, Any] | None = None,
     shared_stage_history: dict[str, Any] | None = None,
+    shared_stage_history_anchor: dict[str, Any] | None = None,
     attempt_id: str | None = None,
 ) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
@@ -5709,6 +5866,7 @@ def disk_preflight(
         parallel_stage_tables=active_stage_tables,
         estimates=shared_stage_estimates,
         history=shared_stage_history,
+        history_anchor=shared_stage_history_anchor,
         attempt_id=attempt_id,
     )
     candidate_stage_cap = int(
@@ -6014,6 +6172,7 @@ def build_snapshot_bundle(
     keep_previous: int = 0,
     snapshot_id: str | None = None,
     previous_shared_stage_budget: dict[str, Any] | None = None,
+    previous_shared_stage_budget_anchor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(out_root).expanduser().resolve()
     source_paths = {name: Path(path).expanduser().resolve() for name, path in sources.items()}
@@ -6072,6 +6231,9 @@ def build_snapshot_bundle(
             max_output_gib,
             parallel_stage_tables=inspected_parallel_stage_tables,
             shared_stage_history=previous_shared_stage_budget,
+            shared_stage_history_anchor=(
+                previous_shared_stage_budget_anchor
+            ),
             attempt_id=sid,
         )
         if not preflight["accepted"]:
@@ -6096,6 +6258,9 @@ def build_snapshot_bundle(
                     preflight["temporary_stage_total_cap_bytes"]
                 ),
                 shared_stage_history=previous_shared_stage_budget,
+                shared_stage_history_anchor=(
+                    previous_shared_stage_budget_anchor
+                ),
                 shared_stage_attempt_id=sid,
             )
         except BaseException as snapshot_exc:
@@ -6524,6 +6689,30 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         else None
     )
     previous = read_json_object(status_path) if status_path else {}
+    previous_history_candidate = (
+        previous.get("shared_stage_budget")
+        if isinstance(previous.get("shared_stage_budget"), dict)
+        else None
+    )
+    previous_history_anchor: dict[str, Any] | None = None
+    if status_path and isinstance(previous_history_candidate, dict):
+        try:
+            previous_anchor_path = shared_stage_budget_anchor_path(
+                status_path,
+                previous_history_candidate.get("attempt_id"),
+            )
+            loaded_anchor = read_json_object(previous_anchor_path)
+            previous_history_anchor = loaded_anchor or None
+        except ValueError:
+            previous_history_anchor = None
+    legacy_unanchored_history = bool(
+        previous_history_candidate
+        and previous_history_anchor is None
+        and previous.get("shared_stage_budget_anchor_required") is not True
+    )
+    previous_shared_stage_budget = (
+        None if legacy_unanchored_history else previous_history_candidate
+    )
     continuous_worker = int(args.max_runs) <= 0
     interval_sec = max(1, int(getattr(args, "interval_sec", 21600)))
     failure_retry_sec = max(
@@ -6577,7 +6766,13 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         "snapshot_id": None,
         "current": current_path,
         "last_accepted_snapshot": previous.get("last_accepted_snapshot"),
-        "shared_stage_budget": previous.get("shared_stage_budget"),
+        "shared_stage_budget": previous_shared_stage_budget,
+        "shared_stage_budget_anchor_required": True,
+        "shared_stage_budget_anchor": (
+            previous_history_anchor
+            if previous_shared_stage_budget is not None
+            else None
+        ),
         "promotion_allowed": False,
     }
     lock_acquired = False
@@ -6607,11 +6802,20 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 max_source_read_lock_sec=args.max_source_read_lock_sec,
                 keep_previous=args.keep_previous,
                 snapshot_id=args.snapshot_id,
-                previous_shared_stage_budget=previous.get(
-                    "shared_stage_budget"
-                ),
+                previous_shared_stage_budget=previous_shared_stage_budget,
+                previous_shared_stage_budget_anchor=previous_history_anchor,
             )
             finished = utc_iso()
+            current_shared_stage_budget = manifest.get("shared_stage_budget")
+            current_shared_stage_anchor = (
+                write_shared_stage_budget_anchor(
+                    status_path,
+                    current_shared_stage_budget,
+                )
+                if status_path
+                and isinstance(current_shared_stage_budget, dict)
+                else None
+            )
             accepted_summary = snapshot_manifest_summary(manifest)
             accepted_manifest_path = (
                 Path(args.out_root).expanduser().resolve()
@@ -6642,7 +6846,8 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 "snapshot_id": manifest["snapshot_id"],
                 "interrupted_partials_removed": interrupted_partials_removed,
                 "last_accepted_snapshot": accepted_summary,
-                "shared_stage_budget": manifest.get("shared_stage_budget"),
+                "shared_stage_budget": current_shared_stage_budget,
+                "shared_stage_budget_anchor": current_shared_stage_anchor,
                 "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
                 "next_attempt_at": (
                     utc_iso(time.time() + next_attempt_delay)
@@ -6656,10 +6861,22 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         finished = utc_iso()
         failure_code = snapshot_failure_code(exc)
         failure_details = snapshot_failure_details(exc)
-        failure_stage_budget = (
+        current_failure_stage_budget = (
             shared_stage_budget_evidence_from_exception(exc)
-            or previous.get("shared_stage_budget")
         )
+        failure_stage_budget = (
+            current_failure_stage_budget or previous_shared_stage_budget
+        )
+        failure_stage_anchor = previous_history_anchor
+        if (
+            status_path
+            and lock_acquired
+            and isinstance(current_failure_stage_budget, dict)
+        ):
+            failure_stage_anchor = write_shared_stage_budget_anchor(
+                status_path,
+                current_failure_stage_budget,
+            )
         consecutive_failure_count = int(base_status["consecutive_failure_count"]) + 1
         previous_failure_code = str(base_status.get("last_failure_code") or "")
         previous_failure_code_count = int(
@@ -6690,6 +6907,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             "last_failure_code": failure_code,
             "last_failure_details": failure_details,
             "shared_stage_budget": failure_stage_budget,
+            "shared_stage_budget_anchor": failure_stage_anchor,
             "last_error": bounded_error_text(exc),
             "error_count": int(base_status["error_count"]) + 1,
             "status": "failed",

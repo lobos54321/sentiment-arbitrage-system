@@ -266,7 +266,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "55bd8018e000f3acaab13ffd24b0758456bd2b621ad493a8bfe16fb328bdb9d9",
+      "impact_hash": "29cd18a162ce2f25a2ca375baf66228fb09c097240ccb88b546eb3df55fa9a91",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -397,7 +397,7 @@
         "spec/telegram_dog_regime_capture/v2.7.0/gap-register.json": "6b7e67bf733b0bf4c2cffc327ef54970b79041e672e8f7ae66b541f22c85e377",
         "spec/telegram_dog_regime_capture/v2.7.0/generated/v27-contract-client.json": "a4754205a0553156d1044792a0539503cbeaaee426e1450768a8103c8e93892d",
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json": "287750ba886c9a43e0c2fbb86d67bf1e2322fa41898e3caa1287d2e077f83ba5",
-        "src/web/dashboard-server.js": "da4cf611d59cb034eceb4f714e55594c350c171e5ce26fdc7f26351d798e4be9",
+        "src/web/dashboard-server.js": "2dde448118c6389deb92be229963f4e65dbbcf7713e7d109e7ec76d3f4ba56db",
         "test_paper_fast_lane.py": "aec90398e371fd425196f320d7dbe726bce34b5e0d29b396e9c39ac650035f6d",
         "test_telegram_lifecycle_markov.py": "8f0c0d3336232204d3e218eb85d5c3863c1159a309e2f9630cbbae2c4a1695a4",
         "test_v27_basic_contract_readiness.py": "9e111a2a77ec27f00c0bfdbf5794c4524414926784f0221f932ae5772fc77520",
@@ -414,8 +414,8 @@
         "scripts/agent_autoloop_stage_runner.py": "2e748b1a0d6d62671897f70ecfdb7075f065f9a969c849c2a02bc940850b5462",
         "scripts/agent_capture_discovery_loop.py": "342738ce9611789ef467234283fb5a7603c227c35229c62d31637642a3573e95",
         "scripts/autoloop_oos_refresh_worker.py": "5300c65b404497aa00d1e1b97303d7096be4b657daa7e6e23130bf87ad09e021",
-        "scripts/cross_db_evaluator_snapshot.py": "2b58512d4b9a37c4db76054698cd4deb8c35e49533960f25a012152e5afa6aa2",
-        "scripts/evaluator_db_contract.py": "83c2a2ab522dae579628cb7813420e7a668f91b3221ff6c153fdb90f128a9449",
+        "scripts/cross_db_evaluator_snapshot.py": "6772886c11e307cf7dc6d88328f2375d04cad41bef23ca6d0b1e7f136c266e7a",
+        "scripts/evaluator_db_contract.py": "daa063dfa2fc30775e4f02a233d7d6f73cedca2ca62f9ca669645bd51d9a33f0",
         "scripts/run_zeabur_services.sh": "5327b4ab83e20fd5078ca7a33da0704e35b6ef73247bf5e5d77f7b59836ead8d",
         "src/index.js": "23e8d2e0adc0b6b6f2ede5e9add0691abb9611b1e1c552fe2114bf27db8d39f0",
         "src/web/evaluator-snapshot-preflight.js": "9a9960fc83c8b0257950ed44bb1cc7e923253b8c2b6acba85455c28490c2dc0e",
@@ -425,7 +425,7 @@
         "tests/test_autoloop_evaluator_snapshot_provenance.py": "6f1c27ec3ebdb166b819ae24b1d7cba11e224b5bdb80a358aa95a82437cb4e3b",
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
-        "tests/test_cross_db_evaluator_snapshot.py": "d644faa189308863a2b57634fb3e02e264a44da0312efe5caece0c28edb317ab",
+        "tests/test_cross_db_evaluator_snapshot.py": "c6af1934347bd71979003b32af77ee4c770c11a20f02102d9547208647a49afb",
         "tests/test_evaluator_db_contract.py": "576ce1d62c8aa2d581e539f2d6e39380c33d9ffa6655a9b9d8095fc860e791d4",
         "tests/test_runtime_v27_writer_topology_audit.py": "3e6c144ec960adcf9893f841effc6c36719b45fac052de712b8dd99ec514793e"
       },

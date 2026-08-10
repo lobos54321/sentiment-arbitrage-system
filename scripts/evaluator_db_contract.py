@@ -39,13 +39,16 @@ from cross_db_evaluator_snapshot import (
     SHARED_STAGE_BUDGET_SCHEMA_VERSION,
     SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
     SHARED_STAGE_HASH_CANONICALIZATION,
+    SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION,
     SHARED_STAGE_PAGE_SIZE,
     SHARED_STAGE_TARGET_CANDIDATE,
     allocate_shared_stage_residual,
     parallel_paper_stage_inventory_valid,
+    read_json_object,
     normalized_timestamp_sql,
     quote_identifier,
     shared_stage_budget_evidence_sha256,
+    shared_stage_budget_anchor_path,
     shared_stage_budget_plan_sha256,
     shared_stage_advisory_demand,
     shared_stage_history_required_bytes,
@@ -559,6 +562,7 @@ def validate_shared_stage_budget_contract(
     manifest: dict,
     disk_preflight: dict,
     active_stage_tables: tuple[str, ...],
+    trusted_history_anchor: dict | None,
 ) -> None:
     shared = manifest.get("shared_stage_budget")
     disk_shared = disk_preflight.get("shared_stage_budget")
@@ -831,6 +835,35 @@ def validate_shared_stage_budget_contract(
                 f"shared stage allocation mismatch:{target}"
             )
     raw_advisory_exceeded = shared.get("targets_exceeding_advisory")
+    history_used = any(
+        str((raw_targets.get(target) or {}).get("history_state") or "")
+        != "none"
+        for target in expected_targets
+    )
+    history_attempt_id = str(shared.get("history_attempt_id") or "")
+    history_evidence_sha256 = str(
+        shared.get("history_evidence_sha256") or ""
+    )
+    history_lineage_valid = bool(
+        history_used
+        and shared.get("history_lineage_validated") is True
+        and shared.get("history_reason") == "history_accepted"
+        and shared.get("history_anchor_schema_version")
+        == SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION
+        and history_attempt_id
+        and history_attempt_id != str(shared.get("attempt_id") or "")
+        and valid_sha256_hex(history_evidence_sha256)
+        and isinstance(trusted_history_anchor, dict)
+        and trusted_history_anchor.get("schema_version")
+        == SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION
+        and trusted_history_anchor.get("anchor_source")
+        == "atomic_worker_attempt_sidecar"
+        and trusted_history_anchor.get("immutable") is True
+        and str(trusted_history_anchor.get("attempt_id") or "")
+        == history_attempt_id
+        and str(trusted_history_anchor.get("evidence_sha256") or "")
+        == history_evidence_sha256
+    )
     if (
         borrowing_priority != expected_priority
         or not isinstance(raw_advisory_exceeded, list)
@@ -838,11 +871,19 @@ def validate_shared_stage_budget_contract(
         != advisory_exceeded_targets
         or int(shared.get("advisory_miss_count"))
         != len(advisory_exceeded_targets)
-        or bool(shared.get("history_used"))
-        != any(
-            str((raw_targets.get(target) or {}).get("history_state") or "")
-            != "none"
-            for target in expected_targets
+        or bool(shared.get("history_used")) != history_used
+        or (
+            history_used
+            and not history_lineage_valid
+        )
+        or (
+            not history_used
+            and (
+                shared.get("history_lineage_validated") is not False
+                or shared.get("history_attempt_id") is not None
+                or shared.get("history_evidence_sha256") is not None
+                or shared.get("history_anchor_schema_version") is not None
+            )
         )
         or sum(grants.values()) != total_cap
         or sum(actuals.values()) != actual_total
@@ -1079,6 +1120,7 @@ def evaluator_snapshot_bundle_status(
     producer_status: dict = {}
     producer_status_loaded = False
     producer_acceptance: dict = {}
+    producer_shared_stage_history_anchor: dict = {}
     snapshot_age_sec_value: float | None = None
     snapshot_upper_epoch: float | None = None
     manifest_parallel_stage_tables: tuple[str, ...] = ()
@@ -1133,6 +1175,33 @@ def evaluator_snapshot_bundle_status(
             producer_manifest_file = None
         if producer_manifest_file != manifest_file:
             blockers.append("evaluator_snapshot_producer_manifest_path_mismatch")
+    if manifest_loaded:
+        shared_budget = manifest.get("shared_stage_budget") or {}
+        if shared_budget.get("history_used") is True:
+            try:
+                producer_shared_stage_history_anchor_file = (
+                    shared_stage_budget_anchor_path(
+                        producer_status_file,
+                        shared_budget.get("history_attempt_id"),
+                    )
+                )
+            except (TypeError, ValueError):
+                producer_shared_stage_history_anchor_file = None
+            if (
+                producer_shared_stage_history_anchor_file is None
+                or not producer_shared_stage_history_anchor_file.is_file()
+            ):
+                blockers.append(
+                    "evaluator_snapshot_shared_stage_history_anchor_missing"
+                )
+            else:
+                producer_shared_stage_history_anchor = read_json_object(
+                    producer_shared_stage_history_anchor_file
+                )
+                if not producer_shared_stage_history_anchor:
+                    blockers.append(
+                        "evaluator_snapshot_shared_stage_history_anchor_invalid"
+                    )
     if manifest_loaded:
         if manifest.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
             blockers.append("evaluator_snapshot_schema_version_invalid")
@@ -1229,6 +1298,7 @@ def evaluator_snapshot_bundle_status(
                     manifest,
                     disk_preflight,
                     safe_manifest_parallel_stage_tables,
+                    producer_shared_stage_history_anchor,
                 )
             except (KeyError, TypeError, ValueError, OverflowError):
                 blockers.append(

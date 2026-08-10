@@ -25,7 +25,10 @@ from cross_db_evaluator_snapshot import (  # noqa: E402
     source_table_reference,
     static_database_output_budgets,
 )
-from evaluator_db_contract import validate_shared_stage_estimate_contract  # noqa: E402
+from evaluator_db_contract import (  # noqa: E402
+    evaluator_snapshot_bundle_status,
+    validate_shared_stage_estimate_contract,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +131,7 @@ def shared_stage_history(estimates, *, cap_hit_target=None):
             "high_water_bytes": high_water,
             "copy_completed": target != cap_hit_target,
             "cap_hit": target == cap_hit_target,
-            "evidence_source": "test_history",
+            "evidence_source": "partial_stage_files_before_cleanup",
         }
     total = sum(row["granted_cap_bytes"] for row in targets.values())
     history = {
@@ -152,6 +155,10 @@ def shared_stage_history(estimates, *, cap_hit_target=None):
         "cleanup_completed": True,
         "stage_files_removed": True,
         "no_unregistered_stage_files": True,
+        "captured_at": "2026-08-08T00:00:00Z",
+        "captured_before_cleanup": True,
+        "failure_code": "parallel_paper_stage_budget_exceeded",
+        "failure_components": ["paper"],
         "accepted": False,
     }
     history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
@@ -161,6 +168,18 @@ def shared_stage_history(estimates, *, cap_hit_target=None):
         snapshot_module.shared_stage_budget_evidence_sha256(history)
     )
     return history
+
+
+def shared_stage_history_anchor(history):
+    return {
+        "schema_version": (
+            snapshot_module.SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION
+        ),
+        "attempt_id": history["attempt_id"],
+        "evidence_sha256": history["evidence_sha256"],
+        "anchor_source": "atomic_worker_attempt_sidecar",
+        "immutable": True,
+    }
 
 
 def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
@@ -807,7 +826,11 @@ def test_candidate_sqlite_full_is_attributed_as_cap_hit(
     history["evidence_sha256"] = (
         snapshot_module.shared_stage_budget_evidence_sha256(history)
     )
-    assert snapshot_module.validated_shared_stage_budget_history(history)[
+    history_anchor = shared_stage_history_anchor(history)
+    assert snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=history_anchor,
+    )[
         "accepted"
     ] is True
 
@@ -816,6 +839,7 @@ def test_candidate_sqlite_full_is_attributed_as_cap_hit(
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         estimates=estimates,
         history=history,
+        history_anchor=history_anchor,
         attempt_id="candidate-cap-hit-next",
     )
     next_candidate = next_plan["targets"][
@@ -877,7 +901,11 @@ def test_failed_stage_high_water_is_reused_by_next_shared_plan(tmp_path):
     assert history["targets"]["paper_decision_events"]["high_water_bytes"] == (
         first_plan["targets"]["paper_decision_events"]["granted_cap_bytes"]
     )
-    assert snapshot_module.validated_shared_stage_budget_history(history)[
+    history_anchor = shared_stage_history_anchor(history)
+    assert snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=history_anchor,
+    )[
         "accepted"
     ] is True
 
@@ -886,6 +914,7 @@ def test_failed_stage_high_water_is_reused_by_next_shared_plan(tmp_path):
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         estimates=estimates,
         history=history,
+        history_anchor=history_anchor,
         attempt_id="next-attempt",
     )
     assert next_plan["accepted"] is True
@@ -960,7 +989,11 @@ def test_completed_parallel_stage_is_reused_with_completed_history_headroom(
     assert history["targets"]["a_class_decision_events"][
         "cap_hit"
     ] is True
-    assert snapshot_module.validated_shared_stage_budget_history(history)[
+    history_anchor = shared_stage_history_anchor(history)
+    assert snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=history_anchor,
+    )[
         "accepted"
     ] is True
 
@@ -969,6 +1002,7 @@ def test_completed_parallel_stage_is_reused_with_completed_history_headroom(
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         estimates=estimates,
         history=history,
+        history_anchor=history_anchor,
         attempt_id="parallel-history-next",
     )
     assert next_plan["targets"]["paper_decision_events"][
@@ -1014,7 +1048,10 @@ def test_unregistered_stage_file_invalidates_high_water_history(tmp_path):
     )
     assert evidence["no_unregistered_stage_files"] is False
     assert evidence["unregistered_stage_files"] == [".rogue-stage.db"]
-    validated = snapshot_module.validated_shared_stage_budget_history(evidence)
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        evidence,
+        trusted_anchor=shared_stage_history_anchor(evidence),
+    )
     assert validated["accepted"] is False
     assert validated["reason"] == "history_cleanup_invalid"
 
@@ -1029,7 +1066,10 @@ def test_capacity_insufficient_history_is_not_reused():
     history["evidence_sha256"] = (
         snapshot_module.shared_stage_budget_evidence_sha256(history)
     )
-    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=shared_stage_history_anchor(history),
+    )
     assert validated["accepted"] is False
     assert validated["reason"] == "history_plan_not_usable"
 
@@ -1064,7 +1104,10 @@ def test_rehashed_unsafe_history_is_rejected(mutation, expected_reason):
     history["evidence_sha256"] = (
         snapshot_module.shared_stage_budget_evidence_sha256(history)
     )
-    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=shared_stage_history_anchor(history),
+    )
     assert validated["accepted"] is False
     assert validated["reason"] == expected_reason
 
@@ -1076,9 +1119,132 @@ def test_tampered_high_water_history_hash_is_rejected():
         cap_hit_target="paper_decision_events",
     )
     history["targets"]["paper_decision_events"]["high_water_bytes"] += 4096
-    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=shared_stage_history_anchor(history),
+    )
     assert validated["accepted"] is False
     assert validated["reason"] == "history_evidence_hash_invalid"
+
+
+def test_rehashed_high_water_substitution_mismatches_trusted_attempt_anchor():
+    target = "paper_decision_events"
+    estimates = shared_stage_estimates(required_bytes={target: 24576})
+    history = shared_stage_history(estimates)
+    trusted_anchor = shared_stage_history_anchor(history)
+
+    history["targets"][target]["high_water_bytes"] = 16384
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=trusted_anchor,
+    )
+    assert validated["accepted"] is False
+    assert validated["reason"] == "history_anchor_mismatch"
+
+    next_plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=history["total_cap_bytes"] + 20 * 4096,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        history=history,
+        history_anchor=trusted_anchor,
+        attempt_id="next-after-forged-history",
+    )
+    assert next_plan["accepted"] is False
+    assert next_plan["history_used"] is False
+    assert next_plan["history_reason"] == "history_anchor_mismatch"
+    assert next_plan["targets"][target]["history_state"] == "none"
+
+
+def test_authoritative_consumer_reads_the_persisted_predecessor_anchor(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    out_root = tmp_path / "anchored-history-consumer"
+    first = snapshot_module.build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out_root),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        snapshot_id="20260101T000000Z-1234abca",
+    )
+    status_path = out_root / "snapshot_status.json"
+    predecessor_anchor = snapshot_module.write_shared_stage_budget_anchor(
+        status_path,
+        first["shared_stage_budget"],
+    )
+    second = snapshot_module.build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out_root),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        snapshot_id="20260101T000100Z-1234abcb",
+        previous_shared_stage_budget=first["shared_stage_budget"],
+        previous_shared_stage_budget_anchor=predecessor_anchor,
+    )
+    assert second["shared_stage_budget"]["history_used"] is True
+    snapshot_module.write_shared_stage_budget_anchor(
+        status_path,
+        second["shared_stage_budget"],
+    )
+    manifest_path = (
+        out_root
+        / "snapshots"
+        / second["snapshot_id"]
+        / "manifest.json"
+    ).resolve()
+    snapshot_module.atomic_json(
+        status_path,
+        {
+            "schema_version": (
+                "cross_db_evaluator_snapshot_worker_status.v1"
+            ),
+            "status": "completed",
+            "accepted": True,
+            "snapshot_id": second["snapshot_id"],
+            "last_accepted_snapshot": {
+                "snapshot_id": second["snapshot_id"],
+                "manifest_path": str(manifest_path),
+                "manifest_sha256": snapshot_module.sha256_file(
+                    manifest_path
+                ),
+            },
+            "promotion_allowed": False,
+        },
+    )
+
+    def bundle_status():
+        return evaluator_snapshot_bundle_status(
+            signal_db=str(out_root / "current" / "signal.db"),
+            paper_db=str(out_root / "current" / "paper_evidence.db"),
+            raw_db=str(out_root / "current" / "raw.db"),
+            kline_db=str(out_root / "current" / "kline.db"),
+            data_dir=str(tmp_path / "live-defaults"),
+            manifest_path=str(manifest_path),
+        )
+
+    accepted = bundle_status()
+    assert accepted["accepted"] is True, accepted["blockers"]
+
+    predecessor_anchor["evidence_sha256"] = "0" * 64
+    snapshot_module.atomic_json(
+        snapshot_module.shared_stage_budget_anchor_path(
+            status_path,
+            first["shared_stage_budget"]["attempt_id"],
+        ),
+        predecessor_anchor,
+    )
+    rejected = bundle_status()
+    assert rejected["accepted"] is False
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in rejected["blockers"]
+    )
 
 
 def test_disk_preflight_assigns_shared_residual_to_cap_hit_target(
@@ -1112,6 +1278,7 @@ def test_disk_preflight_assigns_shared_residual_to_cap_hit_target(
         max_output_gib=10,
         shared_stage_estimates=estimates,
         shared_stage_history=history,
+        shared_stage_history_anchor=shared_stage_history_anchor(history),
         attempt_id="current-attempt",
     )
 
@@ -3793,6 +3960,9 @@ def test_snapshot_worker_persists_shared_high_water_for_next_retry(
     )
     evidence["accepted"] = False
     evidence["captured_at"] = snapshot_module.utc_iso()
+    evidence["captured_before_cleanup"] = True
+    evidence["failure_code"] = "parallel_paper_stage_budget_exceeded"
+    evidence["failure_components"] = ["paper"]
     evidence["cleanup_completed"] = True
     evidence["no_unregistered_stage_files"] = True
     evidence["unregistered_stage_files"] = []
@@ -3838,20 +4008,32 @@ def test_snapshot_worker_persists_shared_high_water_for_next_retry(
     assert first["shared_stage_budget"]["targets"][
         "paper_decision_events"
     ]["cap_hit"] is True
+    persisted_anchor = snapshot_module.read_json_object(
+        snapshot_module.shared_stage_budget_anchor_path(
+            Path(args.status_out),
+            first["shared_stage_budget"]["attempt_id"],
+        )
+    )
     assert snapshot_module.validated_shared_stage_budget_history(
-        first["shared_stage_budget"]
+        first["shared_stage_budget"],
+        trusted_anchor=persisted_anchor,
     )["accepted"] is True
 
     observed_history = None
+    observed_anchor = None
 
     def inspect_history(**kwargs):
-        nonlocal observed_history
+        nonlocal observed_history, observed_anchor
         observed_history = kwargs.get("previous_shared_stage_budget")
+        observed_anchor = kwargs.get(
+            "previous_shared_stage_budget_anchor"
+        )
         raise RuntimeError("shared_stage_capacity_insufficient")
 
     monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", inspect_history)
     snapshot_module.run_snapshot_once(args)
     assert observed_history == evidence
+    assert observed_anchor == persisted_anchor
 
 
 def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_soon(

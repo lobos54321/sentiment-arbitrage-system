@@ -9170,6 +9170,23 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const hasOption = (name) => Object.prototype.hasOwnProperty.call(options, name);
   const statusPayload = hasOption('statusPayload') ? options.statusPayload : safeReadAgentJson(statusPath);
   const manifestPayload = hasOption('manifestPayload') ? options.manifestPayload : safeReadAgentJson(manifestPath);
+  const sharedStageHistoryAttemptId = String(
+    manifestPayload?.shared_stage_budget?.history_attempt_id || '',
+  );
+  const sharedStageHistoryAnchorPath = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(
+    sharedStageHistoryAttemptId,
+  )
+    ? join(
+      dirname(statusPath),
+      'shared_stage_budget_anchors',
+      `${sharedStageHistoryAttemptId}.json`,
+    )
+    : null;
+  const sharedStageHistoryAnchorPayload = hasOption('sharedStageHistoryAnchorPayload')
+    ? options.sharedStageHistoryAnchorPayload
+    : sharedStageHistoryAnchorPath
+      ? safeReadAgentJson(sharedStageHistoryAnchorPath)
+      : null;
   const statusArtifact = hasOption('statusArtifact') ? options.statusArtifact : agentArtifactStat(statusPath);
   const manifestArtifact = hasOption('manifestArtifact') ? options.manifestArtifact : agentArtifactStat(manifestPath);
   const authoritativePreflight = hasOption('authoritativePreflight')
@@ -10204,6 +10221,39 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const sharedStageHistoryUsedExpected = expectedSharedStageTargets.some(
     (target) => String(rawSharedTargets[target]?.history_state || '') !== 'none',
   );
+  const sharedStageHistoryLineagePassed = sharedStageHistoryUsedExpected
+    ? Boolean(
+      manifestSharedStageBudget.history_lineage_validated === true
+      && manifestSharedStageBudget.history_reason === 'history_accepted'
+      && manifestSharedStageBudget.history_anchor_schema_version
+        === 'shared_stage_budget_history_anchor.v1'
+      && typeof manifestSharedStageBudget.history_attempt_id === 'string'
+      && manifestSharedStageBudget.history_attempt_id.length > 0
+      && manifestSharedStageBudget.history_attempt_id
+        !== manifestSharedStageBudget.attempt_id
+      && /^[a-f0-9]{64}$/i.test(
+        String(manifestSharedStageBudget.history_evidence_sha256 || ''),
+      )
+      && sharedStageHistoryAnchorPayload
+      && typeof sharedStageHistoryAnchorPayload === 'object'
+      && !Array.isArray(sharedStageHistoryAnchorPayload)
+      && !sharedStageHistoryAnchorPayload.error_code
+      && sharedStageHistoryAnchorPayload.schema_version
+        === 'shared_stage_budget_history_anchor.v1'
+      && sharedStageHistoryAnchorPayload.anchor_source
+        === 'atomic_worker_attempt_sidecar'
+      && sharedStageHistoryAnchorPayload.immutable === true
+      && sharedStageHistoryAnchorPayload.attempt_id
+        === manifestSharedStageBudget.history_attempt_id
+      && sharedStageHistoryAnchorPayload.evidence_sha256
+        === manifestSharedStageBudget.history_evidence_sha256
+    )
+    : Boolean(
+      manifestSharedStageBudget.history_lineage_validated !== true
+      && manifestSharedStageBudget.history_attempt_id == null
+      && manifestSharedStageBudget.history_evidence_sha256 == null
+      && manifestSharedStageBudget.history_anchor_schema_version == null
+    );
   const sharedStageBudgetPassed = Boolean(
     legacyFixedAllocationAbsent
     && sharedStageBudgetCopiesMatch
@@ -10231,6 +10281,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && /^[a-f0-9]{64}$/i.test(sharedStageEvidenceSha256)
     && sharedStagePlanHashMatched
     && sharedStageEvidenceHashMatched
+    && sharedStageHistoryLineagePassed
     && rawSharedActiveTargets.length === expectedSharedStageTargets.length
     && rawSharedActiveTargets.every(
       (target, index) => target === expectedSharedStageTargets[index],
@@ -10459,6 +10510,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       : null,
     plan_sha256_matched: sharedStagePlanHashMatched,
     evidence_sha256_matched: sharedStageEvidenceHashMatched,
+    history_lineage_validated: sharedStageHistoryLineagePassed,
     active_targets: Array.isArray(publicSharedBudgetSource.active_targets)
       ? publicSharedBudgetSource.active_targets
         .map(String)
