@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import tempfile
 import threading
@@ -36,44 +37,64 @@ PAYLOAD_PROJECTION_SCHEMA_VERSION = "candidate_observation_payload_projection.v1
 CANDIDATE_STAGE_SCHEMA_VERSION = "candidate_observation_selective_stage.v1"
 CANDIDATE_STAGE_SCHEMA = "candidate_stage"
 CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
-CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal_candidate"
+CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal"
 MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
-CANDIDATE_STAGE_BUDGET_MODE = "shared_residual_disk_after_output_and_reserve"
+CANDIDATE_STAGE_BUDGET_MODE = "shared_stage_budget_coordinator"
 PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v2"
 PARALLEL_PAPER_STAGE_STORAGE_MODE = "constraint_free_full_fidelity"
 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES = 3 * 4096
-# Production measurements on 2026-08-09 showed that the aggregate temporary
-# budget was sufficient, but the old fixed shares stranded capacity while the
-# P9 stage hit SQLITE_FULL. Keep the total cap and reserve unchanged; only
-# rebalance the existing residual pool around observed peak stage sizes.
-CANDIDATE_STAGE_RESIDUAL_SHARE = 0.12
+SHARED_STAGE_BUDGET_SCHEMA_VERSION = "shared_stage_budget.v1"
+SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
+    "history_high_water_plus_bounded_source_estimate"
+)
+SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
+SHARED_STAGE_PAGE_SIZE = 4096
+SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
+SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 20.0
+# Capacity is derived from DBSTAT physical/payload maxima, never from samples.
+# These constants cover the largest SQLite varints, cell pointer, and the extra
+# record serial/value bytes introduced when a source INTEGER PRIMARY KEY alias
+# becomes an ordinary column in a constraint-free stage table.
+SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES = 32
+SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES = 32
+SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES = 2
+SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION = (
+    "sqlite_dbstat_physical_upper_bound.v2"
+)
+SHARED_STAGE_HASH_CANONICALIZATION = "json_sorted_float64_bits.v1"
+SOURCE_DBSTAT_VIRTUAL_TABLE = "__a3_source_dbstat"
+SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA = (
+    "selected_payload_upper_plus_full_source_structural_overhead_"
+    "plus_per_row_record_overhead_plus_root_reserve"
+    "+full_source_signal_index_physical_upper_for_candidate"
+)
+SHARED_STAGE_COMPLETED_HISTORY_HEADROOM = 1.10
+SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM = 1.20
+SHARED_STAGE_CAP_HIT_HEADROOM = 1.35
+SHARED_STAGE_HIDDEN_FILE_RE = re.compile(r"^\..+-stage\.db(?:-(?:journal|wal|shm))?$")
 PARALLEL_PAPER_STAGE_CONFIGS = {
     "paper_decision_events": {
         "schema": "paper_decision_stage",
         "filename": ".paper-decision-events-stage.db",
         "role": "paper_decision_events_parallel_stage",
-        "residual_share": 0.36,
         "required": True,
     },
     "a_class_decision_events": {
         "schema": "a_class_decision_stage",
         "filename": ".a-class-decision-events-stage.db",
         "role": "a_class_decision_events_parallel_stage",
-        "residual_share": 0.25,
         "required": True,
     },
     "opportunity_events": {
         "schema": "opportunity_events_stage",
         "filename": ".opportunity-events-stage.db",
         "role": "opportunity_events_parallel_stage",
-        "residual_share": 0.07,
         "required": True,
     },
     "opportunity_event_path_samples": {
         "schema": "opportunity_path_samples_stage",
         "filename": ".opportunity-event-path-samples-stage.db",
         "role": "opportunity_event_path_samples_parallel_stage",
-        "residual_share": 0.20,
         "required": False,
     },
 }
@@ -92,9 +113,6 @@ PAPER_DECISION_STAGE_SCHEMA_VERSION = PARALLEL_PAPER_STAGE_SCHEMA_VERSION
 PAPER_DECISION_STAGE_SCHEMA = PARALLEL_PAPER_STAGE_CONFIGS["paper_decision_events"]["schema"]
 PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
 MIN_PAPER_DECISION_STAGE_CAP_BYTES = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-PAPER_DECISION_STAGE_RESIDUAL_SHARE = PARALLEL_PAPER_STAGE_CONFIGS[
-    PAPER_DECISION_STAGE_TABLE
-]["residual_share"]
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
@@ -360,6 +378,45 @@ def parallel_paper_stage_inventory_valid(tables: Any) -> bool:
     )
 
 
+def shared_stage_target_names(
+    parallel_stage_tables: tuple[str, ...] | list[str],
+) -> tuple[str, ...]:
+    tables = tuple(str(table) for table in parallel_stage_tables)
+    if not parallel_paper_stage_inventory_valid(tables):
+        raise ValueError(f"invalid shared stage inventory: {tables}")
+    return (SHARED_STAGE_TARGET_CANDIDATE, *tables)
+
+
+def shared_stage_target_filename(target: str) -> str:
+    target = str(target)
+    if target == SHARED_STAGE_TARGET_CANDIDATE:
+        return ".candidate-observation-stage.db"
+    config = PARALLEL_PAPER_STAGE_CONFIGS.get(target)
+    if not config:
+        raise ValueError(f"unknown shared stage target: {target}")
+    return str(config["filename"])
+
+
+def shared_stage_target_minimum_bytes(target: str) -> int:
+    return (
+        MIN_CANDIDATE_STAGE_CAP_BYTES
+        if str(target) == SHARED_STAGE_TARGET_CANDIDATE
+        else MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+    )
+
+
+def round_up_stage_page(value: Any) -> int:
+    try:
+        numeric = max(0, int(math.ceil(float(value))))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return (
+        (numeric + SHARED_STAGE_PAGE_SIZE - 1)
+        // SHARED_STAGE_PAGE_SIZE
+        * SHARED_STAGE_PAGE_SIZE
+    )
+
+
 def utc_iso(epoch: float | None = None) -> str:
     value = time.time() if epoch is None else epoch
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
@@ -401,6 +458,180 @@ def read_json_object(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def validated_shared_stage_budget_history(
+    payload: Any,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"accepted": False, "reason": "history_missing", "targets": {}}
+    if payload.get("schema_version") != SHARED_STAGE_BUDGET_SCHEMA_VERSION:
+        return {
+            "accepted": False,
+            "reason": "history_schema_mismatch",
+            "targets": {},
+        }
+    if payload.get("hash_canonicalization") != SHARED_STAGE_HASH_CANONICALIZATION:
+        return {
+            "accepted": False,
+            "reason": "history_hash_canonicalization_mismatch",
+            "targets": {},
+        }
+    plan_sha256 = str(payload.get("plan_sha256") or "")
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
+        or shared_stage_budget_plan_sha256(payload) != plan_sha256
+    ):
+        return {
+            "accepted": False,
+            "reason": "history_plan_hash_invalid",
+            "targets": {},
+        }
+    evidence_sha256 = str(payload.get("evidence_sha256") or "")
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256)
+        or shared_stage_budget_evidence_sha256(payload) != evidence_sha256
+    ):
+        return {
+            "accepted": False,
+            "reason": "history_evidence_hash_invalid",
+            "targets": {},
+        }
+    try:
+        history_total_cap = int(payload.get("total_cap_bytes"))
+        history_total_granted = int(payload.get("total_granted_bytes"))
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "accepted": False,
+            "reason": "history_total_invalid",
+            "targets": {},
+        }
+    if (
+        payload.get("allocation_mode")
+        != SHARED_STAGE_BUDGET_ALLOCATION_MODE
+        or payload.get("capacity_sufficient") is not True
+        or payload.get("grants_sum_matches_total_cap") is not True
+        or payload.get("fixed_percentage_allocation_used") is not False
+        or history_total_cap <= 0
+        or history_total_granted != history_total_cap
+    ):
+        return {
+            "accepted": False,
+            "reason": "history_plan_not_usable",
+            "targets": {},
+        }
+    raw_targets = payload.get("targets")
+    raw_active_targets = payload.get("active_targets")
+    if not isinstance(raw_targets, dict) or not isinstance(raw_active_targets, list):
+        return {
+            "accepted": False,
+            "reason": "history_shape_invalid",
+            "targets": {},
+        }
+    known_targets = {
+        SHARED_STAGE_TARGET_CANDIDATE,
+        *PARALLEL_PAPER_STAGE_TABLES,
+    }
+    active_targets = tuple(str(target) for target in raw_active_targets)
+    active_parallel_tables = active_targets[1:]
+    if (
+        not active_targets
+        or active_targets[0] != SHARED_STAGE_TARGET_CANDIDATE
+        or not parallel_paper_stage_inventory_valid(active_parallel_tables)
+        or active_targets
+        != shared_stage_target_names(active_parallel_tables)
+        or len(active_targets) != len(set(active_targets))
+        or any(target not in known_targets for target in active_targets)
+        or set(raw_targets) != set(active_targets)
+    ):
+        return {
+            "accepted": False,
+            "reason": "history_inventory_invalid",
+            "targets": {},
+        }
+    sanitized_targets: dict[str, dict[str, Any]] = {}
+    for target in active_targets:
+        raw = raw_targets.get(target)
+        if not isinstance(raw, dict):
+            return {
+                "accepted": False,
+                "reason": "history_target_invalid",
+                "targets": {},
+            }
+        try:
+            granted = int(raw.get("granted_cap_bytes"))
+            raw_high_water = raw.get("high_water_bytes")
+            if raw_high_water is None:
+                raw_high_water = raw.get("actual_usage_bytes")
+            high_water = int(raw_high_water)
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "accepted": False,
+                "reason": "history_numeric_invalid",
+                "targets": {},
+            }
+        if (
+            granted < shared_stage_target_minimum_bytes(target)
+            or granted % SHARED_STAGE_PAGE_SIZE != 0
+            or high_water < 0
+            or high_water > granted
+        ):
+            return {
+                "accepted": False,
+                "reason": "history_capacity_invalid",
+                "targets": {},
+            }
+        sanitized_targets[target] = {
+            "granted_cap_bytes": granted,
+            "high_water_bytes": high_water,
+            "copy_completed": raw.get("copy_completed") is True,
+            "cap_hit": raw.get("cap_hit") is True,
+            "evidence_source": str(
+                raw.get("evidence_source") or "worker_status"
+            )[:80],
+        }
+    if sum(
+        int(report["granted_cap_bytes"])
+        for report in sanitized_targets.values()
+    ) != history_total_granted:
+        return {
+            "accepted": False,
+            "reason": "history_total_invalid",
+            "targets": {},
+        }
+    cleanup_completed = payload.get("cleanup_completed") is True
+    stage_files_removed = payload.get("stage_files_removed") is True
+    no_unregistered = payload.get("no_unregistered_stage_files") is True
+    if payload.get("accepted") is True:
+        cleanup_completed = payload.get("cleanup_completed") is True
+        stage_files_removed = payload.get("stage_files_removed") is True
+        no_unregistered = payload.get("no_unregistered_stage_files") is True
+    accepted = bool(
+        cleanup_completed
+        and stage_files_removed
+        and no_unregistered
+    )
+    return {
+        "accepted": accepted,
+        "reason": "history_accepted" if accepted else "history_cleanup_invalid",
+        "attempt_id": str(payload.get("attempt_id") or "")[:80],
+        "active_targets": list(active_targets),
+        "targets": sanitized_targets if accepted else {},
+    }
+
+
+def shared_stage_budget_evidence_from_exception(
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        evidence = getattr(current, "shared_stage_budget", None)
+        if isinstance(evidence, dict):
+            return evidence
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def bounded_error_text(exc: BaseException, limit: int = 4096) -> str:
@@ -473,6 +704,23 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
     text = str(exc)
     known = (
         "source_read_lock_budget_exceeded",
+        "shared_stage_capacity_insufficient",
+        "shared_stage_estimate_timeout",
+        "shared_stage_estimate_query_plan_not_indexed",
+        "shared_stage_estimate_columns_missing",
+        "shared_stage_estimate_dbstat_unavailable",
+        "shared_stage_estimate_dbstat_missing",
+        "shared_stage_estimate_dbstat_invalid",
+        "shared_stage_estimate_row_count_missing",
+        "shared_stage_estimate_read_view_not_pinned",
+        "shared_stage_estimate_read_view_identity_invalid",
+        "shared_stage_estimate_duplicate_target",
+        "shared_stage_estimate_barrier_broken",
+        "shared_stage_estimate_candidate_signal_id_type_invalid",
+        "shared_stage_estimate_candidate_order_index_missing",
+        "shared_stage_estimate_candidate_order_index_invalid",
+        "shared_stage_budget_plan_missing",
+        "shared_stage_cleanup_failed",
         "parallel_paper_stage_column_contract_mismatch",
         "parallel_paper_stage_destination_schema_invalid",
         "parallel_paper_stage_destination_schema_mismatch",
@@ -589,6 +837,23 @@ def snapshot_failure_code(exc: BaseException) -> str:
     known = (
         "evaluator_snapshot_lock_held",
         "source_read_lock_budget_exceeded",
+        "shared_stage_capacity_insufficient",
+        "shared_stage_estimate_timeout",
+        "shared_stage_estimate_query_plan_not_indexed",
+        "shared_stage_estimate_columns_missing",
+        "shared_stage_estimate_dbstat_unavailable",
+        "shared_stage_estimate_dbstat_missing",
+        "shared_stage_estimate_dbstat_invalid",
+        "shared_stage_estimate_row_count_missing",
+        "shared_stage_estimate_read_view_not_pinned",
+        "shared_stage_estimate_read_view_identity_invalid",
+        "shared_stage_estimate_duplicate_target",
+        "shared_stage_estimate_barrier_broken",
+        "shared_stage_estimate_candidate_signal_id_type_invalid",
+        "shared_stage_estimate_candidate_order_index_missing",
+        "shared_stage_estimate_candidate_order_index_invalid",
+        "shared_stage_budget_plan_missing",
+        "shared_stage_cleanup_failed",
         "parallel_paper_stage_column_contract_mismatch",
         "parallel_paper_stage_destination_schema_invalid",
         "parallel_paper_stage_destination_schema_mismatch",
@@ -666,6 +931,48 @@ def snapshot_manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
             "rows_copied": report.get("rows_copied"),
         }
     disk = manifest.get("disk_preflight") if isinstance(manifest.get("disk_preflight"), dict) else {}
+    shared_budget = (
+        manifest.get("shared_stage_budget")
+        if isinstance(manifest.get("shared_stage_budget"), dict)
+        else {}
+    )
+    shared_targets = (
+        shared_budget.get("targets")
+        if isinstance(shared_budget.get("targets"), dict)
+        else {}
+    )
+    shared_budget_summary = {
+        "schema_version": shared_budget.get("schema_version"),
+        "attempt_id": shared_budget.get("attempt_id"),
+        "allocation_mode": shared_budget.get("allocation_mode"),
+        "plan_sha256": shared_budget.get("plan_sha256"),
+        "active_targets": shared_budget.get("active_targets") or [],
+        "total_cap_bytes": shared_budget.get("total_cap_bytes"),
+        "total_granted_bytes": shared_budget.get("total_granted_bytes"),
+        "actual_total_bytes": shared_budget.get("actual_total_bytes"),
+        "unconsumed_bytes": shared_budget.get("unconsumed_bytes"),
+        "capacity_sufficient": shared_budget.get("capacity_sufficient") is True,
+        "history_used": shared_budget.get("history_used") is True,
+        "fixed_percentage_allocation_used": (
+            shared_budget.get("fixed_percentage_allocation_used") is True
+        ),
+        "cleanup_completed": shared_budget.get("cleanup_completed") is True,
+        "no_unregistered_stage_files": (
+            shared_budget.get("no_unregistered_stage_files") is True
+        ),
+        "targets": {
+            str(target): {
+                "granted_cap_bytes": report.get("granted_cap_bytes"),
+                "actual_usage_bytes": report.get("actual_usage_bytes"),
+                "high_water_bytes": report.get("high_water_bytes"),
+                "copy_completed": report.get("copy_completed") is True,
+                "cap_hit": report.get("cap_hit") is True,
+                "within_grant": report.get("within_grant") is True,
+            }
+            for target, report in shared_targets.items()
+            if isinstance(report, dict)
+        },
+    }
     return {
         "schema_version": manifest.get("schema_version"),
         "snapshot_id": manifest.get("snapshot_id"),
@@ -691,6 +998,7 @@ def snapshot_manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
             "estimated_free_after_bytes": disk.get("estimated_free_after_bytes"),
         },
         "indexed_selection": indexed_selection,
+        "shared_stage_budget": shared_budget_summary,
         "promotion_allowed": False,
     }
 
@@ -741,6 +1049,262 @@ def snapshot_directory_report(path: Path, *, include_manifest: bool) -> dict[str
         "missing_entries": missing,
         "accepted": not unexpected and not missing,
     }
+
+
+def stage_file_usage(path: Path) -> dict[str, Any]:
+    logical_size = 0
+    allocated_size = 0
+    sidecars: dict[str, int] = {}
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        candidate = Path(f"{path}{suffix}")
+        if not candidate.is_file():
+            continue
+        details = candidate.stat()
+        size = max(0, int(details.st_size))
+        logical_size += size
+        allocated = max(
+            0,
+            int(getattr(details, "st_blocks", 0) or 0) * 512,
+        )
+        allocated_size += allocated or size
+        sidecars[candidate.name] = size
+    return {
+        "file_present": bool(sidecars),
+        "logical_size_bytes": logical_size,
+        "allocated_size_bytes": allocated_size,
+        "high_water_bytes": max(logical_size, allocated_size),
+        "file_count": len(sidecars),
+        "sidecar_sizes": sidecars,
+    }
+
+
+def capture_shared_stage_budget_failure(
+    partial_dir: Path,
+    plan: dict[str, Any] | None,
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    if not isinstance(plan, dict):
+        return None
+    targets = plan.get("targets")
+    active_targets = plan.get("active_targets")
+    if not isinstance(targets, dict) or not isinstance(active_targets, list):
+        return None
+    evidence = json.loads(json.dumps(plan))
+    evidence["accepted"] = False
+    evidence["captured_at"] = utc_iso()
+    evidence["captured_before_cleanup"] = True
+    evidence["cleanup_completed"] = False
+    failure_code = snapshot_failure_code(exc)
+    failure_details = snapshot_failure_details(exc)
+    evidence["failure_code"] = failure_code
+    evidence["failure_components"] = sorted(failure_details)
+    expected_stage_files: set[str] = set()
+    actual_total = 0
+    for target in active_targets:
+        report = evidence["targets"].get(target) or {}
+        filename = str(report.get("stage_filename") or "")
+        if not filename:
+            continue
+        expected_stage_files.update(
+            {filename, f"{filename}-journal", f"{filename}-wal", f"{filename}-shm"}
+        )
+        usage = stage_file_usage(partial_dir / filename)
+        high_water = int(usage["high_water_bytes"])
+        actual_total += high_water
+        grant = max(0, int(report.get("granted_cap_bytes") or 0))
+        target_failure = False
+        copy_completed = False
+        for details in failure_details.values():
+            stage = str(details.get("stage") or "")
+            code = str(details.get("error_code") or "")
+            if target in stage:
+                target_failure = True
+            copy_timing = details.get("copy_timing")
+            completed = (
+                copy_timing.get("completed_tables")
+                if isinstance(copy_timing, dict)
+                else None
+            )
+            completed_parallel = (
+                copy_timing.get("completed_parallel_stages")
+                if isinstance(copy_timing, dict)
+                else None
+            )
+            if (
+                target == SHARED_STAGE_TARGET_CANDIDATE
+                and isinstance(completed, dict)
+                and CANDIDATE_OBSERVATION_TABLE in completed
+            ):
+                copy_completed = True
+            if (
+                target != SHARED_STAGE_TARGET_CANDIDATE
+                and isinstance(completed_parallel, list)
+                and target in completed_parallel
+            ):
+                copy_completed = True
+            if target_failure and code == "parallel_paper_stage_budget_exceeded":
+                report["cap_hit"] = True
+        report.update(
+            {
+                "actual_usage_bytes": high_water,
+                "high_water_bytes": high_water,
+                "logical_high_water_bytes": int(usage["logical_size_bytes"]),
+                "allocated_high_water_bytes": int(
+                    usage["allocated_size_bytes"]
+                ),
+                "file_present": usage["file_present"],
+                "file_count": usage["file_count"],
+                "copy_completed": copy_completed,
+                "cap_hit": bool(
+                    report.get("cap_hit") is True
+                    or (
+                        grant > 0
+                        and high_water
+                        >= max(0, grant - SHARED_STAGE_PAGE_SIZE)
+                    )
+                ),
+                "evidence_source": "partial_stage_files_before_cleanup",
+                "within_grant": high_water <= grant if grant > 0 else False,
+                "utilization_ratio": (
+                    round(high_water / grant, 6) if grant > 0 else None
+                ),
+            }
+        )
+        evidence["targets"][target] = report
+    unregistered = sorted(
+        item.name
+        for item in partial_dir.iterdir()
+        if item.is_file()
+        and SHARED_STAGE_HIDDEN_FILE_RE.fullmatch(item.name)
+        and item.name not in expected_stage_files
+    ) if partial_dir.is_dir() else []
+    evidence["actual_total_bytes"] = actual_total
+    evidence["unconsumed_bytes"] = max(
+        0,
+        int(evidence.get("total_cap_bytes") or 0) - actual_total,
+    )
+    evidence["all_targets_within_grant"] = all(
+        (report or {}).get("within_grant") is True
+        for report in evidence["targets"].values()
+    )
+    evidence["unregistered_stage_files"] = unregistered
+    evidence["no_unregistered_stage_files"] = not unregistered
+    return evidence
+
+
+def finalize_shared_stage_budget_success(
+    plan: dict[str, Any],
+    paper_report: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = json.loads(json.dumps(plan))
+    targets = evidence.get("targets") or {}
+    candidate_usage = max(
+        0,
+        int(paper_report.get("temporary_candidate_stage_size_bytes") or 0),
+    )
+    actual_total = 0
+    for target in evidence.get("active_targets") or []:
+        report = targets.get(target) or {}
+        if target == SHARED_STAGE_TARGET_CANDIDATE:
+            actual = candidate_usage
+            actual_rows_copied = max(
+                0,
+                int(
+                    ((paper_report.get("selected_tables") or {}).get(
+                        CANDIDATE_OBSERVATION_TABLE
+                    ) or {}).get("rows_copied")
+                    or 0
+                ),
+            )
+        else:
+            stage_report = (
+                (paper_report.get("parallel_paper_stages") or {}).get(target)
+                or {}
+            )
+            actual = max(
+                0,
+                int(stage_report.get("stage_size_bytes") or 0),
+            )
+            actual_rows_copied = max(
+                0,
+                int(stage_report.get("rows_copied") or 0),
+            )
+        grant = max(0, int(report.get("granted_cap_bytes") or 0))
+        estimate = max(0, int(report.get("estimated_required_bytes") or 0))
+        estimate_evidence = report.get("estimate_evidence") or {}
+        estimated_rows = max(
+            0,
+            int(estimate_evidence.get("selected_row_count") or 0),
+        )
+        row_count_binding_mode = str(
+            estimate_evidence.get("row_count_binding_mode") or ""
+        )
+        row_count_bound = bool(
+            (
+                row_count_binding_mode == "exact_selected_rows"
+                and actual_rows_copied == estimated_rows
+            )
+            or (
+                row_count_binding_mode == "full_source_row_upper"
+                and actual_rows_copied <= estimated_rows
+            )
+        )
+        actual_total += actual
+        report.update(
+            {
+                "actual_usage_bytes": actual,
+                "high_water_bytes": actual,
+                "actual_rows_copied": actual_rows_copied,
+                "row_count_bound_to_snapshot": row_count_bound,
+                "within_estimated_upper_bound": (
+                    estimate > 0 and actual <= estimate
+                ),
+                "copy_completed": True,
+                "cap_hit": False,
+                "within_grant": grant > 0 and actual <= grant,
+                "utilization_ratio": (
+                    round(actual / grant, 6) if grant > 0 else None
+                ),
+                "evidence_source": "accepted_producer_stage_report",
+            }
+        )
+        targets[target] = report
+    evidence["targets"] = targets
+    evidence["actual_total_bytes"] = actual_total
+    evidence["unconsumed_bytes"] = max(
+        0,
+        int(evidence.get("total_cap_bytes") or 0) - actual_total,
+    )
+    evidence["all_targets_within_grant"] = all(
+        (report or {}).get("within_grant") is True
+        for report in targets.values()
+    )
+    evidence["all_targets_within_estimated_upper_bound"] = all(
+        (report or {}).get("within_estimated_upper_bound") is True
+        for report in targets.values()
+    )
+    evidence["all_target_row_counts_bound_to_snapshot"] = all(
+        (report or {}).get("row_count_bound_to_snapshot") is True
+        for report in targets.values()
+    )
+    evidence["captured_at"] = utc_iso()
+    evidence["captured_before_cleanup"] = True
+    evidence["cleanup_completed"] = True
+    evidence["stage_files_removed"] = True
+    evidence["unregistered_stage_files"] = []
+    evidence["no_unregistered_stage_files"] = True
+    evidence["accepted"] = bool(
+        plan.get("accepted") is True
+        and evidence["all_targets_within_grant"] is True
+        and evidence["all_targets_within_estimated_upper_bound"] is True
+        and evidence["all_target_row_counts_bound_to_snapshot"] is True
+        and evidence["actual_total_bytes"]
+        <= int(evidence.get("total_cap_bytes") or 0)
+    )
+    evidence["evidence_sha256"] = shared_stage_budget_evidence_sha256(
+        evidence
+    )
+    return evidence
 
 
 def write_bounded_manifest(
@@ -1264,6 +1828,861 @@ def selection_for_table(
     }
 
 
+def bounded_sqlite_value_bytes(value: Any) -> int:
+    if value is None:
+        return 1
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return 8
+    return len(str(value).encode("utf-8"))
+
+
+def ensure_source_dbstat(connection: sqlite3.Connection) -> str:
+    """Bind DBSTAT explicitly to the attached ``src`` schema.
+
+    The eponymous ``dbstat('src', 1)`` form can report the main database page
+    size for an attached database on some SQLite builds. A named TEMP virtual
+    table created with ``USING dbstat(src)`` keeps the schema binding and page
+    accounting unambiguous.
+    """
+    table_name = SOURCE_DBSTAT_VIRTUAL_TABLE
+    exists = connection.execute(
+        "SELECT 1 FROM temp.sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    if exists is None:
+        connection.execute(
+            f"CREATE VIRTUAL TABLE temp.{quote_identifier(table_name)} "
+            "USING dbstat(src)"
+        )
+    return table_name
+
+
+def source_table_storage_report(
+    connection: sqlite3.Connection,
+    table: str,
+) -> dict[str, int]:
+    """Return an explicitly aggregated DBSTAT physical upper-bound basis."""
+    dbstat_table = ensure_source_dbstat(connection)
+    row = connection.execute(
+        "SELECT COUNT(*) AS page_count, "
+        "COALESCE(SUM(payload), 0) AS payload_bytes, "
+        "COALESCE(SUM(unused), 0) AS unused_bytes, "
+        "COALESCE(MAX(mx_payload), 0) AS max_payload_bytes, "
+        "COALESCE(SUM(pgsize), 0) AS physical_bytes, "
+        "COALESCE(SUM(ncell), 0) AS cell_upper_count, "
+        "COALESCE(MIN(pgsize), 0) AS min_page_size, "
+        "COALESCE(MAX(pgsize), 0) AS max_page_size "
+        f"FROM temp.{quote_identifier(dbstat_table)} WHERE name=?",
+        (table,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"shared_stage_estimate_dbstat_missing:{table}")
+    page_count = max(0, int(row["page_count"] or 0))
+    payload_bytes = max(0, int(row["payload_bytes"] or 0))
+    unused_bytes = max(0, int(row["unused_bytes"] or 0))
+    max_payload_bytes = max(0, int(row["max_payload_bytes"] or 0))
+    physical_bytes = max(0, int(row["physical_bytes"] or 0))
+    cell_upper_count = max(0, int(row["cell_upper_count"] or 0))
+    min_page_size = max(0, int(row["min_page_size"] or 0))
+    max_page_size = max(0, int(row["max_page_size"] or 0))
+    source_page_size = int(
+        connection.execute("PRAGMA src.page_size").fetchone()[0] or 0
+    )
+    if physical_bytes <= 0 or page_count <= 0:
+        raise RuntimeError(
+            f"shared_stage_estimate_dbstat_invalid:{table}:empty_btree"
+        )
+    if (
+        source_page_size < 512
+        or source_page_size > 65536
+        or source_page_size & (source_page_size - 1)
+        or min_page_size != source_page_size
+        or max_page_size != source_page_size
+        or physical_bytes != page_count * source_page_size
+    ):
+        raise RuntimeError(
+            f"shared_stage_estimate_dbstat_invalid:{table}:page_accounting"
+        )
+    if payload_bytes > physical_bytes or unused_bytes > physical_bytes:
+        raise RuntimeError(
+            f"shared_stage_estimate_dbstat_invalid:{table}:payload_exceeds_physical"
+        )
+    if max_payload_bytes > payload_bytes:
+        raise RuntimeError(
+            f"shared_stage_estimate_dbstat_invalid:{table}:max_payload_invalid"
+        )
+    return {
+        "page_count": page_count,
+        "page_size": source_page_size,
+        "physical_bytes": physical_bytes,
+        "payload_bytes": payload_bytes,
+        "unused_bytes": unused_bytes,
+        "max_payload_bytes": max_payload_bytes,
+        "cell_upper_count": cell_upper_count,
+        "structural_overhead_bytes": physical_bytes - payload_bytes,
+    }
+
+
+def source_table_storage_bytes(
+    connection: sqlite3.Connection,
+    table: str,
+) -> int:
+    return source_table_storage_report(connection, table)["physical_bytes"]
+
+
+def shared_stage_physical_upper_bound(
+    *,
+    target: str,
+    selected_row_count: int,
+    storage: dict[str, int],
+    candidate_order_index_storage: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """Derive a deterministic stage-file upper bound without sample averages.
+
+    DBSTAT payload and mx_payload bound all logical record bytes. The complete
+    source-btree non-payload region bounds page headers, cell pointers, unused
+    bytes and overflow-page structure for any selected subset. Per-row constants
+    cover the extra rowid/record bytes introduced by the constraint-free stage.
+
+    Candidate staging uses a signal_id-only index. Its bound is derived from the
+    complete existing source signal_id index btree, not from candidate_id or an
+    average row sample. The source index already contains every source key,
+    interior separator and overflow page; the added per-cell and root reserve
+    covers rebuilding the selected subset in the 4096-byte stage database.
+    """
+    rows = max(0, int(selected_row_count))
+    minimum = shared_stage_target_minimum_bytes(target)
+    if rows == 0:
+        return {
+            "selected_payload_upper_bytes": 0,
+            "source_structural_overhead_bytes": int(
+                storage["structural_overhead_bytes"]
+            ),
+            "table_storage_upper_bytes": minimum,
+            "candidate_order_index_upper_bytes": 0,
+            "estimated_required_bytes": minimum,
+        }
+    source_payload = max(0, int(storage["payload_bytes"]))
+    max_payload = max(0, int(storage["max_payload_bytes"]))
+    selected_payload_upper = min(source_payload, rows * max_payload)
+    structural = max(0, int(storage["structural_overhead_bytes"]))
+    page_size = max(SHARED_STAGE_PAGE_SIZE, int(storage["page_size"]))
+    root_reserve = page_size * SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+    table_storage_upper = round_up_stage_page(
+        selected_payload_upper
+        + structural
+        + rows * SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
+        + root_reserve
+    )
+    candidate_index_upper = 0
+    if target == SHARED_STAGE_TARGET_CANDIDATE:
+        if not isinstance(candidate_order_index_storage, dict):
+            raise RuntimeError(
+                "shared_stage_estimate_candidate_order_index_missing"
+            )
+        index_physical = max(
+            0,
+            int(candidate_order_index_storage["physical_bytes"]),
+        )
+        index_cells = max(
+            0,
+            int(candidate_order_index_storage["cell_upper_count"]),
+        )
+        index_page_size = max(
+            SHARED_STAGE_PAGE_SIZE,
+            int(candidate_order_index_storage["page_size"]),
+        )
+        candidate_index_upper = round_up_stage_page(
+            index_physical
+            + index_cells * SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
+            + index_page_size * SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+        )
+    estimated_required = round_up_stage_page(
+        max(minimum, table_storage_upper + candidate_index_upper)
+    )
+    return {
+        "selected_payload_upper_bytes": selected_payload_upper,
+        "source_structural_overhead_bytes": structural,
+        "table_storage_upper_bytes": table_storage_upper,
+        "candidate_order_index_upper_bytes": candidate_index_upper,
+        "estimated_required_bytes": estimated_required,
+    }
+
+
+def estimate_shared_stage_target_requirement(
+    connection: sqlite3.Connection,
+    target: str,
+    *,
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    pinned_read_view: dict[str, Any] | None = None,
+    lock_deadline_monotonic: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Estimate one stage from the same pinned source view used for its copy.
+
+    When ``pinned_read_view`` is supplied, the caller must already hold a read
+    transaction on the attached ``src`` database.  The returned evidence is
+    bound to that read-view identity and is therefore not a pre-copy guess from
+    a different database state.
+    """
+    target = str(target)
+    table = (
+        CANDIDATE_OBSERVATION_TABLE
+        if target == SHARED_STAGE_TARGET_CANDIDATE
+        else target
+    )
+    if target != SHARED_STAGE_TARGET_CANDIDATE and target not in PARALLEL_PAPER_STAGE_CONFIGS:
+        raise ValueError(f"unknown shared stage estimate target: {target}")
+    if pinned_read_view is not None:
+        if not connection.in_transaction:
+            raise RuntimeError("shared_stage_estimate_read_view_not_pinned")
+        read_view_id = str(pinned_read_view.get("read_view_id") or "")
+        read_view_role = str(pinned_read_view.get("role") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", read_view_id) or not read_view_role:
+            raise RuntimeError("shared_stage_estimate_read_view_identity_invalid")
+    else:
+        read_view_id = None
+        read_view_role = None
+
+    started = time.monotonic()
+    estimate_deadline = started + SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+
+    def estimate_interrupted() -> int:
+        if cancel_event is not None and cancel_event.is_set():
+            return 1
+        now = time.monotonic()
+        if lock_deadline_monotonic is not None and now >= lock_deadline_monotonic:
+            return 1
+        return 1 if now >= estimate_deadline else 0
+
+    connection.set_progress_handler(estimate_interrupted, 10000)
+    try:
+        rule = DATABASE_SPECS["paper"]["tables"][table]
+        selection = selection_for_table(
+            connection,
+            table,
+            rule,
+            review_lower_epoch=review_lower_epoch,
+            long_lower_epoch=long_lower_epoch,
+            upper_epoch=upper_epoch,
+        )
+        plan = source_query_plan_evidence(connection, table, selection)
+        if plan["required"] and (
+            plan["uses_declared_index"] is not True
+            or plan["uses_range_search"] is not True
+            or plan["full_table_scan_detected"] is True
+        ):
+            raise RuntimeError(
+                f"shared_stage_estimate_query_plan_not_indexed:{table}"
+            )
+        column_rows = list(
+            connection.execute(
+                f"PRAGMA src.table_info({quote_identifier(table)})"
+            ).fetchall()
+        )
+        columns = [str(row["name"]) for row in column_rows]
+        declared_types = {
+            str(row["name"]): str(row["type"] or "")
+            for row in column_rows
+        }
+        if not columns:
+            raise RuntimeError(f"shared_stage_estimate_columns_missing:{table}")
+
+        candidate_order_source_index_name = None
+        candidate_order_source_index_columns: list[str] = []
+        candidate_order_index_storage: dict[str, int] | None = None
+        if target == SHARED_STAGE_TARGET_CANDIDATE:
+            if not declared_numeric_timestamp_type(
+                declared_types.get("signal_id", "")
+            ):
+                raise RuntimeError(
+                    "shared_stage_estimate_candidate_signal_id_type_invalid"
+                )
+            candidate_order_source_index_name = source_index_for_column(
+                connection,
+                table,
+                "signal_id",
+            )
+            if not candidate_order_source_index_name:
+                raise RuntimeError(
+                    "shared_stage_estimate_candidate_order_index_missing"
+                )
+            candidate_order_source_index_columns = source_index_columns(
+                connection,
+                candidate_order_source_index_name,
+            )
+            if candidate_order_source_index_columns != ["signal_id"]:
+                raise RuntimeError(
+                    "shared_stage_estimate_candidate_order_index_invalid"
+                )
+
+        relation = source_table_reference(table, selection)
+        selected_rows: int | None = None
+        total_rows: int | None = None
+        row_count_upper_basis = "table_dbstat_cell_upper"
+        sample_rows = 0
+        average_row_bytes: float | None = None
+        sample_max_row_bytes: int | None = None
+        estimate_strategy = "dbstat_physical_upper_bound_with_indexed_row_count"
+        storage = source_table_storage_report(connection, table)
+        if candidate_order_source_index_name:
+            candidate_order_index_storage = source_table_storage_report(
+                connection,
+                candidate_order_source_index_name,
+            )
+            total_rows = int(
+                candidate_order_index_storage["cell_upper_count"]
+            )
+            row_count_upper_basis = "exact_signal_index_entry_count"
+        else:
+            total_rows = int(storage["cell_upper_count"])
+
+        if selection.get("source_index_name"):
+            selected_rows = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM {relation} "
+                    f"WHERE {selection['predicate_sql']}",
+                    selection["parameters"],
+                ).fetchone()[0]
+            )
+            column_sql = ", ".join(
+                quote_identifier(column) for column in columns
+            )
+            anchor = quote_identifier(str(selection["indexed_time_anchor"]))
+            per_edge_limit = max(
+                1,
+                SHARED_STAGE_ESTIMATE_SAMPLE_ROWS // 2,
+            )
+            sampled = []
+            for direction in ("ASC", "DESC"):
+                sampled.extend(
+                    connection.execute(
+                        f"SELECT {column_sql} FROM {relation} "
+                        f"WHERE {selection['predicate_sql']} "
+                        f"ORDER BY {anchor} {direction} "
+                        f"LIMIT {per_edge_limit}",
+                        selection["parameters"],
+                    ).fetchall()
+                )
+            sample_rows = len(sampled)
+            if sample_rows:
+                diagnostic_sizes = [
+                    sum(bounded_sqlite_value_bytes(value) for value in row)
+                    + len(columns) * 2
+                    + 24
+                    for row in sampled
+                ]
+                average_row_bytes = sum(diagnostic_sizes) / sample_rows
+                sample_max_row_bytes = max(diagnostic_sizes)
+        else:
+            estimate_strategy = "dbstat_full_btree_physical_upper_bound"
+            selected_rows = total_rows
+
+        if selected_rows is None:
+            raise RuntimeError(
+                f"shared_stage_estimate_row_count_missing:{table}"
+            )
+        physical_upper = shared_stage_physical_upper_bound(
+            target=target,
+            selected_row_count=selected_rows,
+            storage=storage,
+            candidate_order_index_storage=candidate_order_index_storage,
+        )
+        estimated_bytes = int(physical_upper["estimated_required_bytes"])
+        minimum = shared_stage_target_minimum_bytes(target)
+        return {
+            "target": target,
+            "source_table": table,
+            "strategy": estimate_strategy,
+            "bounded": True,
+            "upper_bound_schema_version": (
+                SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION
+            ),
+            "upper_bound_formula": SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA,
+            "capacity_sample_used": False,
+            "source_measurement_trust_boundary": (
+                "same_pinned_read_view_as_copy"
+                if pinned_read_view is not None
+                else "standalone_diagnostic_connection"
+            ),
+            "pinned_read_view_id": read_view_id,
+            "pinned_read_view_role": read_view_role,
+            "estimate_started_after_pin": pinned_read_view is not None,
+            "estimate_completed_before_copy": pinned_read_view is not None,
+            "row_count_binding_mode": (
+                "exact_selected_rows"
+                if selection.get("source_index_name")
+                else "full_source_row_upper"
+            ),
+            "sample_limit_rows": SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
+            "selected_row_count": selected_rows,
+            "source_row_count_upper": total_rows,
+            "source_row_count_upper_basis": row_count_upper_basis,
+            "sample_rows": sample_rows,
+            "average_row_bytes_diagnostic": (
+                round(average_row_bytes, 3)
+                if average_row_bytes is not None
+                else None
+            ),
+            "sample_max_row_bytes_diagnostic": sample_max_row_bytes,
+            "source_dbstat_page_count": storage["page_count"],
+            "source_dbstat_page_size": storage["page_size"],
+            "source_dbstat_physical_bytes": storage["physical_bytes"],
+            "source_dbstat_payload_bytes": storage["payload_bytes"],
+            "source_dbstat_unused_bytes": storage["unused_bytes"],
+            "source_dbstat_max_payload_bytes": storage["max_payload_bytes"],
+            "source_dbstat_cell_upper_count": storage["cell_upper_count"],
+            "source_structural_overhead_bytes": physical_upper[
+                "source_structural_overhead_bytes"
+            ],
+            "selected_payload_upper_bytes": physical_upper[
+                "selected_payload_upper_bytes"
+            ],
+            "row_record_overhead_upper_bytes": (
+                SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
+            ),
+            "index_record_overhead_upper_bytes": (
+                SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
+            ),
+            "btree_root_reserve_pages": SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES,
+            "table_storage_upper_bytes": physical_upper[
+                "table_storage_upper_bytes"
+            ],
+            "candidate_order_index_upper_bytes": physical_upper[
+                "candidate_order_index_upper_bytes"
+            ],
+            "candidate_order_source_index_name": (
+                candidate_order_source_index_name
+            ),
+            "candidate_order_source_index_columns": (
+                candidate_order_source_index_columns
+            ),
+            "candidate_order_source_index_partial": (
+                False if candidate_order_source_index_name else None
+            ),
+            "candidate_order_source_index_dbstat_page_count": (
+                candidate_order_index_storage["page_count"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_page_size": (
+                candidate_order_index_storage["page_size"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_physical_bytes": (
+                candidate_order_index_storage["physical_bytes"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_payload_bytes": (
+                candidate_order_index_storage["payload_bytes"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_unused_bytes": (
+                candidate_order_index_storage["unused_bytes"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_max_payload_bytes": (
+                candidate_order_index_storage["max_payload_bytes"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_dbstat_cell_upper_count": (
+                candidate_order_index_storage["cell_upper_count"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "candidate_order_source_index_structural_overhead_bytes": (
+                candidate_order_index_storage["structural_overhead_bytes"]
+                if candidate_order_index_storage
+                else None
+            ),
+            "estimated_required_bytes": estimated_bytes,
+            "minimum_cap_bytes": minimum,
+            "source_index_name": selection.get("source_index_name"),
+            "source_query_plan": plan["details"],
+            "source_query_plan_uses_index": plan["uses_declared_index"],
+            "source_query_plan_uses_range_search": plan["uses_range_search"],
+            "source_query_plan_full_table_scan_detected": plan[
+                "full_table_scan_detected"
+            ],
+            "elapsed_sec": round(time.monotonic() - started, 6),
+        }
+    except sqlite3.OperationalError as exc:
+        error_text = str(exc).lower()
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("parallel_paper_stage_cancelled") from exc
+        if (
+            lock_deadline_monotonic is not None
+            and time.monotonic() >= lock_deadline_monotonic
+        ):
+            raise RuntimeError(
+                f"source_read_lock_budget_exceeded:paper:"
+                f"shared_stage_estimate:{table}"
+            ) from exc
+        if "dbstat" in error_text and (
+            "no such table" in error_text or "no such module" in error_text
+        ):
+            raise RuntimeError(
+                f"shared_stage_estimate_dbstat_unavailable:{table}"
+            ) from exc
+        if "interrupted" in error_text:
+            raise RuntimeError(
+                f"shared_stage_estimate_timeout:{table}"
+            ) from exc
+        if sqlite_busy_or_locked(exc):
+            raise RuntimeError(
+                f"snapshot_source_read_lock_timeout:paper:"
+                f"shared_stage_estimate:{table}"
+            ) from exc
+        raise
+    finally:
+        connection.set_progress_handler(None, 0)
+
+
+def estimate_shared_stage_requirements(
+    source: Path,
+    *,
+    parallel_stage_tables: tuple[str, ...],
+    review_lower_epoch: float,
+    long_lower_epoch: float,
+    upper_epoch: float,
+    busy_timeout_ms: int,
+) -> dict[str, Any]:
+    active_targets = shared_stage_target_names(parallel_stage_tables)
+    timeout_sec = max(0.001, float(busy_timeout_ms) / 1000.0)
+    connection = sqlite3.connect(":memory:", timeout=timeout_sec, uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
+    source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
+    connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
+    estimates: dict[str, dict[str, Any]] = {}
+    try:
+        for target in active_targets:
+            table = (
+                CANDIDATE_OBSERVATION_TABLE
+                if target == SHARED_STAGE_TARGET_CANDIDATE
+                else target
+            )
+            rule = DATABASE_SPECS["paper"]["tables"][table]
+            selection = selection_for_table(
+                connection,
+                table,
+                rule,
+                review_lower_epoch=review_lower_epoch,
+                long_lower_epoch=long_lower_epoch,
+                upper_epoch=upper_epoch,
+            )
+            plan = source_query_plan_evidence(connection, table, selection)
+            if plan["required"] and (
+                plan["uses_declared_index"] is not True
+                or plan["uses_range_search"] is not True
+                or plan["full_table_scan_detected"] is True
+            ):
+                raise RuntimeError(
+                    f"shared_stage_estimate_query_plan_not_indexed:{table}"
+                )
+            column_rows = list(
+                connection.execute(
+                    f"PRAGMA src.table_info({quote_identifier(table)})"
+                ).fetchall()
+            )
+            columns = [str(row["name"]) for row in column_rows]
+            declared_types = {
+                str(row["name"]): str(row["type"] or "")
+                for row in column_rows
+            }
+            if not columns:
+                raise RuntimeError(f"shared_stage_estimate_columns_missing:{table}")
+            candidate_order_source_index_name = None
+            candidate_order_source_index_columns: list[str] = []
+            candidate_order_index_storage: dict[str, int] | None = None
+            if target == SHARED_STAGE_TARGET_CANDIDATE:
+                if not declared_numeric_timestamp_type(
+                    declared_types.get("signal_id", "")
+                ):
+                    raise RuntimeError(
+                        "shared_stage_estimate_candidate_signal_id_type_invalid"
+                    )
+                candidate_order_source_index_name = source_index_for_column(
+                    connection,
+                    table,
+                    "signal_id",
+                )
+                if not candidate_order_source_index_name:
+                    raise RuntimeError(
+                        "shared_stage_estimate_candidate_order_index_missing"
+                    )
+                candidate_order_source_index_columns = source_index_columns(
+                    connection,
+                    candidate_order_source_index_name,
+                )
+                if candidate_order_source_index_columns != ["signal_id"]:
+                    raise RuntimeError(
+                        "shared_stage_estimate_candidate_order_index_invalid"
+                    )
+            started = time.monotonic()
+            deadline = started + SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+
+            def estimate_timeout() -> int:
+                return 1 if time.monotonic() >= deadline else 0
+
+            connection.set_progress_handler(estimate_timeout, 10000)
+            relation = source_table_reference(table, selection)
+            selected_rows: int | None = None
+            total_rows: int | None = None
+            sample_rows = 0
+            average_row_bytes: float | None = None
+            sample_max_row_bytes: int | None = None
+            estimate_strategy = "dbstat_physical_upper_bound_with_indexed_row_count"
+            storage: dict[str, int] = {}
+            try:
+                storage = source_table_storage_report(connection, table)
+                if candidate_order_source_index_name:
+                    candidate_order_index_storage = source_table_storage_report(
+                        connection,
+                        candidate_order_source_index_name,
+                    )
+                    # Rowid-table DBSTAT ncell includes interior separator cells.
+                    # A single-column ordinary index has exactly one entry per
+                    # source row across its full btree, so use that entry count
+                    # as the candidate source-row upper/exact count.
+                    total_rows = int(
+                        candidate_order_index_storage["cell_upper_count"]
+                    )
+                    row_count_upper_basis = "exact_signal_index_entry_count"
+                else:
+                    total_rows = int(storage["cell_upper_count"])
+                    row_count_upper_basis = "table_dbstat_cell_upper"
+                if selection.get("source_index_name"):
+                    selected_rows = int(
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {relation} "
+                            f"WHERE {selection['predicate_sql']}",
+                            selection["parameters"],
+                        ).fetchone()[0]
+                    )
+                    column_sql = ", ".join(
+                        quote_identifier(column) for column in columns
+                    )
+                    anchor = quote_identifier(
+                        str(selection["indexed_time_anchor"])
+                    )
+                    per_edge_limit = max(
+                        1,
+                        SHARED_STAGE_ESTIMATE_SAMPLE_ROWS // 2,
+                    )
+                    sampled = []
+                    for direction in ("ASC", "DESC"):
+                        sampled.extend(
+                            connection.execute(
+                                f"SELECT {column_sql} FROM {relation} "
+                                f"WHERE {selection['predicate_sql']} "
+                                f"ORDER BY {anchor} {direction} "
+                                f"LIMIT {per_edge_limit}",
+                                selection["parameters"],
+                            ).fetchall()
+                        )
+                    sample_rows = len(sampled)
+                    if sample_rows:
+                        diagnostic_sizes = [
+                            sum(bounded_sqlite_value_bytes(value) for value in row)
+                            + len(columns) * 2
+                            + 24
+                            for row in sampled
+                        ]
+                        average_row_bytes = sum(diagnostic_sizes) / sample_rows
+                        sample_max_row_bytes = max(diagnostic_sizes)
+                else:
+                    estimate_strategy = "dbstat_full_btree_physical_upper_bound"
+                    # A table without a validated range index reserves the full
+                    # btree cell count and payload. It may not use a normalized
+                    # timestamp scan to claim a smaller capacity requirement.
+                    selected_rows = total_rows
+            except sqlite3.OperationalError as exc:
+                error_text = str(exc).lower()
+                if "dbstat" in error_text and (
+                    "no such table" in error_text
+                    or "no such module" in error_text
+                ):
+                    raise RuntimeError(
+                        f"shared_stage_estimate_dbstat_unavailable:{table}"
+                    ) from exc
+                if "interrupted" in error_text:
+                    raise RuntimeError(
+                        f"shared_stage_estimate_timeout:{table}"
+                    ) from exc
+                if sqlite_busy_or_locked(exc):
+                    raise RuntimeError(
+                        f"snapshot_source_read_lock_timeout:paper:"
+                        f"shared_stage_estimate:{table}"
+                    ) from exc
+                raise
+            finally:
+                connection.set_progress_handler(None, 0)
+            minimum = shared_stage_target_minimum_bytes(target)
+            if selected_rows is None:
+                raise RuntimeError(
+                    f"shared_stage_estimate_row_count_missing:{table}"
+                )
+            physical_upper = shared_stage_physical_upper_bound(
+                target=target,
+                selected_row_count=selected_rows,
+                storage=storage,
+                candidate_order_index_storage=candidate_order_index_storage,
+            )
+            estimated_bytes = int(physical_upper["estimated_required_bytes"])
+            estimates[target] = {
+                "target": target,
+                "source_table": table,
+                "strategy": estimate_strategy,
+                "bounded": True,
+                "upper_bound_schema_version": (
+                    SHARED_STAGE_PHYSICAL_UPPER_BOUND_SCHEMA_VERSION
+                ),
+                "upper_bound_formula": (
+                    SHARED_STAGE_PHYSICAL_UPPER_BOUND_FORMULA
+                ),
+                "capacity_sample_used": False,
+                "source_measurement_trust_boundary": (
+                    "producer_attested_bound_to_immutable_snapshot_rows_and_high_water"
+                ),
+                "row_count_binding_mode": (
+                    "exact_selected_rows"
+                    if selection.get("source_index_name")
+                    else "full_source_row_upper"
+                ),
+                "sample_limit_rows": SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
+                "selected_row_count": selected_rows,
+                "source_row_count_upper": total_rows,
+                "source_row_count_upper_basis": row_count_upper_basis,
+                "sample_rows": sample_rows,
+                "average_row_bytes_diagnostic": (
+                    round(average_row_bytes, 3)
+                    if average_row_bytes is not None
+                    else None
+                ),
+                "sample_max_row_bytes_diagnostic": sample_max_row_bytes,
+                "source_dbstat_page_count": storage["page_count"],
+                "source_dbstat_page_size": storage["page_size"],
+                "source_dbstat_physical_bytes": storage["physical_bytes"],
+                "source_dbstat_payload_bytes": storage["payload_bytes"],
+                "source_dbstat_unused_bytes": storage["unused_bytes"],
+                "source_dbstat_max_payload_bytes": storage[
+                    "max_payload_bytes"
+                ],
+                "source_dbstat_cell_upper_count": storage[
+                    "cell_upper_count"
+                ],
+                "source_structural_overhead_bytes": physical_upper[
+                    "source_structural_overhead_bytes"
+                ],
+                "selected_payload_upper_bytes": physical_upper[
+                    "selected_payload_upper_bytes"
+                ],
+                "row_record_overhead_upper_bytes": (
+                    SHARED_STAGE_ROW_RECORD_OVERHEAD_UPPER_BYTES
+                ),
+                "index_record_overhead_upper_bytes": (
+                    SHARED_STAGE_INDEX_RECORD_OVERHEAD_UPPER_BYTES
+                ),
+                "btree_root_reserve_pages": (
+                    SHARED_STAGE_BTREE_ROOT_RESERVE_PAGES
+                ),
+                "table_storage_upper_bytes": physical_upper[
+                    "table_storage_upper_bytes"
+                ],
+                "candidate_order_index_upper_bytes": physical_upper[
+                    "candidate_order_index_upper_bytes"
+                ],
+                "candidate_order_source_index_name": (
+                    candidate_order_source_index_name
+                ),
+                "candidate_order_source_index_columns": (
+                    candidate_order_source_index_columns
+                ),
+                "candidate_order_source_index_partial": (
+                    False if candidate_order_source_index_name else None
+                ),
+                "candidate_order_source_index_dbstat_page_count": (
+                    candidate_order_index_storage["page_count"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_page_size": (
+                    candidate_order_index_storage["page_size"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_physical_bytes": (
+                    candidate_order_index_storage["physical_bytes"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_payload_bytes": (
+                    candidate_order_index_storage["payload_bytes"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_unused_bytes": (
+                    candidate_order_index_storage["unused_bytes"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_max_payload_bytes": (
+                    candidate_order_index_storage["max_payload_bytes"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_dbstat_cell_upper_count": (
+                    candidate_order_index_storage["cell_upper_count"]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "candidate_order_source_index_structural_overhead_bytes": (
+                    candidate_order_index_storage[
+                        "structural_overhead_bytes"
+                    ]
+                    if candidate_order_index_storage
+                    else None
+                ),
+                "estimated_required_bytes": estimated_bytes,
+                "minimum_cap_bytes": minimum,
+                "source_index_name": selection.get("source_index_name"),
+                "source_query_plan": plan["details"],
+                "source_query_plan_uses_index": plan["uses_declared_index"],
+                "source_query_plan_uses_range_search": plan["uses_range_search"],
+                "source_query_plan_full_table_scan_detected": plan[
+                    "full_table_scan_detected"
+                ],
+                "elapsed_sec": round(time.monotonic() - started, 6),
+            }
+    finally:
+        try:
+            connection.execute("DETACH DATABASE src")
+        except sqlite3.Error:
+            pass
+        connection.close()
+    return {
+        "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+        "generated_at": utc_iso(),
+        "active_targets": list(active_targets),
+        "targets": estimates,
+        "all_estimates_bounded": all(
+            report.get("bounded") is True for report in estimates.values()
+        ),
+    }
+
+
 def canonical_json_object(raw: Any, *, table: str, signal_id: Any) -> tuple[dict[str, Any], str]:
     try:
         value = json.loads(raw)
@@ -1318,6 +2737,10 @@ def candidate_observation_projection_supported(
         )
     )
     names = {str(row["name"]) for row in columns}
+    declared_types = {
+        str(row["name"]): str(row["type"] or "")
+        for row in columns
+    }
     id_columns = [row for row in columns if str(row["name"]) == "id"]
     id_is_rowid_alias = bool(
         len(id_columns) == 1
@@ -1326,7 +2749,10 @@ def candidate_observation_projection_supported(
     )
     return (
         CANDIDATE_OBSERVATION_PROJECTION_REQUIRED_COLUMNS.issubset(names)
-        and id_is_rowid_alias,
+        and id_is_rowid_alias
+        and declared_numeric_timestamp_type(
+            declared_types.get("signal_id", "")
+        ),
         columns,
     )
 
@@ -1408,7 +2834,7 @@ def copy_candidate_observation_projection(
         f"SELECT {selected_columns} "
         f"FROM {source_relation} "
         f"WHERE {where_sql} "
-        f"ORDER BY {quote_identifier('signal_id')}, {quote_identifier('candidate_id')}",
+        f"ORDER BY {quote_identifier('signal_id')}",
         tuple(parameters),
     )
     source_digest = hashlib.sha256()
@@ -1430,7 +2856,10 @@ def copy_candidate_observation_projection(
         f"{quote_identifier('common_payload_json')}) VALUES (?,?,?)"
     )
     for signal_id, grouped in itertools.groupby(cursor, key=lambda row: row["signal_id"]):
-        rows = list(grouped)
+        rows = sorted(
+            list(grouped),
+            key=lambda row: str(row["candidate_id"]),
+        )
         payloads: list[dict[str, Any]] = []
         for row in rows:
             payload, canonical = canonical_json_object(
@@ -1514,13 +2943,15 @@ def stage_candidate_observation_rows(
         f"CREATE TABLE {stage_relation} AS "
         f"SELECT * FROM {source_relation} WHERE 0"
     )
-    # Build the ordering index while the staging table is empty. This avoids a
-    # file-backed sorter during CREATE INDEX; subsequent pages are maintained
-    # incrementally by INSERT and remain bounded by candidate_stage.max_page_count.
+    # Build the ordering index while the staging table is empty. Keep only the
+    # numeric signal_id in the SQLite key: candidate_id can be arbitrarily wide
+    # and is sorted within each signal group in Python after the source lock is
+    # released. Subsequent pages are maintained incrementally by INSERT and
+    # remain bounded by candidate_stage.max_page_count.
     connection.execute(
         f"CREATE INDEX {quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
         f"{quote_identifier(CANDIDATE_STAGE_ORDER_INDEX)} "
-        f"ON {quote_identifier(CANDIDATE_STAGE_TABLE)}(signal_id,candidate_id)"
+        f"ON {quote_identifier(CANDIDATE_STAGE_TABLE)}(signal_id)"
     )
     connection.execute(
         f"INSERT INTO {stage_relation} "
@@ -1543,7 +2974,7 @@ def prepare_candidate_stage_for_projection(
     plan_rows = connection.execute(
         f"EXPLAIN QUERY PLAN SELECT signal_id,candidate_id,payload_json "
         f"FROM {candidate_stage_relation()} "
-        f"ORDER BY signal_id,candidate_id"
+        f"ORDER BY signal_id"
     ).fetchall()
     details = [str(row[3]) for row in plan_rows]
     uses_order_index = any(CANDIDATE_STAGE_ORDER_INDEX in detail for detail in details)
@@ -2694,6 +4125,133 @@ def snapshot_one(
     }
 
 
+class SharedStageBudgetCoordinator:
+    """Build one global stage plan from the exact pinned views being copied."""
+
+    def __init__(
+        self,
+        *,
+        total_cap_bytes: int,
+        parallel_stage_tables: tuple[str, ...],
+        history: dict[str, Any] | None,
+        attempt_id: str,
+    ) -> None:
+        self.active_targets = shared_stage_target_names(parallel_stage_tables)
+        self.total_cap_bytes = int(total_cap_bytes)
+        self.parallel_stage_tables = tuple(parallel_stage_tables)
+        self.history = history
+        self.attempt_id = str(attempt_id)
+        self._lock = threading.Lock()
+        self._estimates: dict[str, dict[str, Any]] = {}
+        self._plan: dict[str, Any] | None = None
+        self._error: BaseException | None = None
+        self._error_target: str | None = None
+        self._barrier = threading.Barrier(
+            len(self.active_targets),
+            action=self._finalize_plan,
+        )
+
+    def _finalize_plan(self) -> None:
+        try:
+            with self._lock:
+                estimates = {
+                    "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+                    "generated_at": utc_iso(),
+                    "active_targets": list(self.active_targets),
+                    "all_estimates_bounded": all(
+                        report.get("bounded") is True
+                        for report in self._estimates.values()
+                    ),
+                    "all_estimates_pinned_read_view_bound": all(
+                        report.get("source_measurement_trust_boundary")
+                        == "same_pinned_read_view_as_copy"
+                        and report.get("estimate_started_after_pin") is True
+                        and report.get("estimate_completed_before_copy") is True
+                        and bool(report.get("pinned_read_view_id"))
+                        and bool(report.get("pinned_read_view_role"))
+                        for report in self._estimates.values()
+                    ),
+                    "targets": json.loads(json.dumps(self._estimates)),
+                }
+            plan = build_shared_stage_budget_plan(
+                total_cap_bytes=self.total_cap_bytes,
+                parallel_stage_tables=self.parallel_stage_tables,
+                estimates=estimates,
+                history=self.history,
+                attempt_id=self.attempt_id,
+                require_pinned_view_binding=True,
+            )
+            if plan.get("accepted") is not True:
+                raise RuntimeError("shared_stage_capacity_insufficient")
+            with self._lock:
+                self._plan = plan
+        except BaseException as exc:
+            with self._lock:
+                self._error = exc
+
+    def submit_estimate(
+        self,
+        target: str,
+        estimate: dict[str, Any],
+        *,
+        timeout_sec: float,
+    ) -> int:
+        target = str(target)
+        if target not in self.active_targets:
+            raise ValueError(f"shared stage target not active: {target}")
+        with self._lock:
+            if target in self._estimates:
+                raise RuntimeError(
+                    f"shared_stage_estimate_duplicate_target:{target}"
+                )
+            self._estimates[target] = json.loads(json.dumps(estimate))
+        try:
+            self._barrier.wait(timeout=max(0.001, float(timeout_sec)))
+        except threading.BrokenBarrierError as exc:
+            with self._lock:
+                error = self._error
+            if error is not None:
+                raise error
+            raise RuntimeError(
+                "shared_stage_estimate_barrier_broken"
+            ) from exc
+        with self._lock:
+            error = self._error
+            plan = self._plan
+        if error is not None:
+            raise error
+        if not isinstance(plan, dict):
+            raise RuntimeError("shared_stage_budget_plan_missing")
+        return int(plan["targets"][target]["granted_cap_bytes"])
+
+    def abort(
+        self,
+        exc: BaseException | None = None,
+        *,
+        target: str | None = None,
+    ) -> None:
+        with self._lock:
+            if self._error is None and exc is not None:
+                self._error = exc
+                self._error_target = str(target) if target else None
+        try:
+            self._barrier.abort()
+        except threading.BrokenBarrierError:
+            pass
+
+    def error_target(self) -> str | None:
+        with self._lock:
+            return self._error_target
+
+    def plan(self) -> dict[str, Any] | None:
+        with self._lock:
+            return (
+                json.loads(json.dumps(self._plan))
+                if isinstance(self._plan, dict)
+                else None
+            )
+
+
 def build_parallel_table_stage(
     *,
     source: Path,
@@ -2705,7 +4263,8 @@ def build_parallel_table_stage(
     review_lower_epoch: float,
     long_lower_epoch: float,
     upper_epoch: float,
-    budget_bytes: int,
+    budget_bytes: int | None = None,
+    budget_coordinator: SharedStageBudgetCoordinator | None = None,
     busy_timeout_ms: int,
     max_source_read_lock_sec: float,
     start_event: threading.Event,
@@ -2727,7 +4286,7 @@ def build_parallel_table_stage(
         connection.execute("PRAGMA temp_store=FILE")
         page_size = 4096
         connection.execute(f"PRAGMA page_size={page_size}")
-        connection.execute(f"PRAGMA max_page_count={max(1, int(budget_bytes) // page_size)}")
+        resolved_budget_bytes = max(0, int(budget_bytes or 0))
         source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
         progress["stage"] = "attach_source"
         connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
@@ -2750,6 +4309,7 @@ def build_parallel_table_stage(
         pin_report = {
             "role": role,
             "table": table,
+            "read_view_id": os.urandom(16).hex(),
             "pinned_started_at": utc_iso(pin_started),
             "pinned_finished_at": utc_iso(pin_finished),
             "pinned_started_epoch": pin_started,
@@ -2759,6 +4319,37 @@ def build_parallel_table_stage(
             "source_read_lock_limit_sec": float(max_source_read_lock_sec),
             **source_page_report,
         }
+        if budget_coordinator is not None:
+            progress["stage"] = f"shared_stage_estimate:{table}"
+            estimate = estimate_shared_stage_target_requirement(
+                connection,
+                table,
+                review_lower_epoch=review_lower_epoch,
+                long_lower_epoch=long_lower_epoch,
+                upper_epoch=upper_epoch,
+                pinned_read_view=pin_report,
+                lock_deadline_monotonic=lock_deadline,
+                cancel_event=cancel_event,
+            )
+            connection.set_progress_handler(
+                interrupt_expired_or_cancelled,
+                10000,
+            )
+            resolved_budget_bytes = budget_coordinator.submit_estimate(
+                table,
+                estimate,
+                timeout_sec=max(
+                    0.001,
+                    lock_deadline - time.monotonic(),
+                ),
+            )
+        if resolved_budget_bytes < MIN_PARALLEL_PAPER_STAGE_CAP_BYTES:
+            raise RuntimeError(
+                f"shared_stage_capacity_insufficient:{table}"
+            )
+        connection.execute(
+            f"PRAGMA max_page_count={max(1, resolved_budget_bytes // page_size)}"
+        )
         progress["stage"] = "parallel_pinned_barrier"
         pinned_barrier.wait(timeout=30)
         while not copy_start_event.wait(timeout=0.1):
@@ -2792,7 +4383,7 @@ def build_parallel_table_stage(
         connection.close()
         connection = None
         stage_size_bytes = int(destination.stat().st_size)
-        if stage_size_bytes <= 0 or stage_size_bytes > int(budget_bytes):
+        if stage_size_bytes <= 0 or stage_size_bytes > resolved_budget_bytes:
             raise RuntimeError("parallel_paper_stage_budget_exceeded")
         quick_check = sqlite3.connect(destination)
         quick_check.row_factory = sqlite3.Row
@@ -2829,9 +4420,9 @@ def build_parallel_table_stage(
             "table": table,
             "stage_path": str(destination.resolve()),
             "stage_size_bytes": stage_size_bytes,
-            "stage_budget_bytes": int(budget_bytes),
+            "stage_budget_bytes": resolved_budget_bytes,
             "stage_page_size": page_size,
-            "stage_budget_passed": stage_size_bytes <= int(budget_bytes),
+            "stage_budget_passed": stage_size_bytes <= resolved_budget_bytes,
             "quick_check": quick_check_rows,
             "table_report": table_report,
             "deferred_indexes": deferred_indexes,
@@ -2902,11 +4493,14 @@ def snapshot_all_concurrently(
     long_lower_epoch: float,
     upper_epoch: float,
     database_budgets: dict[str, int],
-    candidate_stage_budget_bytes: int,
-    parallel_paper_stage_budget_bytes: dict[str, int],
     expected_parallel_paper_stage_tables: tuple[str, ...],
     busy_timeout_ms: int,
     max_source_read_lock_sec: float,
+    candidate_stage_budget_bytes: int | None = None,
+    parallel_paper_stage_budget_bytes: dict[str, int] | None = None,
+    shared_stage_total_cap_bytes: int | None = None,
+    shared_stage_history: dict[str, Any] | None = None,
+    shared_stage_attempt_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     names = tuple(DATABASE_SPECS)
     start_barrier = threading.Barrier(len(names))
@@ -2914,10 +4508,19 @@ def snapshot_all_concurrently(
     reports: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     result_lock = threading.Lock()
+    dynamic_shared_budget = shared_stage_total_cap_bytes is not None
+    fixed_parallel_stage_budgets = dict(
+        parallel_paper_stage_budget_bytes or {}
+    )
+    shared_budget_coordinator_holder: dict[
+        str,
+        SharedStageBudgetCoordinator,
+    ] = {}
 
     def worker(name: str) -> None:
         connection = None
         parallel_stage_runtimes: dict[str, dict[str, Any]] = {}
+        shared_budget_coordinator: SharedStageBudgetCoordinator | None = None
         progress = {"stage": "open_destination"}
         try:
             source = source_paths[name]
@@ -2946,7 +4549,25 @@ def snapshot_all_concurrently(
                     raise RuntimeError(
                         "parallel_paper_stage_failed:source_inventory_drift"
                     )
-                if set(parallel_paper_stage_budget_bytes) != set(
+                if dynamic_shared_budget:
+                    if (
+                        shared_stage_total_cap_bytes is None
+                        or int(shared_stage_total_cap_bytes) <= 0
+                        or not shared_stage_attempt_id
+                    ):
+                        raise RuntimeError(
+                            "shared_stage_budget_plan_missing"
+                        )
+                    shared_budget_coordinator = SharedStageBudgetCoordinator(
+                        total_cap_bytes=int(shared_stage_total_cap_bytes),
+                        parallel_stage_tables=active_parallel_stage_tables,
+                        history=shared_stage_history,
+                        attempt_id=str(shared_stage_attempt_id),
+                    )
+                    shared_budget_coordinator_holder["paper"] = (
+                        shared_budget_coordinator
+                    )
+                elif set(fixed_parallel_stage_budgets) != set(
                     active_parallel_stage_tables
                 ):
                     raise RuntimeError(
@@ -2967,10 +4588,27 @@ def snapshot_all_concurrently(
                 connection.execute(
                     f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.page_size={stage_page_size}"
                 )
-                stage_max_pages = max(1, int(candidate_stage_budget_bytes) // stage_page_size)
-                connection.execute(
-                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}.max_page_count={stage_max_pages}"
+                resolved_candidate_stage_budget = max(
+                    0,
+                    int(candidate_stage_budget_bytes or 0),
                 )
+                if not dynamic_shared_budget:
+                    if (
+                        resolved_candidate_stage_budget
+                        < MIN_CANDIDATE_STAGE_CAP_BYTES
+                    ):
+                        raise RuntimeError(
+                            "shared_stage_capacity_insufficient:"
+                            f"{SHARED_STAGE_TARGET_CANDIDATE}"
+                        )
+                    stage_max_pages = max(
+                        1,
+                        resolved_candidate_stage_budget // stage_page_size,
+                    )
+                    connection.execute(
+                        f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
+                        f"max_page_count={stage_max_pages}"
+                    )
                 parallel_pin_barrier = threading.Barrier(
                     1 + len(active_parallel_stage_tables)
                 )
@@ -3003,9 +4641,16 @@ def snapshot_all_concurrently(
                                 review_lower_epoch=review_lower_epoch,
                                 long_lower_epoch=long_lower_epoch,
                                 upper_epoch=upper_epoch,
-                                budget_bytes=int(
-                                    parallel_paper_stage_budget_bytes[stage_table]
+                                budget_bytes=(
+                                    None
+                                    if dynamic_shared_budget
+                                    else int(
+                                        fixed_parallel_stage_budgets[
+                                            stage_table
+                                        ]
+                                    )
                                 ),
+                                budget_coordinator=shared_budget_coordinator,
                                 busy_timeout_ms=busy_timeout_ms,
                                 max_source_read_lock_sec=max_source_read_lock_sec,
                                 start_event=stage_start,
@@ -3014,6 +4659,11 @@ def snapshot_all_concurrently(
                                 cancel_event=stage_cancel,
                             )
                         except Exception as stage_exc:
+                            if shared_budget_coordinator is not None:
+                                shared_budget_coordinator.abort(
+                                    stage_exc,
+                                    target=stage_table,
+                                )
                             state["exception"] = stage_exc
                             state["error"] = {
                                 "error_code": snapshot_component_failure_code(
@@ -3059,6 +4709,7 @@ def snapshot_all_concurrently(
             pin_finished = time.time()
             pin_report = {
                 "role": f"{name}_main_selective_copy",
+                "read_view_id": os.urandom(16).hex(),
                 "pinned_started_at": utc_iso(pin_started),
                 "pinned_finished_at": utc_iso(pin_finished),
                 "pinned_started_epoch": pin_started,
@@ -3068,6 +4719,72 @@ def snapshot_all_concurrently(
                 "source_read_lock_limit_sec": float(max_source_read_lock_sec),
                 **source_page_reports[name],
             }
+            if name == "paper" and shared_budget_coordinator is not None:
+                progress["stage"] = (
+                    f"shared_stage_estimate:"
+                    f"{SHARED_STAGE_TARGET_CANDIDATE}"
+                )
+                candidate_estimate = estimate_shared_stage_target_requirement(
+                    connection,
+                    SHARED_STAGE_TARGET_CANDIDATE,
+                    review_lower_epoch=review_lower_epoch,
+                    long_lower_epoch=long_lower_epoch,
+                    upper_epoch=upper_epoch,
+                    pinned_read_view=pin_report,
+                    lock_deadline_monotonic=lock_deadline,
+                )
+                connection.set_progress_handler(
+                    interrupt_expired_read_view,
+                    10000,
+                )
+                try:
+                    resolved_candidate_stage_budget = (
+                        shared_budget_coordinator.submit_estimate(
+                            SHARED_STAGE_TARGET_CANDIDATE,
+                            candidate_estimate,
+                            timeout_sec=max(
+                                0.001,
+                                lock_deadline - time.monotonic(),
+                            ),
+                        )
+                    )
+                except BaseException:
+                    root_target = shared_budget_coordinator.error_target()
+                    if root_target in parallel_stage_runtimes:
+                        root_exception = parallel_stage_runtimes[
+                            root_target
+                        ]["state"].get("exception")
+                        if root_exception is not None:
+                            progress["stage"] = (
+                                f"copy_table:{root_target}"
+                            )
+                            progress["current_table"] = root_target
+                            raise root_exception
+                    for table, runtime in parallel_stage_runtimes.items():
+                        stage_exception = runtime["state"].get(
+                            "exception"
+                        )
+                        if stage_exception is not None:
+                            progress["stage"] = f"copy_table:{table}"
+                            progress["current_table"] = table
+                            raise stage_exception
+                    raise
+                if (
+                    resolved_candidate_stage_budget
+                    < MIN_CANDIDATE_STAGE_CAP_BYTES
+                ):
+                    raise RuntimeError(
+                        "shared_stage_capacity_insufficient:"
+                        f"{SHARED_STAGE_TARGET_CANDIDATE}"
+                    )
+                stage_max_pages = max(
+                    1,
+                    resolved_candidate_stage_budget // stage_page_size,
+                )
+                connection.execute(
+                    f"PRAGMA {quote_identifier(CANDIDATE_STAGE_SCHEMA)}."
+                    f"max_page_count={stage_max_pages}"
+                )
             if parallel_stage_runtimes:
                 progress["stage"] = "paper_parallel_pinned_barrier"
                 try:
@@ -3102,10 +4819,20 @@ def snapshot_all_concurrently(
                 ),
                 progress=progress,
             )
+            if name == "paper" and shared_budget_coordinator is not None:
+                pinned_plan = shared_budget_coordinator.plan()
+                if not isinstance(pinned_plan, dict):
+                    raise RuntimeError("shared_stage_budget_plan_missing")
+                report["shared_stage_budget_plan"] = pinned_plan
+                report[
+                    "shared_stage_estimates_bound_to_copy_read_views"
+                ] = True
             with result_lock:
                 reports[name] = report
         except Exception as exc:
             sqlite_errorcode, sqlite_errorname = sqlite_error_identity(exc)
+            if shared_budget_coordinator is not None:
+                shared_budget_coordinator.abort(exc)
             if parallel_stage_runtimes:
                 for runtime in parallel_stage_runtimes.values():
                     runtime["cancel_event"].set()
@@ -3119,6 +4846,12 @@ def snapshot_all_concurrently(
                     pass
                 for runtime in parallel_stage_runtimes.values():
                     runtime["thread"].join(timeout=30)
+            completed_parallel_stages = [
+                table
+                for table, runtime in parallel_stage_runtimes.items()
+                if isinstance(runtime["state"].get("result"), dict)
+                and runtime["state"]["result"].get("accepted") is True
+            ]
             if connection is not None:
                 connection.set_progress_handler(None, 0)
             if (
@@ -3179,6 +4912,7 @@ def snapshot_all_concurrently(
                     if isinstance(completed_timings, dict)
                     else {}
                 ),
+                "completed_parallel_stages": completed_parallel_stages,
             }
             error_details: dict[str, Any] = {
                 "error_code": snapshot_component_failure_code(exc),
@@ -3222,7 +4956,17 @@ def snapshot_all_concurrently(
     for thread in threads:
         thread.join()
     if errors:
-        raise ConcurrentSnapshotError(errors)
+        concurrent_error = ConcurrentSnapshotError(errors)
+        coordinator = shared_budget_coordinator_holder.get("paper")
+        if coordinator is not None:
+            pinned_plan = coordinator.plan()
+            if isinstance(pinned_plan, dict):
+                setattr(
+                    concurrent_error,
+                    "shared_stage_budget_plan",
+                    pinned_plan,
+                )
+        raise concurrent_error
     if set(reports) != set(names):
         raise RuntimeError(f"concurrent evaluator snapshot incomplete: {sorted(reports)}")
     return reports
@@ -3245,12 +4989,421 @@ def detected_commit(repo_root: Path) -> str | None:
         return None
 
 
+def shared_stage_budget_plan_hash_payload(
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    payload = json.loads(json.dumps(plan))
+    for key in (
+        "generated_at",
+        "plan_sha256",
+        "evidence_sha256",
+        "captured_at",
+        "captured_before_cleanup",
+        "failure_code",
+        "failure_components",
+        "unregistered_stage_files",
+        "stage_files_removed",
+    ):
+        payload.pop(key, None)
+    for key in (
+        "actual_total_bytes",
+        "unconsumed_bytes",
+        "all_targets_within_grant",
+        "all_targets_within_estimated_upper_bound",
+        "all_target_row_counts_bound_to_snapshot",
+        "no_unregistered_stage_files",
+        "cleanup_completed",
+    ):
+        payload[key] = None
+    payload["accepted"] = bool(
+        payload.get("capacity_sufficient") is True
+        and payload.get("grants_sum_matches_total_cap") is True
+        and int(payload.get("total_granted_bytes") or 0)
+        == int(payload.get("total_cap_bytes") or 0)
+    )
+    for report in (payload.get("targets") or {}).values():
+        if not isinstance(report, dict):
+            continue
+        for key in (
+            "actual_usage_bytes",
+            "high_water_bytes",
+            "actual_rows_copied",
+            "row_count_bound_to_snapshot",
+            "within_estimated_upper_bound",
+            "logical_high_water_bytes",
+            "allocated_high_water_bytes",
+            "file_present",
+            "file_count",
+            "copy_completed",
+            "cap_hit",
+            "within_grant",
+            "utilization_ratio",
+            "evidence_source",
+        ):
+            report.pop(key, None)
+    return payload
+
+
+def shared_stage_hash_normalize(value: Any) -> Any:
+    """Normalize JSON values identically in Python and JavaScript.
+
+    JSON parsers do not preserve the distinction between ``1`` and ``1.0``.
+    Integral floats in the JavaScript-safe range are therefore normalized to
+    integers. Non-integral floats are represented by their exact IEEE-754
+    binary64 bit pattern so both runtimes hash the same value without relying
+    on language-specific decimal formatting.
+    """
+    if value is None or isinstance(value, (bool, str, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("shared stage hash contains non-finite float")
+        if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+            return int(value)
+        return {"__float64__": struct.pack(">d", value).hex()}
+    if isinstance(value, list):
+        return [shared_stage_hash_normalize(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): shared_stage_hash_normalize(item)
+            for key, item in value.items()
+        }
+    raise TypeError(
+        f"unsupported shared stage hash value: {type(value).__name__}"
+    )
+
+
+def shared_stage_hash_json(value: Any) -> str:
+    return json.dumps(
+        shared_stage_hash_normalize(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def shared_stage_budget_plan_sha256(plan: dict[str, Any]) -> str:
+    return sha256_text(
+        shared_stage_hash_json(shared_stage_budget_plan_hash_payload(plan))
+    )
+
+
+def shared_stage_budget_evidence_hash_payload(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    payload = json.loads(json.dumps(evidence))
+    payload.pop("evidence_sha256", None)
+    return payload
+
+
+def shared_stage_budget_evidence_sha256(evidence: dict[str, Any]) -> str:
+    return sha256_text(
+        shared_stage_hash_json(shared_stage_budget_evidence_hash_payload(evidence))
+    )
+
+
+def build_shared_stage_budget_plan(
+    *,
+    total_cap_bytes: int,
+    parallel_stage_tables: tuple[str, ...],
+    estimates: dict[str, Any],
+    history: dict[str, Any] | None = None,
+    attempt_id: str | None = None,
+    require_pinned_view_binding: bool = False,
+) -> dict[str, Any]:
+    active_targets = shared_stage_target_names(parallel_stage_tables)
+    estimate_targets = (
+        estimates.get("targets") if isinstance(estimates, dict) else None
+    )
+    if (
+        not isinstance(estimate_targets, dict)
+        or tuple(estimates.get("active_targets") or ()) != active_targets
+        or set(estimate_targets) != set(active_targets)
+        or estimates.get("schema_version") != SHARED_STAGE_BUDGET_SCHEMA_VERSION
+    ):
+        raise ValueError("shared stage estimate inventory invalid")
+    history_report = validated_shared_stage_budget_history(history)
+    history_targets = (
+        history_report.get("targets")
+        if history_report.get("accepted") is True
+        else {}
+    )
+    target_reports: dict[str, dict[str, Any]] = {}
+    baseline_total = 0
+    cap_hit_targets: list[str] = []
+    for target in active_targets:
+        estimate = estimate_targets.get(target) or {}
+        minimum = shared_stage_target_minimum_bytes(target)
+        try:
+            estimated_required = round_up_stage_page(
+                max(minimum, int(estimate.get("estimated_required_bytes") or 0))
+            )
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(
+                f"shared stage estimate invalid for {target}"
+            ) from None
+        previous = history_targets.get(target) or {}
+        previous_high_water = round_up_stage_page(
+            previous.get("high_water_bytes") or 0
+        )
+        previous_grant = round_up_stage_page(
+            previous.get("granted_cap_bytes") or 0
+        )
+        cap_hit = previous.get("cap_hit") is True
+        completed = previous.get("copy_completed") is True
+        history_required = 0
+        history_state = "none"
+        if previous:
+            if cap_hit:
+                history_state = "cap_hit"
+                history_required = round_up_stage_page(
+                    max(previous_high_water, previous_grant)
+                    * SHARED_STAGE_CAP_HIT_HEADROOM
+                )
+                cap_hit_targets.append(target)
+            elif completed:
+                history_state = "completed"
+                history_required = round_up_stage_page(
+                    previous_high_water
+                    * SHARED_STAGE_COMPLETED_HISTORY_HEADROOM
+                )
+            else:
+                history_state = "incomplete"
+                history_required = round_up_stage_page(
+                    previous_high_water
+                    * SHARED_STAGE_INCOMPLETE_HISTORY_HEADROOM
+                )
+        baseline_required = round_up_stage_page(
+            max(minimum, estimated_required, history_required)
+        )
+        baseline_total += baseline_required
+        target_reports[target] = {
+            "target": target,
+            "source_table": str(
+                (estimate.get("source_table") or target)
+            ),
+            "stage_filename": shared_stage_target_filename(target),
+            "required": (
+                target == SHARED_STAGE_TARGET_CANDIDATE
+                or PARALLEL_PAPER_STAGE_CONFIGS.get(target, {}).get("required")
+                is True
+            ),
+            "minimum_cap_bytes": minimum,
+            "estimated_required_bytes": estimated_required,
+            "estimate_strategy": estimate.get("strategy"),
+            "estimate_bounded": estimate.get("bounded") is True,
+            "estimate_evidence": {
+                key: estimate.get(key)
+                for key in (
+                    "upper_bound_schema_version",
+                    "upper_bound_formula",
+                    "capacity_sample_used",
+                    "source_measurement_trust_boundary",
+                    "pinned_read_view_id",
+                    "pinned_read_view_role",
+                    "estimate_started_after_pin",
+                    "estimate_completed_before_copy",
+                    "row_count_binding_mode",
+                    "sample_limit_rows",
+                    "selected_row_count",
+                    "source_row_count_upper",
+                    "source_row_count_upper_basis",
+                    "sample_rows",
+                    "average_row_bytes_diagnostic",
+                    "sample_max_row_bytes_diagnostic",
+                    "source_dbstat_page_count",
+                    "source_dbstat_page_size",
+                    "source_dbstat_physical_bytes",
+                    "source_dbstat_payload_bytes",
+                    "source_dbstat_unused_bytes",
+                    "source_dbstat_max_payload_bytes",
+                    "source_dbstat_cell_upper_count",
+                    "source_structural_overhead_bytes",
+                    "selected_payload_upper_bytes",
+                    "row_record_overhead_upper_bytes",
+                    "index_record_overhead_upper_bytes",
+                    "btree_root_reserve_pages",
+                    "table_storage_upper_bytes",
+                    "candidate_order_index_upper_bytes",
+                    "candidate_order_source_index_name",
+                    "candidate_order_source_index_columns",
+                    "candidate_order_source_index_partial",
+                    "candidate_order_source_index_dbstat_page_count",
+                    "candidate_order_source_index_dbstat_page_size",
+                    "candidate_order_source_index_dbstat_physical_bytes",
+                    "candidate_order_source_index_dbstat_payload_bytes",
+                    "candidate_order_source_index_dbstat_unused_bytes",
+                    "candidate_order_source_index_dbstat_max_payload_bytes",
+                    "candidate_order_source_index_dbstat_cell_upper_count",
+                    "candidate_order_source_index_structural_overhead_bytes",
+                    "source_index_name",
+                    "source_query_plan",
+                    "source_query_plan_uses_index",
+                    "source_query_plan_uses_range_search",
+                    "source_query_plan_full_table_scan_detected",
+                )
+            },
+            "history_state": history_state,
+            "history_high_water_bytes": previous_high_water,
+            "history_granted_cap_bytes": previous_grant,
+            "history_cap_hit": cap_hit,
+            "history_copy_completed": completed,
+            "baseline_required_bytes": baseline_required,
+            "granted_cap_bytes": 0,
+            "borrowed_shared_pool_bytes": 0,
+            "evidence_sources": [
+                "bounded_source_estimate",
+                *( ["previous_worker_high_water"] if previous else [] ),
+            ],
+        }
+    total_cap = max(0, int(total_cap_bytes))
+    all_estimates_pinned_read_view_bound = all(
+        (report.get("estimate_evidence") or {}).get(
+            "source_measurement_trust_boundary"
+        )
+        == "same_pinned_read_view_as_copy"
+        and (report.get("estimate_evidence") or {}).get(
+            "estimate_started_after_pin"
+        )
+        is True
+        and (report.get("estimate_evidence") or {}).get(
+            "estimate_completed_before_copy"
+        )
+        is True
+        and bool(
+            (report.get("estimate_evidence") or {}).get(
+                "pinned_read_view_id"
+            )
+        )
+        and bool(
+            (report.get("estimate_evidence") or {}).get(
+                "pinned_read_view_role"
+            )
+        )
+        for report in target_reports.values()
+    )
+    capacity_sufficient = bool(
+        total_cap > 0
+        and baseline_total <= total_cap
+        and all(
+            report["estimate_bounded"] is True
+            for report in target_reports.values()
+        )
+        and (
+            not require_pinned_view_binding
+            or all_estimates_pinned_read_view_bound
+        )
+    )
+    residual_pool = max(0, total_cap - baseline_total)
+    grants = {
+        target: int(report["baseline_required_bytes"])
+        for target, report in target_reports.items()
+    }
+    borrowing_priority = list(cap_hit_targets)
+    if not borrowing_priority and active_targets:
+        borrowing_priority = [
+            max(
+                active_targets,
+                key=lambda target: (
+                    int(target_reports[target]["baseline_required_bytes"]),
+                    -active_targets.index(target),
+                ),
+            )
+        ]
+    if capacity_sufficient and residual_pool > 0 and borrowing_priority:
+        remaining = residual_pool
+        weight_total = sum(
+            max(1, int(target_reports[target]["baseline_required_bytes"]))
+            for target in borrowing_priority
+        )
+        for target in borrowing_priority[:-1]:
+            weight = max(
+                1,
+                int(target_reports[target]["baseline_required_bytes"]),
+            )
+            extra = (
+                int(residual_pool * weight / weight_total)
+                // SHARED_STAGE_PAGE_SIZE
+                * SHARED_STAGE_PAGE_SIZE
+            )
+            extra = min(remaining, max(0, extra))
+            grants[target] += extra
+            remaining -= extra
+        grants[borrowing_priority[-1]] += remaining
+    for target, grant in grants.items():
+        target_reports[target]["granted_cap_bytes"] = grant
+        target_reports[target]["borrowed_shared_pool_bytes"] = max(
+            0,
+            grant - int(target_reports[target]["baseline_required_bytes"]),
+        )
+    total_granted = sum(grants.values())
+    plan = {
+        "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+        "allocation_mode": SHARED_STAGE_BUDGET_ALLOCATION_MODE,
+        "hash_canonicalization": SHARED_STAGE_HASH_CANONICALIZATION,
+        "attempt_id": str(attempt_id or "")[:80] or None,
+        "generated_at": utc_iso(),
+        "page_size": SHARED_STAGE_PAGE_SIZE,
+        "total_cap_bytes": total_cap,
+        "active_targets": list(active_targets),
+        "minimum_total_bytes": sum(
+            shared_stage_target_minimum_bytes(target)
+            for target in active_targets
+        ),
+        "baseline_required_total_bytes": baseline_total,
+        "residual_pool_bytes": residual_pool,
+        "borrowing_priority_targets": borrowing_priority,
+        "history_used": history_report.get("accepted") is True,
+        "history_reason": history_report.get("reason"),
+        "history_attempt_id": history_report.get("attempt_id"),
+        "fixed_percentage_allocation_used": False,
+        "pinned_read_view_binding_required": bool(
+            require_pinned_view_binding
+        ),
+        "all_estimates_pinned_read_view_bound": (
+            all_estimates_pinned_read_view_bound
+        ),
+        "targets": target_reports,
+        "total_granted_bytes": total_granted,
+        "grants_sum_matches_total_cap": total_granted == total_cap,
+        "capacity_sufficient": capacity_sufficient,
+        "all_estimates_bounded": all(
+            report["estimate_bounded"] is True
+            for report in target_reports.values()
+        ),
+        "accepted": bool(
+            capacity_sufficient
+            and total_granted == total_cap
+            and (
+                not require_pinned_view_binding
+                or all_estimates_pinned_read_view_bound
+            )
+            and all(
+                int(report["granted_cap_bytes"])
+                >= int(report["baseline_required_bytes"])
+                >= int(report["minimum_cap_bytes"])
+                for report in target_reports.values()
+            )
+        ),
+        "actual_total_bytes": None,
+        "unconsumed_bytes": None,
+        "all_targets_within_grant": None,
+        "no_unregistered_stage_files": None,
+        "cleanup_completed": None,
+    }
+    plan["plan_sha256"] = shared_stage_budget_plan_sha256(plan)
+    return plan
+
+
 def disk_preflight(
     root: Path,
     min_free_after_gib: float,
     max_output_gib: float,
     *,
     parallel_stage_tables: tuple[str, ...] | list[str] | None = None,
+    shared_stage_estimates: dict[str, Any] | None = None,
+    shared_stage_history: dict[str, Any] | None = None,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(root)
@@ -3271,85 +5424,72 @@ def disk_preflight(
         for table in PARALLEL_PAPER_OPTIONAL_STAGE_TABLES
         if table not in active_stage_tables
     )
-    configured_stage_shares = {
-        table: float(PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"])
+    raw_stage_cap = max(0, int(usage.free) - bounded_output - reserve)
+    total_stage_cap = (
+        raw_stage_cap // SHARED_STAGE_PAGE_SIZE * SHARED_STAGE_PAGE_SIZE
+    )
+    alignment_reserve = raw_stage_cap - total_stage_cap
+    if shared_stage_estimates is None:
+        active_targets = shared_stage_target_names(active_stage_tables)
+        shared_stage_estimates = {
+            "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+            "generated_at": utc_iso(),
+            "active_targets": list(active_targets),
+            "all_estimates_bounded": True,
+            "targets": {
+                target: {
+                    "target": target,
+                    "source_table": target,
+                    "strategy": "minimum_only_test_fallback",
+                    "bounded": True,
+                    "estimated_required_bytes": (
+                        shared_stage_target_minimum_bytes(target)
+                    ),
+                    "minimum_cap_bytes": (
+                        shared_stage_target_minimum_bytes(target)
+                    ),
+                }
+                for target in active_targets
+            },
+        }
+    shared_budget = build_shared_stage_budget_plan(
+        total_cap_bytes=total_stage_cap,
+        parallel_stage_tables=active_stage_tables,
+        estimates=shared_stage_estimates,
+        history=shared_stage_history,
+        attempt_id=attempt_id,
+    )
+    candidate_stage_cap = int(
+        shared_budget["targets"][SHARED_STAGE_TARGET_CANDIDATE][
+            "granted_cap_bytes"
+        ]
+    )
+    parallel_stage_caps = {
+        table: int(
+            shared_budget["targets"][table]["granted_cap_bytes"]
+        )
         for table in active_stage_tables
     }
-    active_weight_total = float(
-        CANDIDATE_STAGE_RESIDUAL_SHARE + sum(configured_stage_shares.values())
-    )
-    if not math.isfinite(active_weight_total) or active_weight_total <= 0:
-        raise ValueError("parallel paper stage active weight total must be positive")
-    candidate_normalized_share = (
-        float(CANDIDATE_STAGE_RESIDUAL_SHARE) / active_weight_total
-    )
-    normalized_stage_shares = {
-        table: share / active_weight_total
-        for table, share in configured_stage_shares.items()
-    }
-    total_stage_cap = max(0, int(usage.free) - bounded_output - reserve)
-    minimum_stage_total = (
-        MIN_CANDIDATE_STAGE_CAP_BYTES
-        + len(active_stage_tables) * MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-    )
-    parallel_stage_caps: dict[str, int] = {
-        table: 0 for table in active_stage_tables
-    }
-    if total_stage_cap >= minimum_stage_total:
-        residual_after_minimums = total_stage_cap - minimum_stage_total
-        candidate_stage_cap = MIN_CANDIDATE_STAGE_CAP_BYTES
-        for table in active_stage_tables:
-            parallel_stage_caps[table] = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-        allocation_targets = ("candidate", *active_stage_tables)
-        allocated = candidate_stage_cap + sum(parallel_stage_caps.values())
-        for target in allocation_targets[:-1]:
-            normalized_share = (
-                candidate_normalized_share
-                if target == "candidate"
-                else normalized_stage_shares[target]
-            )
-            extra = int(residual_after_minimums * normalized_share) // 4096 * 4096
-            if target == "candidate":
-                candidate_stage_cap += extra
-            else:
-                parallel_stage_caps[target] += extra
-            allocated += extra
-        final_target = allocation_targets[-1]
-        final_extra = total_stage_cap - allocated
-        if final_target == "candidate":
-            candidate_stage_cap += final_extra
-        else:
-            parallel_stage_caps[final_target] += final_extra
-    else:
-        remaining = total_stage_cap
-        candidate_stage_cap = min(remaining, MIN_CANDIDATE_STAGE_CAP_BYTES)
-        remaining -= candidate_stage_cap
-        for table in active_stage_tables:
-            parallel_stage_caps[table] = min(
-                remaining,
-                MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
-            )
-            remaining -= parallel_stage_caps[table]
-    estimated_peak = (
-        bounded_output + candidate_stage_cap + sum(parallel_stage_caps.values())
-    )
+    estimated_peak = bounded_output + int(shared_budget["total_granted_bytes"])
     estimated_free_at_peak = int(usage.free) - estimated_peak
     accepted = bool(
         bounded_output > 0
+        and shared_budget.get("accepted") is True
+        and int(shared_budget["total_granted_bytes"]) == total_stage_cap
         and candidate_stage_cap >= MIN_CANDIDATE_STAGE_CAP_BYTES
         and all(
             parallel_stage_caps.get(table, 0)
             >= MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
             for table in active_stage_tables
         )
-        and candidate_stage_cap + sum(parallel_stage_caps.values())
-        == total_stage_cap
-        and estimated_free_at_peak >= reserve
+        and estimated_free_at_peak >= reserve + alignment_reserve
     )
     return {
         "free_bytes": int(usage.free),
         "selective_snapshot_output_cap_bytes": bounded_output,
         "temporary_full_backup_bytes": 0,
+        "temporary_stage_raw_cap_bytes": raw_stage_cap,
+        "temporary_stage_alignment_reserve_bytes": alignment_reserve,
         "temporary_stage_total_cap_bytes": total_stage_cap,
         "temporary_candidate_stage_cap_bytes": candidate_stage_cap,
         "temporary_parallel_paper_stage_cap_bytes": parallel_stage_caps,
@@ -3364,19 +5504,12 @@ def disk_preflight(
         "omitted_optional_parallel_paper_stage_tables": list(
             omitted_optional_stages
         ),
-        "candidate_stage_residual_share": CANDIDATE_STAGE_RESIDUAL_SHARE,
-        "parallel_paper_stage_residual_shares": configured_stage_shares,
-        "parallel_paper_stage_active_weight_total": active_weight_total,
-        "candidate_stage_normalized_share": candidate_normalized_share,
-        "parallel_paper_stage_normalized_shares": normalized_stage_shares,
-        "paper_decision_stage_residual_share": configured_stage_shares.get(
-            PAPER_DECISION_STAGE_TABLE,
-            0.0,
-        ),
         "candidate_stage_budget_mode": CANDIDATE_STAGE_BUDGET_MODE,
         "candidate_stage_minimum_cap_bytes": MIN_CANDIDATE_STAGE_CAP_BYTES,
         "parallel_paper_stage_minimum_cap_bytes": MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
         "paper_decision_stage_minimum_cap_bytes": MIN_PAPER_DECISION_STAGE_CAP_BYTES,
+        "shared_stage_budget": shared_budget,
+        "fixed_percentage_allocation_used": False,
         "estimated_peak_working_bytes": estimated_peak,
         "required_reserve_bytes": reserve,
         "estimated_free_after_bytes": int(usage.free) - bounded_output,
@@ -3384,6 +5517,72 @@ def disk_preflight(
         "fail_closed_on_insufficient_space": True,
         "accepted": accepted,
     }
+
+
+def apply_shared_stage_budget_to_preflight(
+    preflight: dict[str, Any],
+    shared_budget: dict[str, Any],
+    *,
+    active_stage_tables: tuple[str, ...],
+) -> dict[str, Any]:
+    """Replace provisional minimum grants with the pinned-view stage plan."""
+    if not isinstance(preflight, dict) or not isinstance(shared_budget, dict):
+        raise ValueError("shared stage preflight evidence missing")
+    expected_targets = shared_stage_target_names(active_stage_tables)
+    targets = shared_budget.get("targets")
+    total_cap = int(preflight.get("temporary_stage_total_cap_bytes") or 0)
+    if (
+        tuple(shared_budget.get("active_targets") or ()) != expected_targets
+        or not isinstance(targets, dict)
+        or set(targets) != set(expected_targets)
+        or int(shared_budget.get("total_cap_bytes") or 0) != total_cap
+        or int(shared_budget.get("total_granted_bytes") or 0) != total_cap
+        or shared_budget.get("grants_sum_matches_total_cap") is not True
+    ):
+        raise ValueError("shared stage pinned plan does not match disk cap")
+    candidate_cap = int(
+        targets[SHARED_STAGE_TARGET_CANDIDATE]["granted_cap_bytes"]
+    )
+    parallel_caps = {
+        table: int(targets[table]["granted_cap_bytes"])
+        for table in active_stage_tables
+    }
+    output_cap = int(
+        preflight.get("selective_snapshot_output_cap_bytes") or 0
+    )
+    free_bytes = int(preflight.get("free_bytes") or 0)
+    reserve = int(preflight.get("required_reserve_bytes") or 0)
+    alignment_reserve = int(
+        preflight.get("temporary_stage_alignment_reserve_bytes") or 0
+    )
+    estimated_peak = output_cap + total_cap
+    estimated_free_at_peak = free_bytes - estimated_peak
+    preflight.update(
+        {
+            "temporary_candidate_stage_cap_bytes": candidate_cap,
+            "temporary_parallel_paper_stage_cap_bytes": parallel_caps,
+            "temporary_paper_decision_stage_cap_bytes": parallel_caps.get(
+                PAPER_DECISION_STAGE_TABLE,
+                0,
+            ),
+            "shared_stage_budget": json.loads(json.dumps(shared_budget)),
+            "estimated_peak_working_bytes": estimated_peak,
+            "estimated_free_at_peak_bytes": estimated_free_at_peak,
+            "accepted": bool(
+                output_cap > 0
+                and shared_budget.get("accepted") is True
+                and candidate_cap >= MIN_CANDIDATE_STAGE_CAP_BYTES
+                and all(
+                    parallel_caps.get(table, 0)
+                    >= MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+                    for table in active_stage_tables
+                )
+                and estimated_free_at_peak
+                >= reserve + alignment_reserve
+            ),
+        }
+    )
+    return preflight
 
 
 def static_database_output_budgets(max_output_gib: float) -> dict[str, int]:
@@ -3562,6 +5761,7 @@ def build_snapshot_bundle(
     max_source_read_lock_sec: float = DEFAULT_MAX_SOURCE_READ_LOCK_SEC,
     keep_previous: int = 0,
     snapshot_id: str | None = None,
+    previous_shared_stage_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(out_root).expanduser().resolve()
     source_paths = {name: Path(path).expanduser().resolve() for name, path in sources.items()}
@@ -3591,6 +5791,8 @@ def build_snapshot_bundle(
     if final_dir.exists() or partial_dir.exists():
         raise FileExistsError(sid)
     partial_dir.mkdir()
+    preflight: dict[str, Any] | None = None
+    shared_budget_plan: dict[str, Any] | None = None
     try:
         source_page_reports = inspect_source_page_reports(
             source_paths,
@@ -3608,41 +5810,58 @@ def build_snapshot_bundle(
             raise RuntimeError(
                 "parallel_paper_stage_failed:source_inventory_invalid"
             )
+        # This first pass proves only the global disk cap and minimum stage
+        # inventory.  Per-target grants are deliberately deferred until the
+        # exact paper read views are pinned; no production capacity decision is
+        # taken from an earlier, independently opened connection.
         preflight = disk_preflight(
             root,
             min_free_after_gib,
             max_output_gib,
             parallel_stage_tables=inspected_parallel_stage_tables,
+            shared_stage_history=previous_shared_stage_budget,
+            attempt_id=sid,
         )
-        candidate_stage_budget_bytes = int(
-            preflight["temporary_candidate_stage_cap_bytes"]
-        )
-        parallel_paper_stage_budget_bytes = {
-            table: int(value)
-            for table, value in (
-                preflight["temporary_parallel_paper_stage_cap_bytes"] or {}
-            ).items()
-        }
         if not preflight["accepted"]:
             raise RuntimeError(f"insufficient disk for evaluator snapshot: {preflight}")
         budget_plan = database_output_budget_plan(max_output_gib, source_page_reports)
         output_budgets = budget_plan["database_budget_bytes"]
-        database_reports = snapshot_all_concurrently(
-            source_paths,
-            partial_dir,
-            source_page_reports,
-            review_lower_epoch=review_lower_epoch,
-            long_lower_epoch=long_lower_epoch,
-            upper_epoch=selection_upper_epoch,
-            database_budgets=output_budgets,
-            candidate_stage_budget_bytes=candidate_stage_budget_bytes,
-            parallel_paper_stage_budget_bytes=parallel_paper_stage_budget_bytes,
-            expected_parallel_paper_stage_tables=(
-                inspected_parallel_stage_tables
-            ),
-            busy_timeout_ms=int(source_busy_timeout_ms),
-            max_source_read_lock_sec=float(max_source_read_lock_sec),
+        try:
+            database_reports = snapshot_all_concurrently(
+                source_paths,
+                partial_dir,
+                source_page_reports,
+                review_lower_epoch=review_lower_epoch,
+                long_lower_epoch=long_lower_epoch,
+                upper_epoch=selection_upper_epoch,
+                database_budgets=output_budgets,
+                expected_parallel_paper_stage_tables=(
+                    inspected_parallel_stage_tables
+                ),
+                busy_timeout_ms=int(source_busy_timeout_ms),
+                max_source_read_lock_sec=float(max_source_read_lock_sec),
+                shared_stage_total_cap_bytes=int(
+                    preflight["temporary_stage_total_cap_bytes"]
+                ),
+                shared_stage_history=previous_shared_stage_budget,
+                shared_stage_attempt_id=sid,
+            )
+        except BaseException as snapshot_exc:
+            pinned_plan = getattr(
+                snapshot_exc,
+                "shared_stage_budget_plan",
+                None,
+            )
+            if isinstance(pinned_plan, dict):
+                shared_budget_plan = pinned_plan
+            raise
+        paper_plan_report = database_reports.get("paper") or {}
+        shared_budget_plan = paper_plan_report.pop(
+            "shared_stage_budget_plan",
+            None,
         )
+        if not isinstance(shared_budget_plan, dict):
+            raise RuntimeError("shared_stage_budget_plan_missing")
         pinned_read_views = [
             view
             for report in database_reports.values()
@@ -3690,6 +5909,33 @@ def build_snapshot_bundle(
             for report in database_reports.values()
         )
         paper_report = database_reports.get("paper") or {}
+        if not isinstance(shared_budget_plan, dict):
+            raise RuntimeError("shared_stage_budget_plan_missing")
+        shared_stage_budget = finalize_shared_stage_budget_success(
+            shared_budget_plan,
+            paper_report,
+        )
+        apply_shared_stage_budget_to_preflight(
+            preflight,
+            shared_stage_budget,
+            active_stage_tables=inspected_parallel_stage_tables,
+        )
+        shared_stage_budget_passed = bool(
+            shared_stage_budget.get("accepted") is True
+            and shared_stage_budget.get(
+                "pinned_read_view_binding_required"
+            )
+            is True
+            and shared_stage_budget.get(
+                "all_estimates_pinned_read_view_bound"
+            )
+            is True
+            and paper_report.get(
+                "shared_stage_estimates_bound_to_copy_read_views"
+            )
+            is True
+            and preflight.get("accepted") is True
+        )
         paper_selected_tables = paper_report.get("selected_tables") or {}
         active_parallel_stage_tables = tuple(
             paper_report.get("parallel_paper_stage_tables") or ()
@@ -3772,6 +6018,7 @@ def build_snapshot_bundle(
             and paper_decision_parallel_read_view_pinned
             and paper_decision_parallel_stage_merged_after_source_read_lock_release
             and paper_decision_parallel_stage_removed_before_publish
+            and shared_stage_budget_passed
             and output_cap_passed
             and git_commit
         )
@@ -3787,9 +6034,15 @@ def build_snapshot_bundle(
             "snapshot_ts": selection_upper_epoch,
             "git_commit": git_commit,
             "git_commit_present": bool(git_commit),
-            "method": "coordinated_read_view_pin_then_compact_bounded_selective_extract",
+            "method": "coordinated_pinned_view_estimate_then_compact_bounded_selective_extract",
             "bounded_selective_snapshot": True,
             "read_views_pinned_before_copy": True,
+            "shared_stage_estimates_bound_to_copy_read_views": (
+                paper_report.get(
+                    "shared_stage_estimates_bound_to_copy_read_views"
+                )
+                is True
+            ),
             "max_source_read_lock_sec": float(max_source_read_lock_sec),
             "source_read_lock_budget_passed": source_read_lock_budget_passed,
             "indexes_built_after_source_read_lock_release": (
@@ -3824,7 +6077,7 @@ def build_snapshot_bundle(
                 paper_decision_parallel_stage_removed_before_publish
             ),
             "source_mutation_free": source_mutation_free,
-            "copy_mode": "parallel_pinned_heavy_paper_stages_plus_bounded_selective_extract",
+            "copy_mode": "parallel_pinned_estimate_and_heavy_paper_stages_plus_bounded_selective_extract",
             "pinned_read_view_count": len(pinned_read_views),
             "cross_database_time_skew_sec": round(skew, 6),
             "max_allowed_cross_database_time_skew_sec": float(max_skew_sec),
@@ -3851,6 +6104,8 @@ def build_snapshot_bundle(
             "output_cap_bytes": output_cap_bytes,
             "output_cap_passed": output_cap_passed,
             "disk_preflight": preflight,
+            "shared_stage_budget": shared_stage_budget,
+            "shared_stage_budget_passed": shared_stage_budget_passed,
             "databases": database_reports,
             "accepted": accepted,
             "immutable": True,
@@ -3900,9 +6155,38 @@ def build_snapshot_bundle(
             manifest["retention"]["status_write_error"] = f"{type(exc).__name__}:{exc}"
         latest_manifest = manifest
         return latest_manifest
-    except BaseException:
-        if partial_dir.exists():
-            shutil.rmtree(partial_dir)
+    except BaseException as exc:
+        shared_failure_evidence = capture_shared_stage_budget_failure(
+            partial_dir,
+            shared_budget_plan,
+            exc,
+        )
+        cleanup_completed = True
+        try:
+            if partial_dir.exists():
+                shutil.rmtree(partial_dir)
+        except Exception:
+            cleanup_completed = False
+        if isinstance(shared_failure_evidence, dict):
+            shared_failure_evidence["cleanup_completed"] = cleanup_completed
+            shared_failure_evidence["stage_files_removed"] = bool(
+                cleanup_completed and not partial_dir.exists()
+            )
+            shared_failure_evidence["evidence_sha256"] = (
+                shared_stage_budget_evidence_sha256(
+                    shared_failure_evidence
+                )
+            )
+            setattr(exc, "shared_stage_budget", shared_failure_evidence)
+        if not cleanup_completed:
+            cleanup_exc = RuntimeError("shared_stage_cleanup_failed")
+            if isinstance(shared_failure_evidence, dict):
+                setattr(
+                    cleanup_exc,
+                    "shared_stage_budget",
+                    shared_failure_evidence,
+                )
+            raise cleanup_exc from exc
         raise
 
 
@@ -3927,6 +6211,8 @@ def self_test() -> None:
                 "UNIQUE(signal_id,candidate_id));"
                 "CREATE INDEX idx_candidate_shadow_obs_observed "
                 "ON candidate_shadow_observations(observed_at);"
+                "CREATE INDEX idx_candidate_shadow_obs_signal "
+                "ON candidate_shadow_observations(signal_id);"
                 "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
                 "CREATE INDEX idx_candidate_shadow_virtual_observed "
                 "ON candidate_shadow_virtual_trades(observed_at);"
@@ -4039,6 +6325,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         "snapshot_id": None,
         "current": current_path,
         "last_accepted_snapshot": previous.get("last_accepted_snapshot"),
+        "shared_stage_budget": previous.get("shared_stage_budget"),
         "promotion_allowed": False,
     }
     lock_acquired = False
@@ -4068,6 +6355,9 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 max_source_read_lock_sec=args.max_source_read_lock_sec,
                 keep_previous=args.keep_previous,
                 snapshot_id=args.snapshot_id,
+                previous_shared_stage_budget=previous.get(
+                    "shared_stage_budget"
+                ),
             )
             finished = utc_iso()
             accepted_summary = snapshot_manifest_summary(manifest)
@@ -4100,6 +6390,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 "snapshot_id": manifest["snapshot_id"],
                 "interrupted_partials_removed": interrupted_partials_removed,
                 "last_accepted_snapshot": accepted_summary,
+                "shared_stage_budget": manifest.get("shared_stage_budget"),
                 "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
                 "next_attempt_at": (
                     utc_iso(time.time() + next_attempt_delay)
@@ -4113,6 +6404,10 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         finished = utc_iso()
         failure_code = snapshot_failure_code(exc)
         failure_details = snapshot_failure_details(exc)
+        failure_stage_budget = (
+            shared_stage_budget_evidence_from_exception(exc)
+            or previous.get("shared_stage_budget")
+        )
         consecutive_failure_count = int(base_status["consecutive_failure_count"]) + 1
         previous_failure_code = str(base_status.get("last_failure_code") or "")
         previous_failure_code_count = int(
@@ -4142,6 +6437,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             "last_failure_at": finished,
             "last_failure_code": failure_code,
             "last_failure_details": failure_details,
+            "shared_stage_budget": failure_stage_budget,
             "last_error": bounded_error_text(exc),
             "error_count": int(base_status["error_count"]) + 1,
             "status": "failed",

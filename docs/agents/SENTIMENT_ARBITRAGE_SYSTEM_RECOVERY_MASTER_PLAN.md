@@ -2,15 +2,15 @@
 
 Plan ID: `SAS-RECOVERY-MASTER-2026-08-08`
 
-Status: `P0_C_IMPLEMENTED_LOCALLY_PENDING_PRODUCTION_ACCEPTED_SNAPSHOT_VALIDATION`
+Status: `P0_C_SHARED_STAGE_BUDGET_IMPLEMENTED_LOCALLY_PENDING_PR_AND_PRODUCTION_ACCEPTED_SNAPSHOT_VALIDATION`
 
-Baseline commit: `f592c47a137871c4dd70911a4c6d783297c15395`
+Baseline commit: `7b46dcd55c35231dc5157b68882c6cf89986d1c4`
 
 Implementation worktree: `/Users/lobos/.devspace/worktrees/sentiment-arbitrage-system-04eed4ac`
 
-Deployment status: `NOT_DEPLOYED`
+Deployment status: `P0_A_B_C_THROUGH_P0_C_7_DEPLOYED__P0_C_8_NOT_DEPLOYED`
 
-Production observation: `2026-08-08T04:02:30Z`（Sydney `2026-08-08 14:02:30 AEST`）
+Production observation: `2026-08-09T07:54:04Z`（Sydney `2026-08-09 17:54:04 AEST`）
 
 Default operating mode: `paper_only_measurement_first`
 
@@ -1094,3 +1094,17 @@ Root health degraded 条件仅包括：
 - P0-D paper E2E 明确保持 `LOCKED`，不因部署 RUNNING、HTTP 200、Basic Readiness 绿色或 producer-only acceptance 自动解锁。
 
 下一运行时验收：部署受控 P0-A/P0-B/P0-C 原子发布单元后，证明 production 首个 accepted manifest、observed_at query plan、source read-lock、四库 SHA/quick-check、output/free-space/skew，以及同一 snapshot lineage 下的 fresh AutoLoop primary capture。P0-D paper E2E 在这些运行证据通过并经独立人工决策前保持锁定。
+
+### 2026-08-09｜P0-C.8 共享 Staging 预算实施
+
+- PR #71 至 #81 已依次以 exact SHA fast-forward 并部署；当前生产基线为 `7b46dcd55c35231dc5157b68882c6cf89986d1c4`，paper DB 约 25.58GB 且 integrity marker 不存在，但仍没有 accepted manifest；
+- 最新生产失败已经把矛盾压缩为 P9 单表固定 cap：aggregate stage pool 约 12.48GB，P9 grant 约 4.49GB，`paper_decision_events` 在 293.21 秒附近触发 `SQLITE_FULL`；AutoLoop 继续 `blocked_evaluator_snapshot_required`，P0-D 继续锁定；
+- 当前隔离分支 `p0c/shared-stage-budget-20260809` 已删除所有运行时固定 stage percentage，实施 `shared_stage_budget.v1`：总 cap 仍由 free space 减 10GB output cap 与 5GB reserve 后按 4096-byte page 向下对齐；
+- 分配计划由有界 source estimate 与上一轮经双 SHA 验证的 high-water 共同构造；每个 target 获得 baseline，剩余共享池优先分配给 cap-hit target；estimate/baseline 合计超过全局 cap 时，在启动长时间 source copy 前以 `shared_stage_capacity_insufficient` 拒绝；
+- 所有 stage estimate 现在都以明确绑定 attached `src` schema 的 TEMP DBSTAT virtual table 为容量事实源：逐页聚合 table/overflow page count、payload、unused、max-payload 与 physical bytes，并与 `PRAGMA src.page_size` 交叉验证；indexed stage 额外执行 index range count，unindexed optional path 保守使用完整 btree cell upper count；selected payload upper、完整 source structural overhead、每行 record/rowid overhead、root reserve 与 candidate ordering-index upper 共同形成可复算上界；最多 256 条 edge samples 只作诊断，明确 `capacity_sample_used=false`；
+- producer 在失败 partial 清理前记录 logical/allocated high-water、grant、actual、utilisation、copy-complete、cap-hit 与 rogue-stage inventory；只有 cleanup 成功、无未登记 stage 文件、plan/evidence hashes 有效且原全局计划可用的证据，才会回灌下一轮；
+- authoritative consumer 独立重算 global cap、page alignment、target inventory、minimum/baseline/residual/borrow/grant/actual totals、plan/evidence SHA、alias caps、cleanup、reserve，以及 DBSTAT page/payload/max-payload/row-count/formula；双 SHA 使用 Python/Node 一致的 `json_sorted_float64_bits.v1`，非整数 float 以 IEEE-754 binary64 位模式编码；Dashboard 同样实际复算，不再只校验 hash 格式；即使同步重签双 SHA 与 producer manifest SHA，篡改 physical upper evidence 仍被拒绝；
+- Dashboard 仅输出 public-safe aggregate stage evidence，并轻量复算同一 physical-upper 公式；失败 status 的最新 high-water 与 DBSTAT aggregate 优先展示，accepted manifest 的 `contract_passed` 语义不被混淆；
+- 新增中间 512KB payload 反例：最早/最晚 256 条样本均小，sample diagnostic 明确漏掉 outlier，但 DBSTAT upper 仍覆盖并实际完成 stage copy；独立 checker 先后关闭 negative high-water、cleanup、inventory、sample-average-not-bounded、attached 64KB page accounting 与 Dashboard stale-hash 六类缺陷；最终物理上界 reviewer 用 1KB/4KB/8KB/64KB source pages 与 130KB overflow payload给出 `APPROVE`，跨语言 hash reviewer 用两组完整 JSON type vectors 验证 Python/Node plan/evidence SHA 完全一致并给出 `APPROVE`；
+- 最终本地门禁为 Python producer/consumer focused `201 passed`、Node 20 Dashboard focused `64 passed`、CI 同构 Python `157 + 70 + 221 passed`、Node 20 完整行为矩阵 `73 passed`；Basic Readiness 无 blocker、`observe_only_foundation_ready=true`、`normal_tiny_ready=false`、mode-gate scope 为 `final_scope_covered`，generated client、spec validation、Python/Node compile/syntax、治理 JSON 与 whitespace 全部通过；
+- 策略、entry/exit、risk、wallet、executor、promotion、automatic runtime change 与 paper enablement 均未修改；独立反方审查与全部本地门禁已通过，下一动作是形成受控提交、推送并创建 exact-SHA PR；仍需人工批准才能 fast-forward/deploy；production accepted manifest、authoritative preflight 和 same-lineage AutoLoop primary capture 在部署验收前均不得宣称完成。

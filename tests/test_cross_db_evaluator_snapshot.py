@@ -25,6 +25,7 @@ from cross_db_evaluator_snapshot import (  # noqa: E402
     source_table_reference,
     static_database_output_budgets,
 )
+from evaluator_db_contract import validate_shared_stage_estimate_contract  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +42,8 @@ def create_sources(root):
             "observed_at INTEGER, payload_json TEXT);"
             "CREATE INDEX idx_candidate_shadow_obs_observed "
             "ON candidate_shadow_observations(observed_at);"
+            "CREATE INDEX idx_candidate_shadow_obs_signal "
+            "ON candidate_shadow_observations(signal_id);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
             "CREATE INDEX idx_candidate_shadow_virtual_observed "
             "ON candidate_shadow_virtual_trades(observed_at);"
@@ -70,6 +73,116 @@ def create_sources(root):
         connection.close()
         sources[name] = str(path)
     return sources
+
+
+def shared_stage_estimates(active_tables=None, *, required_bytes=None):
+    tables = tuple(
+        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+        if active_tables is None
+        else active_tables
+    )
+    targets = snapshot_module.shared_stage_target_names(tables)
+    required_bytes = dict(required_bytes or {})
+    reports = {}
+    for target in targets:
+        minimum = snapshot_module.shared_stage_target_minimum_bytes(target)
+        reports[target] = {
+            "target": target,
+            "source_table": (
+                snapshot_module.CANDIDATE_OBSERVATION_TABLE
+                if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE
+                else target
+            ),
+            "strategy": "test_bounded_estimate",
+            "bounded": True,
+            "estimated_required_bytes": snapshot_module.round_up_stage_page(
+                required_bytes.get(target, minimum)
+            ),
+            "minimum_cap_bytes": minimum,
+        }
+    return {
+        "schema_version": snapshot_module.SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+        "generated_at": snapshot_module.utc_iso(),
+        "active_targets": list(targets),
+        "all_estimates_bounded": True,
+        "targets": reports,
+    }
+
+
+def shared_stage_history(estimates, *, cap_hit_target=None):
+    targets = {}
+    for target in estimates["active_targets"]:
+        high_water = int(
+            estimates["targets"][target]["estimated_required_bytes"]
+        )
+        targets[target] = {
+            "granted_cap_bytes": high_water,
+            "high_water_bytes": high_water,
+            "copy_completed": target != cap_hit_target,
+            "cap_hit": target == cap_hit_target,
+            "evidence_source": "test_history",
+        }
+    total = sum(row["granted_cap_bytes"] for row in targets.values())
+    history = {
+        "schema_version": snapshot_module.SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+        "allocation_mode": snapshot_module.SHARED_STAGE_BUDGET_ALLOCATION_MODE,
+        "hash_canonicalization": (
+            snapshot_module.SHARED_STAGE_HASH_CANONICALIZATION
+        ),
+        "attempt_id": "previous-attempt",
+        "active_targets": list(estimates["active_targets"]),
+        "targets": targets,
+        "total_cap_bytes": total,
+        "total_granted_bytes": total,
+        "grants_sum_matches_total_cap": True,
+        "capacity_sufficient": True,
+        "fixed_percentage_allocation_used": False,
+        "cleanup_completed": True,
+        "stage_files_removed": True,
+        "no_unregistered_stage_files": True,
+        "accepted": False,
+    }
+    history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        history
+    )
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    return history
+
+
+def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
+    payload = {
+        "schema_version": "shared_stage_budget.v1",
+        "allocation_mode": "history_high_water_plus_bounded_source_estimate",
+        "hash_canonicalization": "json_sorted_float64_bits.v1",
+        "generated_at": "x",
+        "capacity_sufficient": True,
+        "grants_sum_matches_total_cap": True,
+        "total_cap_bytes": 4096,
+        "total_granted_bytes": 4096,
+        "actual_total_bytes": 1024,
+        "unconsumed_bytes": 3072,
+        "all_targets_within_grant": True,
+        "targets": {
+            "t": {
+                "minimum_cap_bytes": 12288,
+                "average": 0.1,
+                "integral_float": 1.0,
+                "utilization_ratio": 0.25,
+                "actual_usage_bytes": 1024,
+            }
+        },
+    }
+    assert snapshot_module.shared_stage_budget_plan_sha256(payload) == (
+        "4e7d8de308b3b86a1c0169d4a0a8dd09ef598dd64e17bbb1bd658eb2ddc79c4e"
+    )
+    payload["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        payload
+    )
+    assert snapshot_module.shared_stage_budget_evidence_sha256(payload) == (
+        "b6a21cff3c526c744576c59deeae60d6d888d2ac8635bb25a3bdf870aa9599a1"
+    )
 
 
 def test_parallel_stage_required_flags_match_selection_contract():
@@ -117,7 +230,588 @@ def test_source_page_inspection_failure_is_component_scoped(tmp_path, monkeypatc
     assert "/secret/path" not in str(raised.value)
 
 
-def test_disk_preflight_sizes_stage_from_residual_space_not_output_fraction(
+def test_shared_stage_estimate_uses_dbstat_upper_bound_and_indexed_count(tmp_path):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO paper_decision_events(id, event_ts) VALUES (?, ?)",
+        [(index, now - index) for index in range(1, 1001)],
+    )
+    paper.commit()
+    paper.close()
+
+    report = snapshot_module.estimate_shared_stage_requirements(
+        Path(sources["paper"]),
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        review_lower_epoch=now - 96 * 3600,
+        long_lower_epoch=now - 840 * 3600,
+        upper_epoch=now,
+        busy_timeout_ms=30000,
+    )
+
+    p9 = report["targets"]["paper_decision_events"]
+    assert report["schema_version"] == "shared_stage_budget.v1"
+    assert report["all_estimates_bounded"] is True
+    assert p9["strategy"] == "dbstat_physical_upper_bound_with_indexed_row_count"
+    assert p9["upper_bound_schema_version"] == (
+        "sqlite_dbstat_physical_upper_bound.v2"
+    )
+    assert p9["capacity_sample_used"] is False
+    assert p9["selected_row_count"] == 1000
+    assert p9["source_row_count_upper"] >= p9["selected_row_count"]
+    assert 1 <= p9["sample_rows"] <= 256
+    assert p9["average_row_bytes_diagnostic"] > 0
+    assert p9["sample_max_row_bytes_diagnostic"] > 0
+    assert p9["source_dbstat_physical_bytes"] == (
+        p9["source_dbstat_page_count"] * p9["source_dbstat_page_size"]
+    )
+    assert p9["source_dbstat_payload_bytes"] <= p9[
+        "source_dbstat_physical_bytes"
+    ]
+    assert p9["selected_payload_upper_bytes"] <= p9[
+        "source_dbstat_payload_bytes"
+    ]
+    assert p9["source_query_plan_uses_index"] is True
+    assert p9["source_query_plan_uses_range_search"] is True
+    assert p9["source_query_plan_full_table_scan_detected"] is False
+    assert p9["estimated_required_bytes"] == p9["table_storage_upper_bytes"]
+    assert p9["estimated_required_bytes"] >= 12288
+    path = report["targets"]["opportunity_event_path_samples"]
+    assert path["strategy"] == "dbstat_full_btree_physical_upper_bound"
+    assert path["bounded"] is True
+
+
+def test_dbstat_uses_attached_source_page_size_not_main_page_size():
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("ATTACH DATABASE ':memory:' AS src")
+    connection.execute("PRAGMA src.page_size=65536")
+    connection.execute(
+        "CREATE TABLE src.t(id INTEGER PRIMARY KEY, payload BLOB)"
+    )
+    connection.executemany(
+        "INSERT INTO src.t(payload) VALUES (?)",
+        [(b"x" * 20_000,)] * 5,
+    )
+
+    report = snapshot_module.source_table_storage_report(connection, "t")
+
+    assert connection.execute("PRAGMA src.page_size").fetchone()[0] == 65536
+    assert report["page_size"] == 65536
+    assert report["physical_bytes"] == report["page_count"] * 65536
+    assert report["payload_bytes"] >= 100_000
+    assert report["payload_bytes"] <= report["physical_bytes"]
+    connection.close()
+
+
+def test_dbstat_upper_bound_covers_large_middle_payload_missed_by_edge_sample(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    giant_payload = "x" * (512 * 1024)
+    rows = []
+    for index in range(300):
+        payload = giant_payload if index == 150 else "small"
+        rows.append((index + 1, now - 300 + index, payload))
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute(
+        "ALTER TABLE paper_decision_events ADD COLUMN payload_json TEXT"
+    )
+    paper.executemany(
+        "INSERT INTO paper_decision_events(id, event_ts, payload_json) "
+        "VALUES (?, ?, ?)",
+        rows,
+    )
+    paper.commit()
+    paper.close()
+
+    report = snapshot_module.estimate_shared_stage_requirements(
+        Path(sources["paper"]),
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        review_lower_epoch=now - 96 * 3600,
+        long_lower_epoch=now - 840 * 3600,
+        upper_epoch=now,
+        busy_timeout_ms=30000,
+    )
+    estimate = report["targets"]["paper_decision_events"]
+
+    assert estimate["capacity_sample_used"] is False
+    assert estimate["sample_max_row_bytes_diagnostic"] < len(giant_payload)
+    assert estimate["source_dbstat_max_payload_bytes"] >= len(giant_payload)
+    assert estimate["selected_payload_upper_bytes"] >= len(giant_payload)
+
+    page_report = snapshot_module.inspect_source_page_reports(
+        {"paper": Path(sources["paper"])},
+        busy_timeout_ms=30000,
+    )["paper"]
+    start_event = threading.Event()
+    copy_start_event = threading.Event()
+    cancel_event = threading.Event()
+    start_event.set()
+    copy_start_event.set()
+    stage = snapshot_module.build_parallel_table_stage(
+        source=Path(sources["paper"]),
+        destination=tmp_path / ".middle-payload-stage.db",
+        table="paper_decision_events",
+        role="paper_decision_events_parallel_stage",
+        rule=snapshot_module.DATABASE_SPECS["paper"]["tables"][
+            "paper_decision_events"
+        ],
+        source_page_report=page_report,
+        review_lower_epoch=now - 96 * 3600,
+        long_lower_epoch=now - 840 * 3600,
+        upper_epoch=now,
+        budget_bytes=estimate["estimated_required_bytes"],
+        busy_timeout_ms=30000,
+        max_source_read_lock_sec=300,
+        start_event=start_event,
+        pinned_barrier=threading.Barrier(1),
+        copy_start_event=copy_start_event,
+        cancel_event=cancel_event,
+    )
+
+    assert stage["table_report"]["rows_copied"] == 300
+    assert stage["stage_size_bytes"] <= estimate["estimated_required_bytes"]
+
+
+def test_candidate_signal_only_index_bound_ignores_huge_candidate_ids(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO candidate_shadow_observations("
+        "id, signal_id, candidate_id, observed_at, payload_json"
+        ") VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                index + 1,
+                index // 10 + 1,
+                f"candidate-{index}-" + "x" * 100_000,
+                now - index,
+                "{}",
+            )
+            for index in range(100)
+        ],
+    )
+    paper.commit()
+    paper.close()
+
+    estimate_report = snapshot_module.estimate_shared_stage_requirements(
+        Path(sources["paper"]),
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        review_lower_epoch=now - 96 * 3600,
+        long_lower_epoch=now - 840 * 3600,
+        upper_epoch=now,
+        busy_timeout_ms=30000,
+    )
+    estimate = estimate_report["targets"][
+        "candidate_shadow_observations"
+    ]
+    assert estimate["candidate_order_source_index_columns"] == ["signal_id"]
+    assert estimate["candidate_order_source_index_name"] == (
+        "idx_candidate_shadow_obs_signal"
+    )
+    assert estimate["candidate_order_index_upper_bytes"] > 0
+
+    out = tmp_path / "candidate-wide-key-evidence"
+    manifest = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-9abcdeff",
+    )
+    candidate_budget = manifest["shared_stage_budget"]["targets"][
+        "candidate_shadow_observations"
+    ]
+    projection = manifest["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_observations"
+    ]["storage_projection"]
+    assert manifest["accepted"] is True
+    assert candidate_budget["actual_usage_bytes"] <= candidate_budget[
+        "estimated_required_bytes"
+    ]
+    assert projection["stage_order_index_name"] == (
+        "idx_a3_candidate_stage_signal"
+    )
+    assert projection["stage_query_plan_temp_btree_detected"] is False
+
+
+def test_multilevel_candidate_table_uses_exact_signal_index_row_count(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper = sqlite3.connect(sources["paper"])
+    paper.executemany(
+        "INSERT INTO candidate_shadow_observations("
+        "id, signal_id, candidate_id, observed_at, payload_json"
+        ") VALUES (?, ?, ?, ?, '{}')",
+        (
+            (index + 1, index // 10 + 1, f"candidate-{index}", now - index % 3600)
+            for index in range(100_000)
+        ),
+    )
+    paper.commit()
+    paper.close()
+
+    estimator = sqlite3.connect(":memory:", uri=True)
+    estimator.row_factory = sqlite3.Row
+    estimator.execute(
+        "ATTACH DATABASE ? AS src",
+        (f"file:{Path(sources['paper']).resolve()}?mode=ro",),
+    )
+    estimator.execute("BEGIN")
+    estimator.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
+    estimate = snapshot_module.estimate_shared_stage_target_requirement(
+        estimator,
+        "candidate_shadow_observations",
+        review_lower_epoch=now - 96 * 3600,
+        long_lower_epoch=now - 840 * 3600,
+        upper_epoch=now,
+        pinned_read_view={
+            "read_view_id": "1" * 32,
+            "role": "paper_main_selective_copy",
+        },
+    )
+    estimator.rollback()
+    estimator.close()
+    assert estimate["source_row_count_upper_basis"] == (
+        "exact_signal_index_entry_count"
+    )
+    assert estimate["source_row_count_upper"] == 100_000
+    assert estimate["candidate_order_source_index_dbstat_cell_upper_count"] == (
+        100_000
+    )
+    assert estimate["source_dbstat_cell_upper_count"] > 100_000
+
+    consumer_report = {
+        "estimated_required_bytes": estimate["estimated_required_bytes"],
+        "estimate_strategy": estimate["strategy"],
+        "estimate_evidence": estimate,
+    }
+    assert validate_shared_stage_estimate_contract(
+        "candidate_shadow_observations",
+        consumer_report,
+    ) == estimate["estimated_required_bytes"]
+
+
+def test_candidate_order_index_requires_exact_signal_id_key(tmp_path):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("DROP INDEX idx_candidate_shadow_obs_signal")
+    paper.execute(
+        "CREATE INDEX idx_candidate_shadow_obs_signal_composite "
+        "ON candidate_shadow_observations(signal_id, candidate_id)"
+    )
+    paper.commit()
+    paper.close()
+    now = int(time.time())
+
+    with pytest.raises(
+        RuntimeError,
+        match="shared_stage_estimate_candidate_order_index_invalid",
+    ):
+        snapshot_module.estimate_shared_stage_requirements(
+            Path(sources["paper"]),
+            parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+            review_lower_epoch=now - 96 * 3600,
+            long_lower_epoch=now - 840 * 3600,
+            upper_epoch=now,
+            busy_timeout_ms=30000,
+        )
+
+
+def test_shared_stage_estimate_fails_closed_when_dbstat_is_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+
+    def dbstat_unavailable(*_args, **_kwargs):
+        raise sqlite3.OperationalError("no such table: dbstat")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "source_table_storage_report",
+        dbstat_unavailable,
+    )
+    now = int(time.time())
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "shared_stage_estimate_dbstat_unavailable:"
+            "candidate_shadow_observations"
+        ),
+    ):
+        snapshot_module.estimate_shared_stage_requirements(
+            Path(sources["paper"]),
+            parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+            review_lower_epoch=now - 96 * 3600,
+            long_lower_epoch=now - 840 * 3600,
+            upper_epoch=now,
+            busy_timeout_ms=30000,
+        )
+
+
+def test_failed_stage_high_water_is_reused_by_next_shared_plan(tmp_path):
+    estimates = shared_stage_estimates(
+        required_bytes={
+            "paper_decision_events": 24576,
+        }
+    )
+    total_cap = sum(
+        row["estimated_required_bytes"]
+        for row in estimates["targets"].values()
+    )
+    first_plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        attempt_id="failed-attempt",
+    )
+    partial = tmp_path / ".failed.partial"
+    partial.mkdir()
+    for target, report in first_plan["targets"].items():
+        size = 4096
+        if target == "paper_decision_events":
+            size = int(report["granted_cap_bytes"])
+        (partial / report["stage_filename"]).write_bytes(b"x" * size)
+    failure = snapshot_module.ConcurrentSnapshotError(
+        {
+            "paper": {
+                "error_code": "parallel_paper_stage_budget_exceeded",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:paper_decision_events",
+            }
+        }
+    )
+    history = snapshot_module.capture_shared_stage_budget_failure(
+        partial,
+        first_plan,
+        failure,
+    )
+    assert history is not None
+    history["cleanup_completed"] = True
+    history["stage_files_removed"] = True
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    assert history["targets"]["paper_decision_events"]["cap_hit"] is True
+    assert history["targets"]["paper_decision_events"]["high_water_bytes"] == (
+        first_plan["targets"]["paper_decision_events"]["granted_cap_bytes"]
+    )
+    assert snapshot_module.validated_shared_stage_budget_history(history)[
+        "accepted"
+    ] is True
+
+    next_plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap + 10 * 4096,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        history=history,
+        attempt_id="next-attempt",
+    )
+    assert next_plan["accepted"] is True
+    assert next_plan["history_used"] is True
+    assert next_plan["targets"]["paper_decision_events"]["history_state"] == (
+        "cap_hit"
+    )
+    assert next_plan["targets"]["paper_decision_events"][
+        "granted_cap_bytes"
+    ] > first_plan["targets"]["paper_decision_events"]["granted_cap_bytes"]
+    assert next_plan["total_granted_bytes"] == next_plan["total_cap_bytes"]
+
+
+def test_completed_parallel_stage_is_reused_with_completed_history_headroom(
+    tmp_path,
+):
+    estimates = shared_stage_estimates(
+        required_bytes={
+            "paper_decision_events": 24576,
+            "a_class_decision_events": 24576,
+        }
+    )
+    total_cap = sum(
+        row["estimated_required_bytes"]
+        for row in estimates["targets"].values()
+    )
+    first_plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        attempt_id="parallel-history-attempt",
+    )
+    partial = tmp_path / ".parallel-history.partial"
+    partial.mkdir()
+    for target, report in first_plan["targets"].items():
+        size = 4096
+        if target == "a_class_decision_events":
+            size = int(report["granted_cap_bytes"])
+        (partial / report["stage_filename"]).write_bytes(b"x" * size)
+    failure = snapshot_module.ConcurrentSnapshotError(
+        {
+            "paper": {
+                "error_code": "parallel_paper_stage_budget_exceeded",
+                "error_type": "RuntimeError",
+                "stage": "copy_table:a_class_decision_events",
+                "copy_timing": {
+                    "completed_parallel_stages": [
+                        "paper_decision_events",
+                    ],
+                    "completed_tables": {},
+                },
+            }
+        }
+    )
+    history = snapshot_module.capture_shared_stage_budget_failure(
+        partial,
+        first_plan,
+        failure,
+    )
+    assert history is not None
+    history["cleanup_completed"] = True
+    history["stage_files_removed"] = True
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    assert history["targets"]["paper_decision_events"][
+        "copy_completed"
+    ] is True
+    assert history["targets"]["a_class_decision_events"][
+        "copy_completed"
+    ] is False
+    assert history["targets"]["a_class_decision_events"][
+        "cap_hit"
+    ] is True
+    assert snapshot_module.validated_shared_stage_budget_history(history)[
+        "accepted"
+    ] is True
+
+    next_plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap + 20 * 4096,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        history=history,
+        attempt_id="parallel-history-next",
+    )
+    assert next_plan["targets"]["paper_decision_events"][
+        "history_state"
+    ] == "completed"
+    assert next_plan["targets"]["a_class_decision_events"][
+        "history_state"
+    ] == "cap_hit"
+    assert next_plan["targets"]["paper_decision_events"][
+        "baseline_required_bytes"
+    ] < next_plan["targets"]["a_class_decision_events"][
+        "baseline_required_bytes"
+    ]
+
+
+def test_unregistered_stage_file_invalidates_high_water_history(tmp_path):
+    estimates = shared_stage_estimates()
+    total_cap = sum(
+        row["estimated_required_bytes"]
+        for row in estimates["targets"].values()
+    )
+    plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        attempt_id="rogue-file-attempt",
+    )
+    partial = tmp_path / ".rogue.partial"
+    partial.mkdir()
+    for report in plan["targets"].values():
+        (partial / report["stage_filename"]).write_bytes(b"x" * 4096)
+    (partial / ".rogue-stage.db").write_bytes(b"rogue")
+    evidence = snapshot_module.capture_shared_stage_budget_failure(
+        partial,
+        plan,
+        RuntimeError("parallel_paper_stage_budget_exceeded"),
+    )
+    assert evidence is not None
+    evidence["cleanup_completed"] = True
+    evidence["stage_files_removed"] = True
+    evidence["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(evidence)
+    )
+    assert evidence["no_unregistered_stage_files"] is False
+    assert evidence["unregistered_stage_files"] == [".rogue-stage.db"]
+    validated = snapshot_module.validated_shared_stage_budget_history(evidence)
+    assert validated["accepted"] is False
+    assert validated["reason"] == "history_cleanup_invalid"
+
+
+def test_capacity_insufficient_history_is_not_reused():
+    estimates = shared_stage_estimates()
+    history = shared_stage_history(estimates)
+    history["capacity_sufficient"] = False
+    history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        history
+    )
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    assert validated["accepted"] is False
+    assert validated["reason"] == "history_plan_not_usable"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_reason"),
+    (
+        ("negative_high_water", "history_capacity_invalid"),
+        ("stage_files_not_removed", "history_cleanup_invalid"),
+        ("required_inventory_removed", "history_inventory_invalid"),
+        ("target_grant_sum_mismatch", "history_total_invalid"),
+    ),
+)
+def test_rehashed_unsafe_history_is_rejected(mutation, expected_reason):
+    estimates = shared_stage_estimates()
+    history = shared_stage_history(estimates)
+    p9 = history["targets"]["paper_decision_events"]
+    if mutation == "negative_high_water":
+        p9["high_water_bytes"] = -1
+    elif mutation == "stage_files_not_removed":
+        history["stage_files_removed"] = False
+    elif mutation == "required_inventory_removed":
+        history["active_targets"] = ["paper_decision_events"]
+        history["targets"] = {"paper_decision_events": p9}
+    elif mutation == "target_grant_sum_mismatch":
+        p9["granted_cap_bytes"] += 4096
+    else:
+        raise AssertionError(mutation)
+    history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        history
+    )
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    assert validated["accepted"] is False
+    assert validated["reason"] == expected_reason
+
+
+def test_tampered_high_water_history_hash_is_rejected():
+    estimates = shared_stage_estimates()
+    history = shared_stage_history(
+        estimates,
+        cap_hit_target="paper_decision_events",
+    )
+    history["targets"]["paper_decision_events"]["high_water_bytes"] += 4096
+    validated = snapshot_module.validated_shared_stage_budget_history(history)
+    assert validated["accepted"] is False
+    assert validated["reason"] == "history_evidence_hash_invalid"
+
+
+def test_disk_preflight_assigns_shared_residual_to_cap_hit_target(
     tmp_path,
     monkeypatch,
 ):
@@ -128,78 +822,75 @@ def test_disk_preflight_sizes_stage_from_residual_space_not_output_fraction(
         "disk_usage",
         lambda _path: SimpleNamespace(total=80 * gib, used=40 * gib, free=free_bytes),
     )
+    estimates = shared_stage_estimates(
+        required_bytes={
+            "candidate_shadow_observations": 1 * gib,
+            "paper_decision_events": 4 * gib,
+            "a_class_decision_events": 2 * gib,
+            "opportunity_events": 1 * gib,
+            "opportunity_event_path_samples": 2 * gib,
+        }
+    )
+    history = shared_stage_history(
+        estimates,
+        cap_hit_target="paper_decision_events",
+    )
 
     report = snapshot_module.disk_preflight(
         tmp_path,
         min_free_after_gib=5,
         max_output_gib=10,
+        shared_stage_estimates=estimates,
+        shared_stage_history=history,
+        attempt_id="current-attempt",
     )
 
     expected_total_stage = 25 * gib
-    minimum_total = (
-        snapshot_module.MIN_CANDIDATE_STAGE_CAP_BYTES
-        + len(snapshot_module.PARALLEL_PAPER_STAGE_TABLES)
-        * snapshot_module.MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-    )
-    expected_candidate = (
-        snapshot_module.MIN_CANDIDATE_STAGE_CAP_BYTES
-        + int(
-            (expected_total_stage - minimum_total)
-            * snapshot_module.CANDIDATE_STAGE_RESIDUAL_SHARE
-        )
-        // 4096
-        * 4096
-    )
-    residual_after_minimums = expected_total_stage - minimum_total
-    expected_parallel = {}
-    allocated = expected_candidate
-    for table in snapshot_module.PARALLEL_PAPER_STAGE_TABLES[:-1]:
-        share = snapshot_module.PARALLEL_PAPER_STAGE_CONFIGS[table]["residual_share"]
-        expected_parallel[table] = (
-            snapshot_module.MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
-            + int(residual_after_minimums * share) // 4096 * 4096
-        )
-        allocated += expected_parallel[table]
-    expected_parallel[snapshot_module.PARALLEL_PAPER_STAGE_TABLES[-1]] = (
-        expected_total_stage - allocated
-    )
+    shared = report["shared_stage_budget"]
+    p9 = shared["targets"]["paper_decision_events"]
     assert report["accepted"] is True
-    assert report["candidate_stage_budget_mode"] == "shared_residual_disk_after_output_and_reserve"
+    assert report["candidate_stage_budget_mode"] == "shared_stage_budget_coordinator"
+    assert report["fixed_percentage_allocation_used"] is False
     assert report["candidate_stage_minimum_cap_bytes"] == 12288
     assert report["paper_decision_stage_minimum_cap_bytes"] == 12288
+    assert report["temporary_stage_raw_cap_bytes"] == expected_total_stage
+    assert report["temporary_stage_alignment_reserve_bytes"] == 0
     assert report["temporary_stage_total_cap_bytes"] == expected_total_stage
-    assert report["temporary_candidate_stage_cap_bytes"] == expected_candidate
-    assert report["temporary_parallel_paper_stage_cap_bytes"] == expected_parallel
-    assert report["configured_parallel_paper_stage_tables"] == list(
-        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    assert shared["schema_version"] == "shared_stage_budget.v1"
+    assert shared["allocation_mode"] == (
+        "history_high_water_plus_bounded_source_estimate"
     )
-    assert report["parallel_paper_stage_tables"] == list(
-        snapshot_module.PARALLEL_PAPER_STAGE_TABLES
-    )
-    assert report["omitted_optional_parallel_paper_stage_tables"] == []
-    assert report["parallel_paper_stage_active_weight_total"] == pytest.approx(1.0)
-    assert report["candidate_stage_normalized_share"] == pytest.approx(
-        snapshot_module.CANDIDATE_STAGE_RESIDUAL_SHARE
-    )
-    assert report["parallel_paper_stage_normalized_shares"] == pytest.approx(
-        report["parallel_paper_stage_residual_shares"]
-    )
-    assert report["temporary_paper_decision_stage_cap_bytes"] == expected_parallel[
-        "paper_decision_events"
+    assert shared["attempt_id"] == "current-attempt"
+    assert shared["history_used"] is True
+    assert shared["fixed_percentage_allocation_used"] is False
+    assert shared["grants_sum_matches_total_cap"] is True
+    assert shared["total_granted_bytes"] == expected_total_stage
+    assert sum(
+        target["granted_cap_bytes"]
+        for target in shared["targets"].values()
+    ) == expected_total_stage
+    assert p9["history_state"] == "cap_hit"
+    assert p9["history_cap_hit"] is True
+    assert p9["borrowed_shared_pool_bytes"] > 0
+    assert p9["granted_cap_bytes"] > 4 * gib
+    assert report["temporary_paper_decision_stage_cap_bytes"] == p9[
+        "granted_cap_bytes"
     ]
-    assert report["temporary_candidate_stage_cap_bytes"] > 2 * gib
-    assert report["temporary_parallel_paper_stage_cap_bytes"][
-        "paper_decision_events"
-    ] > 8 * gib
-    assert report["temporary_parallel_paper_stage_cap_bytes"][
-        "a_class_decision_events"
-    ] > 6 * gib
-    assert report["temporary_parallel_paper_stage_cap_bytes"][
-        "opportunity_events"
-    ] > 1 * gib
-    assert report["temporary_parallel_paper_stage_cap_bytes"][
-        "opportunity_event_path_samples"
-    ] > 4 * gib
+    assert report["temporary_candidate_stage_cap_bytes"] == shared["targets"][
+        "candidate_shadow_observations"
+    ]["granted_cap_bytes"]
+    assert report["temporary_parallel_paper_stage_cap_bytes"] == {
+        table: shared["targets"][table]["granted_cap_bytes"]
+        for table in snapshot_module.PARALLEL_PAPER_STAGE_TABLES
+    }
+    for legacy in (
+        "candidate_stage_residual_share",
+        "parallel_paper_stage_residual_shares",
+        "parallel_paper_stage_active_weight_total",
+        "candidate_stage_normalized_share",
+        "parallel_paper_stage_normalized_shares",
+    ):
+        assert legacy not in report
     assert report["estimated_peak_working_bytes"] == 35 * gib
     assert report["estimated_free_at_peak_bytes"] == 5 * gib
     assert report["estimated_free_at_peak_bytes"] == report["required_reserve_bytes"]
@@ -223,9 +914,11 @@ def test_disk_preflight_fails_when_residual_stage_capacity_is_below_one_page(
         max_output_gib=10,
     )
 
-    assert report["temporary_stage_total_cap_bytes"] == 12287
-    assert report["temporary_candidate_stage_cap_bytes"] == 12287
-    assert report["temporary_paper_decision_stage_cap_bytes"] == 0
+    assert report["temporary_stage_raw_cap_bytes"] == 12287
+    assert report["temporary_stage_alignment_reserve_bytes"] == 4095
+    assert report["temporary_stage_total_cap_bytes"] == 8192
+    assert report["shared_stage_budget"]["capacity_sufficient"] is False
+    assert report["shared_stage_budget"]["accepted"] is False
     assert report["accepted"] is False
 
 
@@ -341,14 +1034,18 @@ def test_optional_opportunity_path_stage_is_skipped_when_source_table_is_absent(
         + disk["temporary_candidate_stage_cap_bytes"]
         == disk["temporary_stage_total_cap_bytes"]
     )
-    assert disk["parallel_paper_stage_active_weight_total"] == pytest.approx(0.8)
-    assert disk["candidate_stage_normalized_share"] == pytest.approx(0.15)
-    assert disk["parallel_paper_stage_normalized_shares"] == pytest.approx(
-        {
-            "paper_decision_events": 0.45,
-            "a_class_decision_events": 0.3125,
-            "opportunity_events": 0.0875,
-        }
+    shared = disk["shared_stage_budget"]
+    assert shared["active_targets"] == [
+        "candidate_shadow_observations",
+        *expected_stages,
+    ]
+    assert "opportunity_event_path_samples" not in shared["targets"]
+    assert shared["total_granted_bytes"] == minimum_active_stage_bytes
+    assert shared["grants_sum_matches_total_cap"] is True
+    assert shared["fixed_percentage_allocation_used"] is False
+    assert all(
+        target["granted_cap_bytes"] == 12288
+        for target in shared["targets"].values()
     )
     assert optional_selection == {
         "included": False,
@@ -1095,6 +1792,8 @@ def test_candidate_projection_runs_after_source_lock_release_and_stage_is_remove
         );
         CREATE INDEX idx_candidate_shadow_obs_observed
           ON candidate_shadow_observations(observed_at);
+        CREATE INDEX idx_candidate_shadow_obs_signal
+          ON candidate_shadow_observations(signal_id);
         """
     )
     paper.execute(
@@ -1141,7 +1840,7 @@ def test_candidate_projection_runs_after_source_lock_release_and_stage_is_remove
     assert projection["projection_started_after_source_read_view_release"] is True
     assert projection["source_stage_schema_version"] == "candidate_observation_selective_stage.v1"
     assert projection["source_stage_size_bytes"] > 0
-    assert projection["stage_order_index_name"] == "idx_a3_candidate_stage_signal_candidate"
+    assert projection["stage_order_index_name"] == "idx_a3_candidate_stage_signal"
     assert projection["stage_query_plan_uses_order_index"] is True
     assert projection["stage_query_plan_temp_btree_detected"] is False
     assert all("TEMP B-TREE" not in row.upper() for row in projection["stage_query_plan"])
@@ -1155,6 +1854,132 @@ def test_candidate_projection_runs_after_source_lock_release_and_stage_is_remove
         report["disk_preflight"]["estimated_free_at_peak_bytes"]
         >= report["disk_preflight"]["required_reserve_bytes"]
     )
+
+
+def test_shared_stage_estimate_and_copy_use_same_pinned_wal_view(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    paper_path = Path(sources["paper"])
+    writer = sqlite3.connect(paper_path)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute(
+        "INSERT INTO candidate_shadow_observations("
+        "id, signal_id, candidate_id, observed_at, payload_json"
+        ") VALUES (1, 1, 'before-pin', ?, ?)",
+        (now - 60, '{"phase":"before"}'),
+    )
+    writer.commit()
+    writer.close()
+
+    def standalone_estimate_must_not_run(*_args, **_kwargs):
+        raise AssertionError(
+            "production bundle must not use a separate estimate connection"
+        )
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "estimate_shared_stage_requirements",
+        standalone_estimate_must_not_run,
+    )
+    original_estimator = (
+        snapshot_module.estimate_shared_stage_target_requirement
+    )
+    concurrent_inserted = threading.Event()
+
+    def estimate_then_commit_concurrent_row(
+        connection,
+        target,
+        **kwargs,
+    ):
+        estimate = original_estimator(connection, target, **kwargs)
+        if (
+            target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE
+            and kwargs.get("pinned_read_view") is not None
+            and not concurrent_inserted.is_set()
+        ):
+            concurrent_writer = sqlite3.connect(paper_path, timeout=30)
+            concurrent_writer.execute("PRAGMA busy_timeout=30000")
+            concurrent_writer.execute(
+                "INSERT INTO candidate_shadow_observations("
+                "id, signal_id, candidate_id, observed_at, payload_json"
+                ") VALUES (2, 2, 'after-pin', ?, ?)",
+                (now - 30, '{"phase":"after"}'),
+            )
+            concurrent_writer.commit()
+            concurrent_writer.close()
+            concurrent_inserted.set()
+        return estimate
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "estimate_shared_stage_target_requirement",
+        estimate_then_commit_concurrent_row,
+    )
+    manifest = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "pinned-wal-evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abcf",
+    )
+
+    assert concurrent_inserted.is_set()
+    live = sqlite3.connect(paper_path)
+    try:
+        assert live.execute(
+            "SELECT COUNT(*) FROM candidate_shadow_observations"
+        ).fetchone()[0] == 2
+    finally:
+        live.close()
+
+    paper_report = manifest["databases"]["paper"]
+    selected = paper_report["selected_tables"][
+        "candidate_shadow_observations"
+    ]
+    projection = selected["storage_projection"]
+    budget = manifest["shared_stage_budget"]["targets"][
+        "candidate_shadow_observations"
+    ]
+    evidence = budget["estimate_evidence"]
+    paper_main_view = next(
+        view
+        for view in paper_report["pinned_read_views"]
+        if view["role"] == "paper_main_selective_copy"
+    )
+    assert manifest["accepted"] is True
+    assert manifest[
+        "shared_stage_estimates_bound_to_copy_read_views"
+    ] is True
+    assert paper_report[
+        "shared_stage_estimates_bound_to_copy_read_views"
+    ] is True
+    assert evidence["source_measurement_trust_boundary"] == (
+        "same_pinned_read_view_as_copy"
+    )
+    assert evidence["pinned_read_view_id"] == paper_main_view[
+        "read_view_id"
+    ]
+    assert evidence["selected_row_count"] == 1
+    assert budget["actual_rows_copied"] == 1
+    assert selected["rows_copied"] == 1
+    assert projection["rows_copied"] == 1
+
+    frozen = sqlite3.connect(paper_report["snapshot_path"])
+    try:
+        assert frozen.execute(
+            "SELECT COUNT(*) FROM "
+            "__a3_candidate_shadow_observation_rows"
+        ).fetchone()[0] == 1
+        assert frozen.execute(
+            "SELECT candidate_id FROM candidate_shadow_observations"
+        ).fetchall() == [("before-pin",)]
+    finally:
+        frozen.close()
 
 
 def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
@@ -1635,6 +2460,8 @@ def test_incompatible_candidate_projection_schema_fails_closed_without_publish(t
         );
         CREATE INDEX idx_candidate_shadow_obs_observed
           ON candidate_shadow_observations(observed_at);
+        CREATE INDEX idx_candidate_shadow_obs_signal
+          ON candidate_shadow_observations(signal_id);
         """
     )
     paper.commit()
@@ -2423,8 +3250,23 @@ def test_disk_shortage_fails_closed_without_replacing_current(tmp_path, monkeypa
         "disk_usage",
         lambda _path: DiskUsage(1024**3, 1024**3 - 1024, 1024),
     )
+    copy_started = False
 
-    with pytest.raises(RuntimeError, match="insufficient disk"):
+    def unexpected_copy(*_args, **_kwargs):
+        nonlocal copy_started
+        copy_started = True
+        raise AssertionError("copy must not start when shared capacity is insufficient")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_all_concurrently",
+        unexpected_copy,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="shared_stage_capacity_insufficient|insufficient disk",
+    ):
         build_snapshot_bundle(
             sources=sources,
             out_root=str(out),
@@ -2435,6 +3277,7 @@ def test_disk_shortage_fails_closed_without_replacing_current(tmp_path, monkeypa
             snapshot_id="20260101T010000Z-abcdef12",
         )
 
+    assert copy_started is False
     current = json.loads((out / "current" / "manifest.json").read_text())
     assert current["snapshot_id"] == first["snapshot_id"]
     assert not (out / "snapshots" / ".20260101T010000Z-abcdef12.partial").exists()
@@ -2589,6 +3432,19 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert accepted["manifest_sha256"] == snapshot_module.sha256_file(Path(accepted["manifest_path"]))
     assert accepted["indexed_selection"]["candidate_shadow_observations"]["predicate_strategy"] == "indexed_epoch_seconds"
     assert accepted["indexed_selection"]["candidate_shadow_virtual_trades"]["source_index_name"] == "idx_candidate_shadow_virtual_observed"
+    shared = persisted["shared_stage_budget"]
+    assert shared["schema_version"] == "shared_stage_budget.v1"
+    assert shared["accepted"] is True
+    assert shared["cleanup_completed"] is True
+    assert shared["no_unregistered_stage_files"] is True
+    assert shared["total_granted_bytes"] == shared["total_cap_bytes"]
+    assert all(
+        target["within_grant"] is True
+        for target in shared["targets"].values()
+    )
+    assert accepted["shared_stage_budget"]["schema_version"] == (
+        "shared_stage_budget.v1"
+    )
     assert persisted["next_attempt_delay_sec"] == 21600
     assert persisted["next_attempt_at"]
     assert persisted["failure_retry_sec"] == 60
@@ -2643,6 +3499,86 @@ def test_snapshot_worker_failure_preserves_last_accepted_summary(tmp_path, monke
     assert persisted["consecutive_failure_count"] == 1
     assert persisted["error_count"] == 3
     assert persisted["promotion_allowed"] is False
+
+
+def test_snapshot_worker_persists_shared_high_water_for_next_retry(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources)
+    estimates = shared_stage_estimates()
+    total_cap = sum(
+        row["estimated_required_bytes"]
+        for row in estimates["targets"].values()
+    )
+    evidence = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        attempt_id="failed-worker-attempt",
+    )
+    evidence["accepted"] = False
+    evidence["captured_at"] = snapshot_module.utc_iso()
+    evidence["cleanup_completed"] = True
+    evidence["no_unregistered_stage_files"] = True
+    evidence["unregistered_stage_files"] = []
+    evidence["actual_total_bytes"] = 0
+    for target, report in evidence["targets"].items():
+        high_water = 4096
+        if target == "paper_decision_events":
+            high_water = int(report["granted_cap_bytes"])
+        report.update(
+            {
+                "actual_usage_bytes": high_water,
+                "high_water_bytes": high_water,
+                "copy_completed": target != "paper_decision_events",
+                "cap_hit": target == "paper_decision_events",
+                "within_grant": True,
+                "utilization_ratio": high_water
+                / int(report["granted_cap_bytes"]),
+                "evidence_source": "partial_stage_files_before_cleanup",
+            }
+        )
+        evidence["actual_total_bytes"] += high_water
+    evidence["unconsumed_bytes"] = (
+        int(evidence["total_cap_bytes"])
+        - int(evidence["actual_total_bytes"])
+    )
+    evidence["all_targets_within_grant"] = True
+    evidence["stage_files_removed"] = True
+    evidence["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(evidence)
+    )
+
+    def fail_snapshot(**_kwargs):
+        exc = RuntimeError(
+            "parallel_paper_stage_budget_exceeded:paper_decision_events"
+        )
+        setattr(exc, "shared_stage_budget", evidence)
+        raise exc
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_snapshot)
+    first = snapshot_module.run_snapshot_once(args)
+    assert first["accepted"] is False
+    assert first["shared_stage_budget"] == evidence
+    assert first["shared_stage_budget"]["targets"][
+        "paper_decision_events"
+    ]["cap_hit"] is True
+    assert snapshot_module.validated_shared_stage_budget_history(
+        first["shared_stage_budget"]
+    )["accepted"] is True
+
+    observed_history = None
+
+    def inspect_history(**kwargs):
+        nonlocal observed_history
+        observed_history = kwargs.get("previous_shared_stage_budget")
+        raise RuntimeError("shared_stage_capacity_insufficient")
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", inspect_history)
+    snapshot_module.run_snapshot_once(args)
+    assert observed_history == evidence
 
 
 def test_concurrent_snapshot_failure_preserves_safe_database_stage_and_retries_soon(

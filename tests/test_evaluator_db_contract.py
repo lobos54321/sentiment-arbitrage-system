@@ -23,7 +23,11 @@ from evaluator_db_contract import (  # noqa: E402
     require_evaluator_snapshot_bundle,
     sha256_file,
 )
-from cross_db_evaluator_snapshot import build_snapshot_bundle  # noqa: E402
+from cross_db_evaluator_snapshot import (  # noqa: E402
+    build_snapshot_bundle,
+    shared_stage_budget_evidence_sha256,
+    shared_stage_budget_plan_sha256,
+)
 
 
 def create_live_sources(root):
@@ -37,6 +41,8 @@ def create_live_sources(root):
             "observed_at INTEGER, payload_json TEXT);"
             "CREATE INDEX idx_candidate_shadow_obs_observed "
             "ON candidate_shadow_observations(observed_at);"
+            "CREATE INDEX idx_candidate_shadow_obs_signal "
+            "ON candidate_shadow_observations(signal_id);"
             "CREATE TABLE candidate_shadow_virtual_trades(signal_id INTEGER, observed_at INTEGER);"
             "CREATE INDEX idx_candidate_shadow_virtual_observed "
             "ON candidate_shadow_virtual_trades(observed_at);"
@@ -73,12 +79,44 @@ def create_valid_bundle(
     monkeypatch,
     *,
     include_optional_path_samples: bool = True,
+    seed_shared_stage_rows: bool = False,
 ):
     live = tmp_path / "live"
     sources = create_live_sources(live)
     if not include_optional_path_samples:
         paper = sqlite3.connect(sources["paper"])
         paper.execute("DROP TABLE opportunity_event_path_samples")
+        paper.commit()
+        paper.close()
+    if seed_shared_stage_rows:
+        now = int(time.time())
+        paper = sqlite3.connect(sources["paper"])
+        paper.execute(
+            "INSERT INTO candidate_shadow_observations("
+            "id, signal_id, candidate_id, observed_at, payload_json"
+            ") VALUES (1, 1, 'candidate-1', ?, '{}')",
+            (now,),
+        )
+        paper.execute(
+            "INSERT INTO paper_decision_events(id, event_ts) VALUES (1, ?)",
+            (now,),
+        )
+        paper.execute(
+            "INSERT INTO a_class_decision_events(id, event_ts) VALUES (1, ?)",
+            (now,),
+        )
+        paper.execute(
+            "INSERT INTO opportunity_events(id, event_ts) VALUES (1, ?)",
+            (now,),
+        )
+        if include_optional_path_samples:
+            paper.execute(
+                "INSERT INTO opportunity_event_path_samples("
+                "id, opportunity_key, sample_ts, raw_payload_json, "
+                "created_at, updated_at"
+                ") VALUES (1, 'opp-1', ?, '{}', ?, ?)",
+                (now, now, now),
+            )
         paper.commit()
         paper.close()
     monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
@@ -115,6 +153,24 @@ def create_valid_bundle(
         encoding="utf-8",
     )
     return live, sources, out
+
+
+def synchronize_shared_budget_copies(manifest):
+    shared = manifest["shared_stage_budget"]
+    shared["plan_sha256"] = shared_stage_budget_plan_sha256(shared)
+    shared["evidence_sha256"] = shared_stage_budget_evidence_sha256(shared)
+    manifest["disk_preflight"]["shared_stage_budget"] = json.loads(
+        json.dumps(shared)
+    )
+
+
+def synchronize_producer_manifest_sha(out: Path, manifest_path: Path) -> None:
+    status_path = out / "snapshot_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["last_accepted_snapshot"]["manifest_sha256"] = sha256_file(
+        manifest_path
+    )
+    status_path.write_text(json.dumps(status), encoding="utf-8")
 
 
 def test_missing_evidence_db_is_rejected(tmp_path):
@@ -299,9 +355,10 @@ def test_optional_absent_stage_cannot_retain_hidden_disk_cap(
     )
 
     assert status["accepted"] is False
-    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status[
-        "blockers"
-    ]
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in status["blockers"]
+    )
 
 
 def test_unknown_parallel_stage_name_is_rejected_without_consumer_crash(
@@ -928,6 +985,273 @@ def test_pinned_read_view_lineage_tampering_is_rejected(tmp_path, monkeypatch):
     assert "evaluator_snapshot_pinned_read_view_lineage_invalid" in status["blockers"]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "legacy_fixed_share",
+        "grant_sum_exceeds_global_cap",
+        "actual_exceeds_grant",
+        "cleanup_incomplete",
+        "stage_files_not_removed",
+        "unregistered_stage_file",
+        "optional_target_inventory_drift",
+        "baseline_below_estimate",
+        "negative_actual",
+        "null_grant",
+        "estimate_sample_used",
+        "estimate_payload_upper_tamper",
+        "estimate_physical_bytes_tamper",
+        "estimate_formula_tamper",
+        "plan_hash_mismatch",
+    ),
+)
+def test_shared_stage_budget_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+    mutation,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    shared = manifest["shared_stage_budget"]
+    disk = manifest["disk_preflight"]
+    p9 = shared["targets"]["paper_decision_events"]
+    if mutation == "legacy_fixed_share":
+        disk["candidate_stage_residual_share"] = 0.12
+    elif mutation == "grant_sum_exceeds_global_cap":
+        p9["granted_cap_bytes"] += 4096
+        p9["borrowed_shared_pool_bytes"] += 4096
+        shared["total_granted_bytes"] += 4096
+        disk["temporary_parallel_paper_stage_cap_bytes"][
+            "paper_decision_events"
+        ] += 4096
+        disk["temporary_paper_decision_stage_cap_bytes"] += 4096
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "actual_exceeds_grant":
+        delta = int(p9["granted_cap_bytes"]) + 1 - int(
+            p9["actual_usage_bytes"]
+        )
+        p9["actual_usage_bytes"] += delta
+        p9["high_water_bytes"] += delta
+        p9["utilization_ratio"] = p9["actual_usage_bytes"] / p9[
+            "granted_cap_bytes"
+        ]
+        shared["actual_total_bytes"] += delta
+        shared["unconsumed_bytes"] -= delta
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "cleanup_incomplete":
+        shared["cleanup_completed"] = False
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "stage_files_not_removed":
+        shared["stage_files_removed"] = False
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "unregistered_stage_file":
+        shared["no_unregistered_stage_files"] = False
+        shared["unregistered_stage_files"] = [".rogue-stage.db"]
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "optional_target_inventory_drift":
+        shared["active_targets"].remove("opportunity_event_path_samples")
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "baseline_below_estimate":
+        p9["baseline_required_bytes"] = p9["estimated_required_bytes"] - 4096
+        p9["borrowed_shared_pool_bytes"] = (
+            p9["granted_cap_bytes"] - p9["baseline_required_bytes"]
+        )
+        shared["baseline_required_total_bytes"] -= 4096
+        shared["residual_pool_bytes"] += 4096
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "negative_actual":
+        delta = int(p9["actual_usage_bytes"]) + 1
+        p9["actual_usage_bytes"] = -1
+        p9["high_water_bytes"] = -1
+        shared["actual_total_bytes"] -= delta
+        shared["unconsumed_bytes"] += delta
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "null_grant":
+        p9["granted_cap_bytes"] = None
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "estimate_sample_used":
+        p9["estimate_evidence"]["capacity_sample_used"] = True
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "estimate_payload_upper_tamper":
+        p9["estimate_evidence"]["selected_payload_upper_bytes"] += 4096
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "estimate_physical_bytes_tamper":
+        p9["estimate_evidence"]["source_dbstat_physical_bytes"] += 4096
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "estimate_formula_tamper":
+        p9["estimate_evidence"]["upper_bound_formula"] = (
+            "edge_sample_average_times_selected_rows"
+        )
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "plan_hash_mismatch":
+        shared["plan_sha256"] = "0" * 64
+        disk["shared_stage_budget"] = json.loads(json.dumps(shared))
+    else:
+        raise AssertionError(mutation)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in status["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "estimate_read_view_id_mismatch",
+        "estimate_read_view_role_mismatch",
+        "manifest_binding_flag_false",
+        "paper_binding_flag_false",
+        "pinned_view_id_mismatch",
+    ),
+)
+def test_shared_stage_read_view_binding_tampering_is_rejected(
+    tmp_path,
+    monkeypatch,
+    mutation,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    shared = manifest["shared_stage_budget"]
+    p9 = shared["targets"]["paper_decision_events"]
+    candidate = shared["targets"]["candidate_shadow_observations"]
+    paper_report = manifest["databases"]["paper"]
+    if mutation == "estimate_read_view_id_mismatch":
+        p9["estimate_evidence"]["pinned_read_view_id"] = candidate[
+            "estimate_evidence"
+        ]["pinned_read_view_id"]
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "estimate_read_view_role_mismatch":
+        p9["estimate_evidence"]["pinned_read_view_role"] = (
+            "paper_main_selective_copy"
+        )
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "manifest_binding_flag_false":
+        manifest[
+            "shared_stage_estimates_bound_to_copy_read_views"
+        ] = False
+    elif mutation == "paper_binding_flag_false":
+        paper_report[
+            "shared_stage_estimates_bound_to_copy_read_views"
+        ] = False
+    elif mutation == "pinned_view_id_mismatch":
+        for view in paper_report["pinned_read_views"]:
+            if view.get("role") == "paper_decision_events_parallel_stage":
+                view["read_view_id"] = "f" * 32
+                break
+        else:
+            raise AssertionError("paper decision pinned view missing")
+    else:
+        raise AssertionError(mutation)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert {
+        "evaluator_snapshot_shared_stage_budget_contract_invalid",
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid",
+        "evaluator_snapshot_pinned_read_view_lineage_invalid",
+    }.intersection(status["blockers"])
+
+
+def test_frozen_row_count_mismatch_is_rejected_after_sha_reanchoring(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_shared_stage_rows=True,
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    paper_path = (out / "current" / "paper_evidence.db").resolve()
+
+    paper = sqlite3.connect(paper_path)
+    paper.execute("DELETE FROM paper_decision_events")
+    paper.commit()
+    paper.close()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    paper_report["snapshot_sha256"] = sha256_file(paper_path)
+    paper_report["snapshot_size_bytes"] = paper_path.stat().st_size
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(paper_path),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+def test_candidate_selected_and_projection_row_counts_are_bound(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_shared_stage_rows=True,
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    candidate = manifest["databases"]["paper"]["selected_tables"][
+        "candidate_shadow_observations"
+    ]
+    candidate["rows_copied"] = 2
+    candidate["storage_projection"]["rows_copied"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
 def test_candidate_stage_budget_formula_tampering_is_rejected(tmp_path, monkeypatch):
     live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
     manifest_path = (out / "current" / "manifest.json").resolve()
@@ -947,7 +1271,10 @@ def test_candidate_stage_budget_formula_tampering_is_rejected(tmp_path, monkeypa
     )
 
     assert status["accepted"] is False
-    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in status["blockers"]
+    )
 
 
 def test_paper_decision_stage_budget_formula_tampering_is_rejected(
@@ -974,7 +1301,10 @@ def test_paper_decision_stage_budget_formula_tampering_is_rejected(
     )
 
     assert status["accepted"] is False
-    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in status["blockers"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1010,7 +1340,10 @@ def test_each_parallel_paper_stage_budget_formula_tampering_is_rejected(
     )
 
     assert status["accepted"] is False
-    assert "evaluator_snapshot_disk_preflight_contract_invalid" in status["blockers"]
+    assert (
+        "evaluator_snapshot_shared_stage_budget_contract_invalid"
+        in status["blockers"]
+    )
 
 
 def test_disk_preflight_tampering_is_rejected(tmp_path, monkeypatch):
@@ -1053,6 +1386,10 @@ def test_candidate_payload_projection_tampering_is_rejected(tmp_path, monkeypatc
     paper.execute(
         "CREATE INDEX idx_candidate_shadow_obs_observed "
         "ON candidate_shadow_observations(observed_at)"
+    )
+    paper.execute(
+        "CREATE INDEX idx_candidate_shadow_obs_signal "
+        "ON candidate_shadow_observations(signal_id)"
     )
     paper.execute(
         "INSERT INTO candidate_shadow_observations VALUES (1,1,'current_all',?,?)",

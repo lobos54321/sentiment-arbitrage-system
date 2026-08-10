@@ -47,6 +47,8 @@ import {
   readPaperReviewSnapshotHealth,
   readRuntimeFinalEvidenceHealth,
   readEvaluatorSnapshotWorkerHealth,
+  sharedStageBudgetEvidenceSha256,
+  sharedStageBudgetPlanSha256,
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   readV27ReadModelWorkerHealth,
@@ -59,6 +61,40 @@ import {
   tryBeginPaperReport,
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
+
+test('shared stage hashes match the Python cross-runtime golden vector', () => {
+  const payload = {
+    schema_version: 'shared_stage_budget.v1',
+    allocation_mode: 'history_high_water_plus_bounded_source_estimate',
+    hash_canonicalization: 'json_sorted_float64_bits.v1',
+    generated_at: 'x',
+    capacity_sufficient: true,
+    grants_sum_matches_total_cap: true,
+    total_cap_bytes: 4096,
+    total_granted_bytes: 4096,
+    actual_total_bytes: 1024,
+    unconsumed_bytes: 3072,
+    all_targets_within_grant: true,
+    targets: {
+      t: {
+        minimum_cap_bytes: 12288,
+        average: 0.1,
+        integral_float: 1.0,
+        utilization_ratio: 0.25,
+        actual_usage_bytes: 1024,
+      },
+    },
+  };
+  assert.equal(
+    sharedStageBudgetPlanSha256(payload),
+    '4e7d8de308b3b86a1c0169d4a0a8dd09ef598dd64e17bbb1bd658eb2ddc79c4e',
+  );
+  payload.plan_sha256 = sharedStageBudgetPlanSha256(payload);
+  assert.equal(
+    sharedStageBudgetEvidenceSha256(payload),
+    'b6a21cff3c526c744576c59deeae60d6d888d2ac8635bb25a3bdf870aa9599a1',
+  );
+});
 
 test('redactLogMessage masks dashboard secrets without hiding token addresses', () => {
   const redacted = redactLogMessage([
@@ -1657,6 +1693,24 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     raw: -0.20,
     kline: -0.15,
   };
+  const pinnedReadViewIds = {
+    signal_main_selective_copy: '1'.repeat(32),
+    paper_main_selective_copy: '2'.repeat(32),
+    paper_decision_events_parallel_stage: '3'.repeat(32),
+    a_class_decision_events_parallel_stage: '4'.repeat(32),
+    opportunity_events_parallel_stage: '5'.repeat(32),
+    opportunity_event_path_samples_parallel_stage: '6'.repeat(32),
+    raw_main_selective_copy: '7'.repeat(32),
+    kline_main_selective_copy: '8'.repeat(32),
+  };
+  const sharedTargetPinnedRoles = {
+    candidate_shadow_observations: 'paper_main_selective_copy',
+    paper_decision_events: 'paper_decision_events_parallel_stage',
+    a_class_decision_events: 'a_class_decision_events_parallel_stage',
+    opportunity_events: 'opportunity_events_parallel_stage',
+    opportunity_event_path_samples:
+      'opportunity_event_path_samples_parallel_stage',
+  };
   const databaseReport = (name) => ({
     snapshot_path: `/snapshot/${name}.db`,
     snapshot_size_bytes: 100,
@@ -1669,6 +1723,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     pinned_read_views: [
       {
         role: `${name}_main_selective_copy`,
+        read_view_id: pinnedReadViewIds[`${name}_main_selective_copy`],
         pinned_midpoint_epoch: snapshotTs + pinnedOffsets[name],
         source_read_lock_limit_sec: 300,
       },
@@ -1690,6 +1745,225 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     destination_schema_restored_after_source_read_lock_release: true,
     source_constraints_rebuilt_after_source_read_lock_release: true,
   });
+  const sharedEstimateEvidence = ({ target, estimated, actualRows }) => {
+    const indexed = target !== 'opportunity_event_path_samples';
+    const selectedRows = actualRows;
+    const physicalBytes = 4096;
+    const pageCount = 1;
+    const sourceIndexName = indexed ? `idx_${target}_time` : null;
+    const candidateTarget = target === 'candidate_shadow_observations';
+    const candidateOrderPhysicalBytes = candidateTarget ? 4096 : null;
+    const candidateOrderCellCount = candidateTarget ? actualRows : null;
+    const candidateIndexUpper = candidateTarget
+      ? 16384
+      : 0;
+    return {
+      upper_bound_schema_version: 'sqlite_dbstat_physical_upper_bound.v2',
+      upper_bound_formula:
+        'selected_payload_upper_plus_full_source_structural_overhead_'
+        + 'plus_per_row_record_overhead_plus_root_reserve'
+        + '+full_source_signal_index_physical_upper_for_candidate',
+      capacity_sample_used: false,
+      source_measurement_trust_boundary: 'same_pinned_read_view_as_copy',
+      pinned_read_view_id:
+        pinnedReadViewIds[sharedTargetPinnedRoles[target]],
+      pinned_read_view_role: sharedTargetPinnedRoles[target],
+      estimate_started_after_pin: true,
+      estimate_completed_before_copy: true,
+      row_count_binding_mode: indexed
+        ? 'exact_selected_rows'
+        : 'full_source_row_upper',
+      sample_limit_rows: 256,
+      selected_row_count: selectedRows,
+      source_row_count_upper: selectedRows,
+      source_row_count_upper_basis: candidateTarget
+        ? 'exact_signal_index_entry_count'
+        : 'table_dbstat_cell_upper',
+      sample_rows: 0,
+      average_row_bytes_diagnostic: null,
+      sample_max_row_bytes_diagnostic: null,
+      source_dbstat_page_count: pageCount,
+      source_dbstat_page_size: 4096,
+      source_dbstat_physical_bytes: physicalBytes,
+      source_dbstat_payload_bytes: 0,
+      source_dbstat_unused_bytes: physicalBytes,
+      source_dbstat_max_payload_bytes: 0,
+      source_dbstat_cell_upper_count: candidateTarget
+        ? selectedRows + 1
+        : selectedRows,
+      source_structural_overhead_bytes: physicalBytes,
+      selected_payload_upper_bytes: 0,
+      row_record_overhead_upper_bytes: 32,
+      index_record_overhead_upper_bytes: 32,
+      btree_root_reserve_pages: 2,
+      table_storage_upper_bytes: 16384,
+      candidate_order_index_upper_bytes: candidateIndexUpper,
+      candidate_order_source_index_name: candidateTarget
+        ? 'idx_candidate_shadow_obs_signal'
+        : null,
+      candidate_order_source_index_columns: candidateTarget
+        ? ['signal_id']
+        : [],
+      candidate_order_source_index_partial: candidateTarget ? false : null,
+      candidate_order_source_index_dbstat_page_count: candidateTarget ? 1 : null,
+      candidate_order_source_index_dbstat_page_size: candidateTarget ? 4096 : null,
+      candidate_order_source_index_dbstat_physical_bytes:
+        candidateOrderPhysicalBytes,
+      candidate_order_source_index_dbstat_payload_bytes: candidateTarget ? 0 : null,
+      candidate_order_source_index_dbstat_unused_bytes: candidateTarget ? 4096 : null,
+      candidate_order_source_index_dbstat_max_payload_bytes: candidateTarget ? 0 : null,
+      candidate_order_source_index_dbstat_cell_upper_count:
+        candidateOrderCellCount,
+      candidate_order_source_index_structural_overhead_bytes:
+        candidateTarget ? 4096 : null,
+      source_index_name: sourceIndexName,
+      source_query_plan: indexed
+        ? [`SEARCH src.${target} USING INDEX ${sourceIndexName} (ts>? AND ts<?)`]
+        : [],
+      source_query_plan_uses_index: indexed ? true : null,
+      source_query_plan_uses_range_search: indexed ? true : null,
+      source_query_plan_full_table_scan_detected: indexed ? false : null,
+    };
+  };
+  const sharedTarget = ({
+    target,
+    stageFilename,
+    estimated,
+    baseline,
+    grant,
+    actual,
+    actualRows = 1,
+    borrowed = 0,
+    historyState = 'none',
+  }) => ({
+    target,
+    source_table: target,
+    stage_filename: stageFilename,
+    required: target !== 'opportunity_event_path_samples',
+    minimum_cap_bytes: 12288,
+    estimated_required_bytes: estimated,
+    estimate_strategy: target === 'opportunity_event_path_samples'
+      ? 'dbstat_full_btree_physical_upper_bound'
+      : 'dbstat_physical_upper_bound_with_indexed_row_count',
+    estimate_bounded: true,
+    estimate_evidence: sharedEstimateEvidence({
+      target,
+      estimated,
+      actualRows,
+    }),
+    history_state: historyState,
+    history_high_water_bytes: 0,
+    history_granted_cap_bytes: 0,
+    history_cap_hit: false,
+    history_copy_completed: false,
+    baseline_required_bytes: baseline,
+    granted_cap_bytes: grant,
+    borrowed_shared_pool_bytes: borrowed,
+    evidence_sources: ['bounded_source_estimate'],
+    actual_usage_bytes: actual,
+    high_water_bytes: actual,
+    actual_rows_copied: actualRows,
+    row_count_bound_to_snapshot: true,
+    within_estimated_upper_bound: true,
+    copy_completed: true,
+    cap_hit: false,
+    within_grant: true,
+    utilization_ratio: actual / grant,
+    evidence_source: 'accepted_producer_stage_report',
+  });
+  const sharedStageBudget = {
+    schema_version: 'shared_stage_budget.v1',
+    allocation_mode: 'history_high_water_plus_bounded_source_estimate',
+    hash_canonicalization: 'json_sorted_float64_bits.v1',
+    attempt_id: snapshotId,
+    generated_at: '2026-08-08T03:59:00.000Z',
+    page_size: 4096,
+    total_cap_bytes: 102400,
+    active_targets: [
+      'candidate_shadow_observations',
+      'paper_decision_events',
+      'a_class_decision_events',
+      'opportunity_events',
+      'opportunity_event_path_samples',
+    ],
+    minimum_total_bytes: 61440,
+    baseline_required_total_bytes: 98304,
+    residual_pool_bytes: 4096,
+    borrowing_priority_targets: ['a_class_decision_events'],
+    history_used: false,
+    history_reason: 'history_missing',
+    history_attempt_id: null,
+    fixed_percentage_allocation_used: false,
+    targets: {
+      candidate_shadow_observations: sharedTarget({
+        target: 'candidate_shadow_observations',
+        stageFilename: '.candidate-observation-stage.db',
+        estimated: 32768,
+        baseline: 32768,
+        grant: 32768,
+        actual: 16000,
+      }),
+      paper_decision_events: sharedTarget({
+        target: 'paper_decision_events',
+        stageFilename: '.paper-decision-events-stage.db',
+        estimated: 16384,
+        baseline: 16384,
+        grant: 16384,
+        actual: 8192,
+      }),
+      a_class_decision_events: sharedTarget({
+        target: 'a_class_decision_events',
+        stageFilename: '.a-class-decision-events-stage.db',
+        estimated: 16384,
+        baseline: 16384,
+        grant: 20480,
+        actual: 8192,
+        borrowed: 4096,
+      }),
+      opportunity_events: sharedTarget({
+        target: 'opportunity_events',
+        stageFilename: '.opportunity-events-stage.db',
+        estimated: 16384,
+        baseline: 16384,
+        grant: 16384,
+        actual: 8192,
+      }),
+      opportunity_event_path_samples: sharedTarget({
+        target: 'opportunity_event_path_samples',
+        stageFilename: '.opportunity-event-path-samples-stage.db',
+        estimated: 16384,
+        baseline: 16384,
+        grant: 16384,
+        actual: 8192,
+      }),
+    },
+    total_granted_bytes: 102400,
+    grants_sum_matches_total_cap: true,
+    capacity_sufficient: true,
+    all_estimates_bounded: true,
+    pinned_read_view_binding_required: true,
+    all_estimates_pinned_read_view_bound: true,
+    accepted: true,
+    actual_total_bytes: 48768,
+    unconsumed_bytes: 53632,
+    all_targets_within_grant: true,
+    all_targets_within_estimated_upper_bound: true,
+    all_target_row_counts_bound_to_snapshot: true,
+    captured_at: '2026-08-08T03:59:20.000Z',
+    captured_before_cleanup: true,
+    cleanup_completed: true,
+    stage_files_removed: true,
+    unregistered_stage_files: [],
+    no_unregistered_stage_files: true,
+    plan_sha256: null,
+    evidence_sha256: null,
+  };
+  sharedStageBudget.plan_sha256 = sharedStageBudgetPlanSha256(
+    sharedStageBudget,
+  );
+  sharedStageBudget.evidence_sha256 = sharedStageBudgetEvidenceSha256(
+    sharedStageBudget,
+  );
   return {
     statusPayload: {
       schema_version: 'cross_db_evaluator_snapshot_worker_status.v1',
@@ -1713,6 +1987,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         manifest_sha256: 'd'.repeat(64),
         max_source_read_lock_duration_sec: 3.33,
       },
+      shared_stage_budget: sharedStageBudget,
       promotion_allowed: false,
     },
     manifestPayload: {
@@ -1734,6 +2009,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       indexes_built_after_source_read_lock_release: true,
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
+      shared_stage_estimates_bound_to_copy_read_views: true,
       parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v2',
       parallel_paper_stage_tables: [
         'paper_decision_events',
@@ -1757,20 +2033,24 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       output_cap_bytes: 10000,
       partial_artifacts_absent: true,
       active_database_reads_allowed_for_autoloop: false,
+      shared_stage_budget: sharedStageBudget,
+      shared_stage_budget_passed: true,
       disk_preflight: {
         accepted: true,
-        free_bytes: 120000,
+        free_bytes: 122400,
         selective_snapshot_output_cap_bytes: 10000,
         temporary_full_backup_bytes: 0,
-        temporary_stage_total_cap_bytes: 100000,
-        temporary_candidate_stage_cap_bytes: 16384,
+        temporary_stage_raw_cap_bytes: 102400,
+        temporary_stage_alignment_reserve_bytes: 0,
+        temporary_stage_total_cap_bytes: 102400,
+        temporary_candidate_stage_cap_bytes: 32768,
         temporary_parallel_paper_stage_cap_bytes: {
-          paper_decision_events: 24576,
+          paper_decision_events: 16384,
           a_class_decision_events: 20480,
-          opportunity_events: 12288,
-          opportunity_event_path_samples: 26272,
+          opportunity_events: 16384,
+          opportunity_event_path_samples: 16384,
         },
-        temporary_paper_decision_stage_cap_bytes: 24576,
+        temporary_paper_decision_stage_cap_bytes: 16384,
         configured_parallel_paper_stage_tables: [
           'paper_decision_events',
           'a_class_decision_events',
@@ -1784,28 +2064,14 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           'opportunity_event_path_samples',
         ],
         omitted_optional_parallel_paper_stage_tables: [],
-        candidate_stage_residual_share: 0.12,
-        parallel_paper_stage_residual_shares: {
-          paper_decision_events: 0.36,
-          a_class_decision_events: 0.25,
-          opportunity_events: 0.07,
-          opportunity_event_path_samples: 0.20,
-        },
-        parallel_paper_stage_active_weight_total: 1.0,
-        candidate_stage_normalized_share: 0.12,
-        parallel_paper_stage_normalized_shares: {
-          paper_decision_events: 0.36,
-          a_class_decision_events: 0.25,
-          opportunity_events: 0.07,
-          opportunity_event_path_samples: 0.20,
-        },
-        paper_decision_stage_residual_share: 0.36,
-        candidate_stage_budget_mode: 'shared_residual_disk_after_output_and_reserve',
+        candidate_stage_budget_mode: 'shared_stage_budget_coordinator',
+        shared_stage_budget: sharedStageBudget,
+        fixed_percentage_allocation_used: false,
         candidate_stage_minimum_cap_bytes: 12288,
         parallel_paper_stage_minimum_cap_bytes: 12288,
         paper_decision_stage_minimum_cap_bytes: 12288,
-        estimated_peak_working_bytes: 110000,
-        estimated_free_after_bytes: 110000,
+        estimated_peak_working_bytes: 112400,
+        estimated_free_after_bytes: 112400,
         estimated_free_at_peak_bytes: 10000,
         required_reserve_bytes: 10000,
         fail_closed_on_insufficient_space: true,
@@ -1816,6 +2082,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           ...databaseReport('paper'),
           source_read_lock_duration_sec: 3.33,
           main_source_read_lock_duration_sec: 3.33,
+          shared_stage_estimates_bound_to_copy_read_views: true,
           parallel_paper_source_read_lock_duration_sec: {
             paper_decision_events: 2.5,
             a_class_decision_events: 2.75,
@@ -1837,11 +2104,11 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             paper_decision_events: {
               ...stageSchemaEvidence(10),
               role: 'paper_decision_events_parallel_stage',
-              stage_size_bytes: 20000,
-              stage_budget_bytes: 24576,
+              stage_size_bytes: 8192,
+              stage_budget_bytes: 16384,
               stage_page_size: 4096,
-              rows_copied: 4100,
-              rows_merged: 4100,
+              rows_copied: 1,
+              rows_merged: 1,
               merge_duration_sec: 0.25,
               source_read_lock_duration_sec: 2.5,
               source_read_lock_budget_passed: true,
@@ -1854,11 +2121,11 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             a_class_decision_events: {
               ...stageSchemaEvidence(8),
               role: 'a_class_decision_events_parallel_stage',
-              stage_size_bytes: 18000,
+              stage_size_bytes: 8192,
               stage_budget_bytes: 20480,
               stage_page_size: 4096,
-              rows_copied: 3000,
-              rows_merged: 3000,
+              rows_copied: 1,
+              rows_merged: 1,
               merge_duration_sec: 0.20,
               source_read_lock_duration_sec: 2.75,
               source_read_lock_budget_passed: true,
@@ -1871,11 +2138,11 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             opportunity_events: {
               ...stageSchemaEvidence(7),
               role: 'opportunity_events_parallel_stage',
-              stage_size_bytes: 12000,
-              stage_budget_bytes: 12288,
+              stage_size_bytes: 8192,
+              stage_budget_bytes: 16384,
               stage_page_size: 4096,
-              rows_copied: 2000,
-              rows_merged: 2000,
+              rows_copied: 1,
+              rows_merged: 1,
               merge_duration_sec: 0.15,
               source_read_lock_duration_sec: 2.25,
               source_read_lock_budget_passed: true,
@@ -1888,11 +2155,11 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             opportunity_event_path_samples: {
               ...stageSchemaEvidence(6),
               role: 'opportunity_event_path_samples_parallel_stage',
-              stage_size_bytes: 24000,
-              stage_budget_bytes: 26272,
+              stage_size_bytes: 8192,
+              stage_budget_bytes: 16384,
               stage_page_size: 4096,
-              rows_copied: 5000,
-              rows_merged: 5000,
+              rows_copied: 1,
+              rows_merged: 1,
               merge_duration_sec: 0.30,
               source_read_lock_duration_sec: 2.9,
               source_read_lock_budget_passed: true,
@@ -1908,34 +2175,43 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           paper_decision_parallel_read_view_pinned: true,
           paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
           paper_decision_parallel_stage_removed_before_publish: true,
-          paper_decision_parallel_stage_size_bytes: 20000,
-          paper_decision_parallel_stage_budget_bytes: 24576,
+          paper_decision_parallel_stage_size_bytes: 8192,
+          paper_decision_parallel_stage_budget_bytes: 16384,
           paper_decision_parallel_stage_page_size: 4096,
-          paper_decision_parallel_stage_rows_merged: 4100,
+          paper_decision_parallel_stage_rows_merged: 1,
           paper_decision_parallel_stage_merge_duration_sec: 0.25,
           pinned_read_views: [
             {
               role: 'paper_main_selective_copy',
+              read_view_id: pinnedReadViewIds.paper_main_selective_copy,
               pinned_midpoint_epoch: snapshotTs - 0.10,
               source_read_lock_limit_sec: 300,
             },
             {
               role: 'paper_decision_events_parallel_stage',
+              read_view_id:
+                pinnedReadViewIds.paper_decision_events_parallel_stage,
               pinned_midpoint_epoch: snapshotTs - 0.05,
               source_read_lock_limit_sec: 300,
             },
             {
               role: 'a_class_decision_events_parallel_stage',
+              read_view_id:
+                pinnedReadViewIds.a_class_decision_events_parallel_stage,
               pinned_midpoint_epoch: snapshotTs,
               source_read_lock_limit_sec: 300,
             },
             {
               role: 'opportunity_events_parallel_stage',
+              read_view_id:
+                pinnedReadViewIds.opportunity_events_parallel_stage,
               pinned_midpoint_epoch: snapshotTs + 0.05,
               source_read_lock_limit_sec: 300,
             },
             {
               role: 'opportunity_event_path_samples_parallel_stage',
+              read_view_id:
+                pinnedReadViewIds.opportunity_event_path_samples_parallel_stage,
               pinned_midpoint_epoch: snapshotTs + 0.10,
               source_read_lock_limit_sec: 300,
             },
@@ -2006,7 +2282,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_index: true,
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
-              rows_copied: 36120,
+              rows_copied: 1,
             },
             candidate_shadow_virtual_trades: {
               included: true,
@@ -2036,19 +2312,19 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_index: true,
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
-              rows_copied: 4100,
+              rows_copied: 1,
               parallel_stage: {
                 ...stageSchemaEvidence(10),
                 role: 'paper_decision_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
-                stage_rows_copied: 4100,
-                rows_merged: 4100,
+                stage_rows_copied: 1,
+                rows_merged: 1,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
-                stage_size_bytes: 20000,
-                stage_budget_bytes: 24576,
+                stage_size_bytes: 8192,
+                stage_budget_bytes: 16384,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -2066,18 +2342,18 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_index: true,
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
-              rows_copied: 3000,
+              rows_copied: 1,
               parallel_stage: {
                 ...stageSchemaEvidence(8),
                 role: 'a_class_decision_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
-                stage_rows_copied: 3000,
-                rows_merged: 3000,
+                stage_rows_copied: 1,
+                rows_merged: 1,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
-                stage_size_bytes: 18000,
+                stage_size_bytes: 8192,
                 stage_budget_bytes: 20480,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
@@ -2096,19 +2372,19 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_index: true,
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
-              rows_copied: 2000,
+              rows_copied: 1,
               parallel_stage: {
                 ...stageSchemaEvidence(7),
                 role: 'opportunity_events_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
-                stage_rows_copied: 2000,
-                rows_merged: 2000,
+                stage_rows_copied: 1,
+                rows_merged: 1,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
-                stage_size_bytes: 12000,
-                stage_budget_bytes: 12288,
+                stage_size_bytes: 8192,
+                stage_budget_bytes: 16384,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -2120,19 +2396,19 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               future_bound_enforced: true,
               time_columns: ['sample_ts', 'created_at', 'updated_at'],
               upper_bound_columns: ['sample_ts', 'created_at', 'updated_at'],
-              rows_copied: 5000,
+              rows_copied: 1,
               parallel_stage: {
                 ...stageSchemaEvidence(6),
                 role: 'opportunity_event_path_samples_parallel_stage',
                 full_fidelity_row_copy: true,
                 payload_semantics_preserved: true,
-                stage_rows_copied: 5000,
-                rows_merged: 5000,
+                stage_rows_copied: 1,
+                rows_merged: 1,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
-                stage_size_bytes: 24000,
-                stage_budget_bytes: 26272,
+                stage_size_bytes: 8192,
+                stage_budget_bytes: 16384,
                 source_read_lock_budget_passed: true,
                 merge_started_after_source_read_view_release: true,
               },
@@ -2182,7 +2458,15 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
     authoritativePreflight: fixture.authoritativePreflight,
   });
 
-  assert.equal(health.status, 'producer_accepted');
+  assert.equal(
+    health.status,
+    'producer_accepted',
+    JSON.stringify({
+      blockers: health.blockers,
+      manifest_contract: health.manifest_contract,
+      shared_stage_budget: health.shared_stage_budget,
+    }, null, 2),
+  );
   assert.equal(health.healthy, true);
   assert.equal(health.degraded, false);
   assert.equal(health.consumer_ready, true);
@@ -2196,7 +2480,7 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.pinned_read_view_lineage.passed, true);
   assert.equal(health.pinned_read_view_lineage.actual_count, 8);
   assert.equal(health.pinned_read_view_lineage.recomputed_skew_sec, 0.40);
-  assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 36120);
+  assert.equal(health.indexed_selection.candidate_shadow_observations.rows_copied, 1);
   assert.equal(health.indexed_watermarks.candidate_shadow_observations.passed, true);
   assert.equal(
     health.indexed_watermarks.candidate_shadow_observations.source_index_name,
@@ -2206,17 +2490,51 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.consecutive_failure_count, 0);
   assert.equal(health.next_attempt_delay_sec, 21600);
   assert.equal(health.snapshot_files.paper.size_matches_manifest, true);
+  assert.equal(health.manifest_contract.shared_stage_budget_passed, true);
+  assert.equal(health.shared_stage_budget.available, true);
+  assert.equal(health.shared_stage_budget.contract_passed, true);
+  assert.equal(
+    health.shared_stage_budget.hash_canonicalization,
+    'json_sorted_float64_bits.v1',
+  );
+  assert.equal(health.shared_stage_budget.plan_sha256_matched, true);
+  assert.equal(health.shared_stage_budget.evidence_sha256_matched, true);
+  assert.equal(health.shared_stage_budget.fixed_percentage_allocation_used, false);
+  assert.equal(health.shared_stage_budget.total_cap_bytes, 102400);
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events.granted_cap_bytes,
+    16384,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events.actual_usage_bytes,
+    8192,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .estimate_evidence_passed,
+    true,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .upper_bound_schema_version,
+    'sqlite_dbstat_physical_upper_bound.v2',
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .capacity_sample_used,
+    false,
+  );
   assert.equal(health.manifest_contract.parallel_paper_stages_passed, true);
   assert.equal(health.parallel_paper_stages.passed, true);
   assert.equal(health.parallel_paper_stages.stage_count, 4);
   assert.equal(health.parallel_paper_stages.pinned_read_view_count, 5);
   assert.equal(
     health.parallel_paper_stages.stages.opportunity_event_path_samples.rows_copied,
-    5000,
+    1,
   );
   assert.equal(
     health.parallel_paper_stages.stages.opportunity_event_path_samples.rows_merged,
-    5000,
+    1,
   );
   assert.equal(
     health.parallel_paper_stages.stages.opportunity_event_path_samples.passed,
@@ -2226,8 +2544,8 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.parallel_paper_stages.stages.opportunity_events.passed, true);
   assert.equal(health.manifest_contract.paper_decision_parallel_stage_passed, true);
   assert.equal(health.parallel_paper_decision_stage.passed, true);
-  assert.equal(health.parallel_paper_decision_stage.rows_copied, 4100);
-  assert.equal(health.parallel_paper_decision_stage.rows_merged, 4100);
+  assert.equal(health.parallel_paper_decision_stage.rows_copied, 1);
+  assert.equal(health.parallel_paper_decision_stage.rows_merged, 1);
   assert.equal(health.parallel_paper_decision_stage.stage_page_size, 4096);
   assert.equal(health.parallel_paper_decision_stage.pinned_read_view_count, 5);
   assert.equal(health.parallel_paper_decision_stage.stage_removed_before_publish, true);
@@ -2271,40 +2589,51 @@ test('evaluator snapshot worker health accepts an explicitly absent optional pat
   manifestPayload.pinned_read_view_count = 7;
   manifestPayload.cross_database_time_skew_sec = 0.35;
   const disk = manifestPayload.disk_preflight;
-  disk.temporary_candidate_stage_cap_bytes = 16384;
+  const shared = manifestPayload.shared_stage_budget;
+  shared.active_targets = [
+    'candidate_shadow_observations',
+    ...activeTables,
+  ];
+  delete shared.targets.opportunity_event_path_samples;
+  shared.minimum_total_bytes = 49152;
+  shared.baseline_required_total_bytes = 81920;
+  shared.residual_pool_bytes = 20480;
+  shared.borrowing_priority_targets = ['paper_decision_events'];
+  shared.targets.paper_decision_events.granted_cap_bytes = 36864;
+  shared.targets.paper_decision_events.borrowed_shared_pool_bytes = 20480;
+  shared.targets.paper_decision_events.utilization_ratio = 8192 / 36864;
+  shared.targets.a_class_decision_events.granted_cap_bytes = 16384;
+  shared.targets.a_class_decision_events.borrowed_shared_pool_bytes = 0;
+  shared.targets.a_class_decision_events.utilization_ratio = 8192 / 16384;
+  shared.total_granted_bytes = 102400;
+  shared.actual_total_bytes = 40576;
+  shared.unconsumed_bytes = 61824;
+  shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+  shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+  disk.shared_stage_budget = structuredClone(shared);
+  fixture.statusPayload.shared_stage_budget = structuredClone(shared);
+  disk.temporary_candidate_stage_cap_bytes = 32768;
   disk.temporary_parallel_paper_stage_cap_bytes = {
-    paper_decision_events: 32768,
-    a_class_decision_events: 24576,
-    opportunity_events: 26272,
+    paper_decision_events: 36864,
+    a_class_decision_events: 16384,
+    opportunity_events: 16384,
   };
-  disk.temporary_paper_decision_stage_cap_bytes = 32768;
+  disk.temporary_paper_decision_stage_cap_bytes = 36864;
   disk.parallel_paper_stage_tables = activeTables;
   disk.omitted_optional_parallel_paper_stage_tables = [
     'opportunity_event_path_samples',
   ];
-  disk.parallel_paper_stage_residual_shares = {
-    paper_decision_events: 0.36,
-    a_class_decision_events: 0.25,
-    opportunity_events: 0.07,
-  };
-  disk.parallel_paper_stage_active_weight_total = 0.80;
-  disk.candidate_stage_normalized_share = 0.15;
-  disk.parallel_paper_stage_normalized_shares = {
-    paper_decision_events: 0.45,
-    a_class_decision_events: 0.3125,
-    opportunity_events: 0.0875,
-  };
   paperReport.parallel_paper_stage_tables = activeTables;
   paperReport.parallel_paper_stage_count = activeTables.length;
   delete paperReport.parallel_paper_stages.opportunity_event_path_samples;
   delete paperReport.parallel_paper_source_read_lock_duration_sec.opportunity_event_path_samples;
-  paperReport.parallel_paper_stages.paper_decision_events.stage_budget_bytes = 32768;
-  paperReport.parallel_paper_stages.a_class_decision_events.stage_budget_bytes = 24576;
-  paperReport.parallel_paper_stages.opportunity_events.stage_budget_bytes = 26272;
-  paperReport.paper_decision_parallel_stage_budget_bytes = 32768;
-  paperReport.selected_tables.paper_decision_events.parallel_stage.stage_budget_bytes = 32768;
-  paperReport.selected_tables.a_class_decision_events.parallel_stage.stage_budget_bytes = 24576;
-  paperReport.selected_tables.opportunity_events.parallel_stage.stage_budget_bytes = 26272;
+  paperReport.parallel_paper_stages.paper_decision_events.stage_budget_bytes = 36864;
+  paperReport.parallel_paper_stages.a_class_decision_events.stage_budget_bytes = 16384;
+  paperReport.parallel_paper_stages.opportunity_events.stage_budget_bytes = 16384;
+  paperReport.paper_decision_parallel_stage_budget_bytes = 36864;
+  paperReport.selected_tables.paper_decision_events.parallel_stage.stage_budget_bytes = 36864;
+  paperReport.selected_tables.a_class_decision_events.parallel_stage.stage_budget_bytes = 16384;
+  paperReport.selected_tables.opportunity_events.parallel_stage.stage_budget_bytes = 16384;
   paperReport.pinned_read_views = paperReport.pinned_read_views.filter(
     (row) => row.role !== 'opportunity_event_path_samples_parallel_stage',
   );
@@ -2338,6 +2667,17 @@ test('evaluator snapshot worker health accepts an explicitly absent optional pat
   assert.equal(health.parallel_paper_stages.configured_tables.length, 4);
   assert.equal(health.parallel_paper_stages.optional_absence_valid, true);
   assert.equal(health.parallel_paper_stages.stage_count, 3);
+  assert.deepEqual(health.shared_stage_budget.active_targets, [
+    'candidate_shadow_observations',
+    ...activeTables,
+  ]);
+  assert.equal(
+    Object.hasOwn(
+      health.shared_stage_budget.targets,
+      'opportunity_event_path_samples',
+    ),
+    false,
+  );
   assert.equal(health.pinned_read_view_lineage.expected_count, 7);
   assert.equal(health.pinned_read_view_lineage.actual_count, 7);
 });
@@ -2377,6 +2717,26 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.equal(starting.status, 'starting');
   assert.equal(starting.degraded, false);
 
+  const failedSharedBudget = structuredClone(
+    fixture.statusPayload.shared_stage_budget,
+  );
+  failedSharedBudget.accepted = false;
+  failedSharedBudget.cleanup_completed = true;
+  failedSharedBudget.no_unregistered_stage_files = true;
+  failedSharedBudget.targets.paper_decision_events.actual_usage_bytes = 32768;
+  failedSharedBudget.targets.paper_decision_events.high_water_bytes = 32768;
+  failedSharedBudget.targets.paper_decision_events.copy_completed = false;
+  failedSharedBudget.targets.paper_decision_events.cap_hit = true;
+  failedSharedBudget.targets.paper_decision_events.within_grant = true;
+  failedSharedBudget.targets.paper_decision_events.utilization_ratio = 1;
+  failedSharedBudget.actual_total_bytes = 98768;
+  failedSharedBudget.unconsumed_bytes = 3632;
+  failedSharedBudget.plan_sha256 = sharedStageBudgetPlanSha256(
+    failedSharedBudget,
+  );
+  failedSharedBudget.evidence_sha256 = sharedStageBudgetEvidenceSha256(
+    failedSharedBudget,
+  );
   const failed = readEvaluatorSnapshotWorkerHealth({
     ...base,
     statusPayload: {
@@ -2396,6 +2756,11 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
             current_table_elapsed_sec: 42.1256789,
             source_lock_elapsed_sec: 299.875,
             source_lock_remaining_sec: 0.125,
+            completed_parallel_stages: [
+              'paper_decision_events',
+              '../../private_key',
+              'paper_decision_events',
+            ],
             completed_tables: {
               candidate_shadow_virtual_trades: {
                 duration_sec: 3.25,
@@ -2429,6 +2794,7 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       consecutive_failure_code_count: 1,
       next_attempt_delay_sec: 60,
       next_attempt_at: '2026-08-08T04:01:00.000Z',
+      shared_stage_budget: failedSharedBudget,
     },
   });
   assert.equal(failed.status, 'failed');
@@ -2455,6 +2821,7 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
             source_lock_remaining_sec: 292.5,
           },
         },
+        completed_parallel_stages: ['paper_decision_events'],
       },
     },
     raw: {
@@ -2468,6 +2835,30 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.equal(failed.consecutive_failure_code_count, 1);
   assert.equal(failed.next_attempt_delay_sec, 60);
   assert.equal(failed.next_attempt_at, '2026-08-08T04:01:00.000Z');
+  assert.equal(failed.shared_stage_budget.accepted, false);
+  assert.equal(
+    failed.shared_stage_budget.targets.paper_decision_events.cap_hit,
+    true,
+  );
+  assert.equal(
+    failed.shared_stage_budget.targets.paper_decision_events.high_water_bytes,
+    32768,
+  );
+  assert.equal(
+    failed.shared_stage_budget.targets.paper_decision_events
+      .estimate_evidence_passed,
+    true,
+  );
+  assert.equal(
+    failed.shared_stage_budget.targets.paper_decision_events
+      .upper_bound_schema_version,
+    'sqlite_dbstat_physical_upper_bound.v2',
+  );
+  assert.equal(
+    failed.shared_stage_budget.targets.paper_decision_events
+      .capacity_sample_used,
+    false,
+  );
   assert.equal(JSON.stringify(failed).includes('/app/data/paper_trades.db'), false);
   assert.equal(JSON.stringify(failed).includes('/app/data/raw.db'), false);
   assert.equal(JSON.stringify(failed).includes('SQLITE_BUSY /app/data/raw.db'), false);
@@ -2606,6 +2997,65 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
     pinnedLineageBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
   );
 
+  for (const mutation of [
+    'estimate_read_view_id_mismatch',
+    'estimate_read_view_role_mismatch',
+    'manifest_binding_flag_false',
+    'paper_binding_flag_false',
+    'pinned_view_id_mismatch',
+  ]) {
+    const bindingManifest = structuredClone(fixture.manifestPayload);
+    const shared = bindingManifest.shared_stage_budget;
+    const p9 = shared.targets.paper_decision_events;
+    let sharedMutated = false;
+    if (mutation === 'estimate_read_view_id_mismatch') {
+      p9.estimate_evidence.pinned_read_view_id = shared.targets
+        .candidate_shadow_observations.estimate_evidence.pinned_read_view_id;
+      sharedMutated = true;
+    } else if (mutation === 'estimate_read_view_role_mismatch') {
+      p9.estimate_evidence.pinned_read_view_role = 'paper_main_selective_copy';
+      sharedMutated = true;
+    } else if (mutation === 'manifest_binding_flag_false') {
+      bindingManifest.shared_stage_estimates_bound_to_copy_read_views = false;
+    } else if (mutation === 'paper_binding_flag_false') {
+      bindingManifest.databases.paper
+        .shared_stage_estimates_bound_to_copy_read_views = false;
+    } else if (mutation === 'pinned_view_id_mismatch') {
+      const pinnedView = bindingManifest.databases.paper.pinned_read_views.find(
+        (row) => row.role === 'paper_decision_events_parallel_stage',
+      );
+      assert.ok(pinnedView);
+      pinnedView.read_view_id = 'f'.repeat(32);
+    }
+    if (sharedMutated) {
+      shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+      shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+      bindingManifest.disk_preflight.shared_stage_budget = structuredClone(shared);
+    }
+    const bindingBlocked = readEvaluatorSnapshotWorkerHealth({
+      ...base,
+      manifestPayload: bindingManifest,
+    });
+    assert.equal(bindingBlocked.status, 'contract_blocked', mutation);
+    assert.equal(bindingBlocked.consumer_ready, false, mutation);
+    assert.equal(
+      bindingBlocked.manifest_contract.shared_stage_budget_passed,
+      false,
+      mutation,
+    );
+    assert.equal(
+      bindingBlocked.shared_stage_budget.contract_passed,
+      false,
+      mutation,
+    );
+    assert.ok(
+      bindingBlocked.blockers.includes(
+        'evaluator_snapshot_manifest_contract_blocked',
+      ),
+      mutation,
+    );
+  }
+
   const paperDecisionManifest = structuredClone(fixture.manifestPayload);
   paperDecisionManifest.databases.paper.selected_tables.paper_decision_events.parallel_stage.row_count_matched = false;
   paperDecisionManifest.databases.paper.paper_decision_parallel_stage_removed_before_publish = false;
@@ -2707,6 +3157,102 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   assert.ok(
     nullIndexBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
   );
+
+  for (const mutation of [
+    'legacy_fixed_share',
+    'copies_diverged',
+    'grant_sum_exceeds_cap',
+    'actual_exceeds_grant',
+    'cleanup_incomplete',
+    'stage_files_not_removed',
+    'unregistered_stage_file',
+    'null_grant',
+    'estimate_sample_used',
+    'estimate_payload_upper_tamper',
+    'estimate_physical_bytes_tamper',
+    'estimate_candidate_order_index_tamper',
+    'estimate_formula_tamper',
+    'row_count_manifest_mismatch',
+    'hash_payload_tamper',
+  ]) {
+    const sharedManifest = structuredClone(fixture.manifestPayload);
+    const shared = sharedManifest.shared_stage_budget;
+    const diskShared = sharedManifest.disk_preflight;
+    const p9 = shared.targets.paper_decision_events;
+    if (mutation === 'legacy_fixed_share') {
+      diskShared.candidate_stage_residual_share = 0.12;
+    } else if (mutation === 'copies_diverged') {
+      diskShared.shared_stage_budget.targets.paper_decision_events.granted_cap_bytes += 4096;
+    } else if (mutation === 'grant_sum_exceeds_cap') {
+      p9.granted_cap_bytes += 4096;
+      p9.borrowed_shared_pool_bytes += 4096;
+      shared.total_granted_bytes += 4096;
+      diskShared.shared_stage_budget = structuredClone(shared);
+      diskShared.temporary_parallel_paper_stage_cap_bytes.paper_decision_events += 4096;
+      diskShared.temporary_paper_decision_stage_cap_bytes += 4096;
+    } else if (mutation === 'actual_exceeds_grant') {
+      const delta = p9.granted_cap_bytes + 1 - p9.actual_usage_bytes;
+      p9.actual_usage_bytes += delta;
+      p9.high_water_bytes += delta;
+      p9.utilization_ratio = p9.actual_usage_bytes / p9.granted_cap_bytes;
+      shared.actual_total_bytes += delta;
+      shared.unconsumed_bytes -= delta;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'cleanup_incomplete') {
+      shared.cleanup_completed = false;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'stage_files_not_removed') {
+      shared.stage_files_removed = false;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'unregistered_stage_file') {
+      shared.no_unregistered_stage_files = false;
+      shared.unregistered_stage_files = ['.rogue-stage.db'];
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'null_grant') {
+      p9.granted_cap_bytes = null;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'estimate_sample_used') {
+      p9.estimate_evidence.capacity_sample_used = true;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'estimate_payload_upper_tamper') {
+      p9.estimate_evidence.selected_payload_upper_bytes += 4096;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'estimate_physical_bytes_tamper') {
+      p9.estimate_evidence.source_dbstat_physical_bytes += 4096;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'estimate_candidate_order_index_tamper') {
+      shared.targets.candidate_shadow_observations.estimate_evidence
+        .candidate_order_source_index_dbstat_physical_bytes += 4096;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'estimate_formula_tamper') {
+      p9.estimate_evidence.upper_bound_formula = (
+        'edge_sample_average_times_selected_rows'
+      );
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'row_count_manifest_mismatch') {
+      p9.actual_rows_copied = 2;
+      diskShared.shared_stage_budget = structuredClone(shared);
+    } else if (mutation === 'hash_payload_tamper') {
+      p9.history_state = 'tampered-after-signing';
+      diskShared.shared_stage_budget = structuredClone(shared);
+    }
+    const sharedBlocked = readEvaluatorSnapshotWorkerHealth({
+      ...base,
+      manifestPayload: sharedManifest,
+    });
+    assert.equal(sharedBlocked.status, 'contract_blocked', mutation);
+    assert.equal(sharedBlocked.consumer_ready, false, mutation);
+    assert.equal(
+      sharedBlocked.manifest_contract.shared_stage_budget_passed,
+      false,
+      mutation,
+    );
+    assert.equal(sharedBlocked.shared_stage_budget.contract_passed, false, mutation);
+    assert.ok(
+      sharedBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+      mutation,
+    );
+  }
 
   const shaBlocked = readEvaluatorSnapshotWorkerHealth({
     ...base,

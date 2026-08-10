@@ -2,7 +2,7 @@
 
 Plan ID: `SAS-P0-C-FROZEN-SNAPSHOT-AUTOLOOP-2026-08-08`
 
-Status: `IMPLEMENTED_LOCALLY_PENDING_PRODUCTION_ACCEPTED_SNAPSHOT_VALIDATION`
+Status: `SHARED_STAGE_BUDGET_IMPLEMENTED_LOCALLY_PENDING_PR_AND_PRODUCTION_VALIDATION`
 
 Parent plan: `docs/agents/SENTIMENT_ARBITRAGE_SYSTEM_RECOVERY_MASTER_PLAN.md`
 
@@ -19,7 +19,7 @@ Reference commits:
 - `b9051fa` — evaluator-contract fixture indexes;
 - `ad91a42` — A3 v2.3 contract documentation.
 
-Deployment status: `NOT_DEPLOYED`
+Deployment status: `PRODUCTION_AT_7b46dcd_SHARED_STAGE_BUDGET_NOT_DEPLOYED`
 
 Promotion allowed: `false`
 
@@ -442,6 +442,22 @@ Accepted snapshot → AutoLoop 血缘：
 - 新正反例已覆盖：带 AUTOINCREMENT/UNIQUE/CHECK/DEFAULT 的 source table 在 stage 中无约束无索引、在最终库中完整恢复并继续拒绝重复 key/非法 CHECK；13 种 stage schema evidence 篡改、实际最终 DB `ALTER TABLE` 漂移及 Dashboard aggregate/nested 分叉均 fail-closed；
 - 第一轮独立反方审查发现两项 fail-closed 缺口：新 schema 错误被泛化为 `RuntimeError`，以及 Dashboard 会把 `stage_index_count:null` 数值化为 0；现已为八类 schema failure 保留稳定 code，并要求 aggregate/nested 原始 index count 都必须是整数 0；对应回归均已增加；
 - 第二轮独立反方审查未发现新的可执行 correctness issue；当前本地 gate 为 producer/consumer focused Python `167 passed`、Dashboard Node 20 `63 passed`、恢复矩阵 Python `335 passed`、GitHub exact Python groups `157 + 70 + 180 passed`、Node 20 完整矩阵 `72 passed`，Basic Readiness 无 blocker、`normal_tiny_ready=false`；本轮尚未提交、建 PR 或部署，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
+
+### 2026-08-09｜生产第八轮收敛：`shared_stage_budget.v1` 高水位共享分配
+
+- PR #81 exact SHA `7b46dcd55c35231dc5157b68882c6cf89986d1c4` 已 fast-forward 到 `main`，post-push CI 与 Zeabur exact-SHA deployment 均成功；生产 paper DB 继续为 `ok`、约 25.58GB，integrity marker 不存在；
+- PR #81 首次生产 attempt 仍 fail-closed：`paper_decision_events` 在约 293.21 秒时触及 `SQLITE_FULL`，当轮 P9 临时 stage cap 约 4.49GB；同一 preflight 的 aggregate stage pool 约 12.48GB，因此根因已经明确为固定单表 cap 失衡，不是总磁盘、10GB output cap 或 5GB reserve 不足；
+- 本轮删除运行时代码中的 candidate/P9/A_CLASS/opportunity/path 固定 residual percentage；新增 `shared_stage_budget.v1 / history_high_water_plus_bounded_source_estimate`，全局 stage cap 仍严格等于 `floor((free - output_cap - reserve) / 4096) * 4096`，未对 output、reserve、96h/840h window 或 300 秒 source-view ceiling 做任何放宽；
+- snapshot 开始前只执行有界 estimate：producer 通过 `CREATE VIRTUAL TABLE temp.__a3_source_dbstat USING dbstat(src)` 将 DBSTAT 明确绑定到 attached source schema，再逐页聚合 table/overflow 的 page count、payload、unused、max-payload 与 physical bytes，并与 `PRAGMA src.page_size` 交叉验证；该实现已覆盖 512–65,536 byte source pages，避免 eponymous `dbstat('src', 1)` 在 attached 64KB page DB 上错误沿用 main page size；带时间索引的表再用 indexed range count 计算 selected row count，无时间索引的 optional path table保守使用完整 btree cell upper count；容量上界由 selected payload upper、完整 source structural overhead、显式 record/rowid overhead、root reserve，以及 candidate ordering index upper 组成；最多 256 条上下边缘样本只保留为诊断，`capacity_sample_used=false`，不会参与容量结论；
+- 每个 target 先获得 `max(minimum, bounded estimate, previous high-water headroom)` 的 baseline；上一轮 cap-hit 使用 1.35 倍高水位、未完成使用 1.20 倍、已完成使用 1.10 倍；全局剩余池优先借给 cap-hit target，没有 cap-hit 时借给最大 baseline target；所有 grant 之和必须精确等于全局 stage cap；
+- 这是一套“证据驱动的逐 attempt 共享分配”，不是把每个 SQLite 文件都设成全局 cap 后再事后检查；每个 stage 仍有独立 `max_page_count`，但 grant 来自同一个经过 consumer 重算的全局 coordinator，任何 baseline 合计大于全局 cap 都在启动长时间 source copy 前以 `shared_stage_capacity_insufficient` 拒绝；
+- 失败清理前 producer 会读取每个已登记 stage DB 及其 journal/WAL/SHM 的 logical/allocated high-water、grant、utilisation、copy completion 和 cap-hit；partial 删除成功且没有未登记 hidden stage 文件后，证据才可作为下一轮历史；磁盘不足、无效 inventory、high-water 超 grant、cleanup 失败或 rogue stage 文件均禁止回灌；
+- 分配计划与运行证据使用双 SHA：`plan_sha256` 锁定 active inventory、estimate、baseline、grant、borrow 和总 cap；`evidence_sha256` 另行锁定 actual/high-water/cap-hit/cleanup；Python 与 Node 共同使用 `json_sorted_float64_bits.v1`，安全整数按 JSON 数值保留、integral float 归一化为整数、非整数 float 以 IEEE-754 binary64 bit pattern 编码；authoritative consumer 与 Dashboard 都会实际复算两个 SHA，不再只验证 64 位十六进制格式；只修改 high-water 而不更新证据 hash、只修改 grant 而不更新计划 hash、构造 top-level/disk 两份自洽但不同的合同，或在签名后修改任一被保护字段，都会 fail-closed；
+- accepted manifest 同时保存 top-level 与 `disk_preflight.shared_stage_budget` 两份完全相同的证据；authoritative consumer 独立重算 raw/aligned global cap、minimum/baseline/residual/borrow totals、每 target grant/actual/utilisation、alias caps、plan/evidence hashes、optional inventory、cleanup 和 reserve；旧固定比例字段只要重新出现就 fail-closed；
+- Dashboard 只公开 stage 名称、estimate/baseline/grant/actual/high-water/borrow/utilisation、copy-complete 与 cap-hit，不公开文件路径、SQL、行内容、token 或 secret；当前 failed attempt 的 status evidence 优先于旧 accepted manifest，因此 operator 能看到最新高水位，而 `contract_passed` 仍只代表 accepted manifest 合同；
+- 正反例现已覆盖：P9 cap-hit 后下一轮借用共享余量、optional path 缺失后容量全部返还、baseline 总需求超池时 copy 不启动、indexed row count、`dbstat` 不可用、rogue stage、cleanup failure、negative/null/excess capacities、grant sum 越界、actual 超 grant、estimate/baseline 漂移、plan/evidence hash 篡改、worker status 高水位持久化与下一轮回灌；新增“首尾 256 条都很小、窗口中间存在 512KB payload”的反例，证明样本诊断会漏掉该行，而 DBSTAT physical upper 仍覆盖并实际完成 stage 写入；
+- 独立反方审查共经历四个结论阶段：第一轮因 negative high-water 被归零、`stage_files_removed` 未强制、历史 target inventory 可删减而 `REJECT`；第二轮因 edge-sample average 被错误宣称为 bounded 而 `REJECT`；第三轮进一步发现 attached 64KB source page 的 DBSTAT schema/page accounting 错误，以及 Dashboard 只做 hash regex 而未复算；修复后，物理上界 checker 用 1KB/4KB/8KB/64KB source pages 与 130KB overflow payload 验证全部覆盖实际 4KB staging physical size并给出 `APPROVE`，跨语言哈希 checker 用两组包含 null/bool/string/integer/integral-float/non-integral-float/list/object 的 Python/Node 向量得到完全相同的 plan/evidence SHA并给出 `APPROVE`；
+- 最终本地门禁：producer/authoritative consumer focused Python `201 passed`、Dashboard Node 20 focused `64 passed`、GitHub CI 同构 Python `157 + 70 + 221 passed`、Node 20 完整行为矩阵 `73 passed`；Basic Readiness 无 blocker、`observe_only_foundation_ready=true`、`normal_tiny_ready=false`、mode-gate scope 为 `final_scope_covered`；generated client、spec validation、Python/Node compile/syntax、全部治理 JSON 与 `git diff --check` 均通过；两类独立 checker 最终均为 `APPROVE`；本轮尚未提交、建 PR、部署或生成生产 accepted manifest，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 继续保持 false。
 
 尚未声称完成的生产证据：
 
