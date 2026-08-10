@@ -2,7 +2,7 @@
 
 Plan ID: `SAS-P0-C-FROZEN-SNAPSHOT-AUTOLOOP-2026-08-08`
 
-Status: `SHARED_STAGE_BUDGET_IMPLEMENTED_LOCALLY_PENDING_PR_AND_PRODUCTION_VALIDATION`
+Status: `SHARED_STAGE_BUDGET_PR82_READY_PENDING_HUMAN_FAST_FORWARD_AND_PRODUCTION_VALIDATION`
 
 Parent plan: `docs/agents/SENTIMENT_ARBITRAGE_SYSTEM_RECOVERY_MASTER_PLAN.md`
 
@@ -459,7 +459,7 @@ Accepted snapshot → AutoLoop 血缘：
 - 正反例覆盖：DBSTAT advisory 低于合法 4KiB stage physical size、actual 超 advisory 但在 grant 内仍 accepted、actual 超 grant 拒绝、P9 cap-hit 后优先借用共享余量、optional path 缺失后容量全额返还、baseline 超池提前拒绝、candidate signal-only index、large middle payload、100k-row multi-level btree、rogue stage、cleanup failure、negative/null/excess capacity、row-count lineage、双 SHA 与 read-view identity 篡改；
 - 最终本地门禁已通过：CI 同构 Python `157 + 70 + 230 passed`、Node 20 behavior `74 passed`、Basic Readiness `136/136` 且无 blocker、`observe_only_foundation_ready=true`、`normal_tiny_ready=false`、mode-gate scope=`final_scope_covered`；generated client、spec validation、Python/Node compile、治理 JSON、source/impact hashes 与 `git diff --check` 全部通过；
 - 独立反方审查先发现 candidate `SQLITE_FULL` 的 stage alias 可能无法稳定归入 candidate cap-hit history；producer 已增加 source table、内部 stage table、schema 与 filename 的显式 target aliases，并新增真实 `copy_table:candidate_shadow_observations` 与内部 stage alias 两条回归，证明下一轮进入 `history_state=cap_hit` 且只向 candidate 分配 residual；复审最终结论为 `APPROVE`；
-- 当前实现尚未形成新的 PR #82 exact SHA，也未部署；生产仍运行 `7b46dcd`，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 均继续保持 false。
+- PR #82 已包含实现提交 `29ebb541a15a3954f7675322aa1848177900333d`；本地 checker 复跑 Python `157 + 70 + 230 passed` 与 Node 20 `74 passed`，独立反方审查未发现新的可执行 regression。合并前仍要求 GitHub 当前 PR head 为 `CLEAN / MERGEABLE` 且 exact-SHA `v27-readiness` 为 `SUCCESS`。当前尚未 fast-forward 或部署，生产继续运行 `7b46dcd`，P0-D、promotion、strategy change、automatic runtime change 与 paper enablement 均保持 false。
 
 尚未声称完成的生产证据：
 
@@ -467,4 +467,4 @@ Accepted snapshot → AutoLoop 血缘：
 - 尚未证明生产 read lock duration、output size、free-space reserve 与 manifest SHA；
 - 尚未观察到 authoritative consumer 对同一 snapshot/manifest 完整通过；
 - 尚未观察到生产 AutoLoop 从该 snapshot 生成 fresh primary capture；
-- 因此当前状态是“本地实现和发布门禁已完成、等待更新 PR #82 与人工批准”，不是“线上 AutoLoop 已恢复”。
+- 因此当前状态是“本地实现、PR #82 exact-SHA CI 与发布门禁已完成，等待人工批准 fast-forward 后进行生产验收”，不是“线上 AutoLoop 已恢复”。

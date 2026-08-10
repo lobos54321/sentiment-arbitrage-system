@@ -2,7 +2,7 @@
 
 Plan ID: `SAS-RECOVERY-MASTER-2026-08-08`
 
-Status: `P0_C_SHARED_STAGE_BUDGET_IMPLEMENTED_LOCALLY_PENDING_PR_AND_PRODUCTION_ACCEPTED_SNAPSHOT_VALIDATION`
+Status: `P0_C_SHARED_STAGE_BUDGET_PR82_READY_PENDING_HUMAN_FAST_FORWARD_AND_PRODUCTION_ACCEPTED_SNAPSHOT_VALIDATION`
 
 Baseline commit: `7b46dcd55c35231dc5157b68882c6cf89986d1c4`
 
@@ -1109,4 +1109,4 @@ Root health degraded 条件仅包括：
 - accepted evidence允许 actual 超 advisory，但不允许 actual 超 grant；`targets_exceeding_advisory` 和 `advisory_miss_count` 必须与每 target actual/advisory 重新计算结果一致。固定比例字段、伪造 physical upper claim、allocation weight 漂移、actual/grant 漂移、hidden stage 或 hash 篡改全部 fail-closed；
 - 最终本地门禁为 CI 同构 Python `157 + 70 + 230 passed`、Node 20 behavior `74 passed`、Basic Readiness `136/136` 且无 blocker、`observe_only_foundation_ready=true`、`normal_tiny_ready=false`、mode-gate scope=`final_scope_covered`；generated client、spec、compile/syntax、治理 JSON、source/impact hashes 与 whitespace 均通过；
 - 独立反方审查发现并关闭 candidate `SQLITE_FULL` target attribution 缺口：source table 与内部 stage aliases 现在都稳定映射为 candidate cap-hit，高水位可被下一轮验证并优先获得 residual；新增两条回归后，最终 reviewer 给出 `APPROVE`；
-- 策略、entry/exit、risk、wallet、executor、promotion、automatic runtime change 与 paper enablement 均未修改。下一步是形成新的 exact-SHA 提交并更新 PR #82；仍需人工批准后才能 fast-forward/deploy；production accepted manifest、authoritative preflight 与 same-lineage AutoLoop primary capture 在部署验收前不得宣称完成。
+- 策略、entry/exit、risk、wallet、executor、promotion、automatic runtime change 与 paper enablement 均未修改。PR #82 已包含实现提交 `29ebb541a15a3954f7675322aa1848177900333d`；本地完整门禁与独立 checker 已通过，合并前仍要求 GitHub 当前 PR head 为 `CLEAN / MERGEABLE` 且 exact-SHA CI 为 `SUCCESS`，并需人工批准后才能 fast-forward/deploy。production accepted manifest、authoritative preflight 与 same-lineage AutoLoop primary capture 在部署验收前不得宣称完成。
