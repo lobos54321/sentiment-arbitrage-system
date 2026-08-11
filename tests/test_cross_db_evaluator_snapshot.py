@@ -264,7 +264,14 @@ def test_source_page_inspection_failure_is_component_scoped(tmp_path, monkeypatc
 def test_remaining_source_read_lock_wait_never_extends_deadline(monkeypatch):
     monkeypatch.setattr(snapshot_module.time, "monotonic", lambda: 100.0)
     assert snapshot_module.remaining_source_read_lock_wait(
-        deadline_monotonic=130.0,
+        deadline_monotonic=250.0,
+        database="paper",
+        stage="pinned_barrier",
+        limit_sec=300.0,
+    ) == 150.0
+    assert snapshot_module.remaining_source_read_lock_wait(
+        deadline_monotonic=250.0,
+        max_wait_sec=30.0,
         database="paper",
         stage="pinned_barrier",
         limit_sec=300.0,
@@ -766,6 +773,138 @@ def test_shared_stage_estimate_fails_closed_when_dbstat_is_unavailable(
             upper_epoch=now,
             busy_timeout_ms=30000,
         )
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        snapshot_module.SHARED_STAGE_TARGET_CANDIDATE,
+        "paper_decision_events",
+    ),
+)
+def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
+    tmp_path,
+    monkeypatch,
+    target,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    source = sqlite3.connect(sources["paper"])
+    if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE:
+        source.execute(
+            "INSERT INTO candidate_shadow_observations("
+            "id, signal_id, candidate_id, observed_at, payload_json"
+            ") VALUES (1, 1, 'sample', ?, '{\"sample\":true}')",
+            (now - 60,),
+        )
+        source_table = "candidate_shadow_observations"
+    else:
+        source.execute(
+            "INSERT INTO paper_decision_events(id, event_ts) VALUES (1, ?)",
+            (now - 60,),
+        )
+        source_table = "paper_decision_events"
+    source.commit()
+    source.close()
+
+    clock = {"dbstat_expired": False}
+
+    def bounded_clock():
+        return 1020.5 if clock["dbstat_expired"] else 1000.0
+
+    def dbstat_timeout(*_args, **_kwargs):
+        clock["dbstat_expired"] = True
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(snapshot_module.time, "monotonic", bounded_clock)
+    monkeypatch.setattr(
+        snapshot_module,
+        "source_table_storage_report",
+        dbstat_timeout,
+    )
+    connection = sqlite3.connect(":memory:", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "ATTACH DATABASE ? AS src",
+        (f"file:{Path(sources['paper']).resolve()}?mode=ro",),
+    )
+    connection.execute("BEGIN")
+    connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
+    try:
+        estimate = snapshot_module.estimate_shared_stage_target_requirement(
+            connection,
+            target,
+            review_lower_epoch=now - 96 * 3600,
+            long_lower_epoch=now - 840 * 3600,
+            upper_epoch=now,
+            pinned_read_view={
+                "read_view_id": "7" * 32,
+                "role": "paper_main_selective_copy",
+            },
+        )
+        assert connection.in_transaction is True
+        assert connection.execute(
+            f"SELECT COUNT(*) FROM src.{source_table}"
+        ).fetchone()[0] == 1
+    finally:
+        connection.rollback()
+        connection.close()
+
+    assert estimate["strategy"] == (
+        snapshot_module.SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
+    )
+    assert estimate["advisory_schema_version"] == (
+        snapshot_module.SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
+    )
+    assert estimate["advisory_formula"] == (
+        snapshot_module.SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+    )
+    assert estimate["capacity_sample_used"] is True
+    assert estimate["dbstat_completed"] is False
+    assert estimate["dbstat_timed_out"] is True
+    assert estimate["dbstat_timeout_sec"] == 20.0
+    assert estimate["dbstat_elapsed_sec"] == 20.5
+    assert estimate["selected_row_count"] == 1
+    assert 1 <= estimate["sample_rows"] <= 256
+    assert estimate["sample_row_bytes_basis"] == (
+        estimate["sample_max_row_bytes_diagnostic"]
+    )
+    assert estimate["source_row_count_upper"] is None
+    assert estimate["source_dbstat_physical_bytes"] is None
+    assert estimate["table_sample_payload_advisory_bytes"] > 0
+    assert estimate["physical_upper_bound_claimed"] is False
+
+    consumer_report = {
+        "advisory_required_bytes": estimate["advisory_required_bytes"],
+        "advisory_strategy": estimate["strategy"],
+        "advisory_evidence": estimate,
+    }
+    assert validate_shared_stage_estimate_contract(
+        target,
+        consumer_report,
+    ) == estimate["advisory_required_bytes"]
+    if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE:
+        inventory = shared_stage_estimates()
+        inventory["targets"][target] = estimate
+        plan = snapshot_module.build_shared_stage_budget_plan(
+            total_cap_bytes=sum(
+                row["advisory_required_bytes"]
+                for row in inventory["targets"].values()
+            ),
+            parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+            estimates=inventory,
+            attempt_id="sample-advisory-plan",
+        )
+        assert validate_shared_stage_estimate_contract(
+            target,
+            plan["targets"][target],
+        ) == estimate["advisory_required_bytes"]
+    tampered = json.loads(json.dumps(consumer_report))
+    tampered["advisory_evidence"][
+        "table_sample_payload_advisory_bytes"
+    ] += 1
+    with pytest.raises(ValueError, match="sample advisory mismatch"):
+        validate_shared_stage_estimate_contract(target, tampered)
 
 
 @pytest.mark.parametrize(

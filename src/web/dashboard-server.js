@@ -9546,6 +9546,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const sharedStageAdvisoryFormula =
     'source_physical_times_selected_row_fraction_plus_per_row_overhead_'
     + 'plus_root_reserve_plus_candidate_signal_index_fraction';
+  const sharedStageSampleAdvisoryFormula =
+    'selected_rows_times_bounded_sample_max_plus_per_row_overhead_'
+    + 'plus_root_reserve_plus_candidate_signal_index_overhead';
   const roundSharedStagePage = (value) => (
     Number.isSafeInteger(value) && value >= 0
       ? Math.ceil(value / 4096) * 4096
@@ -9578,6 +9581,221 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         ? evidence[field]
         : null
     );
+    const sampleContractSelected = (
+      evidence.advisory_schema_version
+        === 'bounded_index_sample_advisory_demand.v1'
+      || evidence.advisory_formula === sharedStageSampleAdvisoryFormula
+    );
+    if (sampleContractSelected) {
+      const selectedRows = nonnegativeInt('selected_row_count');
+      const sampleLimit = nonnegativeInt('sample_limit_rows');
+      const sampleRows = nonnegativeInt('sample_rows');
+      const sampleBasis = nonnegativeInt('sample_row_bytes_basis');
+      const tableSamplePayload = nonnegativeInt(
+        'table_sample_payload_advisory_bytes',
+      );
+      const tableScaledPhysical = nonnegativeInt(
+        'table_scaled_physical_advisory_bytes',
+      );
+      const tableRowOverhead = nonnegativeInt(
+        'table_row_overhead_advisory_bytes',
+      );
+      const tableRootReserve = nonnegativeInt(
+        'table_root_reserve_advisory_bytes',
+      );
+      const tableAdvisory = nonnegativeInt('table_advisory_bytes');
+      const candidateIndexScaledPhysical = nonnegativeInt(
+        'candidate_order_index_scaled_physical_advisory_bytes',
+      );
+      const candidateIndexRowOverhead = nonnegativeInt(
+        'candidate_order_index_row_overhead_advisory_bytes',
+      );
+      const candidateIndexAdvisory = nonnegativeInt(
+        'candidate_order_index_advisory_bytes',
+      );
+      const advisoryRequired = nonnegativeInt('advisory_required_bytes');
+      const pinnedReadViewId = String(evidence.pinned_read_view_id || '');
+      const pinnedReadViewRole = String(evidence.pinned_read_view_role || '');
+      const dbstatTimeout = Number(evidence.dbstat_timeout_sec);
+      const dbstatElapsed = Number(evidence.dbstat_elapsed_sec);
+      const averageDiagnostic = evidence.average_row_bytes_diagnostic;
+      const maxDiagnostic = evidence.sample_max_row_bytes_diagnostic;
+      const sourceDbstatFields = [
+        'source_dbstat_page_count',
+        'source_dbstat_page_size',
+        'source_dbstat_physical_bytes',
+        'source_dbstat_payload_bytes',
+        'source_dbstat_unused_bytes',
+        'source_dbstat_max_payload_bytes',
+        'source_dbstat_cell_upper_count',
+      ];
+      if (
+        [
+          selectedRows,
+          sampleLimit,
+          sampleRows,
+          sampleBasis,
+          tableSamplePayload,
+          tableScaledPhysical,
+          tableRowOverhead,
+          tableRootReserve,
+          tableAdvisory,
+          candidateIndexScaledPhysical,
+          candidateIndexRowOverhead,
+          candidateIndexAdvisory,
+          advisoryRequired,
+        ].some((value) => value == null)
+        || evidence.advisory_schema_version
+          !== 'bounded_index_sample_advisory_demand.v1'
+        || evidence.advisory_formula !== sharedStageSampleAdvisoryFormula
+        || raw.advisory_strategy !== 'bounded_index_sample_advisory_fallback'
+        || evidence.query_bounded !== true
+        || evidence.physical_upper_bound_claimed !== false
+        || evidence.capacity_sample_used !== true
+        || evidence.dbstat_completed !== false
+        || evidence.dbstat_timed_out !== true
+        || typeof evidence.dbstat_timeout_sec !== 'number'
+        || !Number.isFinite(dbstatTimeout)
+        || dbstatTimeout !== 20
+        || typeof evidence.dbstat_elapsed_sec !== 'number'
+        || !Number.isFinite(dbstatElapsed)
+        || dbstatElapsed < dbstatTimeout
+        || evidence.source_measurement_trust_boundary
+          !== 'same_pinned_read_view_as_copy'
+        || !/^[a-f0-9]{32}$/.test(pinnedReadViewId)
+        || pinnedReadViewRole.length === 0
+        || evidence.estimate_started_after_pin !== true
+        || evidence.estimate_completed_before_copy !== true
+        || evidence.row_count_binding_mode !== 'exact_selected_rows'
+        || evidence.source_row_count_upper != null
+        || evidence.source_row_count_upper_basis
+          !== 'not_required_for_bounded_index_sample_advisory'
+        || evidence.source_row_fraction_numerator != null
+        || evidence.source_row_fraction_denominator != null
+        || evidence.advisory_row_overhead_bytes !== 32
+        || evidence.advisory_index_overhead_bytes !== 32
+        || evidence.advisory_root_reserve_pages !== 2
+        || sampleLimit !== 256
+        || sampleRows > sampleLimit
+        || sourceDbstatFields.some((field) => evidence[field] != null)
+        || typeof evidence.source_index_name !== 'string'
+        || evidence.source_index_name.length === 0
+        || !Array.isArray(evidence.source_query_plan)
+        || evidence.source_query_plan.length === 0
+        || evidence.source_query_plan_uses_index !== true
+        || evidence.source_query_plan_uses_range_search !== true
+        || evidence.source_query_plan_full_table_scan_detected !== false
+      ) return false;
+      if (selectedRows > 0) {
+        if (
+          sampleRows <= 0
+          || sampleBasis <= 0
+          || maxDiagnostic !== sampleBasis
+          || typeof averageDiagnostic !== 'number'
+          || !Number.isFinite(averageDiagnostic)
+          || averageDiagnostic <= 0
+        ) return false;
+      } else if (
+        sampleRows !== 0
+        || sampleBasis !== 0
+        || averageDiagnostic != null
+        || maxDiagnostic != null
+      ) return false;
+
+      const candidateOrderDbstatFields = [
+        'candidate_order_source_index_dbstat_page_count',
+        'candidate_order_source_index_dbstat_page_size',
+        'candidate_order_source_index_dbstat_physical_bytes',
+        'candidate_order_source_index_dbstat_payload_bytes',
+        'candidate_order_source_index_dbstat_unused_bytes',
+        'candidate_order_source_index_dbstat_max_payload_bytes',
+        'candidate_order_source_index_dbstat_cell_upper_count',
+        'candidate_order_source_index_structural_overhead_bytes',
+      ];
+      if (candidateOrderDbstatFields.some((field) => evidence[field] != null)) {
+        return false;
+      }
+      if (target === 'candidate_shadow_observations') {
+        if (
+          typeof evidence.candidate_order_source_index_name !== 'string'
+          || evidence.candidate_order_source_index_name.length === 0
+          || !Array.isArray(evidence.candidate_order_source_index_columns)
+          || evidence.candidate_order_source_index_columns.length !== 1
+          || evidence.candidate_order_source_index_columns[0] !== 'signal_id'
+          || evidence.candidate_order_source_index_partial !== false
+        ) return false;
+      } else {
+        const candidateIdentityFields = [
+          'candidate_order_source_index_name',
+          'candidate_order_source_index_columns',
+          'candidate_order_source_index_partial',
+        ];
+        if (candidateIdentityFields.some((field) => {
+          const value = evidence[field];
+          return value != null
+            && !(Array.isArray(value) && value.length === 0)
+            && !(typeof value === 'object'
+              && value != null
+              && !Array.isArray(value)
+              && Object.keys(value).length === 0);
+        })) return false;
+      }
+
+      const safeMultiply = (left, right) => {
+        if (
+          !Number.isSafeInteger(left)
+          || !Number.isSafeInteger(right)
+          || left < 0
+          || right < 0
+        ) return null;
+        const value = BigInt(left) * BigInt(right);
+        return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
+      };
+      const rootReserve = 4096 * 2;
+      const expectedTableSamplePayload = safeMultiply(selectedRows, sampleBasis);
+      const expectedTableRowOverhead = safeMultiply(selectedRows, 32);
+      const expectedTableAdvisory = expectedTableSamplePayload == null
+        || expectedTableRowOverhead == null
+        ? null
+        : roundSharedStagePage(
+          Math.max(
+            minimum,
+            expectedTableSamplePayload + expectedTableRowOverhead + rootReserve,
+          ),
+        );
+      const expectedIndexRowOverhead = target === 'candidate_shadow_observations'
+        ? safeMultiply(selectedRows, 32)
+        : 0;
+      const expectedIndexAdvisory = target === 'candidate_shadow_observations'
+        ? expectedIndexRowOverhead == null
+          ? null
+          : roundSharedStagePage(expectedIndexRowOverhead + rootReserve)
+        : 0;
+      const expectedAdvisory = expectedTableAdvisory != null
+        && expectedIndexAdvisory != null
+        ? roundSharedStagePage(
+          Math.max(minimum, expectedTableAdvisory + expectedIndexAdvisory),
+        )
+        : null;
+      return Boolean(
+        expectedTableSamplePayload != null
+        && expectedTableRowOverhead != null
+        && expectedTableAdvisory != null
+        && expectedIndexRowOverhead != null
+        && expectedIndexAdvisory != null
+        && expectedAdvisory != null
+        && tableSamplePayload === expectedTableSamplePayload
+        && tableScaledPhysical === 0
+        && tableRowOverhead === expectedTableRowOverhead
+        && tableRootReserve === rootReserve
+        && tableAdvisory === expectedTableAdvisory
+        && candidateIndexScaledPhysical === 0
+        && candidateIndexRowOverhead === expectedIndexRowOverhead
+        && candidateIndexAdvisory === expectedIndexAdvisory
+        && advisoryRequired === expectedAdvisory
+        && advisory === expectedAdvisory
+      );
+    }
     const selectedRows = nonnegativeInt('selected_row_count');
     const sourceRowsUpper = nonnegativeInt('source_row_count_upper');
     const pageCount = nonnegativeInt('source_dbstat_page_count');
@@ -9650,6 +9868,16 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       || evidence.query_bounded !== true
       || evidence.physical_upper_bound_claimed !== false
       || evidence.capacity_sample_used !== false
+      || evidence.dbstat_completed !== true
+      || evidence.dbstat_timed_out !== false
+      || typeof evidence.dbstat_timeout_sec !== 'number'
+      || !Number.isFinite(evidence.dbstat_timeout_sec)
+      || evidence.dbstat_timeout_sec !== 20
+      || typeof evidence.dbstat_elapsed_sec !== 'number'
+      || !Number.isFinite(evidence.dbstat_elapsed_sec)
+      || evidence.dbstat_elapsed_sec < 0
+      || evidence.sample_row_bytes_basis != null
+      || evidence.table_sample_payload_advisory_bytes != null
       || evidence.source_measurement_trust_boundary
         !== 'same_pinned_read_view_as_copy'
       || !/^[a-f0-9]{32}$/.test(pinnedReadViewId)
@@ -10040,9 +10268,31 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           : null,
       physical_upper_bound_claimed: raw.physical_upper_bound_claimed === true,
       capacity_sample_used: advisoryEvidence.capacity_sample_used === true,
+      dbstat_completed: typeof advisoryEvidence.dbstat_completed === 'boolean'
+        ? advisoryEvidence.dbstat_completed
+        : null,
+      dbstat_timed_out: typeof advisoryEvidence.dbstat_timed_out === 'boolean'
+        ? advisoryEvidence.dbstat_timed_out
+        : null,
+      dbstat_timeout_sec: Number.isFinite(advisoryEvidence.dbstat_timeout_sec)
+        ? advisoryEvidence.dbstat_timeout_sec
+        : null,
+      dbstat_elapsed_sec: Number.isFinite(advisoryEvidence.dbstat_elapsed_sec)
+        ? advisoryEvidence.dbstat_elapsed_sec
+        : null,
       selected_row_count: Number.isSafeInteger(advisoryEvidence.selected_row_count)
         ? advisoryEvidence.selected_row_count
         : null,
+      sample_row_bytes_basis:
+        Number.isSafeInteger(advisoryEvidence.sample_row_bytes_basis)
+          ? advisoryEvidence.sample_row_bytes_basis
+          : null,
+      table_sample_payload_advisory_bytes:
+        Number.isSafeInteger(
+          advisoryEvidence.table_sample_payload_advisory_bytes,
+        )
+          ? advisoryEvidence.table_sample_payload_advisory_bytes
+          : null,
       source_dbstat_physical_bytes:
         Number.isSafeInteger(advisoryEvidence.source_dbstat_physical_bytes)
           ? advisoryEvidence.source_dbstat_physical_bytes
@@ -10458,7 +10708,19 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         : false,
       physical_upper_bound_claimed: raw.physical_upper_bound_claimed === true,
       capacity_sample_used: advisoryEvidence.capacity_sample_used === true,
+      dbstat_completed: typeof advisoryEvidence.dbstat_completed === 'boolean'
+        ? advisoryEvidence.dbstat_completed
+        : null,
+      dbstat_timed_out: typeof advisoryEvidence.dbstat_timed_out === 'boolean'
+        ? advisoryEvidence.dbstat_timed_out
+        : null,
+      dbstat_timeout_sec: evidenceNumeric('dbstat_timeout_sec'),
+      dbstat_elapsed_sec: evidenceNumeric('dbstat_elapsed_sec'),
       selected_row_count: evidenceNumeric('selected_row_count'),
+      sample_row_bytes_basis: evidenceNumeric('sample_row_bytes_basis'),
+      table_sample_payload_advisory_bytes: evidenceNumeric(
+        'table_sample_payload_advisory_bytes',
+      ),
       source_dbstat_physical_bytes: evidenceNumeric(
         'source_dbstat_physical_bytes',
       ),

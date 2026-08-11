@@ -37,10 +37,14 @@ from cross_db_evaluator_snapshot import (
     SHARED_STAGE_ADVISORY_SCHEMA_VERSION,
     SHARED_STAGE_BUDGET_ALLOCATION_MODE,
     SHARED_STAGE_BUDGET_SCHEMA_VERSION,
+    SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
     SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
     SHARED_STAGE_HASH_CANONICALIZATION,
     SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION,
     SHARED_STAGE_PAGE_SIZE,
+    SHARED_STAGE_SAMPLE_ADVISORY_FORMULA,
+    SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION,
+    SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY,
     SHARED_STAGE_TARGET_CANDIDATE,
     allocate_shared_stage_residual,
     parallel_paper_stage_inventory_valid,
@@ -51,6 +55,7 @@ from cross_db_evaluator_snapshot import (
     shared_stage_budget_anchor_path,
     shared_stage_budget_plan_sha256,
     shared_stage_advisory_demand,
+    shared_stage_sample_advisory_demand,
     shared_stage_history_required_bytes,
     shared_stage_target_filename,
     shared_stage_target_minimum_bytes,
@@ -332,6 +337,191 @@ def producer_status_path_for_manifest(
     return (evidence_root / "snapshot_status.json").resolve(strict=False)
 
 
+def validate_shared_stage_sample_estimate_contract(
+    target: str,
+    report: dict,
+    evidence: dict,
+) -> int:
+    """Validate the indexed-sample fallback as an allocation hint only."""
+
+    def nonnegative_int(name: str) -> int:
+        value = evidence.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(
+                f"shared stage sample advisory numeric invalid:{target}:{name}"
+            )
+        return value
+
+    selected_rows = nonnegative_int("selected_row_count")
+    sample_limit = nonnegative_int("sample_limit_rows")
+    sample_rows = nonnegative_int("sample_rows")
+    sample_basis = nonnegative_int("sample_row_bytes_basis")
+    pinned_read_view_id = str(evidence.get("pinned_read_view_id") or "")
+    pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
+    dbstat_timeout = evidence.get("dbstat_timeout_sec")
+    dbstat_elapsed = evidence.get("dbstat_elapsed_sec")
+    if (
+        evidence.get("source_measurement_trust_boundary")
+        != "same_pinned_read_view_as_copy"
+        or not re.fullmatch(r"[a-f0-9]{32}", pinned_read_view_id)
+        or not pinned_read_view_role
+        or evidence.get("estimate_started_after_pin") is not True
+        or evidence.get("estimate_completed_before_copy") is not True
+        or evidence.get("query_bounded") is not True
+        or evidence.get("physical_upper_bound_claimed") is not False
+        or evidence.get("advisory_schema_version")
+        != SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
+        or evidence.get("advisory_formula")
+        != SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+        or report.get("advisory_strategy")
+        != SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
+        or evidence.get("capacity_sample_used") is not True
+        or evidence.get("dbstat_completed") is not False
+        or evidence.get("dbstat_timed_out") is not True
+        or isinstance(dbstat_timeout, bool)
+        or not isinstance(dbstat_timeout, (int, float))
+        or not math.isfinite(float(dbstat_timeout))
+        or float(dbstat_timeout) != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
+        or isinstance(dbstat_elapsed, bool)
+        or not isinstance(dbstat_elapsed, (int, float))
+        or not math.isfinite(float(dbstat_elapsed))
+        or float(dbstat_elapsed) < 0
+        or float(dbstat_elapsed) + 0.000001 < float(dbstat_timeout)
+        or evidence.get("row_count_binding_mode") != "exact_selected_rows"
+        or evidence.get("source_row_count_upper") is not None
+        or evidence.get("source_row_count_upper_basis")
+        != "not_required_for_bounded_index_sample_advisory"
+        or evidence.get("advisory_row_overhead_bytes")
+        != SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
+        or evidence.get("advisory_index_overhead_bytes")
+        != SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
+        or evidence.get("advisory_root_reserve_pages")
+        != SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
+        or sample_limit != SHARED_STAGE_ESTIMATE_SAMPLE_ROWS
+        or sample_rows > sample_limit
+        or evidence.get("source_row_fraction_numerator") is not None
+        or evidence.get("source_row_fraction_denominator") is not None
+    ):
+        raise ValueError(f"shared stage sample advisory evidence invalid:{target}")
+
+    source_dbstat_fields = (
+        "source_dbstat_page_count",
+        "source_dbstat_page_size",
+        "source_dbstat_physical_bytes",
+        "source_dbstat_payload_bytes",
+        "source_dbstat_unused_bytes",
+        "source_dbstat_max_payload_bytes",
+        "source_dbstat_cell_upper_count",
+    )
+    if any(evidence.get(field) is not None for field in source_dbstat_fields):
+        raise ValueError(f"unexpected source dbstat evidence:{target}")
+
+    average_diagnostic = evidence.get("average_row_bytes_diagnostic")
+    max_diagnostic = evidence.get("sample_max_row_bytes_diagnostic")
+    if average_diagnostic is not None and (
+        isinstance(average_diagnostic, bool)
+        or not isinstance(average_diagnostic, (int, float))
+        or not math.isfinite(float(average_diagnostic))
+        or float(average_diagnostic) < 0
+    ):
+        raise ValueError(
+            f"shared stage sample diagnostic invalid:{target}:average"
+        )
+    if max_diagnostic is not None and (
+        isinstance(max_diagnostic, bool)
+        or not isinstance(max_diagnostic, int)
+        or max_diagnostic < 0
+    ):
+        raise ValueError(
+            f"shared stage sample diagnostic invalid:{target}:maximum"
+        )
+    if selected_rows > 0:
+        if (
+            sample_rows <= 0
+            or sample_basis <= 0
+            or max_diagnostic != sample_basis
+            or average_diagnostic is None
+            or float(average_diagnostic) <= 0
+        ):
+            raise ValueError(f"shared stage sample basis invalid:{target}")
+    elif (
+        sample_rows != 0
+        or sample_basis != 0
+        or average_diagnostic is not None
+        or max_diagnostic is not None
+    ):
+        raise ValueError(f"shared stage empty sample invalid:{target}")
+
+    source_index_name = evidence.get("source_index_name")
+    query_plan = evidence.get("source_query_plan")
+    if (
+        not isinstance(source_index_name, str)
+        or not source_index_name
+        or not isinstance(query_plan, list)
+        or not query_plan
+        or evidence.get("source_query_plan_uses_index") is not True
+        or evidence.get("source_query_plan_uses_range_search") is not True
+        or evidence.get("source_query_plan_full_table_scan_detected") is not False
+    ):
+        raise ValueError(f"shared stage sample index evidence invalid:{target}")
+
+    candidate_order_dbstat_fields = (
+        "candidate_order_source_index_dbstat_page_count",
+        "candidate_order_source_index_dbstat_page_size",
+        "candidate_order_source_index_dbstat_physical_bytes",
+        "candidate_order_source_index_dbstat_payload_bytes",
+        "candidate_order_source_index_dbstat_unused_bytes",
+        "candidate_order_source_index_dbstat_max_payload_bytes",
+        "candidate_order_source_index_dbstat_cell_upper_count",
+        "candidate_order_source_index_structural_overhead_bytes",
+    )
+    if any(
+        evidence.get(field) is not None
+        for field in candidate_order_dbstat_fields
+    ):
+        raise ValueError(f"unexpected candidate dbstat evidence:{target}")
+    if target == SHARED_STAGE_TARGET_CANDIDATE:
+        if (
+            not isinstance(
+                evidence.get("candidate_order_source_index_name"),
+                str,
+            )
+            or not evidence.get("candidate_order_source_index_name")
+            or evidence.get("candidate_order_source_index_columns")
+            != ["signal_id"]
+            or evidence.get("candidate_order_source_index_partial") is not False
+        ):
+            raise ValueError("candidate signal-order sample index evidence invalid")
+    else:
+        candidate_identity_fields = (
+            "candidate_order_source_index_name",
+            "candidate_order_source_index_columns",
+            "candidate_order_source_index_partial",
+        )
+        if any(
+            evidence.get(field) not in (None, [], {})
+            for field in candidate_identity_fields
+        ):
+            raise ValueError("unexpected candidate sample index evidence")
+
+    expected = shared_stage_sample_advisory_demand(
+        target=target,
+        selected_row_count=selected_rows,
+        sample_rows=sample_rows,
+        sample_max_row_bytes=max_diagnostic,
+    )
+    for field, expected_value in expected.items():
+        if nonnegative_int(field) != int(expected_value):
+            raise ValueError(
+                f"shared stage sample advisory mismatch:{target}:{field}"
+            )
+    if int(report.get("advisory_required_bytes")) != int(
+        expected["advisory_required_bytes"]
+    ):
+        raise ValueError(f"shared stage sample advisory total mismatch:{target}")
+    return int(expected["advisory_required_bytes"])
+
+
 def validate_shared_stage_estimate_contract(
     target: str,
     report: dict,
@@ -340,6 +530,17 @@ def validate_shared_stage_estimate_contract(
     evidence = report.get("advisory_evidence")
     if not isinstance(evidence, dict):
         raise ValueError(f"shared stage advisory evidence missing:{target}")
+    if (
+        evidence.get("advisory_schema_version")
+        == SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
+        or evidence.get("advisory_formula")
+        == SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+    ):
+        return validate_shared_stage_sample_estimate_contract(
+            target,
+            report,
+            evidence,
+        )
 
     def nonnegative_int(name: str) -> int:
         value = evidence.get(name)
@@ -362,6 +563,8 @@ def validate_shared_stage_estimate_contract(
     sample_rows = nonnegative_int("sample_rows")
     pinned_read_view_id = str(evidence.get("pinned_read_view_id") or "")
     pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
+    dbstat_timeout = evidence.get("dbstat_timeout_sec")
+    dbstat_elapsed = evidence.get("dbstat_elapsed_sec")
 
     if (
         evidence.get("source_measurement_trust_boundary")
@@ -376,6 +579,18 @@ def validate_shared_stage_estimate_contract(
         != SHARED_STAGE_ADVISORY_SCHEMA_VERSION
         or evidence.get("advisory_formula") != SHARED_STAGE_ADVISORY_FORMULA
         or evidence.get("capacity_sample_used") is not False
+        or evidence.get("dbstat_completed") is not True
+        or evidence.get("dbstat_timed_out") is not False
+        or isinstance(dbstat_timeout, bool)
+        or not isinstance(dbstat_timeout, (int, float))
+        or not math.isfinite(float(dbstat_timeout))
+        or float(dbstat_timeout) != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
+        or isinstance(dbstat_elapsed, bool)
+        or not isinstance(dbstat_elapsed, (int, float))
+        or not math.isfinite(float(dbstat_elapsed))
+        or float(dbstat_elapsed) < 0
+        or evidence.get("sample_row_bytes_basis") is not None
+        or evidence.get("table_sample_payload_advisory_bytes") is not None
         or evidence.get("advisory_row_overhead_bytes")
         != SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
         or evidence.get("advisory_index_overhead_bytes")

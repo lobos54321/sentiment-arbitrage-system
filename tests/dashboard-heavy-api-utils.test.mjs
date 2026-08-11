@@ -1762,6 +1762,10 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       query_bounded: true,
       physical_upper_bound_claimed: false,
       capacity_sample_used: false,
+      dbstat_completed: true,
+      dbstat_timed_out: false,
+      dbstat_timeout_sec: 20,
+      dbstat_elapsed_sec: 0.01,
       source_measurement_trust_boundary: 'same_pinned_read_view_as_copy',
       pinned_read_view_id:
         pinnedReadViewIds[sharedTargetPinnedRoles[target]],
@@ -1780,6 +1784,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       sample_rows: 0,
       average_row_bytes_diagnostic: null,
       sample_max_row_bytes_diagnostic: null,
+      sample_row_bytes_basis: null,
       source_dbstat_page_count: pageCount,
       source_dbstat_page_size: 4096,
       source_dbstat_physical_bytes: physicalBytes,
@@ -1794,6 +1799,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       advisory_root_reserve_pages: 2,
       source_row_fraction_numerator: selectedRows,
       source_row_fraction_denominator: selectedRows,
+      table_sample_payload_advisory_bytes: null,
       table_scaled_physical_advisory_bytes: 4096,
       table_row_overhead_advisory_bytes: 32,
       table_root_reserve_advisory_bytes: 8192,
@@ -2606,6 +2612,118 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(producerOnly.bundle_candidate_available, true);
   assert.equal(producerOnly.consumer_ready, false);
   assert.equal(producerOnly.consumer_state, 'authoritative_preflight_required');
+});
+
+test('evaluator snapshot worker health validates bounded sample advisory fallback', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const manifestPayload = structuredClone(fixture.manifestPayload);
+  const shared = manifestPayload.shared_stage_budget;
+  const p9 = shared.targets.paper_decision_events;
+  p9.advisory_strategy = 'bounded_index_sample_advisory_fallback';
+  Object.assign(p9.advisory_evidence, {
+    advisory_schema_version: 'bounded_index_sample_advisory_demand.v1',
+    advisory_formula:
+      'selected_rows_times_bounded_sample_max_plus_per_row_overhead_'
+      + 'plus_root_reserve_plus_candidate_signal_index_overhead',
+    capacity_sample_used: true,
+    dbstat_completed: false,
+    dbstat_timed_out: true,
+    dbstat_timeout_sec: 20,
+    dbstat_elapsed_sec: 20.5,
+    source_row_count_upper: null,
+    source_row_count_upper_basis:
+      'not_required_for_bounded_index_sample_advisory',
+    sample_rows: 1,
+    average_row_bytes_diagnostic: 4096,
+    sample_max_row_bytes_diagnostic: 4096,
+    sample_row_bytes_basis: 4096,
+    source_dbstat_page_count: null,
+    source_dbstat_page_size: null,
+    source_dbstat_physical_bytes: null,
+    source_dbstat_payload_bytes: null,
+    source_dbstat_unused_bytes: null,
+    source_dbstat_max_payload_bytes: null,
+    source_dbstat_cell_upper_count: null,
+    source_row_fraction_numerator: null,
+    source_row_fraction_denominator: null,
+    table_sample_payload_advisory_bytes: 4096,
+    table_scaled_physical_advisory_bytes: 0,
+    table_row_overhead_advisory_bytes: 32,
+    table_root_reserve_advisory_bytes: 8192,
+    table_advisory_bytes: 16384,
+    candidate_order_index_scaled_physical_advisory_bytes: 0,
+    candidate_order_index_row_overhead_advisory_bytes: 0,
+    candidate_order_index_advisory_bytes: 0,
+  });
+  shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+  shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+  manifestPayload.disk_preflight.shared_stage_budget = structuredClone(shared);
+  const statusPayload = structuredClone(fixture.statusPayload);
+  statusPayload.shared_stage_budget = structuredClone(shared);
+  const healthInput = {
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload,
+    manifestPayload,
+    statusArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 100,
+    },
+    manifestArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 1000,
+    },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  };
+  const health = readEvaluatorSnapshotWorkerHealth(healthInput);
+  assert.equal(health.status, 'producer_accepted');
+  assert.equal(health.shared_stage_budget.contract_passed, true);
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .advisory_evidence_passed,
+    true,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events.capacity_sample_used,
+    true,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events.dbstat_timed_out,
+    true,
+  );
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .sample_row_bytes_basis,
+    4096,
+  );
+
+  const tamperedManifest = structuredClone(manifestPayload);
+  const tamperedShared = tamperedManifest.shared_stage_budget;
+  tamperedShared.targets.paper_decision_events.advisory_evidence
+    .sample_row_bytes_basis += 1;
+  tamperedShared.plan_sha256 = sharedStageBudgetPlanSha256(tamperedShared);
+  tamperedShared.evidence_sha256 = sharedStageBudgetEvidenceSha256(tamperedShared);
+  tamperedManifest.disk_preflight.shared_stage_budget = structuredClone(
+    tamperedShared,
+  );
+  const tamperedStatus = structuredClone(statusPayload);
+  tamperedStatus.shared_stage_budget = structuredClone(tamperedShared);
+  const blocked = readEvaluatorSnapshotWorkerHealth({
+    ...healthInput,
+    manifestPayload: tamperedManifest,
+    statusPayload: tamperedStatus,
+  });
+  assert.equal(blocked.status, 'contract_blocked');
+  assert.equal(blocked.shared_stage_budget.contract_passed, false);
 });
 
 test('evaluator snapshot worker health accepts advisory miss within hard grant', () => {

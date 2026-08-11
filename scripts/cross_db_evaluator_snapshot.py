@@ -49,11 +49,14 @@ SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
 )
 SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
 SHARED_STAGE_PAGE_SIZE = 4096
+SHARED_STAGE_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
-# The production candidate advisory scan currently takes about 120 seconds.
-# Keep 50% headroom while the independent 300-second source-read-lock budget
-# remains the higher-priority hard stop for pinned estimates.
+# Keep the indexed count/sample path bounded below the independent 300-second
+# source-read-lock budget. Full-table DBSTAT has its own much shorter window.
 SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 180.0
+# Full-table DBSTAT is only an allocation hint. Bound its contribution so an
+# advisory scan cannot consume the source-read-lock budget needed by the copy.
+SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC = 20.0
 # Source measurements are advisory allocation evidence, not a physical size
 # proof. SQLite record packing can legitimately make a 4096-byte destination
 # larger than any table-level DBSTAT extrapolation. Safety is therefore enforced
@@ -66,6 +69,16 @@ SHARED_STAGE_ADVISORY_SCHEMA_VERSION = "sqlite_dbstat_advisory_demand.v1"
 SHARED_STAGE_ADVISORY_FORMULA = (
     "source_physical_times_selected_row_fraction_plus_per_row_overhead_"
     "plus_root_reserve_plus_candidate_signal_index_fraction"
+)
+SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION = (
+    "bounded_index_sample_advisory_demand.v1"
+)
+SHARED_STAGE_SAMPLE_ADVISORY_FORMULA = (
+    "selected_rows_times_bounded_sample_max_plus_per_row_overhead_"
+    "plus_root_reserve_plus_candidate_signal_index_overhead"
+)
+SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY = (
+    "bounded_index_sample_advisory_fallback"
 )
 SHARED_STAGE_HASH_CANONICALIZATION = "json_sorted_float64_bits.v1"
 SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION = (
@@ -465,7 +478,7 @@ def round_up_stage_page(value: Any) -> int:
 def remaining_source_read_lock_wait(
     *,
     deadline_monotonic: float,
-    max_wait_sec: float = 30.0,
+    max_wait_sec: float | None = None,
     database: str,
     stage: str,
     limit_sec: float,
@@ -476,6 +489,8 @@ def remaining_source_read_lock_wait(
             f"source_read_lock_budget_exceeded:{database}:{stage}:"
             f"{float(limit_sec):.3f}s"
         )
+    if max_wait_sec is None:
+        return remaining
     return min(max(0.001, float(max_wait_sec)), remaining)
 
 
@@ -2238,6 +2253,65 @@ def shared_stage_advisory_demand(
     }
 
 
+def shared_stage_sample_advisory_demand(
+    *,
+    target: str,
+    selected_row_count: int,
+    sample_rows: int,
+    sample_max_row_bytes: int | None,
+) -> dict[str, int]:
+    """Return a bounded sample allocation hint, never a size proof."""
+    rows = max(0, int(selected_row_count))
+    sampled = max(0, int(sample_rows))
+    sample_basis = max(0, int(sample_max_row_bytes or 0))
+    if sampled > SHARED_STAGE_ESTIMATE_SAMPLE_ROWS:
+        raise RuntimeError("shared_stage_sample_advisory_sample_limit_invalid")
+    if rows > 0 and (sampled <= 0 or sample_basis <= 0):
+        raise RuntimeError("shared_stage_sample_advisory_sample_missing")
+    minimum = shared_stage_target_minimum_bytes(target)
+    root_reserve = (
+        SHARED_STAGE_PAGE_SIZE * SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
+    )
+    table_sample_payload = rows * sample_basis
+    table_row_overhead = rows * SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
+    table_advisory = round_up_stage_page(
+        max(
+            minimum,
+            table_sample_payload + table_row_overhead + root_reserve,
+        )
+    )
+    candidate_index_row_overhead = (
+        rows * SHARED_STAGE_ADVISORY_INDEX_OVERHEAD_BYTES
+        if str(target) == SHARED_STAGE_TARGET_CANDIDATE
+        else 0
+    )
+    candidate_index_advisory = (
+        round_up_stage_page(candidate_index_row_overhead + root_reserve)
+        if str(target) == SHARED_STAGE_TARGET_CANDIDATE
+        else 0
+    )
+    advisory_required = round_up_stage_page(
+        max(minimum, table_advisory + candidate_index_advisory)
+    )
+    values = {
+        "sample_row_bytes_basis": sample_basis,
+        "table_sample_payload_advisory_bytes": table_sample_payload,
+        "table_scaled_physical_advisory_bytes": 0,
+        "table_row_overhead_advisory_bytes": table_row_overhead,
+        "table_root_reserve_advisory_bytes": root_reserve,
+        "table_advisory_bytes": table_advisory,
+        "candidate_order_index_scaled_physical_advisory_bytes": 0,
+        "candidate_order_index_row_overhead_advisory_bytes": (
+            candidate_index_row_overhead
+        ),
+        "candidate_order_index_advisory_bytes": candidate_index_advisory,
+        "advisory_required_bytes": advisory_required,
+    }
+    if any(value > SHARED_STAGE_MAX_SAFE_INTEGER for value in values.values()):
+        raise RuntimeError("shared_stage_sample_advisory_numeric_overflow")
+    return values
+
+
 def estimate_shared_stage_target_requirement(
     connection: sqlite3.Connection,
     target: str,
@@ -2277,12 +2351,15 @@ def estimate_shared_stage_target_requirement(
 
     started = time.monotonic()
     estimate_deadline = started + SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+    dbstat_deadline: float | None = None
 
     def estimate_interrupted() -> int:
         if cancel_event is not None and cancel_event.is_set():
             return 1
         now = time.monotonic()
         if lock_deadline_monotonic is not None and now >= lock_deadline_monotonic:
+            return 1
+        if dbstat_deadline is not None and now >= dbstat_deadline:
             return 1
         return 1 if now >= estimate_deadline else 0
 
@@ -2354,20 +2431,6 @@ def estimate_shared_stage_target_requirement(
         sample_rows = 0
         average_row_bytes: float | None = None
         sample_max_row_bytes: int | None = None
-        estimate_strategy = "dbstat_proportional_advisory_with_indexed_row_count"
-        storage = source_table_storage_report(connection, table)
-        if candidate_order_source_index_name:
-            candidate_order_index_storage = source_table_storage_report(
-                connection,
-                candidate_order_source_index_name,
-            )
-            total_rows = int(
-                candidate_order_index_storage["cell_upper_count"]
-            )
-            row_count_upper_basis = "exact_signal_index_entry_count"
-        else:
-            total_rows = int(storage["cell_upper_count"])
-
         if selection.get("source_index_name"):
             selected_rows = int(
                 connection.execute(
@@ -2405,21 +2468,106 @@ def estimate_shared_stage_target_requirement(
                 ]
                 average_row_bytes = sum(diagnostic_sizes) / sample_rows
                 sample_max_row_bytes = max(diagnostic_sizes)
+
+        storage: dict[str, int] | None = None
+        dbstat_timed_out = False
+        dbstat_started = time.monotonic()
+        dbstat_deadline = min(
+            estimate_deadline,
+            dbstat_started + SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
+            (
+                float(lock_deadline_monotonic)
+                if lock_deadline_monotonic is not None
+                else estimate_deadline
+            ),
+        )
+        try:
+            storage = source_table_storage_report(connection, table)
+            if candidate_order_source_index_name:
+                candidate_order_index_storage = source_table_storage_report(
+                    connection,
+                    candidate_order_source_index_name,
+                )
+                total_rows = int(
+                    candidate_order_index_storage["cell_upper_count"]
+                )
+                row_count_upper_basis = "exact_signal_index_entry_count"
+            else:
+                total_rows = int(storage["cell_upper_count"])
+        except sqlite3.OperationalError as exc:
+            now = time.monotonic()
+            if (
+                "interrupted" in str(exc).lower()
+                and selection.get("source_index_name")
+                and now >= dbstat_deadline
+                and now < estimate_deadline
+                and (
+                    lock_deadline_monotonic is None
+                    or now < lock_deadline_monotonic
+                )
+                and not (
+                    cancel_event is not None and cancel_event.is_set()
+                )
+            ):
+                dbstat_timed_out = True
+                storage = None
+                candidate_order_index_storage = None
+                total_rows = None
+                row_count_upper_basis = (
+                    "not_required_for_bounded_index_sample_advisory"
+                )
+            else:
+                raise
+        finally:
+            dbstat_elapsed_sec = round(
+                time.monotonic() - dbstat_started,
+                6,
+            )
+            dbstat_deadline = None
+            connection.set_progress_handler(estimate_interrupted, 10000)
+
+        if dbstat_timed_out:
+            estimate_strategy = SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
+            advisory_schema_version = (
+                SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
+            )
+            advisory_formula = SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+            capacity_sample_used = True
         else:
-            estimate_strategy = "dbstat_full_btree_advisory_demand"
-            selected_rows = total_rows
+            if not isinstance(storage, dict):
+                raise RuntimeError(
+                    f"shared_stage_estimate_dbstat_missing:{table}"
+                )
+            if selection.get("source_index_name"):
+                estimate_strategy = (
+                    "dbstat_proportional_advisory_with_indexed_row_count"
+                )
+            else:
+                estimate_strategy = "dbstat_full_btree_advisory_demand"
+                selected_rows = total_rows
+            advisory_schema_version = SHARED_STAGE_ADVISORY_SCHEMA_VERSION
+            advisory_formula = SHARED_STAGE_ADVISORY_FORMULA
+            capacity_sample_used = False
 
         if selected_rows is None:
             raise RuntimeError(
                 f"shared_stage_estimate_row_count_missing:{table}"
             )
-        advisory = shared_stage_advisory_demand(
-            target=target,
-            selected_row_count=selected_rows,
-            source_row_count_upper=int(total_rows or 0),
-            storage=storage,
-            candidate_order_index_storage=candidate_order_index_storage,
-        )
+        if dbstat_timed_out:
+            advisory = shared_stage_sample_advisory_demand(
+                target=target,
+                selected_row_count=selected_rows,
+                sample_rows=sample_rows,
+                sample_max_row_bytes=sample_max_row_bytes,
+            )
+        else:
+            advisory = shared_stage_advisory_demand(
+                target=target,
+                selected_row_count=selected_rows,
+                source_row_count_upper=int(total_rows or 0),
+                storage=storage,
+                candidate_order_index_storage=candidate_order_index_storage,
+            )
         advisory_bytes = int(advisory["advisory_required_bytes"])
         minimum = shared_stage_target_minimum_bytes(target)
         return {
@@ -2428,9 +2576,13 @@ def estimate_shared_stage_target_requirement(
             "strategy": estimate_strategy,
             "query_bounded": True,
             "physical_upper_bound_claimed": False,
-            "advisory_schema_version": SHARED_STAGE_ADVISORY_SCHEMA_VERSION,
-            "advisory_formula": SHARED_STAGE_ADVISORY_FORMULA,
-            "capacity_sample_used": False,
+            "advisory_schema_version": advisory_schema_version,
+            "advisory_formula": advisory_formula,
+            "capacity_sample_used": capacity_sample_used,
+            "dbstat_completed": not dbstat_timed_out,
+            "dbstat_timed_out": dbstat_timed_out,
+            "dbstat_timeout_sec": SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
+            "dbstat_elapsed_sec": dbstat_elapsed_sec,
             "source_measurement_trust_boundary": (
                 "same_pinned_read_view_as_copy"
                 if pinned_read_view is not None
@@ -2456,13 +2608,27 @@ def estimate_shared_stage_target_requirement(
                 else None
             ),
             "sample_max_row_bytes_diagnostic": sample_max_row_bytes,
-            "source_dbstat_page_count": storage["page_count"],
-            "source_dbstat_page_size": storage["page_size"],
-            "source_dbstat_physical_bytes": storage["physical_bytes"],
-            "source_dbstat_payload_bytes": storage["payload_bytes"],
-            "source_dbstat_unused_bytes": storage["unused_bytes"],
-            "source_dbstat_max_payload_bytes": storage["max_payload_bytes"],
-            "source_dbstat_cell_upper_count": storage["cell_upper_count"],
+            "source_dbstat_page_count": (
+                storage["page_count"] if storage else None
+            ),
+            "source_dbstat_page_size": (
+                storage["page_size"] if storage else None
+            ),
+            "source_dbstat_physical_bytes": (
+                storage["physical_bytes"] if storage else None
+            ),
+            "source_dbstat_payload_bytes": (
+                storage["payload_bytes"] if storage else None
+            ),
+            "source_dbstat_unused_bytes": (
+                storage["unused_bytes"] if storage else None
+            ),
+            "source_dbstat_max_payload_bytes": (
+                storage["max_payload_bytes"] if storage else None
+            ),
+            "source_dbstat_cell_upper_count": (
+                storage["cell_upper_count"] if storage else None
+            ),
             "advisory_row_overhead_bytes": (
                 SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
             ),
@@ -5516,18 +5682,33 @@ def build_shared_stage_budget_plan(
         minimum = shared_stage_target_minimum_bytes(target)
         try:
             advisory_required = round_up_stage_page(
-                max(minimum, int(estimate.get("advisory_required_bytes") or 0))
+                max(
+                    minimum,
+                    int(estimate.get("advisory_required_bytes") or 0),
+                )
             )
         except (TypeError, ValueError, OverflowError):
             raise ValueError(
                 f"shared stage advisory invalid for {target}"
             ) from None
+        advisory_contract = (
+            estimate.get("advisory_schema_version"),
+            estimate.get("advisory_formula"),
+        )
         if (
             estimate.get("query_bounded") is not True
             or estimate.get("physical_upper_bound_claimed") is not False
-            or estimate.get("advisory_schema_version")
-            != SHARED_STAGE_ADVISORY_SCHEMA_VERSION
-            or estimate.get("advisory_formula") != SHARED_STAGE_ADVISORY_FORMULA
+            or advisory_contract
+            not in {
+                (
+                    SHARED_STAGE_ADVISORY_SCHEMA_VERSION,
+                    SHARED_STAGE_ADVISORY_FORMULA,
+                ),
+                (
+                    SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION,
+                    SHARED_STAGE_SAMPLE_ADVISORY_FORMULA,
+                ),
+            }
         ):
             raise ValueError(f"shared stage advisory contract invalid for {target}")
         previous = history_targets.get(target) or {}
@@ -5573,6 +5754,10 @@ def build_shared_stage_budget_plan(
                     "query_bounded",
                     "physical_upper_bound_claimed",
                     "capacity_sample_used",
+                    "dbstat_completed",
+                    "dbstat_timed_out",
+                    "dbstat_timeout_sec",
+                    "dbstat_elapsed_sec",
                     "source_measurement_trust_boundary",
                     "pinned_read_view_id",
                     "pinned_read_view_role",
@@ -5586,6 +5771,7 @@ def build_shared_stage_budget_plan(
                     "sample_rows",
                     "average_row_bytes_diagnostic",
                     "sample_max_row_bytes_diagnostic",
+                    "sample_row_bytes_basis",
                     "source_dbstat_page_count",
                     "source_dbstat_page_size",
                     "source_dbstat_physical_bytes",
@@ -5598,6 +5784,7 @@ def build_shared_stage_budget_plan(
                     "advisory_root_reserve_pages",
                     "source_row_fraction_numerator",
                     "source_row_fraction_denominator",
+                    "table_sample_payload_advisory_bytes",
                     "table_scaled_physical_advisory_bytes",
                     "table_row_overhead_advisory_bytes",
                     "table_root_reserve_advisory_bytes",
