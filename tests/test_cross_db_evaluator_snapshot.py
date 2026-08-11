@@ -290,6 +290,14 @@ def test_remaining_source_read_lock_wait_never_extends_deadline(monkeypatch):
         )
 
 
+def test_shared_stage_estimate_timeout_is_calibrated_below_lock_budget():
+    assert snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC == 180.0
+    assert (
+        snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+        < snapshot_module.DEFAULT_MAX_SOURCE_READ_LOCK_SEC
+    )
+
+
 def test_shared_stage_coordinator_publishes_root_error_atomically():
     coordinator = snapshot_module.SharedStageBudgetCoordinator(
         total_cap_bytes=1024 * 1024,

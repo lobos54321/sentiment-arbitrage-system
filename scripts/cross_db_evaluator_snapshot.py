@@ -50,7 +50,10 @@ SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
 SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
 SHARED_STAGE_PAGE_SIZE = 4096
 SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
-SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 20.0
+# The production candidate advisory scan currently takes about 120 seconds.
+# Keep 50% headroom while the independent 300-second source-read-lock budget
+# remains the higher-priority hard stop for pinned estimates.
+SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 180.0
 # Source measurements are advisory allocation evidence, not a physical size
 # proof. SQLite record packing can legitimately make a 4096-byte destination
 # larger than any table-level DBSTAT extrapolation. Safety is therefore enforced
