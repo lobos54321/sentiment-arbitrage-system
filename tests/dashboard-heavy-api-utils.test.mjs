@@ -82,6 +82,7 @@ test('shared stage hashes match the Python cross-runtime golden vector', () => {
         integral_float: 1.0,
         utilization_ratio: 0.25,
         actual_usage_bytes: 1024,
+        sqlite_full_observed: true,
       },
     },
   };
@@ -92,7 +93,7 @@ test('shared stage hashes match the Python cross-runtime golden vector', () => {
   payload.plan_sha256 = sharedStageBudgetPlanSha256(payload);
   assert.equal(
     sharedStageBudgetEvidenceSha256(payload),
-    '7e2e5156818a1acac8c2e9064bcaa817a6db5df0de611385cd5610391ccfa6e5',
+    'ac61bf1db4807887f4640760b0e57a5ca0e0c8a2ca90e29b068742de55fa1b49',
   );
 });
 

@@ -767,6 +767,7 @@ def validated_shared_stage_budget_history(
             }
         copy_completed = raw.get("copy_completed") is True
         cap_hit = raw.get("cap_hit") is True
+        sqlite_full_observed = raw.get("sqlite_full_observed") is True
         if (
             granted < shared_stage_target_minimum_bytes(target)
             or granted % SHARED_STAGE_PAGE_SIZE != 0
@@ -778,6 +779,7 @@ def validated_shared_stage_budget_history(
                     copy_completed
                     or high_water
                     < max(0, granted - SHARED_STAGE_PAGE_SIZE)
+                    and not sqlite_full_observed
                 )
             )
         ):
@@ -791,6 +793,7 @@ def validated_shared_stage_budget_history(
             "high_water_bytes": high_water,
             "copy_completed": copy_completed,
             "cap_hit": cap_hit,
+            "sqlite_full_observed": sqlite_full_observed,
             "evidence_source": str(raw.get("evidence_source") or "")[:80],
         }
     if sum(
@@ -1356,12 +1359,23 @@ def capture_shared_stage_budget_failure(
         advisory = max(0, int(report.get("advisory_required_bytes") or 0))
         copy_completed = False
         explicit_budget_failure = False
+        targeted_sqlite_full = False
         for details in failure_details.values():
             code = str(details.get("error_code") or "")
             component_targets_stage = shared_stage_failure_targets_target(
                 target,
                 details,
             )
+            try:
+                sqlite_errorcode = int(details.get("sqlite_errorcode"))
+            except (TypeError, ValueError, OverflowError):
+                sqlite_errorcode = None
+            if (
+                component_targets_stage
+                and sqlite_errorcode is not None
+                and sqlite_errorcode & 0xFF == sqlite3.SQLITE_FULL
+            ):
+                targeted_sqlite_full = True
             copy_timing = details.get("copy_timing")
             completed = (
                 copy_timing.get("completed_tables")
@@ -1402,14 +1416,18 @@ def capture_shared_stage_budget_failure(
                 "file_present": usage["file_present"],
                 "file_count": usage["file_count"],
                 "copy_completed": copy_completed,
+                "sqlite_full_observed": targeted_sqlite_full,
                 "advisory_exceeded": high_water > advisory,
                 "advisory_delta_bytes": high_water - advisory,
                 "cap_hit": bool(
                     not copy_completed
                     and explicit_budget_failure
                     and grant > 0
-                    and high_water
-                    >= max(0, grant - SHARED_STAGE_PAGE_SIZE)
+                    and (
+                        targeted_sqlite_full
+                        or high_water
+                        >= max(0, grant - SHARED_STAGE_PAGE_SIZE)
+                    )
                 ),
                 "evidence_source": "partial_stage_files_before_cleanup",
                 "within_grant": high_water <= grant if grant > 0 else False,
@@ -5635,6 +5653,7 @@ def shared_stage_budget_plan_hash_payload(
             "file_count",
             "copy_completed",
             "cap_hit",
+            "sqlite_full_observed",
             "within_grant",
             "utilization_ratio",
             "evidence_source",

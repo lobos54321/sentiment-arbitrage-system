@@ -1913,6 +1913,7 @@ function sharedStageBudgetPlanHashPayload(plan) {
       'file_count',
       'copy_completed',
       'cap_hit',
+      'sqlite_full_observed',
       'within_grant',
       'utilization_ratio',
       'evidence_source',

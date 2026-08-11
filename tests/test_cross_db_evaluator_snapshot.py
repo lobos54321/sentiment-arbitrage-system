@@ -235,6 +235,7 @@ def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
                 "integral_float": 1.0,
                 "utilization_ratio": 0.25,
                 "actual_usage_bytes": 1024,
+                "sqlite_full_observed": True,
             }
         },
     }
@@ -245,7 +246,7 @@ def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
         payload
     )
     assert snapshot_module.shared_stage_budget_evidence_sha256(payload) == (
-        "7e2e5156818a1acac8c2e9064bcaa817a6db5df0de611385cd5610391ccfa6e5"
+        "ac61bf1db4807887f4640760b0e57a5ca0e0c8a2ca90e29b068742de55fa1b49"
     )
 
 
@@ -1227,15 +1228,30 @@ def test_indexed_count_fallback_preserves_deadline_precedence(
 
 
 @pytest.mark.parametrize(
-    ("failure_stage", "current_table"),
+    (
+        "failure_stage",
+        "current_table",
+        "post_rollback_slack_pages",
+        "sqlite_errorcode",
+    ),
     (
         (
             "copy_table:candidate_shadow_observations",
             "candidate_shadow_observations",
+            0,
+            None,
         ),
         (
             "copy_table:__a3_candidate_shadow_observation_stage",
             "",
+            0,
+            None,
+        ),
+        (
+            "copy_table:candidate_shadow_observations",
+            "candidate_shadow_observations",
+            424,
+            sqlite3.SQLITE_FULL,
         ),
     ),
 )
@@ -1243,8 +1259,14 @@ def test_candidate_sqlite_full_is_attributed_as_cap_hit(
     tmp_path,
     failure_stage,
     current_table,
+    post_rollback_slack_pages,
+    sqlite_errorcode,
 ):
-    estimates = shared_stage_estimates()
+    estimates = shared_stage_estimates(
+        required_bytes={
+            snapshot_module.SHARED_STAGE_TARGET_CANDIDATE: 4 * 1024**2,
+        }
+    )
     total_cap = sum(
         row["advisory_required_bytes"]
         for row in estimates["targets"].values()
@@ -1260,21 +1282,29 @@ def test_candidate_sqlite_full_is_attributed_as_cap_hit(
     for target, report in first_plan["targets"].items():
         size = 4096
         if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE:
-            size = int(report["granted_cap_bytes"])
+            size = int(report["granted_cap_bytes"]) - (
+                post_rollback_slack_pages * snapshot_module.SHARED_STAGE_PAGE_SIZE
+            )
         (partial / report["stage_filename"]).write_bytes(b"x" * size)
-    failure = snapshot_module.ConcurrentSnapshotError(
-        {
-            "paper": {
-                "error_code": "selective_snapshot_exceeded_database_budget",
-                "error_type": "RuntimeError",
-                "stage": failure_stage,
-                "copy_timing": {
-                    "current_table": current_table or None,
-                    "completed_tables": {},
-                    "completed_parallel_stages": [],
-                },
+    failure_details = {
+        "error_code": "selective_snapshot_exceeded_database_budget",
+        "error_type": "RuntimeError",
+        "stage": failure_stage,
+        "copy_timing": {
+            "current_table": current_table or None,
+            "completed_tables": {},
+            "completed_parallel_stages": [],
+        },
+    }
+    if sqlite_errorcode is not None:
+        failure_details.update(
+            {
+                "sqlite_errorcode": sqlite_errorcode,
+                "sqlite_errorname": "SQLITE_FULL",
             }
-        }
+        )
+    failure = snapshot_module.ConcurrentSnapshotError(
+        {"paper": failure_details}
     )
     history = snapshot_module.capture_shared_stage_budget_failure(
         partial,
@@ -1286,7 +1316,9 @@ def test_candidate_sqlite_full_is_attributed_as_cap_hit(
     ]
     assert candidate["copy_completed"] is False
     assert candidate["cap_hit"] is True
-    assert candidate["high_water_bytes"] == candidate["granted_cap_bytes"]
+    assert candidate["high_water_bytes"] == candidate["granted_cap_bytes"] - (
+        post_rollback_slack_pages * snapshot_module.SHARED_STAGE_PAGE_SIZE
+    )
     history["cleanup_completed"] = True
     history["stage_files_removed"] = True
     history["evidence_sha256"] = (
