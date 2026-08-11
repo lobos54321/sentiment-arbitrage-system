@@ -229,6 +229,12 @@ DATABASE_SPECS = {
                 "id", "signal_ts", "entry_ts", "entry_time", "exit_ts", "created_at"
             ),
             "opportunity_events": ("id", "event_ts", "created_at"),
+            "opportunity_event_path_samples": (
+                "id",
+                "sample_ts",
+                "created_at",
+                "updated_at",
+            ),
         },
         "tables": {
             "candidate_shadow_observations": recent(
@@ -290,7 +296,12 @@ DATABASE_SPECS = {
                 "created_at", "updated_at", horizon="long"
             ),
             "opportunity_event_path_samples": recent(
-                "sample_ts", "created_at", "updated_at", horizon="long"
+                "sample_ts",
+                "created_at",
+                "updated_at",
+                horizon="long",
+                indexed_epoch_seconds_anchor="sample_ts",
+                epoch_seconds_columns=("sample_ts",),
             ),
             "paper_trade_path_samples": recent("sample_ts", "created_at", horizon="long"),
             "candidate_shadow_kline_fetch_attempts": through_upper("last_attempt_at"),
@@ -6835,7 +6846,9 @@ def self_test() -> None:
                 "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
                 "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
                 "CREATE INDEX idx_opportunity_path_samples_key_ts "
-                "ON opportunity_event_path_samples(opportunity_key, sample_ts)"
+                "ON opportunity_event_path_samples(opportunity_key, sample_ts);"
+                "CREATE INDEX idx_opportunity_path_samples_sample_ts "
+                "ON opportunity_event_path_samples(sample_ts)"
             ),
             "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
             "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",

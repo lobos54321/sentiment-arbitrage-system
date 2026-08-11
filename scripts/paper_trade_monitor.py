@@ -87,7 +87,7 @@ from a_class_runtime_safety import (
 )
 from fastlane_config import load_a_class_config
 from final_entry_contract import evaluate_final_entry_contract
-from opportunity_events import record_opportunity_event
+from opportunity_events import init_opportunity_events, record_opportunity_event
 from paper_evidence_log import append_paper_evidence_event
 from lifecycle_classifier import classify_lifecycle
 from entry_decision_contract import build_entry_decision_contract
@@ -17702,6 +17702,16 @@ def init_paper_db(db_path=None):
     try:
         db = connect_paper_db(path)
         _create_schema(db)
+        init_opportunity_events(db)
+        # The evaluator's bounded DBSTAT-timeout fallback needs this range
+        # index before its first attempt, not only after a later event write.
+        db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_opportunity_path_samples_sample_ts
+            ON opportunity_event_path_samples(sample_ts ASC)
+            """
+        )
+        db.commit()
     except sqlite3.DatabaseError as e:
         if "file is not a database" in str(e).lower() or "disk image is malformed" in str(e).lower():
             fatal_sqlite_malformed(e, context="paper_db_init", db_path=path)

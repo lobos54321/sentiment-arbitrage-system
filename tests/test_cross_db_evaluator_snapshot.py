@@ -29,6 +29,7 @@ from evaluator_db_contract import (  # noqa: E402
     evaluator_snapshot_bundle_status,
     validate_shared_stage_estimate_contract,
 )
+import paper_trade_monitor as paper_monitor  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -62,7 +63,9 @@ def create_sources(root):
             "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
             "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
             "CREATE INDEX idx_opportunity_path_samples_key_ts "
-            "ON opportunity_event_path_samples(opportunity_key, sample_ts)"
+            "ON opportunity_event_path_samples(opportunity_key, sample_ts);"
+            "CREATE INDEX idx_opportunity_path_samples_sample_ts "
+            "ON opportunity_event_path_samples(sample_ts)"
         ),
         "raw": "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)",
         "kline": "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)",
@@ -76,6 +79,36 @@ def create_sources(root):
         connection.close()
         sources[name] = str(path)
     return sources
+
+
+def test_paper_db_startup_adds_time_first_path_sample_index_to_existing_table(
+    tmp_path,
+):
+    path = tmp_path / "legacy-paper.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE opportunity_event_path_samples("
+        "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
+        "created_at REAL, updated_at REAL);"
+        "CREATE INDEX idx_opportunity_path_samples_key_ts "
+        "ON opportunity_event_path_samples(opportunity_key, sample_ts);"
+        "INSERT INTO opportunity_event_path_samples("
+        "opportunity_key, sample_ts, created_at, updated_at"
+        ") VALUES ('legacy', 1, 1, 1)"
+    )
+    connection.close()
+
+    initialized = paper_monitor.init_paper_db(str(path))
+    try:
+        columns = [
+            row[2]
+            for row in initialized.execute(
+                "PRAGMA index_info(idx_opportunity_path_samples_sample_ts)"
+            ).fetchall()
+        ]
+    finally:
+        initialized.close()
+    assert columns == ["sample_ts"]
 
 
 def shared_stage_estimates(active_tables=None, *, required_bytes=None):
@@ -381,7 +414,13 @@ def test_shared_stage_advisory_uses_dbstat_and_indexed_count(tmp_path):
     assert p9["advisory_required_bytes"] == p9["table_advisory_bytes"]
     assert p9["advisory_required_bytes"] >= 12288
     path = report["targets"]["opportunity_event_path_samples"]
-    assert path["strategy"] == "dbstat_full_btree_advisory_demand"
+    assert path["strategy"] == (
+        "dbstat_proportional_advisory_with_indexed_row_count"
+    )
+    assert path["source_index_name"] == (
+        "idx_opportunity_path_samples_sample_ts"
+    )
+    assert path["source_query_plan_uses_range_search"] is True
     assert path["query_bounded"] is True
     assert path["physical_upper_bound_claimed"] is False
 
@@ -780,6 +819,7 @@ def test_shared_stage_estimate_fails_closed_when_dbstat_is_unavailable(
     (
         snapshot_module.SHARED_STAGE_TARGET_CANDIDATE,
         "paper_decision_events",
+        "opportunity_event_path_samples",
     ),
 )
 def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
@@ -798,6 +838,15 @@ def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
             (now - 60,),
         )
         source_table = "candidate_shadow_observations"
+    elif target == "opportunity_event_path_samples":
+        source.execute(
+            "INSERT INTO opportunity_event_path_samples("
+            "id, opportunity_key, sample_ts, raw_payload_json, "
+            "created_at, updated_at"
+            ") VALUES (1, 'opp-1', ?, '{}', ?, ?)",
+            (now - 60, now - 60, now - 60),
+        )
+        source_table = "opportunity_event_path_samples"
     else:
         source.execute(
             "INSERT INTO paper_decision_events(id, event_ts) VALUES (1, ?)",
@@ -873,6 +922,13 @@ def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
     assert estimate["source_dbstat_physical_bytes"] is None
     assert estimate["table_sample_payload_advisory_bytes"] > 0
     assert estimate["physical_upper_bound_claimed"] is False
+    assert estimate["source_query_plan_uses_index"] is True
+    assert estimate["source_query_plan_uses_range_search"] is True
+    assert estimate["source_query_plan_full_table_scan_detected"] is False
+    if target == "opportunity_event_path_samples":
+        assert estimate["source_index_name"] == (
+            "idx_opportunity_path_samples_sample_ts"
+        )
 
     consumer_report = {
         "advisory_required_bytes": estimate["advisory_required_bytes"],

@@ -58,7 +58,9 @@ def create_live_sources(root):
             "id INTEGER PRIMARY KEY, opportunity_key TEXT, sample_ts REAL, "
             "raw_payload_json TEXT, created_at REAL, updated_at REAL);"
             "CREATE INDEX idx_opportunity_path_samples_key_ts "
-            "ON opportunity_event_path_samples(opportunity_key, sample_ts)",
+            "ON opportunity_event_path_samples(opportunity_key, sample_ts);"
+            "CREATE INDEX idx_opportunity_path_samples_sample_ts "
+            "ON opportunity_event_path_samples(sample_ts)",
         ),
         "raw": ("raw_signal_outcomes.db", "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)"),
         "kline": ("kline_cache.db", "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)"),

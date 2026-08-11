@@ -266,7 +266,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "5ade25ede1d9b1d61309b3ac9a36027e25a4e7ee79cc1cba227b6738b7905e14",
+      "impact_hash": "8296e113401199dba924644670cffe0203ce4898e0168c37484f5a70f27560ee",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -375,7 +375,7 @@
         "config/v27-training-dataset-manifest-policy.json": "0c07e1602dad9616ce207be04c8a8cd4ebfaf1067f4f5810f959958db87702e5",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
         "scripts/paper_fast_lane.py": "ed291f9d6a10fbeeaa7da21101a33d891a1163a5a42db9fbf8eac6d0ce7d6fa0",
-        "scripts/paper_trade_monitor.py": "ee9a8ad53d0c629dcff554b70e16c527dacdc5b59dc55f2b06af014c26649d6f",
+        "scripts/paper_trade_monitor.py": "0e571b61b19ddfceeb88e3b100dff0d68fc415e4501b6c324db21fe34c441288",
         "scripts/telegram_lifecycle_markov.py": "13a32477b07d009ec2ee616e6d6aa25d67a8b00260185fe98267642a4b4942a1",
         "scripts/v27_basic_contract_readiness.py": "95db8c3ae42528bedad6df8d57032979caa9816c246901b4ce37d1438329af44",
         "scripts/v27_denominator_projection.py": "553b0241fc6729cc2982b291d6dba9d2b8323d1a27ec7300378fa50afc2b0eb0",
@@ -414,7 +414,7 @@
         "scripts/agent_autoloop_stage_runner.py": "2e748b1a0d6d62671897f70ecfdb7075f065f9a969c849c2a02bc940850b5462",
         "scripts/agent_capture_discovery_loop.py": "342738ce9611789ef467234283fb5a7603c227c35229c62d31637642a3573e95",
         "scripts/autoloop_oos_refresh_worker.py": "5300c65b404497aa00d1e1b97303d7096be4b657daa7e6e23130bf87ad09e021",
-        "scripts/cross_db_evaluator_snapshot.py": "6db24bd9b1c02acc75c19dc5fc5028381ddcda5cd0da2015943c1b825d64ef9b",
+        "scripts/cross_db_evaluator_snapshot.py": "0b062cf2f76a6ccbdc8a461d652f8e768fd244b74adee4a5593db865cd7f1486",
         "scripts/evaluator_db_contract.py": "1697e1fd4d47ff53d0db31c966b4954e5c16dc113a9297b8575f71e07424c710",
         "scripts/run_zeabur_services.sh": "5327b4ab83e20fd5078ca7a33da0704e35b6ef73247bf5e5d77f7b59836ead8d",
         "src/index.js": "23e8d2e0adc0b6b6f2ede5e9add0691abb9611b1e1c552fe2114bf27db8d39f0",
@@ -425,8 +425,8 @@
         "tests/test_autoloop_evaluator_snapshot_provenance.py": "6f1c27ec3ebdb166b819ae24b1d7cba11e224b5bdb80a358aa95a82437cb4e3b",
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
-        "tests/test_cross_db_evaluator_snapshot.py": "bfcdfa71611d2c4b227f8365c867839a91927edd018521c2821b8f48dde2e48d",
-        "tests/test_evaluator_db_contract.py": "576ce1d62c8aa2d581e539f2d6e39380c33d9ffa6655a9b9d8095fc860e791d4",
+        "tests/test_cross_db_evaluator_snapshot.py": "9e8e80cd76b2d8a076aeb2ab370a2678cb02bd954aaeb306847268308e9302a2",
+        "tests/test_evaluator_db_contract.py": "2ba63500b1acd00ccb683a455ff11d3c67922e3617acdbf89a79c52bd2ff115b",
         "tests/test_runtime_v27_writer_topology_audit.py": "3e6c144ec960adcf9893f841effc6c36719b45fac052de712b8dd99ec514793e"
       },
       "spec_change_id": "v27-runtime-environment-metric-threshold-markov-truth-foundation",
