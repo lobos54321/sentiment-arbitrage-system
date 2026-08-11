@@ -9549,6 +9549,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const sharedStageSampleAdvisoryFormula =
     'selected_rows_times_bounded_sample_max_plus_per_row_overhead_'
     + 'plus_root_reserve_plus_candidate_signal_index_overhead';
+  const sharedStageIndexedCountTimeoutAdvisoryFormula =
+    'bounded_edge_sample_rows_times_sample_max_plus_per_row_overhead_'
+    + 'plus_root_reserve_plus_candidate_signal_index_overhead';
   const roundSharedStagePage = (value) => (
     Number.isSafeInteger(value) && value >= 0
       ? Math.ceil(value / 4096) * 4096
@@ -9581,13 +9584,26 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         ? evidence[field]
         : null
     );
+    const indexedCountTimeoutContractSelected = (
+      evidence.advisory_schema_version
+        === 'bounded_index_count_timeout_advisory_demand.v1'
+      || evidence.advisory_formula
+        === sharedStageIndexedCountTimeoutAdvisoryFormula
+    );
     const sampleContractSelected = (
       evidence.advisory_schema_version
         === 'bounded_index_sample_advisory_demand.v1'
       || evidence.advisory_formula === sharedStageSampleAdvisoryFormula
+      || indexedCountTimeoutContractSelected
     );
     if (sampleContractSelected) {
       const selectedRows = nonnegativeInt('selected_row_count');
+      const sampleRowCountBasis = nonnegativeInt(
+        'sample_row_count_advisory_basis',
+      );
+      const advisoryRows = indexedCountTimeoutContractSelected
+        ? sampleRowCountBasis
+        : selectedRows;
       const sampleLimit = nonnegativeInt('sample_limit_rows');
       const sampleRows = nonnegativeInt('sample_rows');
       const sampleBasis = nonnegativeInt('sample_row_bytes_basis');
@@ -9618,6 +9634,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       const pinnedReadViewRole = String(evidence.pinned_read_view_role || '');
       const dbstatTimeout = Number(evidence.dbstat_timeout_sec);
       const dbstatElapsed = Number(evidence.dbstat_elapsed_sec);
+      const indexedCountTimeout = Number(evidence.indexed_count_timeout_sec);
+      const indexedCountElapsed = Number(evidence.indexed_count_elapsed_sec);
       const averageDiagnostic = evidence.average_row_bytes_diagnostic;
       const maxDiagnostic = evidence.sample_max_row_bytes_diagnostic;
       const sourceDbstatFields = [
@@ -9631,7 +9649,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       ];
       if (
         [
-          selectedRows,
+          advisoryRows,
           sampleLimit,
           sampleRows,
           sampleBasis,
@@ -9645,31 +9663,46 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           candidateIndexAdvisory,
           advisoryRequired,
         ].some((value) => value == null)
-        || evidence.advisory_schema_version
-          !== 'bounded_index_sample_advisory_demand.v1'
-        || evidence.advisory_formula !== sharedStageSampleAdvisoryFormula
-        || raw.advisory_strategy !== 'bounded_index_sample_advisory_fallback'
+        || evidence.advisory_schema_version !== (
+          indexedCountTimeoutContractSelected
+            ? 'bounded_index_count_timeout_advisory_demand.v1'
+            : 'bounded_index_sample_advisory_demand.v1'
+        )
+        || evidence.advisory_formula !== (
+          indexedCountTimeoutContractSelected
+            ? sharedStageIndexedCountTimeoutAdvisoryFormula
+            : sharedStageSampleAdvisoryFormula
+        )
+        || raw.advisory_strategy !== (
+          indexedCountTimeoutContractSelected
+            ? 'bounded_index_count_timeout_advisory_fallback'
+            : 'bounded_index_sample_advisory_fallback'
+        )
         || evidence.query_bounded !== true
         || evidence.physical_upper_bound_claimed !== false
         || evidence.capacity_sample_used !== true
-        || evidence.dbstat_completed !== false
-        || evidence.dbstat_timed_out !== true
         || typeof evidence.dbstat_timeout_sec !== 'number'
         || !Number.isFinite(dbstatTimeout)
         || dbstatTimeout !== 20
         || typeof evidence.dbstat_elapsed_sec !== 'number'
         || !Number.isFinite(dbstatElapsed)
-        || dbstatElapsed < dbstatTimeout
         || evidence.source_measurement_trust_boundary
           !== 'same_pinned_read_view_as_copy'
         || !/^[a-f0-9]{32}$/.test(pinnedReadViewId)
         || pinnedReadViewRole.length === 0
         || evidence.estimate_started_after_pin !== true
         || evidence.estimate_completed_before_copy !== true
-        || evidence.row_count_binding_mode !== 'exact_selected_rows'
+        || evidence.row_count_binding_mode !== (
+          indexedCountTimeoutContractSelected
+            ? 'copy_report_exact_after_indexed_count_timeout'
+            : 'exact_selected_rows'
+        )
         || evidence.source_row_count_upper != null
-        || evidence.source_row_count_upper_basis
-          !== 'not_required_for_bounded_index_sample_advisory'
+        || evidence.source_row_count_upper_basis !== (
+          indexedCountTimeoutContractSelected
+            ? 'unavailable_after_bounded_index_count_timeout'
+            : 'not_required_for_bounded_index_sample_advisory'
+        )
         || evidence.source_row_fraction_numerator != null
         || evidence.source_row_fraction_denominator != null
         || evidence.advisory_row_overhead_bytes !== 32
@@ -9677,6 +9710,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         || evidence.advisory_root_reserve_pages !== 2
         || sampleLimit !== 256
         || sampleRows > sampleLimit
+        || (indexedCountTimeoutContractSelected
+          && sampleRowCountBasis !== sampleRows)
         || sourceDbstatFields.some((field) => evidence[field] != null)
         || typeof evidence.source_index_name !== 'string'
         || evidence.source_index_name.length === 0
@@ -9686,7 +9721,29 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         || evidence.source_query_plan_uses_range_search !== true
         || evidence.source_query_plan_full_table_scan_detected !== false
       ) return false;
-      if (selectedRows > 0) {
+      if (indexedCountTimeoutContractSelected) {
+        if (
+          evidence.selected_row_count !== null
+          || evidence.indexed_count_completed !== false
+          || evidence.indexed_count_timed_out !== true
+          || typeof evidence.indexed_count_timeout_sec !== 'number'
+          || !Number.isFinite(indexedCountTimeout)
+          || indexedCountTimeout !== 20
+          || typeof evidence.indexed_count_elapsed_sec !== 'number'
+          || !Number.isFinite(indexedCountElapsed)
+          || indexedCountElapsed < indexedCountTimeout
+          || indexedCountElapsed >= 180
+          || evidence.dbstat_completed !== false
+          || evidence.dbstat_timed_out !== false
+          || dbstatElapsed !== 0
+          || evidence.dbstat_skipped_reason !== 'indexed_count_timeout'
+        ) return false;
+      } else if (
+        evidence.dbstat_completed !== false
+        || evidence.dbstat_timed_out !== true
+        || dbstatElapsed < dbstatTimeout
+      ) return false;
+      if (advisoryRows > 0) {
         if (
           sampleRows <= 0
           || sampleBasis <= 0
@@ -9752,8 +9809,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : null;
       };
       const rootReserve = 4096 * 2;
-      const expectedTableSamplePayload = safeMultiply(selectedRows, sampleBasis);
-      const expectedTableRowOverhead = safeMultiply(selectedRows, 32);
+      const expectedTableSamplePayload = safeMultiply(advisoryRows, sampleBasis);
+      const expectedTableRowOverhead = safeMultiply(advisoryRows, 32);
       const expectedTableAdvisory = expectedTableSamplePayload == null
         || expectedTableRowOverhead == null
         ? null
@@ -9764,7 +9821,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           ),
         );
       const expectedIndexRowOverhead = target === 'candidate_shadow_observations'
-        ? safeMultiply(selectedRows, 32)
+        ? safeMultiply(advisoryRows, 32)
         : 0;
       const expectedIndexAdvisory = target === 'candidate_shadow_observations'
         ? expectedIndexRowOverhead == null
@@ -9914,7 +9971,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       && (!Number.isSafeInteger(maxDiagnostic) || maxDiagnostic < 0)
     ) return false;
 
-    const expectsIndex = indexedSharedStageTargets.has(target);
+    const expectsIndex = indexedSharedStageTargets.has(target) || (
+      target === 'opportunity_event_path_samples'
+      && typeof evidence.source_index_name === 'string'
+      && evidence.source_index_name.length > 0
+    );
     const queryPlan = evidence.source_query_plan;
     if (expectsIndex) {
       if (
@@ -10138,7 +10199,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       minimum,
       advisory,
     );
-    const advisoryRows = Number(advisoryEvidence.selected_row_count);
+    const advisoryRows = Number.isSafeInteger(
+      advisoryEvidence.selected_row_count,
+    ) && advisoryEvidence.selected_row_count >= 0
+      ? advisoryEvidence.selected_row_count
+      : null;
     const rowCountBindingMode = String(
       advisoryEvidence.row_count_binding_mode || '',
     );
@@ -10146,12 +10211,15 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const rowCountBound = Boolean(
       Number.isInteger(actualRowsCopied)
       && actualRowsCopied >= 0
-      && Number.isInteger(advisoryRows)
       && (
         (rowCountBindingMode === 'exact_selected_rows'
+          && Number.isInteger(advisoryRows)
           && actualRowsCopied === advisoryRows)
         || (rowCountBindingMode === 'full_source_row_upper'
+          && Number.isInteger(advisoryRows)
           && actualRowsCopied <= advisoryRows)
+        || rowCountBindingMode
+          === 'copy_report_exact_after_indexed_count_timeout'
       )
       && Number.isInteger(selectedTableRows)
       && selectedTableRows === actualRowsCopied
@@ -10268,6 +10336,22 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           : null,
       physical_upper_bound_claimed: raw.physical_upper_bound_claimed === true,
       capacity_sample_used: advisoryEvidence.capacity_sample_used === true,
+      indexed_count_completed:
+        typeof advisoryEvidence.indexed_count_completed === 'boolean'
+          ? advisoryEvidence.indexed_count_completed
+          : null,
+      indexed_count_timed_out:
+        typeof advisoryEvidence.indexed_count_timed_out === 'boolean'
+          ? advisoryEvidence.indexed_count_timed_out
+          : null,
+      indexed_count_timeout_sec:
+        Number.isFinite(advisoryEvidence.indexed_count_timeout_sec)
+          ? advisoryEvidence.indexed_count_timeout_sec
+          : null,
+      indexed_count_elapsed_sec:
+        Number.isFinite(advisoryEvidence.indexed_count_elapsed_sec)
+          ? advisoryEvidence.indexed_count_elapsed_sec
+          : null,
       dbstat_completed: typeof advisoryEvidence.dbstat_completed === 'boolean'
         ? advisoryEvidence.dbstat_completed
         : null,
@@ -10280,9 +10364,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       dbstat_elapsed_sec: Number.isFinite(advisoryEvidence.dbstat_elapsed_sec)
         ? advisoryEvidence.dbstat_elapsed_sec
         : null,
+      dbstat_skipped_reason:
+        typeof advisoryEvidence.dbstat_skipped_reason === 'string'
+          ? advisoryEvidence.dbstat_skipped_reason.slice(0, 80)
+          : null,
       selected_row_count: Number.isSafeInteger(advisoryEvidence.selected_row_count)
         ? advisoryEvidence.selected_row_count
         : null,
+      sample_row_count_advisory_basis:
+        Number.isSafeInteger(advisoryEvidence.sample_row_count_advisory_basis)
+          ? advisoryEvidence.sample_row_count_advisory_basis
+          : null,
       sample_row_bytes_basis:
         Number.isSafeInteger(advisoryEvidence.sample_row_bytes_basis)
           ? advisoryEvidence.sample_row_bytes_basis
@@ -10708,6 +10800,16 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         : false,
       physical_upper_bound_claimed: raw.physical_upper_bound_claimed === true,
       capacity_sample_used: advisoryEvidence.capacity_sample_used === true,
+      indexed_count_completed:
+        typeof advisoryEvidence.indexed_count_completed === 'boolean'
+          ? advisoryEvidence.indexed_count_completed
+          : null,
+      indexed_count_timed_out:
+        typeof advisoryEvidence.indexed_count_timed_out === 'boolean'
+          ? advisoryEvidence.indexed_count_timed_out
+          : null,
+      indexed_count_timeout_sec: evidenceNumeric('indexed_count_timeout_sec'),
+      indexed_count_elapsed_sec: evidenceNumeric('indexed_count_elapsed_sec'),
       dbstat_completed: typeof advisoryEvidence.dbstat_completed === 'boolean'
         ? advisoryEvidence.dbstat_completed
         : null,
@@ -10716,7 +10818,14 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         : null,
       dbstat_timeout_sec: evidenceNumeric('dbstat_timeout_sec'),
       dbstat_elapsed_sec: evidenceNumeric('dbstat_elapsed_sec'),
+      dbstat_skipped_reason:
+        typeof advisoryEvidence.dbstat_skipped_reason === 'string'
+          ? advisoryEvidence.dbstat_skipped_reason.slice(0, 80)
+          : null,
       selected_row_count: evidenceNumeric('selected_row_count'),
+      sample_row_count_advisory_basis: evidenceNumeric(
+        'sample_row_count_advisory_basis',
+      ),
       sample_row_bytes_basis: evidenceNumeric('sample_row_bytes_basis'),
       table_sample_payload_advisory_bytes: evidenceNumeric(
         'table_sample_payload_advisory_bytes',

@@ -331,10 +331,16 @@ def test_remaining_source_read_lock_wait_never_extends_deadline(monkeypatch):
 
 
 def test_shared_stage_estimate_timeout_is_calibrated_below_lock_budget():
+    assert snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC == 20.0
     assert snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC == 180.0
     assert (
-        snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC
+        < snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
         < snapshot_module.DEFAULT_MAX_SOURCE_READ_LOCK_SEC
+    )
+    assert (
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC
+        == snapshot_module.SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
     )
 
 
@@ -961,6 +967,263 @@ def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
     ] += 1
     with pytest.raises(ValueError, match="sample advisory mismatch"):
         validate_shared_stage_estimate_contract(target, tampered)
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        snapshot_module.SHARED_STAGE_TARGET_CANDIDATE,
+        "paper_decision_events",
+        "opportunity_event_path_samples",
+    ),
+)
+def test_indexed_count_timeout_uses_bounded_sample_before_dbstat(
+    tmp_path,
+    monkeypatch,
+    target,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    source = sqlite3.connect(sources["paper"])
+    if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE:
+        source.execute(
+            "INSERT INTO candidate_shadow_observations("
+            "id, signal_id, candidate_id, observed_at, payload_json"
+            ") VALUES (1, 1, 'sample', ?, '{\"sample\":true}')",
+            (now - 60,),
+        )
+    elif target == "opportunity_event_path_samples":
+        source.execute(
+            "INSERT INTO opportunity_event_path_samples("
+            "id, opportunity_key, sample_ts, raw_payload_json, "
+            "created_at, updated_at"
+            ") VALUES (1, 'opp-1', ?, '{}', ?, ?)",
+            (now - 60, now - 60, now - 60),
+        )
+    else:
+        source.execute(
+            "INSERT INTO paper_decision_events(id, event_ts) VALUES (1, ?)",
+            (now - 60,),
+        )
+    source.commit()
+    source.close()
+
+    clock = {"now": 1000.0}
+
+    def bounded_clock():
+        return clock["now"]
+
+    def indexed_count_timeout(*_args, **_kwargs):
+        clock["now"] = 1020.5
+        raise sqlite3.OperationalError("interrupted")
+
+    def unexpected_dbstat(*_args, **_kwargs):
+        raise AssertionError("DBSTAT must be skipped after indexed count timeout")
+
+    monkeypatch.setattr(snapshot_module.time, "monotonic", bounded_clock)
+    monkeypatch.setattr(
+        snapshot_module,
+        "exact_indexed_selected_row_count",
+        indexed_count_timeout,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "source_table_storage_report",
+        unexpected_dbstat,
+    )
+    connection = sqlite3.connect(":memory:", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "ATTACH DATABASE ? AS src",
+        (f"file:{Path(sources['paper']).resolve()}?mode=ro",),
+    )
+    connection.execute("BEGIN")
+    connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
+    try:
+        estimate = snapshot_module.estimate_shared_stage_target_requirement(
+            connection,
+            target,
+            review_lower_epoch=now - 96 * 3600,
+            long_lower_epoch=now - 840 * 3600,
+            upper_epoch=now,
+            pinned_read_view={
+                "read_view_id": "8" * 32,
+                "role": "paper_main_selective_copy",
+            },
+        )
+    finally:
+        connection.rollback()
+        connection.close()
+
+    assert estimate["strategy"] == (
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_STRATEGY
+    )
+    assert estimate["advisory_schema_version"] == (
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION
+    )
+    assert estimate["advisory_formula"] == (
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
+    )
+    assert estimate["indexed_count_completed"] is False
+    assert estimate["indexed_count_timed_out"] is True
+    assert estimate["indexed_count_timeout_sec"] == 20.0
+    assert estimate["indexed_count_elapsed_sec"] == 20.5
+    assert estimate["selected_row_count"] is None
+    assert estimate["sample_row_count_advisory_basis"] == estimate["sample_rows"]
+    assert 1 <= estimate["sample_rows"] <= 256
+    assert estimate["dbstat_completed"] is False
+    assert estimate["dbstat_timed_out"] is False
+    assert estimate["dbstat_elapsed_sec"] == 0.0
+    assert estimate["dbstat_skipped_reason"] == "indexed_count_timeout"
+    assert estimate["source_row_count_upper"] is None
+    assert estimate["source_row_count_upper_basis"] == (
+        "unavailable_after_bounded_index_count_timeout"
+    )
+    assert estimate["row_count_binding_mode"] == (
+        snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE
+    )
+    assert estimate["physical_upper_bound_claimed"] is False
+    assert estimate["source_query_plan_uses_index"] is True
+    assert estimate["source_query_plan_uses_range_search"] is True
+    assert estimate["source_query_plan_full_table_scan_detected"] is False
+
+    consumer_report = {
+        "advisory_required_bytes": estimate["advisory_required_bytes"],
+        "advisory_strategy": estimate["strategy"],
+        "advisory_evidence": estimate,
+    }
+    assert validate_shared_stage_estimate_contract(
+        target,
+        consumer_report,
+    ) == estimate["advisory_required_bytes"]
+
+    plan = {
+        "active_targets": [target],
+        "targets": {
+            target: {
+                "granted_cap_bytes": estimate["advisory_required_bytes"],
+                "advisory_required_bytes": estimate["advisory_required_bytes"],
+                "advisory_evidence": estimate,
+            }
+        },
+    }
+    if target == snapshot_module.SHARED_STAGE_TARGET_CANDIDATE:
+        paper_report = {
+            "temporary_candidate_stage_size_bytes": 4096,
+            "selected_tables": {
+                snapshot_module.CANDIDATE_OBSERVATION_TABLE: {
+                    "rows_copied": 1,
+                }
+            },
+        }
+    else:
+        paper_report = {
+            "parallel_paper_stages": {
+                target: {"stage_size_bytes": 4096, "rows_copied": 1},
+            }
+        }
+    finalized = snapshot_module.finalize_shared_stage_budget_success(
+        plan,
+        paper_report,
+    )
+    assert finalized["targets"][target]["actual_rows_copied"] == 1
+    assert finalized["targets"][target]["row_count_bound_to_snapshot"] is True
+
+    tampered = json.loads(json.dumps(consumer_report))
+    tampered["advisory_evidence"]["selected_row_count"] = 1
+    with pytest.raises(ValueError, match="row claim invalid"):
+        validate_shared_stage_estimate_contract(target, tampered)
+
+
+@pytest.mark.parametrize(
+    ("interruption", "expected_error"),
+    (
+        (
+            "early",
+            "shared_stage_estimate_timeout:opportunity_event_path_samples",
+        ),
+        ("cancel", "parallel_paper_stage_cancelled"),
+        (
+            "source_lock",
+            "source_read_lock_budget_exceeded:paper:shared_stage_estimate:"
+            "opportunity_event_path_samples",
+        ),
+        (
+            "overall",
+            "shared_stage_estimate_timeout:opportunity_event_path_samples",
+        ),
+    ),
+)
+def test_indexed_count_fallback_preserves_deadline_precedence(
+    tmp_path,
+    monkeypatch,
+    interruption,
+    expected_error,
+):
+    sources = create_sources(tmp_path)
+    now = int(time.time())
+    source = sqlite3.connect(sources["paper"])
+    source.execute(
+        "INSERT INTO opportunity_event_path_samples("
+        "id, opportunity_key, sample_ts, raw_payload_json, created_at, updated_at"
+        ") VALUES (1, 'opp-1', ?, '{}', ?, ?)",
+        (now - 60, now - 60, now - 60),
+    )
+    source.commit()
+    source.close()
+
+    clock = {"now": 1000.0}
+    cancel_event = threading.Event()
+
+    def bounded_clock():
+        return clock["now"]
+
+    def interrupted_count(*_args, **_kwargs):
+        if interruption == "early":
+            clock["now"] = 1005.0
+        elif interruption == "source_lock":
+            clock["now"] = 1010.5
+        elif interruption == "overall":
+            clock["now"] = 1180.5
+        else:
+            clock["now"] = 1020.5
+            cancel_event.set()
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(snapshot_module.time, "monotonic", bounded_clock)
+    monkeypatch.setattr(
+        snapshot_module,
+        "exact_indexed_selected_row_count",
+        interrupted_count,
+    )
+    connection = sqlite3.connect(":memory:", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "ATTACH DATABASE ? AS src",
+        (f"file:{Path(sources['paper']).resolve()}?mode=ro",),
+    )
+    connection.execute("BEGIN")
+    connection.execute("SELECT COUNT(*) FROM src.sqlite_master").fetchone()
+    try:
+        with pytest.raises(RuntimeError, match=expected_error):
+            snapshot_module.estimate_shared_stage_target_requirement(
+                connection,
+                "opportunity_event_path_samples",
+                review_lower_epoch=now - 96 * 3600,
+                long_lower_epoch=now - 840 * 3600,
+                upper_epoch=now,
+                pinned_read_view={
+                    "read_view_id": "9" * 32,
+                    "role": "paper_main_selective_copy",
+                },
+                lock_deadline_monotonic=(
+                    1010.0 if interruption == "source_lock" else None
+                ),
+                cancel_event=cancel_event,
+            )
+    finally:
+        connection.rollback()
+        connection.close()
 
 
 @pytest.mark.parametrize(

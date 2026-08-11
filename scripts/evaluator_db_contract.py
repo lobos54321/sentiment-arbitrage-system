@@ -39,8 +39,14 @@ from cross_db_evaluator_snapshot import (
     SHARED_STAGE_BUDGET_SCHEMA_VERSION,
     SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
     SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
+    SHARED_STAGE_ESTIMATE_TIMEOUT_SEC,
     SHARED_STAGE_HASH_CANONICALIZATION,
     SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION,
+    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA,
+    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION,
+    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_STRATEGY,
+    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE,
+    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC,
     SHARED_STAGE_PAGE_SIZE,
     SHARED_STAGE_SAMPLE_ADVISORY_FORMULA,
     SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION,
@@ -352,7 +358,20 @@ def validate_shared_stage_sample_estimate_contract(
             )
         return value
 
-    selected_rows = nonnegative_int("selected_row_count")
+    indexed_count_timeout_contract = bool(
+        evidence.get("advisory_schema_version")
+        == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION
+        or evidence.get("advisory_formula")
+        == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
+    )
+    if indexed_count_timeout_contract:
+        if evidence.get("selected_row_count") is not None:
+            raise ValueError(
+                f"shared stage indexed count advisory row claim invalid:{target}"
+            )
+        selected_rows = nonnegative_int("sample_row_count_advisory_basis")
+    else:
+        selected_rows = nonnegative_int("selected_row_count")
     sample_limit = nonnegative_int("sample_limit_rows")
     sample_rows = nonnegative_int("sample_rows")
     sample_basis = nonnegative_int("sample_row_bytes_basis")
@@ -360,6 +379,36 @@ def validate_shared_stage_sample_estimate_contract(
     pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
     dbstat_timeout = evidence.get("dbstat_timeout_sec")
     dbstat_elapsed = evidence.get("dbstat_elapsed_sec")
+    indexed_count_timeout = evidence.get("indexed_count_timeout_sec")
+    indexed_count_elapsed = evidence.get("indexed_count_elapsed_sec")
+    expected_schema = (
+        SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION
+        if indexed_count_timeout_contract
+        else SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
+    )
+    expected_formula = (
+        SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
+        if indexed_count_timeout_contract
+        else SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+    )
+    expected_strategy = (
+        SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_STRATEGY
+        if indexed_count_timeout_contract
+        else SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
+    )
+    expected_binding_mode = (
+        SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE
+        if indexed_count_timeout_contract
+        else "exact_selected_rows"
+    )
+    expected_row_upper_basis = (
+        "unavailable_after_bounded_index_count_timeout"
+        if indexed_count_timeout_contract
+        else "not_required_for_bounded_index_sample_advisory"
+    )
+    indexed_count_row_basis_invalid = bool(
+        indexed_count_timeout_contract and selected_rows != sample_rows
+    )
     if (
         evidence.get("source_measurement_trust_boundary")
         != "same_pinned_read_view_as_copy"
@@ -369,15 +418,10 @@ def validate_shared_stage_sample_estimate_contract(
         or evidence.get("estimate_completed_before_copy") is not True
         or evidence.get("query_bounded") is not True
         or evidence.get("physical_upper_bound_claimed") is not False
-        or evidence.get("advisory_schema_version")
-        != SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
-        or evidence.get("advisory_formula")
-        != SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
-        or report.get("advisory_strategy")
-        != SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
+        or evidence.get("advisory_schema_version") != expected_schema
+        or evidence.get("advisory_formula") != expected_formula
+        or report.get("advisory_strategy") != expected_strategy
         or evidence.get("capacity_sample_used") is not True
-        or evidence.get("dbstat_completed") is not False
-        or evidence.get("dbstat_timed_out") is not True
         or isinstance(dbstat_timeout, bool)
         or not isinstance(dbstat_timeout, (int, float))
         or not math.isfinite(float(dbstat_timeout))
@@ -386,11 +430,10 @@ def validate_shared_stage_sample_estimate_contract(
         or not isinstance(dbstat_elapsed, (int, float))
         or not math.isfinite(float(dbstat_elapsed))
         or float(dbstat_elapsed) < 0
-        or float(dbstat_elapsed) + 0.000001 < float(dbstat_timeout)
-        or evidence.get("row_count_binding_mode") != "exact_selected_rows"
+        or evidence.get("row_count_binding_mode") != expected_binding_mode
         or evidence.get("source_row_count_upper") is not None
         or evidence.get("source_row_count_upper_basis")
-        != "not_required_for_bounded_index_sample_advisory"
+        != expected_row_upper_basis
         or evidence.get("advisory_row_overhead_bytes")
         != SHARED_STAGE_ADVISORY_ROW_OVERHEAD_BYTES
         or evidence.get("advisory_index_overhead_bytes")
@@ -399,10 +442,42 @@ def validate_shared_stage_sample_estimate_contract(
         != SHARED_STAGE_ADVISORY_ROOT_RESERVE_PAGES
         or sample_limit != SHARED_STAGE_ESTIMATE_SAMPLE_ROWS
         or sample_rows > sample_limit
+        or indexed_count_row_basis_invalid
         or evidence.get("source_row_fraction_numerator") is not None
         or evidence.get("source_row_fraction_denominator") is not None
     ):
         raise ValueError(f"shared stage sample advisory evidence invalid:{target}")
+
+    if indexed_count_timeout_contract:
+        if (
+            evidence.get("indexed_count_completed") is not False
+            or evidence.get("indexed_count_timed_out") is not True
+            or isinstance(indexed_count_timeout, bool)
+            or not isinstance(indexed_count_timeout, (int, float))
+            or not math.isfinite(float(indexed_count_timeout))
+            or float(indexed_count_timeout)
+            != SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC
+            or isinstance(indexed_count_elapsed, bool)
+            or not isinstance(indexed_count_elapsed, (int, float))
+            or not math.isfinite(float(indexed_count_elapsed))
+            or float(indexed_count_elapsed) + 0.000001
+            < float(indexed_count_timeout)
+            or float(indexed_count_elapsed) >= SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+            or evidence.get("dbstat_completed") is not False
+            or evidence.get("dbstat_timed_out") is not False
+            or float(dbstat_elapsed) != 0.0
+            or evidence.get("dbstat_skipped_reason")
+            != "indexed_count_timeout"
+        ):
+            raise ValueError(
+                f"shared stage indexed count timeout evidence invalid:{target}"
+            )
+    elif (
+        evidence.get("dbstat_completed") is not False
+        or evidence.get("dbstat_timed_out") is not True
+        or float(dbstat_elapsed) + 0.000001 < float(dbstat_timeout)
+    ):
+        raise ValueError(f"shared stage sample dbstat evidence invalid:{target}")
 
     source_dbstat_fields = (
         "source_dbstat_page_count",
@@ -535,6 +610,10 @@ def validate_shared_stage_estimate_contract(
         == SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
         or evidence.get("advisory_formula")
         == SHARED_STAGE_SAMPLE_ADVISORY_FORMULA
+        or evidence.get("advisory_schema_version")
+        == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION
+        or evidence.get("advisory_formula")
+        == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
     ):
         return validate_shared_stage_sample_estimate_contract(
             target,
@@ -949,18 +1028,31 @@ def validate_shared_stage_budget_contract(
             shared_stage_history_required_bytes(target, previous)
         )
         advisory_evidence = report.get("advisory_evidence") or {}
-        advisory_rows = int(advisory_evidence.get("selected_row_count"))
         row_count_binding_mode = str(
             advisory_evidence.get("row_count_binding_mode") or ""
+        )
+        raw_advisory_rows = advisory_evidence.get("selected_row_count")
+        advisory_rows = (
+            int(raw_advisory_rows)
+            if isinstance(raw_advisory_rows, int)
+            and not isinstance(raw_advisory_rows, bool)
+            else None
         )
         row_count_bound = bool(
             (
                 row_count_binding_mode == "exact_selected_rows"
+                and advisory_rows is not None
                 and actual_rows_copied == advisory_rows
             )
             or (
                 row_count_binding_mode == "full_source_row_upper"
+                and advisory_rows is not None
                 and actual_rows_copied <= advisory_rows
+            )
+            or (
+                row_count_binding_mode
+                == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE
+                and actual_rows_copied >= 0
             )
         )
         utilization = float(report.get("utilization_ratio"))

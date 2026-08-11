@@ -54,6 +54,10 @@ SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
 # Keep the indexed count/sample path bounded below the independent 300-second
 # source-read-lock budget. Full-table DBSTAT has its own much shorter window.
 SHARED_STAGE_ESTIMATE_TIMEOUT_SEC = 180.0
+# Exact indexed COUNT(*) is also only allocation evidence.  On production-scale
+# ranges it must not consume the entire estimate/read-lock budget before the
+# bounded advisory fallback can run.
+SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC = 20.0
 # Full-table DBSTAT is only an allocation hint. Bound its contribution so an
 # advisory scan cannot consume the source-read-lock budget needed by the copy.
 SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC = 20.0
@@ -79,6 +83,19 @@ SHARED_STAGE_SAMPLE_ADVISORY_FORMULA = (
 )
 SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY = (
     "bounded_index_sample_advisory_fallback"
+)
+SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION = (
+    "bounded_index_count_timeout_advisory_demand.v1"
+)
+SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA = (
+    "bounded_edge_sample_rows_times_sample_max_plus_per_row_overhead_"
+    "plus_root_reserve_plus_candidate_signal_index_overhead"
+)
+SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_STRATEGY = (
+    "bounded_index_count_timeout_advisory_fallback"
+)
+SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE = (
+    "copy_report_exact_after_indexed_count_timeout"
 )
 SHARED_STAGE_HASH_CANONICALIZATION = "json_sorted_float64_bits.v1"
 SHARED_STAGE_HISTORY_ANCHOR_SCHEMA_VERSION = (
@@ -1490,6 +1507,11 @@ def finalize_shared_stage_budget_success(
                 row_count_binding_mode == "full_source_row_upper"
                 and actual_rows_copied <= advisory_rows
             )
+            or (
+                row_count_binding_mode
+                == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE
+                and actual_rows_copied >= 0
+            )
         )
         actual_total += actual
         report.update(
@@ -2323,6 +2345,21 @@ def shared_stage_sample_advisory_demand(
     return values
 
 
+def exact_indexed_selected_row_count(
+    connection: sqlite3.Connection,
+    relation: str,
+    selection: dict[str, Any],
+) -> int:
+    """Count the selected index range; the caller supplies the hard deadline."""
+    return int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {relation} "
+            f"WHERE {selection['predicate_sql']}",
+            selection["parameters"],
+        ).fetchone()[0]
+    )
+
+
 def estimate_shared_stage_target_requirement(
     connection: sqlite3.Connection,
     target: str,
@@ -2362,6 +2399,7 @@ def estimate_shared_stage_target_requirement(
 
     started = time.monotonic()
     estimate_deadline = started + SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+    indexed_count_deadline: float | None = None
     dbstat_deadline: float | None = None
 
     def estimate_interrupted() -> int:
@@ -2369,6 +2407,11 @@ def estimate_shared_stage_target_requirement(
             return 1
         now = time.monotonic()
         if lock_deadline_monotonic is not None and now >= lock_deadline_monotonic:
+            return 1
+        if (
+            indexed_count_deadline is not None
+            and now >= indexed_count_deadline
+        ):
             return 1
         if dbstat_deadline is not None and now >= dbstat_deadline:
             return 1
@@ -2442,14 +2485,9 @@ def estimate_shared_stage_target_requirement(
         sample_rows = 0
         average_row_bytes: float | None = None
         sample_max_row_bytes: int | None = None
+        indexed_count_timed_out = False
+        indexed_count_elapsed_sec: float | None = None
         if selection.get("source_index_name"):
-            selected_rows = int(
-                connection.execute(
-                    f"SELECT COUNT(*) FROM {relation} "
-                    f"WHERE {selection['predicate_sql']}",
-                    selection["parameters"],
-                ).fetchone()[0]
-            )
             column_sql = ", ".join(
                 quote_identifier(column) for column in columns
             )
@@ -2479,65 +2517,134 @@ def estimate_shared_stage_target_requirement(
                 ]
                 average_row_bytes = sum(diagnostic_sizes) / sample_rows
                 sample_max_row_bytes = max(diagnostic_sizes)
+            indexed_count_started = time.monotonic()
+            indexed_count_deadline = min(
+                estimate_deadline,
+                indexed_count_started
+                + SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC,
+                (
+                    float(lock_deadline_monotonic)
+                    if lock_deadline_monotonic is not None
+                    else estimate_deadline
+                ),
+            )
+            try:
+                selected_rows = exact_indexed_selected_row_count(
+                    connection,
+                    relation,
+                    selection,
+                )
+            except sqlite3.OperationalError as exc:
+                now = time.monotonic()
+                if (
+                    "interrupted" in str(exc).lower()
+                    and now >= indexed_count_deadline
+                    and now < estimate_deadline
+                    and (
+                        lock_deadline_monotonic is None
+                        or now < lock_deadline_monotonic
+                    )
+                    and not (
+                        cancel_event is not None and cancel_event.is_set()
+                    )
+                ):
+                    indexed_count_timed_out = True
+                    selected_rows = None
+                    row_count_upper_basis = (
+                        "unavailable_after_bounded_index_count_timeout"
+                    )
+                else:
+                    raise
+            finally:
+                indexed_count_elapsed_sec = round(
+                    time.monotonic() - indexed_count_started,
+                    6,
+                )
+                indexed_count_deadline = None
+                connection.set_progress_handler(
+                    estimate_interrupted,
+                    10000,
+                )
 
         storage: dict[str, int] | None = None
         dbstat_timed_out = False
-        dbstat_started = time.monotonic()
-        dbstat_deadline = min(
-            estimate_deadline,
-            dbstat_started + SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
-            (
-                float(lock_deadline_monotonic)
-                if lock_deadline_monotonic is not None
-                else estimate_deadline
-            ),
-        )
-        try:
-            storage = source_table_storage_report(connection, table)
-            if candidate_order_source_index_name:
-                candidate_order_index_storage = source_table_storage_report(
-                    connection,
-                    candidate_order_source_index_name,
-                )
-                total_rows = int(
-                    candidate_order_index_storage["cell_upper_count"]
-                )
-                row_count_upper_basis = "exact_signal_index_entry_count"
-            else:
-                total_rows = int(storage["cell_upper_count"])
-        except sqlite3.OperationalError as exc:
-            now = time.monotonic()
-            if (
-                "interrupted" in str(exc).lower()
-                and selection.get("source_index_name")
-                and now >= dbstat_deadline
-                and now < estimate_deadline
-                and (
-                    lock_deadline_monotonic is None
-                    or now < lock_deadline_monotonic
-                )
-                and not (
-                    cancel_event is not None and cancel_event.is_set()
-                )
-            ):
-                dbstat_timed_out = True
-                storage = None
-                candidate_order_index_storage = None
-                total_rows = None
-                row_count_upper_basis = (
-                    "not_required_for_bounded_index_sample_advisory"
-                )
-            else:
-                raise
-        finally:
-            dbstat_elapsed_sec = round(
-                time.monotonic() - dbstat_started,
-                6,
+        dbstat_completed = False
+        dbstat_elapsed_sec = 0.0
+        dbstat_skipped_reason: str | None = None
+        if indexed_count_timed_out:
+            dbstat_skipped_reason = "indexed_count_timeout"
+        else:
+            dbstat_started = time.monotonic()
+            dbstat_deadline = min(
+                estimate_deadline,
+                dbstat_started + SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
+                (
+                    float(lock_deadline_monotonic)
+                    if lock_deadline_monotonic is not None
+                    else estimate_deadline
+                ),
             )
-            dbstat_deadline = None
-            connection.set_progress_handler(estimate_interrupted, 10000)
+            try:
+                storage = source_table_storage_report(connection, table)
+                if candidate_order_source_index_name:
+                    candidate_order_index_storage = source_table_storage_report(
+                        connection,
+                        candidate_order_source_index_name,
+                    )
+                    total_rows = int(
+                        candidate_order_index_storage["cell_upper_count"]
+                    )
+                    row_count_upper_basis = "exact_signal_index_entry_count"
+                else:
+                    total_rows = int(storage["cell_upper_count"])
+            except sqlite3.OperationalError as exc:
+                now = time.monotonic()
+                if (
+                    "interrupted" in str(exc).lower()
+                    and selection.get("source_index_name")
+                    and now >= dbstat_deadline
+                    and now < estimate_deadline
+                    and (
+                        lock_deadline_monotonic is None
+                        or now < lock_deadline_monotonic
+                    )
+                    and not (
+                        cancel_event is not None and cancel_event.is_set()
+                    )
+                ):
+                    dbstat_timed_out = True
+                    storage = None
+                    candidate_order_index_storage = None
+                    total_rows = None
+                    row_count_upper_basis = (
+                        "not_required_for_bounded_index_sample_advisory"
+                    )
+                else:
+                    raise
+            finally:
+                dbstat_elapsed_sec = round(
+                    time.monotonic() - dbstat_started,
+                    6,
+                )
+                dbstat_deadline = None
+                connection.set_progress_handler(
+                    estimate_interrupted,
+                    10000,
+                )
+            dbstat_completed = not dbstat_timed_out
 
-        if dbstat_timed_out:
+        if indexed_count_timed_out:
+            estimate_strategy = (
+                SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_STRATEGY
+            )
+            advisory_schema_version = (
+                SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION
+            )
+            advisory_formula = (
+                SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
+            )
+            capacity_sample_used = True
+        elif dbstat_timed_out:
             estimate_strategy = SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY
             advisory_schema_version = (
                 SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION
@@ -2560,21 +2667,28 @@ def estimate_shared_stage_target_requirement(
             advisory_formula = SHARED_STAGE_ADVISORY_FORMULA
             capacity_sample_used = False
 
-        if selected_rows is None:
+        if selected_rows is None and not indexed_count_timed_out:
             raise RuntimeError(
                 f"shared_stage_estimate_row_count_missing:{table}"
             )
-        if dbstat_timed_out:
+        if indexed_count_timed_out:
             advisory = shared_stage_sample_advisory_demand(
                 target=target,
-                selected_row_count=selected_rows,
+                selected_row_count=sample_rows,
+                sample_rows=sample_rows,
+                sample_max_row_bytes=sample_max_row_bytes,
+            )
+        elif dbstat_timed_out:
+            advisory = shared_stage_sample_advisory_demand(
+                target=target,
+                selected_row_count=int(selected_rows or 0),
                 sample_rows=sample_rows,
                 sample_max_row_bytes=sample_max_row_bytes,
             )
         else:
             advisory = shared_stage_advisory_demand(
                 target=target,
-                selected_row_count=selected_rows,
+                selected_row_count=int(selected_rows or 0),
                 source_row_count_upper=int(total_rows or 0),
                 storage=storage,
                 candidate_order_index_storage=candidate_order_index_storage,
@@ -2590,10 +2704,20 @@ def estimate_shared_stage_target_requirement(
             "advisory_schema_version": advisory_schema_version,
             "advisory_formula": advisory_formula,
             "capacity_sample_used": capacity_sample_used,
-            "dbstat_completed": not dbstat_timed_out,
+            "indexed_count_completed": (
+                selection.get("source_index_name") is not None
+                and not indexed_count_timed_out
+            ),
+            "indexed_count_timed_out": indexed_count_timed_out,
+            "indexed_count_timeout_sec": (
+                SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC
+            ),
+            "indexed_count_elapsed_sec": indexed_count_elapsed_sec,
+            "dbstat_completed": dbstat_completed,
             "dbstat_timed_out": dbstat_timed_out,
             "dbstat_timeout_sec": SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC,
             "dbstat_elapsed_sec": dbstat_elapsed_sec,
+            "dbstat_skipped_reason": dbstat_skipped_reason,
             "source_measurement_trust_boundary": (
                 "same_pinned_read_view_as_copy"
                 if pinned_read_view is not None
@@ -2604,12 +2728,19 @@ def estimate_shared_stage_target_requirement(
             "estimate_started_after_pin": pinned_read_view is not None,
             "estimate_completed_before_copy": pinned_read_view is not None,
             "row_count_binding_mode": (
-                "exact_selected_rows"
-                if selection.get("source_index_name")
-                else "full_source_row_upper"
+                SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ROW_BINDING_MODE
+                if indexed_count_timed_out
+                else (
+                    "exact_selected_rows"
+                    if selection.get("source_index_name")
+                    else "full_source_row_upper"
+                )
             ),
             "sample_limit_rows": SHARED_STAGE_ESTIMATE_SAMPLE_ROWS,
             "selected_row_count": selected_rows,
+            "sample_row_count_advisory_basis": (
+                sample_rows if indexed_count_timed_out else None
+            ),
             "source_row_count_upper": total_rows,
             "source_row_count_upper_basis": row_count_upper_basis,
             "sample_rows": sample_rows,
@@ -5719,6 +5850,10 @@ def build_shared_stage_budget_plan(
                     SHARED_STAGE_SAMPLE_ADVISORY_SCHEMA_VERSION,
                     SHARED_STAGE_SAMPLE_ADVISORY_FORMULA,
                 ),
+                (
+                    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_SCHEMA_VERSION,
+                    SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA,
+                ),
             }
         ):
             raise ValueError(f"shared stage advisory contract invalid for {target}")
@@ -5765,10 +5900,15 @@ def build_shared_stage_budget_plan(
                     "query_bounded",
                     "physical_upper_bound_claimed",
                     "capacity_sample_used",
+                    "indexed_count_completed",
+                    "indexed_count_timed_out",
+                    "indexed_count_timeout_sec",
+                    "indexed_count_elapsed_sec",
                     "dbstat_completed",
                     "dbstat_timed_out",
                     "dbstat_timeout_sec",
                     "dbstat_elapsed_sec",
+                    "dbstat_skipped_reason",
                     "source_measurement_trust_boundary",
                     "pinned_read_view_id",
                     "pinned_read_view_role",
@@ -5777,6 +5917,7 @@ def build_shared_stage_budget_plan(
                     "row_count_binding_mode",
                     "sample_limit_rows",
                     "selected_row_count",
+                    "sample_row_count_advisory_basis",
                     "source_row_count_upper",
                     "source_row_count_upper_basis",
                     "sample_rows",
