@@ -27,7 +27,9 @@ jobs:
       - name: Compile v27 runtime mode gate
         run: python3 -m py_compile scripts/v27_runtime_mode_gate.py scripts/paper_fast_lane.py scripts/paper_trade_monitor.py
       - name: Compile evaluator snapshot and AutoLoop contracts
-        run: python3 -m py_compile scripts/cross_db_evaluator_snapshot.py scripts/evaluator_db_contract.py scripts/agent_capture_discovery_loop.py scripts/agent_autoloop_stage_runner.py scripts/autoloop_oos_refresh_worker.py
+        run: python3 -m py_compile scripts/cross_db_evaluator_snapshot.py scripts/evaluator_db_contract.py scripts/agent_capture_discovery_loop.py scripts/agent_autoloop_stage_runner.py scripts/autoloop_oos_refresh_worker.py scripts/zeabur_preflight_cleanup.py scripts/offline_raw_gold_silver_funnel_audit.py scripts/run_with_timeout.py
+      - name: Check production supervisor shell syntax
+        run: bash -n scripts/run_zeabur_services.sh scripts/zeabur_prestart.sh
       - name: Check evaluator snapshot JavaScript syntax
         run: node --check src/index.js && node --check src/web/dashboard-server.js && node --check src/web/evaluator-snapshot-preflight.js
       - name: Validate v27 readiness JSON
@@ -72,6 +74,10 @@ jobs:
         run: python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py -q -p no:cacheprovider
       - name: Run evaluator snapshot and AutoLoop provenance tests
         run: python3 -m pytest tests/test_cross_db_evaluator_snapshot.py tests/test_evaluator_db_contract.py tests/test_autoloop_evaluator_snapshot_provenance.py tests/test_autoloop_foundation_fail_closed.py tests/test_autoloop_research_db_isolation.py tests/test_runtime_v27_writer_topology_audit.py -q -p no:cacheprovider
+      - name: Run process supervision tests
+        run: python3 -m pytest test_run_with_timeout.py -q -p no:cacheprovider
+      - name: Run bounded evidence storage tests
+        run: python3 -m pytest test_zeabur_preflight_cleanup.py -k 'paper_evidence or archive_pass or existing_gzip or archive_restart or archive_deadline or stale_archive or funnel_audit or cold_shards or archive_lock or hot_shard or zeabur_service_rejects' -q -p no:cacheprovider
       - name: Run evaluator snapshot and AutoLoop Node behavior tests
         run: node --test tests/dashboard-agent-evaluator-db-source.test.mjs tests/dashboard-heavy-api-utils.test.mjs tests/research-autoloop-recovery-config.test.mjs tests/index-sidecar-config.test.mjs
       - name: Check whitespace

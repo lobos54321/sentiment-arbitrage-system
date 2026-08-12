@@ -8,11 +8,16 @@ sidecars start.
 
 from __future__ import annotations
 
+import fcntl
+import gzip
+import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -25,6 +30,39 @@ GMGN_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_GMGN_JSONL_TRIM_MAX_MB",
 GMGN_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_GMGN_JSONL_TRIM_KEEP_MB", "64")) * 1024 * 1024)
 PAPER_EVIDENCE_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_TRIM_MAX_MB", "256")) * 1024 * 1024)
 PAPER_EVIDENCE_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_TRIM_KEEP_MB", "128")) * 1024 * 1024)
+PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED = os.environ.get(
+    "ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED", "true"
+).lower() != "false"
+PAPER_EVIDENCE_JSONL_HOT_DAYS = max(
+    1, int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_HOT_DAYS", "7")))
+)
+PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES = max(
+    0,
+    int(
+        float(
+            os.environ.get(
+                "ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES", "4"
+            )
+        )
+    ),
+)
+PAPER_EVIDENCE_JSONL_COMPRESSION_LEVEL = min(
+    9,
+    max(
+        1,
+        int(
+            float(
+                os.environ.get(
+                    "ZEABUR_PAPER_EVIDENCE_JSONL_COMPRESSION_LEVEL", "1"
+                )
+            )
+        ),
+    ),
+)
+PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC = max(
+    1.0,
+    float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC", "40")),
+)
 V27_EVENT_JSONL_MAX_BYTES = int(float(os.environ.get("ZEABUR_V27_EVENT_JSONL_TRIM_MAX_MB", "512")) * 1024 * 1024)
 V27_EVENT_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_V27_EVENT_JSONL_TRIM_KEEP_MB", "128")) * 1024 * 1024)
 DELETE_LARGE_TMP = os.environ.get("ZEABUR_DELETE_LARGE_TMP", "false").lower() == "true"
@@ -41,6 +79,8 @@ PAPER_DB_BACKUP_DIR = Path(os.environ.get("ZEABUR_PAPER_DB_BACKUP_DIR", str(DATA
 PAPER_DB_BACKUP_KEEP = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_KEEP", "12"))
 PAPER_DB_BACKUP_MIN_INTERVAL_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_MIN_INTERVAL_SEC", "3600"))
 PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC", "86400"))
+PAPER_EVIDENCE_DAILY_RE = re.compile(r"^paper-events-(\d{8})\.jsonl$")
+ARCHIVE_COPY_CHUNK_BYTES = 1024 * 1024
 
 LOG_NAMES = [
     "dashboard.log",
@@ -147,6 +187,334 @@ def trim_jsonl_tail(path: Path, *, max_bytes: int, keep_bytes: int) -> None:
         log(f"WARN jsonl trim failed for {path}: {exc}")
 
 
+def stream_sha256(stream, *, deadline: float | None = None) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        if archive_deadline_expired(deadline):
+            raise TimeoutError("paper evidence archive work deadline exceeded")
+        chunk = stream.read(ARCHIVE_COPY_CHUNK_BYTES)
+        if not chunk:
+            break
+        digest.update(chunk)
+        size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def gzip_matches_source(
+    source: Path,
+    archive: Path,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    try:
+        with source.open("rb") as source_fh:
+            source_identity = stream_sha256(source_fh, deadline=deadline)
+        with gzip.open(archive, "rb") as archive_fh:
+            archive_identity = stream_sha256(archive_fh, deadline=deadline)
+        return source_identity == archive_identity
+    except TimeoutError:
+        raise
+    except Exception:
+        return False
+
+
+def gzip_matches_archive_plus_source(
+    existing_archive: Path,
+    source: Path,
+    candidate_archive: Path,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    try:
+        digest = hashlib.sha256()
+        expected_size = 0
+        for path, opener in ((existing_archive, gzip.open), (source, open)):
+            with opener(path, "rb") as stream:
+                while True:
+                    if archive_deadline_expired(deadline):
+                        raise TimeoutError("paper evidence archive work deadline exceeded")
+                    chunk = stream.read(ARCHIVE_COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    expected_size += len(chunk)
+        with gzip.open(candidate_archive, "rb") as candidate_fh:
+            candidate_size, candidate_hash = stream_sha256(
+                candidate_fh,
+                deadline=deadline,
+            )
+        return (expected_size, digest.hexdigest()) == (candidate_size, candidate_hash)
+    except TimeoutError:
+        raise
+    except Exception:
+        return False
+
+
+def gzip_ends_with_source(
+    source: Path,
+    archive: Path,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    try:
+        with source.open("rb") as source_fh:
+            source_size, source_hash = stream_sha256(source_fh, deadline=deadline)
+        with gzip.open(archive, "rb") as archive_fh:
+            archive_size, _archive_hash = stream_sha256(archive_fh, deadline=deadline)
+        if archive_size < source_size:
+            return False
+        remaining = archive_size - source_size
+        digest = hashlib.sha256()
+        with gzip.open(archive, "rb") as archive_fh:
+            while remaining > 0:
+                if archive_deadline_expired(deadline):
+                    raise TimeoutError("paper evidence archive work deadline exceeded")
+                discarded = archive_fh.read(min(ARCHIVE_COPY_CHUNK_BYTES, remaining))
+                if not discarded:
+                    return False
+                remaining -= len(discarded)
+            tail_size = 0
+            while True:
+                if archive_deadline_expired(deadline):
+                    raise TimeoutError("paper evidence archive work deadline exceeded")
+                chunk = archive_fh.read(ARCHIVE_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                tail_size += len(chunk)
+        return (tail_size, digest.hexdigest()) == (source_size, source_hash)
+    except TimeoutError:
+        raise
+    except Exception:
+        return False
+
+
+def copy_stream_before_deadline(source_fh, destination_fh, *, deadline: float | None) -> None:
+    while True:
+        if archive_deadline_expired(deadline):
+            raise TimeoutError("paper evidence archive work deadline exceeded")
+        chunk = source_fh.read(ARCHIVE_COPY_CHUNK_BYTES)
+        if not chunk:
+            return
+        destination_fh.write(chunk)
+
+
+def write_gzip_archive(
+    source: Path,
+    temporary: Path,
+    *,
+    existing_archive: Path | None = None,
+    deadline: float | None = None,
+) -> None:
+    with temporary.open("wb") as raw_fh:
+        with gzip.GzipFile(
+            filename=source.name,
+            mode="wb",
+            fileobj=raw_fh,
+            compresslevel=PAPER_EVIDENCE_JSONL_COMPRESSION_LEVEL,
+            mtime=0,
+        ) as archive_fh:
+            if existing_archive is not None:
+                with gzip.open(existing_archive, "rb") as existing_fh:
+                    copy_stream_before_deadline(
+                        existing_fh,
+                        archive_fh,
+                        deadline=deadline,
+                    )
+            with source.open("rb") as source_fh:
+                copy_stream_before_deadline(
+                    source_fh,
+                    archive_fh,
+                    deadline=deadline,
+                )
+        raw_fh.flush()
+        os.fsync(raw_fh.fileno())
+
+
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def paper_evidence_jsonl_day(path: Path):
+    match = PAPER_EVIDENCE_DAILY_RE.fullmatch(path.name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def oldest_hot_paper_evidence_day(*, now_ts: float | None = None):
+    now = float(time.time() if now_ts is None else now_ts)
+    return datetime.fromtimestamp(now, timezone.utc).date() - timedelta(
+        days=PAPER_EVIDENCE_JSONL_HOT_DAYS - 1
+    )
+
+
+def archive_deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def acquire_lock_before_deadline(lock_fh, *, deadline: float | None) -> None:
+    while True:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if archive_deadline_expired(deadline):
+                raise TimeoutError("paper evidence archive lock deadline exceeded")
+            time.sleep(0.05)
+
+
+def archive_paper_evidence_jsonl_file(path: Path, *, deadline: float | None = None) -> dict:
+    archive = Path(f"{path}.gz")
+    temporary = path.with_name(f"{path.name}.gz.tmp.{os.getpid()}")
+    try:
+        source_bytes = path.stat().st_size
+        previous_archive_bytes = archive.stat().st_size if archive.exists() else 0
+        if archive_deadline_expired(deadline):
+            raise TimeoutError("paper evidence archive work deadline exceeded")
+        if archive.exists():
+            if not gzip_matches_source(path, archive, deadline=deadline) and not gzip_ends_with_source(
+                path,
+                archive,
+                deadline=deadline,
+            ):
+                write_gzip_archive(
+                    path,
+                    temporary,
+                    existing_archive=archive,
+                    deadline=deadline,
+                )
+                if not gzip_matches_archive_plus_source(
+                    archive,
+                    path,
+                    temporary,
+                    deadline=deadline,
+                ):
+                    raise RuntimeError("merged gzip archive verification failed")
+                if archive_deadline_expired(deadline):
+                    raise TimeoutError("paper evidence archive work deadline exceeded")
+                os.replace(temporary, archive)
+                fsync_directory(path.parent)
+        else:
+            write_gzip_archive(path, temporary, deadline=deadline)
+            if not gzip_matches_source(path, temporary, deadline=deadline):
+                raise RuntimeError("gzip archive verification failed")
+            if archive_deadline_expired(deadline):
+                raise TimeoutError("paper evidence archive work deadline exceeded")
+            os.replace(temporary, archive)
+            fsync_directory(path.parent)
+        archive_bytes = archive.stat().st_size
+        archive_growth_bytes = max(0, archive_bytes - previous_archive_bytes)
+        path.unlink()
+        try:
+            fsync_directory(path.parent)
+        except Exception as exc:
+            log(f"WARN jsonl source removal directory sync failed for {path}: {exc}")
+        result = {
+            "source": str(path),
+            "archive": str(archive),
+            "source_bytes": source_bytes,
+            "archive_bytes": archive_bytes,
+            "archive_growth_bytes": archive_growth_bytes,
+            "reclaimed_bytes": max(0, source_bytes - archive_growth_bytes),
+        }
+        log(
+            f"archived jsonl {path} {source_bytes // (1024 * 1024)}MB -> "
+            f"{archive_bytes // (1024 * 1024)}MB"
+        )
+        return result
+    except Exception as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+        log(f"WARN jsonl archive failed for {path}: {exc}; leaving source intact")
+        return {
+            "source": str(path),
+            "archive": str(archive),
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+
+
+def archive_paper_evidence_jsonl_files(
+    *,
+    now_ts: float | None = None,
+    deadline: float | None = None,
+) -> dict:
+    summary = {
+        "enabled": PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED,
+        "hot_days": PAPER_EVIDENCE_JSONL_HOT_DAYS,
+        "max_files": PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES,
+        "archived": [],
+        "errors": [],
+        "reclaimed_bytes": 0,
+    }
+    if (
+        not PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED
+        or PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES <= 0
+    ):
+        return summary
+    evidence_dir = DATA_DIR / "paper_evidence_log"
+    if not evidence_dir.exists():
+        return summary
+    oldest_hot_day = oldest_hot_paper_evidence_day(now_ts=now_ts)
+    candidates = []
+    for path in evidence_dir.glob("paper-events-*.jsonl"):
+        day = paper_evidence_jsonl_day(path)
+        if day is None:
+            continue
+        if day < oldest_hot_day:
+            candidates.append((day, path))
+    candidates.sort(key=lambda item: (item[0], item[1].name))
+    lock_path = evidence_dir / ".append.lock"
+    if deadline is None:
+        deadline = time.monotonic() + PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC
+    try:
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            acquire_lock_before_deadline(lock_fh, deadline=deadline)
+            try:
+                for stale in evidence_dir.glob("paper-events-*.jsonl.gz.tmp.*"):
+                    try:
+                        stale.unlink(missing_ok=True)
+                    except Exception as exc:
+                        log(f"WARN stale jsonl archive cleanup failed for {stale}: {exc}")
+                for _day, path in candidates[:PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES]:
+                    if archive_deadline_expired(deadline):
+                        result = {
+                            "source": str(path),
+                            "error": "TimeoutError:paper evidence archive work deadline exceeded",
+                        }
+                        summary["errors"].append(result)
+                        break
+                    result = archive_paper_evidence_jsonl_file(path, deadline=deadline)
+                    if result.get("error"):
+                        summary["errors"].append(result)
+                    else:
+                        summary["archived"].append(result)
+                        summary["reclaimed_bytes"] += int(
+                            result.get("reclaimed_bytes") or 0
+                        )
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    except Exception as exc:
+        result = {
+            "source": str(evidence_dir),
+            "error": f"{type(exc).__name__}:{exc}",
+        }
+        summary["errors"].append(result)
+        log(f"WARN jsonl archive pass failed for {evidence_dir}: {exc}")
+    return summary
+
+
 def trim_runtime_jsonl_files() -> None:
     trim_jsonl_tail(
         DATA_DIR / "gmgn_candidates.jsonl",
@@ -160,12 +528,34 @@ def trim_runtime_jsonl_files() -> None:
     )
     evidence_dir = DATA_DIR / "paper_evidence_log"
     if evidence_dir.exists():
-        for path in evidence_dir.glob("*.jsonl"):
-            trim_jsonl_tail(
-                path,
-                max_bytes=PAPER_EVIDENCE_JSONL_MAX_BYTES,
-                keep_bytes=PAPER_EVIDENCE_JSONL_KEEP_BYTES,
-            )
+        deadline = time.monotonic() + PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC
+        archive_paper_evidence_jsonl_files(deadline=deadline)
+        oldest_hot_day = oldest_hot_paper_evidence_day()
+        lock_path = evidence_dir / ".append.lock"
+        try:
+            with lock_path.open("a+", encoding="utf-8") as lock_fh:
+                acquire_lock_before_deadline(lock_fh, deadline=deadline)
+                try:
+                    for path in evidence_dir.glob("*.jsonl"):
+                        day = paper_evidence_jsonl_day(path)
+                        if (
+                            PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED
+                            and PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES > 0
+                            and day is not None
+                            and day < oldest_hot_day
+                        ):
+                            # Preserve cold shards for a later bounded archive pass instead
+                            # of tail-trimming evidence that should remain replayable.
+                            continue
+                        trim_jsonl_tail(
+                            path,
+                            max_bytes=PAPER_EVIDENCE_JSONL_MAX_BYTES,
+                            keep_bytes=PAPER_EVIDENCE_JSONL_KEEP_BYTES,
+                        )
+                finally:
+                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        except TimeoutError as exc:
+            log(f"WARN paper evidence trim skipped: {exc}")
 
 
 def remove_large_temp_files() -> None:

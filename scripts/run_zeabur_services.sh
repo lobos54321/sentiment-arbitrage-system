@@ -10,6 +10,11 @@ export PORT="${PORT:-8080}"
 export ZEABUR_LOG_TRIM_MAX_MB="${ZEABUR_LOG_TRIM_MAX_MB:-64}"
 export ZEABUR_LOG_TRIM_KEEP_MB="${ZEABUR_LOG_TRIM_KEEP_MB:-16}"
 export ZEABUR_MAINTENANCE_INTERVAL_SEC="${ZEABUR_MAINTENANCE_INTERVAL_SEC:-300}"
+export ZEABUR_PREFLIGHT_TIMEOUT_SEC="${ZEABUR_PREFLIGHT_TIMEOUT_SEC:-45}"
+case "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" in
+  [1-9]|[1-3][0-9]|4[0-5]) ;;
+  *) export ZEABUR_PREFLIGHT_TIMEOUT_SEC=45 ;;
+esac
 export PAPER_DB_RETENTION_INTERVAL_SEC="${PAPER_DB_RETENTION_INTERVAL_SEC:-3600}"
 export RAW_PATH_OBSERVER_ENABLED="${RAW_PATH_OBSERVER_ENABLED:-true}"
 export RAW_PATH_OBSERVER_INTERVAL_SEC="${RAW_PATH_OBSERVER_INTERVAL_SEC:-120}"
@@ -79,11 +84,11 @@ run_marker_aware_preflight() {
     echo "[preflight] $(date -u '+%Y-%m-%dT%H:%M:%SZ') paper DB integrity marker present after ${reason}; running quarantine preflight" | tee -a /app/data/preflight.log
     ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=true \
     ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
-      python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+      python3 scripts/run_with_timeout.py --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" --log /app/data/preflight.log -- python3 scripts/zeabur_preflight_cleanup.py || true
   else
     ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=false \
     ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
-      python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+      python3 scripts/run_with_timeout.py --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" --log /app/data/preflight.log -- python3 scripts/zeabur_preflight_cleanup.py || true
   fi
 }
 
@@ -130,7 +135,10 @@ else
 fi
 
 echo "[STARTUP] Running volume preflight cleanup..."
-python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true
+python3 scripts/run_with_timeout.py \
+  --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" \
+  --log /app/data/preflight.log \
+  -- python3 scripts/zeabur_preflight_cleanup.py || true
 
 if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ]; then
   echo "[STARTUP] Running paper DB retention..."
@@ -196,11 +204,17 @@ echo "[STARTUP] Starting runtime volume/log maintenance..."
       echo "[maintenance] paper DB integrity marker present; running quarantine preflight" | tee -a /app/data/maintenance.log
       ZEABUR_PREFLIGHT_DB_CHECK_ENABLED=true \
       ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
-        python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+        python3 scripts/run_with_timeout.py \
+          --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" \
+          --log /app/data/maintenance.log \
+          -- python3 scripts/zeabur_preflight_cleanup.py || true
     else
       ZEABUR_PREFLIGHT_DB_CHECK_ENABLED="${ZEABUR_RUNTIME_DB_CHECK_ENABLED:-false}" \
       ZEABUR_PREFLIGHT_PAPER_DB_BACKUP_ENABLED=false \
-        python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/maintenance.log || true
+        python3 scripts/run_with_timeout.py \
+          --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" \
+          --log /app/data/maintenance.log \
+          -- python3 scripts/zeabur_preflight_cleanup.py || true
     fi
     NOW_TS="$(date +%s)"
     if [ "${PAPER_DB_RETENTION_ENABLED:-true}" != "false" ] \

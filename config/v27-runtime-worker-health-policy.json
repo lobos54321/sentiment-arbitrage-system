@@ -9,7 +9,11 @@
     },
     {
       "source_file": "scripts/run_zeabur_services.sh",
-      "anchor": "python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true"
+      "anchor": "-- python3 scripts/zeabur_preflight_cleanup.py || true"
+    },
+    {
+      "source_file": "scripts/zeabur_prestart.sh",
+      "anchor": "--timeout-sec \"$ZEABUR_PREFLIGHT_TIMEOUT_SEC\""
     },
     {
       "source_file": "scripts/run_zeabur_services.sh",
@@ -84,7 +88,7 @@
     {
       "control_id": "volume_preflight_before_service_start",
       "source_file": "scripts/run_zeabur_services.sh",
-      "source_anchor": "python3 scripts/zeabur_preflight_cleanup.py 2>&1 | tee -a /app/data/preflight.log || true",
+      "source_anchor": "--timeout-sec \"$ZEABUR_PREFLIGHT_TIMEOUT_SEC\"",
       "protected_paths": ["/app/data/sentiment_arb.db", "/app/data/paper_trades.db", "/app/data/lifecycle_tracks.db", "/app/data/kline_cache.db"],
       "failure_action": "quarantine_bad_volume_before_start"
     },

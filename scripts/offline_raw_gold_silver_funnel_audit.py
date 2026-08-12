@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import gzip
+import hashlib
 import json
 import math
 import sqlite3
@@ -44,6 +46,20 @@ def truthy(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "enter", "would_enter"}
+
+
+def paper_evidence_paths_for_day(log_dir, day):
+    plain_path = log_dir / f"paper-events-{day.strftime('%Y%m%d')}.jsonl"
+    gzip_path = Path(f"{plain_path}.gz")
+    return [path for path in (gzip_path, plain_path) if path.exists()]
+
+
+def paper_evidence_event_identity(record):
+    event_id = record.get("event_id")
+    if event_id not in (None, ""):
+        return f"event_id:{event_id}"
+    material = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"record_sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def safe_float(value):
@@ -940,11 +956,12 @@ def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
     end_day = _dt.datetime.fromtimestamp(float(until_ts), tz=_dt.timezone.utc).date()
     day = start_day
     while day <= end_day:
-        path = log_dir / f"paper-events-{day.strftime('%Y%m%d')}.jsonl"
-        if path.exists():
+        seen_event_identities = set()
+        for path in paper_evidence_paths_for_day(log_dir, day):
             result["files_checked"] += 1
             try:
-                with path.open("r", encoding="utf-8") as fh:
+                opener = gzip.open if path.suffix == ".gz" else open
+                with opener(path, "rt", encoding="utf-8") as fh:
                     for line in fh:
                         try:
                             record = json.loads(line)
@@ -954,6 +971,10 @@ def load_paper_evidence_event_counts(db_path, since_ts, until_ts):
                         ts = safe_float(record.get("event_ts"))
                         if ts is None or ts < since_ts or ts > until_ts:
                             continue
+                        identity = paper_evidence_event_identity(record)
+                        if identity in seen_event_identities:
+                            continue
+                        seen_event_identities.add(identity)
                         event_type = str(record.get("event_type") or "unknown")
                         source = str(record.get("source") or "unknown")
                         event_counts[event_type] += 1

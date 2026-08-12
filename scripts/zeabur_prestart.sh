@@ -4,10 +4,16 @@ set -u
 DATA_DIR="${ZEABUR_DATA_DIR:-./data}"
 mkdir -p "$DATA_DIR"
 
+ZEABUR_PREFLIGHT_TIMEOUT_SEC="${ZEABUR_PREFLIGHT_TIMEOUT_SEC:-45}"
+case "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" in
+  [1-9]|[1-3][0-9]|4[0-5]) ;;
+  *) ZEABUR_PREFLIGHT_TIMEOUT_SEC=45 ;;
+esac
+
 echo "[prestart] Running volume preflight cleanup..."
 ZEABUR_DATA_DIR="$DATA_DIR" \
 python3 scripts/run_with_timeout.py \
-  --timeout-sec "${ZEABUR_PREFLIGHT_TIMEOUT_SEC:-45}" \
+  --timeout-sec "$ZEABUR_PREFLIGHT_TIMEOUT_SEC" \
   --log "$DATA_DIR/preflight.log" \
   -- python3 scripts/zeabur_preflight_cleanup.py || true
 
