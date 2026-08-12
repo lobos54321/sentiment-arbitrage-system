@@ -269,7 +269,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "de8d88a74af5abad2c50909471aed8b31d1f3130cecdf49982afa5270aeb70c3",
+      "impact_hash": "0a48436a9c593a0569430ae16b5087d0d5b786ef2b14479148ecf3a9792273c8",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -425,7 +425,7 @@
         "src/web/dashboard-server.js": "30b3c399460e874a51f17afffb5e09b7b76bd522993d47c3de2e3f72b2bd83fc",
         "src/web/evaluator-snapshot-preflight.js": "9a9960fc83c8b0257950ed44bb1cc7e923253b8c2b6acba85455c28490c2dc0e",
         "test_paper_fast_lane.py": "aec90398e371fd425196f320d7dbe726bce34b5e0d29b396e9c39ac650035f6d",
-        "test_run_with_timeout.py": "06c9c37163707c00ebf6afe58d6f36c924111babf1c1f47c16d2e41f7b9e1652",
+        "test_run_with_timeout.py": "3c70dfcd413c2169381712f968a8437a1802013cd7f1f49fabe89b84dabd61ee",
         "test_telegram_lifecycle_markov.py": "8f0c0d3336232204d3e218eb85d5c3863c1159a309e2f9630cbbae2c4a1695a4",
         "test_v27_basic_contract_readiness.py": "9e111a2a77ec27f00c0bfdbf5794c4524414926784f0221f932ae5772fc77520",
         "test_v27_denominator_projection.py": "478d3efe02c6c559a7ef820cddf50c6fa58ee898becd03e032e85893e7d7e3a6",

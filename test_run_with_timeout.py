@@ -56,13 +56,21 @@ def _spawn_attempt_code(leaf_code, *leaf_args):
     return (
         "import errno, subprocess, sys; "
         f"leaf_code={leaf_code!r}; leaf_args={list(leaf_args)!r}; "
-        "kwargs={'env': {}}; "
+        "kwargs={'env': {}}\n"
         "try:\n"
         " subprocess.Popen([sys.executable, '-c', leaf_code, *leaf_args], "
         "start_new_session=True, **kwargs)\n"
         "except PermissionError as exc:\n"
         " assert exc.errno == errno.EPERM\n"
         " subprocess.Popen([sys.executable, '-c', leaf_code, *leaf_args], **kwargs)"
+    )
+
+
+def test_spawn_attempt_fixture_is_valid_python():
+    compile(
+        _spawn_attempt_code("pass"),
+        "<spawn-attempt-fixture>",
+        "exec",
     )
 
 
