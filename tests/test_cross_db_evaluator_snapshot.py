@@ -5169,8 +5169,9 @@ def test_replaced_worker_lease_inode_blocks_cleanup(tmp_path, monkeypatch):
         ),
     )
     lease_path = snapshot_module.snapshot_worker_owner_lock_path(out_root)
-    lease_path.unlink()
-    lease_path.write_text("replacement inode\n", encoding="utf-8")
+    replacement_lease_path = lease_path.with_name(f"{lease_path.name}.replacement")
+    replacement_lease_path.write_text("replacement inode\n", encoding="utf-8")
+    os.replace(replacement_lease_path, lease_path)
     assert lease_identity_fixture(out_root) != prior_lease_identity
     partial = (
         out_root / "snapshots" / ".20260101T000000Z-1234abcd.partial"

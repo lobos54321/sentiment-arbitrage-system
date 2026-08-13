@@ -270,7 +270,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "f5bffd74d30fc686f8eef44578cfdbffdb81208a6348cf9d1cde1ff5c71141c7",
+      "impact_hash": "066a8d2076393cdd628a64aec5a87f603ff63ccd695885c3abe0a85fc5f46453",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -450,7 +450,7 @@
         "tests/test_autoloop_evaluator_snapshot_provenance.py": "6f1c27ec3ebdb166b819ae24b1d7cba11e224b5bdb80a358aa95a82437cb4e3b",
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
-        "tests/test_cross_db_evaluator_snapshot.py": "2f184b88b562f82ab13f6be867bc3fb4dc41acc6bc433d5d70bd1ead7b79d1ff",
+        "tests/test_cross_db_evaluator_snapshot.py": "32f30cee4fd35c21f5ea14e7a5053eb836417a20a1f7ad113f65dba451ce5aaf",
         "tests/test_data_lifecycle_retention.py": "9e3c76903d16787b9b9513047da21d685bbc4aae05ed2b1672f86281e4c583d0",
         "tests/test_evaluator_db_contract.py": "2ba63500b1acd00ccb683a455ff11d3c67922e3617acdbf89a79c52bd2ff115b",
         "tests/test_runtime_v27_writer_topology_audit.py": "3e6c144ec960adcf9893f841effc6c36719b45fac052de712b8dd99ec514793e"
