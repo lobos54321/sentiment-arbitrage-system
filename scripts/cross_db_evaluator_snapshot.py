@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import sqlite3
 import struct
@@ -156,6 +157,14 @@ PAPER_DECISION_STAGE_SCHEMA = PARALLEL_PAPER_STAGE_CONFIGS["paper_decision_event
 PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
 MIN_PAPER_DECISION_STAGE_CAP_BYTES = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
+WORKER_PROCESS_INSTANCE_ENV = "_CROSS_DB_EVALUATOR_SNAPSHOT_PROCESS_INSTANCE_ID"
+_worker_process_instance_id = os.environ.get(WORKER_PROCESS_INSTANCE_ENV, "")
+if not re.fullmatch(r"[a-f0-9]{32}", _worker_process_instance_id):
+    _worker_process_instance_id = secrets.token_hex(16)
+    os.environ[WORKER_PROCESS_INSTANCE_ENV] = _worker_process_instance_id
+WORKER_PROCESS_INSTANCE_ID = _worker_process_instance_id
+_WORKER_RESTART_POISONED_OUT_ROOTS: dict[str, dict[str, Any]] = {}
+_RUN_SNAPSHOT_ONCE_LOCK = threading.Lock()
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 MAX_RESEARCH_HISTORY_HOURS = 24.0 * 30.0
 DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS
@@ -7314,14 +7323,49 @@ def self_test() -> None:
     print("SELF_TEST_PASS cross_db_evaluator_snapshot")
 
 
-def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
+def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     started = utc_iso()
+    out_root_key = str(Path(args.out_root).expanduser().resolve())
     status_path = (
         Path(args.status_out).expanduser().resolve()
         if args.status_out
         else None
     )
     previous = read_json_object(status_path) if status_path else {}
+    poisoned_status = _WORKER_RESTART_POISONED_OUT_ROOTS.get(out_root_key)
+    previous_worker_instance_id = str(
+        previous.get("worker_instance_id") or ""
+    )
+    same_process_instance = (
+        previous_worker_instance_id == WORKER_PROCESS_INSTANCE_ID
+        if previous_worker_instance_id
+        else previous.get("pid") == os.getpid()
+    )
+    if (
+        poisoned_status is None
+        and previous.get("worker_restart_required") is True
+        and same_process_instance
+    ):
+        poisoned_status = previous
+    if isinstance(poisoned_status, dict):
+        status = json.loads(json.dumps(poisoned_status))
+        status.update(
+            {
+                "running": False,
+                "attempt_running": False,
+                "status": "failed",
+                "accepted": False,
+                "worker_restart_required": True,
+                "next_attempt_delay_sec": None,
+                "next_attempt_at": None,
+                "promotion_allowed": False,
+            }
+        )
+        _WORKER_RESTART_POISONED_OUT_ROOTS[out_root_key] = status
+        if status_path and read_json_object(status_path) != status:
+            atomic_json(status_path, status)
+        print(json.dumps(status, sort_keys=True), flush=True)
+        return status
     previous_history_candidate = (
         previous.get("shared_stage_budget")
         if isinstance(previous.get("shared_stage_budget"), dict)
@@ -7376,6 +7420,7 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     base_status = {
         "schema_version": WORKER_STATUS_SCHEMA_VERSION,
         "pid": os.getpid(),
+        "worker_instance_id": WORKER_PROCESS_INSTANCE_ID,
         "worker_mode": "continuous" if continuous_worker else "bounded",
         "running": True,
         "attempt_running": True,
@@ -7582,8 +7627,17 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         }
         if status_path and lock_acquired:
             atomic_json(status_path, status)
+        if worker_restart_required:
+            _WORKER_RESTART_POISONED_OUT_ROOTS[out_root_key] = json.loads(
+                json.dumps(status)
+            )
     print(json.dumps(status, sort_keys=True), flush=True)
     return status
+
+
+def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
+    with _RUN_SNAPSHOT_ONCE_LOCK:
+        return _run_snapshot_once(args)
 
 
 def main() -> int:
