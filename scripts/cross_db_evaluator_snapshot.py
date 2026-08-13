@@ -705,6 +705,38 @@ def _release_snapshot_worker_lease(out_root: Path) -> None:
         handle.close()
 
 
+def _snapshot_worker_lease_identity(out_root: Path) -> dict[str, int]:
+    out_root_key = str(out_root.expanduser().resolve())
+    handle = _WORKER_OWNER_LEASES.get(out_root_key)
+    if handle is None:
+        raise SnapshotWorkerOwnerInvalidError("lease_not_held")
+    try:
+        file_stat = os.fstat(handle.fileno())
+    except (OSError, ValueError) as exc:
+        raise SnapshotWorkerOwnerInvalidError("lease_identity_unavailable") from exc
+    if not stat_module.S_ISREG(file_stat.st_mode):
+        raise SnapshotWorkerOwnerInvalidError("lease_file_type")
+    return {
+        "device": int(file_stat.st_dev),
+        "inode": int(file_stat.st_ino),
+    }
+
+
+def _valid_worker_lease_identity(identity: Any) -> bool:
+    if not isinstance(identity, dict):
+        return False
+    device = identity.get("device")
+    inode = identity.get("inode")
+    return bool(
+        isinstance(device, int)
+        and not isinstance(device, bool)
+        and device >= 0
+        and isinstance(inode, int)
+        and not isinstance(inode, bool)
+        and inode > 0
+    )
+
+
 def _positive_process_pid(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -836,8 +868,11 @@ def _worker_owner_record_valid(owner: Any) -> bool:
             return False
     identity = owner.get("process_identity")
     if identity is None:
-        return legacy_recovered
-    return _valid_worker_process_identity(identity)
+        if not legacy_recovered:
+            return False
+    elif not _valid_worker_process_identity(identity):
+        return False
+    return _valid_worker_lease_identity(owner.get("lease_identity"))
 
 
 def _worker_owner_record(
@@ -845,6 +880,7 @@ def _worker_owner_record(
     pid: int,
     worker_instance_id: str,
     process_identity: dict[str, Any] | None,
+    lease_identity: dict[str, int],
     legacy_status_recovered: bool,
 ) -> dict[str, Any]:
     normalized_instance = str(worker_instance_id or "")
@@ -857,6 +893,7 @@ def _worker_owner_record(
         "pid": int(pid),
         "worker_instance_id": normalized_instance,
         "process_identity": process_identity,
+        "lease_identity": lease_identity,
         "legacy_status_recovered": bool(legacy_status_recovered),
         "acquired_at": utc_iso(),
     }
@@ -933,7 +970,10 @@ def ensure_snapshot_worker_owner(
     _acquire_snapshot_worker_lease(out_root)
     owner_path = snapshot_worker_owner_path(out_root)
     owner = _load_snapshot_worker_owner(owner_path)
+    lease_identity = _snapshot_worker_lease_identity(out_root)
     if owner is not None:
+        if owner.get("lease_identity") != lease_identity:
+            raise SnapshotWorkerOwnerInvalidError("lease_identity_mismatch")
         owner_pid = int(owner["pid"])
         owner_instance = str(owner.get("worker_instance_id") or "")
         if (
@@ -959,6 +999,7 @@ def ensure_snapshot_worker_owner(
                     pid=os.getpid(),
                     worker_instance_id=WORKER_PROCESS_INSTANCE_ID,
                     process_identity=current_identity,
+                    lease_identity=lease_identity,
                     legacy_status_recovered=False,
                 )
                 _write_snapshot_worker_owner(owner_path, owner)
@@ -983,14 +1024,16 @@ def ensure_snapshot_worker_owner(
             )
             raise PriorSnapshotWorkerActiveError(owner, liveness)
     else:
-        prior_worker_exit_proven = False
+        if _interrupted_snapshot_partial_exists(out_root):
+            raise SnapshotWorkerOwnerInvalidError(
+                "missing_with_interrupted_partials"
+            )
         for legacy_status in legacy_statuses:
             candidate = _legacy_worker_owner_candidate(legacy_status)
             if candidate is None:
                 continue
             observed = snapshot_process_identity(int(candidate["pid"]))
             if observed.get("state") == "exited":
-                prior_worker_exit_proven = True
                 continue
             identity = observed.get("identity")
             legacy_owner = _worker_owner_record(
@@ -999,6 +1042,7 @@ def ensure_snapshot_worker_owner(
                 process_identity=(
                     identity if _valid_worker_process_identity(identity) else None
                 ),
+                lease_identity=lease_identity,
                 legacy_status_recovered=True,
             )
             _write_snapshot_worker_owner(owner_path, legacy_owner)
@@ -1010,13 +1054,6 @@ def ensure_snapshot_worker_owner(
                     else "identity_unavailable"
                 ),
             )
-        if (
-            _interrupted_snapshot_partial_exists(out_root)
-            and not prior_worker_exit_proven
-        ):
-            raise SnapshotWorkerOwnerInvalidError(
-                "missing_with_interrupted_partials"
-            )
     current = snapshot_process_identity(os.getpid())
     current_identity = current.get("identity")
     if current.get("state") != "alive" or not _valid_worker_process_identity(
@@ -1027,6 +1064,7 @@ def ensure_snapshot_worker_owner(
         pid=os.getpid(),
         worker_instance_id=WORKER_PROCESS_INSTANCE_ID,
         process_identity=current_identity,
+        lease_identity=lease_identity,
         legacy_status_recovered=False,
     )
     _write_snapshot_worker_owner(owner_path, current_owner)
