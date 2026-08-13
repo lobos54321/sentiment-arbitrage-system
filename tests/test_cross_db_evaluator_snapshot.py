@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -3700,7 +3701,8 @@ def test_unreaped_parallel_stage_defers_cleanup_to_supervisor_restart(
         for thread in threading.enumerate():
             if thread.name == "snapshot-paper_decision_events-stage":
                 thread.join(timeout=1)
-        cleanup_interrupted_partials(out)
+        if partial.exists():
+            shutil.rmtree(partial)
     assert not partial.exists()
 
 
@@ -4323,7 +4325,10 @@ def test_bundle_output_accounting_includes_manifest_and_has_no_side_files(tmp_pa
     assert report["output_size_bytes"] <= report["output_cap_bytes"]
 
 
-def test_interrupted_partial_cleanup_is_strictly_scoped(tmp_path):
+def test_interrupted_partial_cleanup_is_strictly_scoped(
+    tmp_path,
+    monkeypatch,
+):
     snapshots = tmp_path / "evidence" / "snapshots"
     interrupted = snapshots / ".20260101T010000Z-abcdef12.partial"
     protected = snapshots / "20260101T000000Z-1234abcd"
@@ -4331,6 +4336,12 @@ def test_interrupted_partial_cleanup_is_strictly_scoped(tmp_path):
     for path in (interrupted, protected, unrelated):
         path.mkdir(parents=True)
         (path / "data").write_text("keep-or-remove", encoding="utf-8")
+    write_partial_owner_fixture(interrupted)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda _pid: {"state": "exited", "identity": None},
+    )
 
     removed = cleanup_interrupted_partials(tmp_path / "evidence")
 
@@ -4338,6 +4349,100 @@ def test_interrupted_partial_cleanup_is_strictly_scoped(tmp_path):
     assert not interrupted.exists()
     assert protected.exists()
     assert unrelated.exists()
+
+
+def test_partial_cleanup_preflights_every_owner_before_deleting_any(
+    tmp_path,
+    monkeypatch,
+):
+    snapshots = tmp_path / "evidence" / "snapshots"
+    attributed = snapshots / ".20260101T010000Z-abcdef12.partial"
+    unattributed = snapshots / ".20260101T020000Z-abcdef13.partial"
+    for partial in (attributed, unattributed):
+        partial.mkdir(parents=True)
+        (partial / ".paper-decision-events-stage.db").write_bytes(b"stage")
+    write_partial_owner_fixture(attributed)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda _pid: {"state": "exited", "identity": None},
+    )
+
+    with pytest.raises(
+        snapshot_module.SnapshotWorkerOwnerInvalidError,
+        match="partial_owner_missing",
+    ):
+        cleanup_interrupted_partials(tmp_path / "evidence")
+
+    assert attributed.is_dir()
+    assert unattributed.is_dir()
+
+
+def test_partial_cleanup_blocks_while_exact_creator_identity_is_alive(
+    tmp_path,
+    monkeypatch,
+):
+    partial = (
+        tmp_path
+        / "evidence"
+        / "snapshots"
+        / ".20260101T010000Z-abcdef12.partial"
+    )
+    partial.mkdir(parents=True)
+    creator_identity = process_identity_fixture("live-partial-creator")
+    write_partial_owner_fixture(
+        partial,
+        pid=424242,
+        process_identity=creator_identity,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda pid: (
+            {"state": "alive", "identity": creator_identity}
+            if pid == 424242
+            else {"state": "exited", "identity": None}
+        ),
+    )
+
+    with pytest.raises(
+        snapshot_module.PriorSnapshotWorkerActiveError,
+        match="evaluator_snapshot_prior_worker_active",
+    ):
+        cleanup_interrupted_partials(tmp_path / "evidence")
+
+    assert partial.is_dir()
+
+
+def test_partial_owner_writer_rejects_a_forged_creator(
+    tmp_path,
+):
+    partial = (
+        tmp_path
+        / "evidence"
+        / "snapshots"
+        / ".20260101T010000Z-abcdef12.partial"
+    )
+    partial.mkdir(parents=True)
+    forged_owner = snapshot_module._worker_owner_record(
+        pid=999999,
+        worker_instance_id="0" * 32,
+        process_identity=process_identity_fixture("forged-creator"),
+        lease_identity=lease_identity_fixture(tmp_path / "evidence"),
+        legacy_status_recovered=False,
+    )
+
+    with pytest.raises(
+        snapshot_module.SnapshotWorkerOwnerInvalidError,
+        match="partial_owner_creator_mismatch",
+    ):
+        snapshot_module._write_snapshot_partial_owner(
+            partial,
+            snapshot_id="20260101T010000Z-abcdef12",
+            owner=forged_owner,
+        )
+
+    assert not snapshot_module.snapshot_partial_owner_path(partial).exists()
 
 
 def test_missing_required_watermark_rejects_bundle(tmp_path):
@@ -4544,6 +4649,48 @@ def lease_identity_fixture(out_root):
     lease_path.touch(exist_ok=True)
     file_stat = lease_path.stat()
     return {"device": file_stat.st_dev, "inode": file_stat.st_ino}
+
+
+def write_partial_owner_fixture(
+    partial,
+    *,
+    pid=999999,
+    worker_instance_id="0" * 32,
+    process_identity=None,
+    lease_identity=None,
+):
+    out_root = partial.parent.parent
+    owner = snapshot_module._worker_owner_record(
+        pid=pid,
+        worker_instance_id=worker_instance_id,
+        process_identity=(
+            process_identity
+            if process_identity is not None
+            else process_identity_fixture("partial-owner-start")
+        ),
+        lease_identity=(
+            lease_identity
+            if lease_identity is not None
+            else lease_identity_fixture(out_root)
+        ),
+        legacy_status_recovered=False,
+    )
+    snapshot_id = partial.name[1 : -len(".partial")]
+    record = {
+        "schema_version": snapshot_module.PARTIAL_OWNER_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "owner": owner,
+        "created_at": "2026-08-13T00:00:00Z",
+    }
+    assert snapshot_module._partial_owner_record_valid(
+        record,
+        expected_snapshot_id=snapshot_id,
+    )
+    snapshot_module.atomic_json(
+        snapshot_module.snapshot_partial_owner_path(partial),
+        record,
+    )
+    return owner
 
 
 def test_snapshot_process_identity_binds_current_pid_to_start_time():
@@ -4805,7 +4952,8 @@ def test_replaced_worker_lease_inode_blocks_cleanup(tmp_path, monkeypatch):
             str(out_root.resolve()),
             None,
         )
-        cleanup_interrupted_partials(out_root)
+        if partial.exists():
+            shutil.rmtree(partial)
 
 
 def test_invalid_worker_owner_blocks_cleanup_and_build(tmp_path, monkeypatch):
@@ -4852,7 +5000,8 @@ def test_invalid_worker_owner_blocks_cleanup_and_build(tmp_path, monkeypatch):
             None,
         )
         owner_path.unlink(missing_ok=True)
-        cleanup_interrupted_partials(Path(args.out_root))
+        if partial.exists():
+            shutil.rmtree(partial)
 
 
 def test_missing_worker_owner_with_unattributed_partial_fails_closed(
@@ -4939,7 +5088,8 @@ def test_missing_worker_owner_with_unattributed_partial_fails_closed(
             str(Path(args.out_root).resolve()),
             None,
         )
-        cleanup_interrupted_partials(Path(args.out_root))
+        if partial.exists():
+            shutil.rmtree(partial)
 
 
 def test_unattributed_partial_does_not_bind_to_unrelated_live_legacy_status(
@@ -5151,6 +5301,7 @@ def test_unreaped_parallel_stage_persists_failed_status_without_history_anchor(
         assert persisted["next_attempt_delay_sec"] is None
         assert persisted["next_attempt_at"] is None
         assert partial.is_dir()
+        assert snapshot_module.snapshot_partial_owner_path(partial).is_file()
         assert str(Path(args.out_root).resolve()) in (
             snapshot_module._WORKER_OWNER_LEASES
         )
@@ -5217,7 +5368,8 @@ def test_unreaped_parallel_stage_persists_failed_status_without_history_anchor(
             str(Path(args.out_root).resolve()),
             None,
         )
-        cleanup_interrupted_partials(Path(args.out_root))
+        if partial.exists():
+            shutil.rmtree(partial)
     assert not partial.exists()
 
 
@@ -5293,6 +5445,7 @@ def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
         assert restart_status_write_failed is True
         assert elapsed < 1.5
         assert partial.is_dir()
+        assert snapshot_module.snapshot_partial_owner_path(partial).is_file()
         assert any(
             thread.name == "snapshot-paper_decision_events-stage"
             and thread.is_alive()
@@ -5372,7 +5525,8 @@ def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
             out_root_key,
             None,
         )
-        cleanup_interrupted_partials(Path(args.out_root))
+        if partial.exists():
+            shutil.rmtree(partial)
     assert not partial.exists()
 
 
@@ -5406,15 +5560,16 @@ def test_new_worker_instance_cleans_deferred_partial_before_attempt(
         ),
         encoding="utf-8",
     )
+    prior_owner = snapshot_module._worker_owner_record(
+        pid=999999,
+        worker_instance_id=prior_instance,
+        process_identity=process_identity_fixture("exited-prior-start"),
+        lease_identity=lease_identity_fixture(Path(args.out_root)),
+        legacy_status_recovered=False,
+    )
     snapshot_module.atomic_json(
         snapshot_module.snapshot_worker_owner_path(Path(args.out_root)),
-        snapshot_module._worker_owner_record(
-            pid=999999,
-            worker_instance_id=prior_instance,
-            process_identity=process_identity_fixture("exited-prior-start"),
-            lease_identity=lease_identity_fixture(Path(args.out_root)),
-            legacy_status_recovered=False,
-        ),
+        prior_owner,
     )
     partial = (
         Path(args.out_root)
@@ -5423,6 +5578,13 @@ def test_new_worker_instance_cleans_deferred_partial_before_attempt(
     )
     partial.mkdir(parents=True)
     (partial / ".paper-decision-events-stage.db").write_bytes(b"stage")
+    write_partial_owner_fixture(
+        partial,
+        pid=prior_owner["pid"],
+        worker_instance_id=prior_owner["worker_instance_id"],
+        process_identity=prior_owner["process_identity"],
+        lease_identity=prior_owner["lease_identity"],
+    )
     observed_partial_at_build = []
 
     def stop_replacement_after_startup_cleanup(**_kwargs):
@@ -5444,6 +5606,102 @@ def test_new_worker_instance_cleans_deferred_partial_before_attempt(
     assert status["worker_instance_id"] == (
         snapshot_module.WORKER_PROCESS_INSTANCE_ID
     )
+
+
+def test_stale_valid_root_owner_cannot_authorize_unattributed_live_partial(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=0)
+    args.status_out = None
+    out_root = Path(args.out_root)
+    prior_instance = (
+        "0" * 32
+        if snapshot_module.WORKER_PROCESS_INSTANCE_ID != "0" * 32
+        else "1" * 32
+    )
+    prior_owner = snapshot_module._worker_owner_record(
+        pid=999999,
+        worker_instance_id=prior_instance,
+        process_identity=process_identity_fixture("exited-root-owner-start"),
+        lease_identity=lease_identity_fixture(out_root),
+        legacy_status_recovered=False,
+    )
+    snapshot_module.atomic_json(
+        snapshot_module.snapshot_worker_owner_path(out_root),
+        prior_owner,
+    )
+    partial = (
+        out_root / "snapshots" / ".20260101T000000Z-1234abcd.partial"
+    )
+    partial.mkdir(parents=True)
+    stage_path = partial / ".paper-decision-events-stage.db"
+    stage_path.write_bytes(b"x" * (1024 * 1024))
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time;"
+                "handle=pathlib.Path(sys.argv[1]).open('rb');"
+                "print('ready', flush=True);"
+                "time.sleep(30)"
+            ),
+            str(stage_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    original_identity = snapshot_module.snapshot_process_identity
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda pid: (
+            {"state": "exited", "identity": None}
+            if pid == 999999
+            else original_identity(pid)
+        ),
+    )
+    build_called = False
+
+    def unexpected_build(**_kwargs):
+        nonlocal build_called
+        build_called = True
+        raise AssertionError("unattributed partial must block before build")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "build_snapshot_bundle",
+        unexpected_build,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        status = snapshot_module.run_snapshot_once(args)
+
+        assert build_called is False
+        assert partial.is_dir()
+        assert stage_path.is_file()
+        assert holder.poll() is None
+        assert status["last_failure_code"] == (
+            "evaluator_snapshot_worker_owner_invalid"
+        )
+        assert "partial_owner_missing" in status["last_error"]
+        assert status["worker_restart_required"] is True
+        assert status["cleanup_deferred_until_worker_restart"] is True
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=3)
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(out_root.resolve()),
+            None,
+        )
+        if partial.exists():
+            shutil.rmtree(partial)
 
 
 def test_replacement_worker_preserves_partial_while_prior_worker_is_alive(
@@ -5517,15 +5775,23 @@ def test_replacement_worker_preserves_partial_while_prior_worker_is_alive(
         owner_path = snapshot_module.snapshot_worker_owner_path(
             Path(args.out_root)
         )
+        holder_owner = snapshot_module._worker_owner_record(
+            pid=holder.pid,
+            worker_instance_id=prior_instance,
+            process_identity=holder_identity,
+            lease_identity=lease_identity_fixture(Path(args.out_root)),
+            legacy_status_recovered=False,
+        )
         snapshot_module.atomic_json(
             owner_path,
-            snapshot_module._worker_owner_record(
-                pid=holder.pid,
-                worker_instance_id=prior_instance,
-                process_identity=holder_identity,
-                lease_identity=lease_identity_fixture(Path(args.out_root)),
-                legacy_status_recovered=False,
-            ),
+            holder_owner,
+        )
+        write_partial_owner_fixture(
+            partial,
+            pid=holder_owner["pid"],
+            worker_instance_id=holder_owner["worker_instance_id"],
+            process_identity=holder_owner["process_identity"],
+            lease_identity=holder_owner["lease_identity"],
         )
         monkeypatch.setattr(
             snapshot_module,
@@ -5605,7 +5871,8 @@ def test_replacement_worker_preserves_partial_while_prior_worker_is_alive(
             str(Path(args.out_root).resolve()),
             None,
         )
-        cleanup_interrupted_partials(Path(args.out_root))
+        if partial.exists():
+            shutil.rmtree(partial)
 
 
 def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_path, monkeypatch):
@@ -5641,6 +5908,10 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert accepted["manifest_path"].endswith("/manifest.json")
     assert len(accepted["manifest_sha256"]) == 64
     assert accepted["manifest_sha256"] == snapshot_module.sha256_file(Path(accepted["manifest_path"]))
+    assert not (
+        Path(accepted["manifest_path"]).parent
+        / snapshot_module.PARTIAL_OWNER_FILENAME
+    ).exists()
     assert accepted["indexed_selection"]["candidate_shadow_observations"]["predicate_strategy"] == "indexed_epoch_seconds"
     assert accepted["indexed_selection"]["candidate_shadow_virtual_trades"]["source_index_name"] == "idx_candidate_shadow_virtual_observed"
     shared = persisted["shared_stage_budget"]

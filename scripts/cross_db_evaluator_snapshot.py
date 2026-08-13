@@ -164,6 +164,9 @@ WORKER_PROCESS_IDENTITY_SCHEMA_VERSION = "process_identity.v1"
 WORKER_OWNER_FILENAME = ".snapshot-worker-owner.json"
 WORKER_OWNER_LOCK_FILENAME = ".snapshot-worker-owner.lock"
 WORKER_OWNER_MAX_BYTES = 16 * 1024
+PARTIAL_OWNER_SCHEMA_VERSION = "cross_db_evaluator_snapshot_partial_owner.v1"
+PARTIAL_OWNER_FILENAME = ".snapshot-partial-owner.json"
+PARTIAL_OWNER_MAX_BYTES = 16 * 1024
 WORKER_PROCESS_INSTANCE_ENV = "_CROSS_DB_EVALUATOR_SNAPSHOT_PROCESS_INSTANCE_ID"
 _worker_process_instance_id = os.environ.get(WORKER_PROCESS_INSTANCE_ENV, "")
 if not re.fullmatch(r"[a-f0-9]{32}", _worker_process_instance_id):
@@ -956,9 +959,141 @@ def _interrupted_snapshot_partial_exists(out_root: Path) -> bool:
     if not snapshots.is_dir():
         return False
     return any(
-        path.is_dir() and PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name)
+        PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name)
         for path in snapshots.iterdir()
     )
+
+
+def snapshot_partial_owner_path(partial_dir: Path) -> Path:
+    return partial_dir / PARTIAL_OWNER_FILENAME
+
+
+def _snapshot_id_from_partial_dir(partial_dir: Path) -> str | None:
+    match = PARTIAL_SNAPSHOT_NAME_RE.fullmatch(partial_dir.name)
+    if match is None:
+        return None
+    return partial_dir.name[1 : -len(".partial")]
+
+
+def _partial_owner_record_valid(
+    record: Any,
+    *,
+    expected_snapshot_id: str | None = None,
+) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if record.get("schema_version") != PARTIAL_OWNER_SCHEMA_VERSION:
+        return False
+    snapshot_id = str(record.get("snapshot_id") or "")
+    if not SNAPSHOT_NAME_RE.fullmatch(snapshot_id):
+        return False
+    if expected_snapshot_id is not None and snapshot_id != expected_snapshot_id:
+        return False
+    owner = record.get("owner")
+    return bool(
+        _worker_owner_record_valid(owner)
+        and owner.get("legacy_status_recovered") is False
+        and _valid_worker_process_identity(owner.get("process_identity"))
+    )
+
+
+def _write_snapshot_partial_owner(
+    partial_dir: Path,
+    *,
+    snapshot_id: str,
+    owner: dict[str, Any],
+) -> dict[str, Any]:
+    if partial_dir.is_symlink() or not partial_dir.is_dir():
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_directory")
+    if partial_dir.parent.name != "snapshots":
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_location")
+    if _snapshot_id_from_partial_dir(partial_dir) != snapshot_id:
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_snapshot_id")
+    if not _worker_owner_record_valid(owner):
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_root_contract")
+    current = snapshot_process_identity(os.getpid())
+    current_identity = current.get("identity")
+    if (
+        current.get("state") != "alive"
+        or not _valid_worker_process_identity(current_identity)
+        or owner.get("pid") != os.getpid()
+        or owner.get("worker_instance_id") != WORKER_PROCESS_INSTANCE_ID
+        or owner.get("process_identity") != current_identity
+        or owner.get("legacy_status_recovered") is not False
+    ):
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_creator_mismatch")
+    out_root = partial_dir.parent.parent.resolve()
+    if owner.get("lease_identity") != _snapshot_worker_lease_identity(out_root):
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_lease_mismatch")
+    record = {
+        "schema_version": PARTIAL_OWNER_SCHEMA_VERSION,
+        "snapshot_id": snapshot_id,
+        "owner": json.loads(json.dumps(owner)),
+        "created_at": utc_iso(),
+    }
+    if not _partial_owner_record_valid(
+        record,
+        expected_snapshot_id=snapshot_id,
+    ):
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_write_contract")
+    path = snapshot_partial_owner_path(partial_dir)
+    atomic_json(path, record)
+    fsync_directory(partial_dir)
+    return record
+
+
+def _load_snapshot_partial_owner(partial_dir: Path) -> dict[str, Any]:
+    snapshot_id = _snapshot_id_from_partial_dir(partial_dir)
+    if snapshot_id is None:
+        raise SnapshotWorkerOwnerInvalidError("partial_name_contract")
+    marker_path = snapshot_partial_owner_path(partial_dir)
+    if not marker_path.exists():
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_missing")
+    if marker_path.is_symlink() or not marker_path.is_file():
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_file_type")
+    try:
+        if marker_path.stat().st_size > PARTIAL_OWNER_MAX_BYTES:
+            raise SnapshotWorkerOwnerInvalidError("partial_owner_oversized")
+        record = json.loads(marker_path.read_text(encoding="utf-8"))
+    except SnapshotWorkerOwnerInvalidError:
+        raise
+    except Exception as exc:
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_unreadable") from exc
+    if not _partial_owner_record_valid(
+        record,
+        expected_snapshot_id=snapshot_id,
+    ):
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_contract")
+    return record
+
+
+def _authorize_snapshot_partial_cleanup(
+    partial_dir: Path,
+) -> tuple[dict[str, Any], tuple[int, int]]:
+    if partial_dir.is_symlink() or not partial_dir.is_dir():
+        raise SnapshotWorkerOwnerInvalidError("partial_file_type")
+    directory_stat = partial_dir.stat()
+    record = _load_snapshot_partial_owner(partial_dir)
+    owner = record["owner"]
+    owner_pid = int(owner["pid"])
+    stored_identity = owner["process_identity"]
+    observed = snapshot_process_identity(owner_pid)
+    observed_state = str(observed.get("state") or "unknown")
+    observed_identity = observed.get("identity")
+    identity_mismatch = bool(
+        observed_state == "alive"
+        and _valid_worker_process_identity(observed_identity)
+        and observed_identity != stored_identity
+    )
+    if observed_state != "exited" and not identity_mismatch:
+        liveness = (
+            "partial_owner_alive_matching_identity"
+            if observed_state == "alive"
+            and observed_identity == stored_identity
+            else "partial_owner_identity_unavailable"
+        )
+        raise PriorSnapshotWorkerActiveError(owner, liveness)
+    return record, (int(directory_stat.st_dev), int(directory_stat.st_ino))
 
 
 def ensure_snapshot_worker_owner(
@@ -7272,11 +7407,27 @@ def cleanup_interrupted_partials(root: Path) -> list[str]:
     snapshots = root / "snapshots"
     if not snapshots.is_dir():
         return []
+    authorized: list[tuple[Path, dict[str, Any], tuple[int, int]]] = []
+    for path in sorted(snapshots.iterdir(), key=lambda item: item.name):
+        if not PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name):
+            continue
+        record, directory_identity = _authorize_snapshot_partial_cleanup(path)
+        authorized.append((path, record, directory_identity))
     removed = []
-    for path in snapshots.iterdir():
-        if path.is_dir() and PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name):
-            shutil.rmtree(path)
-            removed.append(str(path))
+    for path, expected_record, expected_directory_identity in authorized:
+        if path.is_symlink() or not path.is_dir():
+            raise SnapshotWorkerOwnerInvalidError("partial_changed_before_cleanup")
+        current_stat = path.stat()
+        current_directory_identity = (
+            int(current_stat.st_dev),
+            int(current_stat.st_ino),
+        )
+        if current_directory_identity != expected_directory_identity:
+            raise SnapshotWorkerOwnerInvalidError("partial_replaced_before_cleanup")
+        if _load_snapshot_partial_owner(path) != expected_record:
+            raise SnapshotWorkerOwnerInvalidError("partial_owner_changed_before_cleanup")
+        shutil.rmtree(path)
+        removed.append(str(path))
     return removed
 
 
@@ -7296,6 +7447,7 @@ def build_snapshot_bundle(
     snapshot_id: str | None = None,
     previous_shared_stage_budget: dict[str, Any] | None = None,
     previous_shared_stage_budget_anchor: dict[str, Any] | None = None,
+    partial_owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = Path(out_root).expanduser().resolve()
     source_paths = {name: Path(path).expanduser().resolve() for name, path in sources.items()}
@@ -7327,6 +7479,12 @@ def build_snapshot_bundle(
     if final_dir.exists() or partial_dir.exists():
         raise FileExistsError(sid)
     partial_dir.mkdir()
+    if partial_owner is not None:
+        _write_snapshot_partial_owner(
+            partial_dir,
+            snapshot_id=sid,
+            owner=partial_owner,
+        )
     preflight: dict[str, Any] | None = None
     shared_budget_plan: dict[str, Any] | None = None
     try:
@@ -7532,6 +7690,10 @@ def build_snapshot_bundle(
             int(report["snapshot_size_bytes"]) for report in database_reports.values()
         )
         output_cap_bytes = int(preflight["selective_snapshot_output_cap_bytes"])
+        if partial_owner is not None:
+            marker_path = snapshot_partial_owner_path(partial_dir)
+            marker_path.unlink()
+            fsync_directory(partial_dir)
         payload_directory = snapshot_directory_report(partial_dir, include_manifest=False)
         if not payload_directory["accepted"]:
             raise RuntimeError(f"snapshot payload contains unexpected files: {payload_directory}")
@@ -7967,7 +8129,7 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     try:
         with exclusive_lock(Path(args.lock_file).expanduser().resolve()):
             lock_acquired = True
-            ensure_snapshot_worker_owner(
+            worker_owner = ensure_snapshot_worker_owner(
                 out_root_path,
                 legacy_statuses=legacy_statuses,
             )
@@ -7996,6 +8158,7 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 snapshot_id=args.snapshot_id,
                 previous_shared_stage_budget=previous_shared_stage_budget,
                 previous_shared_stage_budget_anchor=previous_history_anchor,
+                partial_owner=worker_owner,
             )
             finished = utc_iso()
             current_shared_stage_budget = manifest.get("shared_stage_budget")
