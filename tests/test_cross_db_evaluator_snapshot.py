@@ -4555,6 +4555,119 @@ def test_unreaped_parallel_stage_stops_continuous_worker_for_supervisor_restart(
     ] is True
 
 
+def test_snapshot_cli_returns_one_and_stops_when_worker_restart_is_required(
+    monkeypatch,
+):
+    attempts = []
+
+    def failed_attempt(_args):
+        attempts.append(True)
+        return {
+            "accepted": False,
+            "worker_restart_required": True,
+        }
+
+    monkeypatch.setattr(snapshot_module, "run_snapshot_once", failed_attempt)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["cross_db_evaluator_snapshot.py", "--max-runs", "0"],
+    )
+
+    assert snapshot_module.main() == 1
+    assert attempts == [True]
+
+
+def test_unreaped_parallel_stage_persists_failed_status_without_history_anchor(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(
+        tmp_path,
+        sources,
+        max_runs=0,
+        snapshot_id="20260101T000000Z-1234abd3",
+    )
+    previous = snapshot_module.run_snapshot_once(args)
+    assert previous["accepted"] is True
+    previous_evidence = previous["shared_stage_budget"]
+    previous_anchor = previous["shared_stage_budget_anchor"]
+    previous_anchor_path = snapshot_module.shared_stage_budget_anchor_path(
+        Path(args.status_out),
+        previous_evidence["attempt_id"],
+    )
+    assert previous_anchor_path.is_file()
+    args.snapshot_id = "20260101T010000Z-1234abd4"
+    args.max_source_read_lock_sec = 0.5
+    release = threading.Event()
+    entered = threading.Event()
+    original_stage = snapshot_module.stage_single_source_table
+
+    def hold_paper_decision_stage(connection, table, rule, **kwargs):
+        if table == "paper_decision_events":
+            entered.set()
+            release.wait(timeout=3)
+        return original_stage(connection, table, rule, **kwargs)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "PARALLEL_STAGE_CANCEL_GRACE_SEC",
+        0.02,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "stage_single_source_table",
+        hold_paper_decision_stage,
+    )
+    started = time.monotonic()
+    try:
+        status = snapshot_module.run_snapshot_once(args)
+        elapsed = time.monotonic() - started
+        status_path = Path(args.status_out)
+        persisted = json.loads(status_path.read_text(encoding="utf-8"))
+        partial = (
+            Path(args.out_root)
+            / "snapshots"
+            / ".20260101T010000Z-1234abd4.partial"
+        )
+
+        assert entered.is_set()
+        assert elapsed < 1.5
+        assert status == persisted
+        assert persisted["status"] == "failed"
+        assert persisted["accepted"] is False
+        assert persisted["running"] is False
+        assert persisted["attempt_running"] is False
+        assert persisted["finished_at"]
+        assert persisted["last_failure_code"] == "parallel_paper_stage_timeout"
+        assert persisted["worker_restart_required"] is True
+        assert persisted["cleanup_deferred_until_worker_restart"] is True
+        assert persisted["next_attempt_delay_sec"] is None
+        assert persisted["next_attempt_at"] is None
+        assert partial.is_dir()
+        evidence = persisted["shared_stage_budget"]
+        assert evidence["cleanup_completed"] is False
+        assert evidence["stage_files_removed"] is False
+        assert persisted["shared_stage_budget_anchor"] is None
+        assert not snapshot_module.shared_stage_budget_anchor_path(
+            status_path,
+            evidence["attempt_id"],
+        ).exists()
+        assert snapshot_module.read_json_object(previous_anchor_path) == previous_anchor
+        assert snapshot_module.validated_shared_stage_budget_history(
+            evidence,
+            trusted_anchor=None,
+        )["accepted"] is False
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "snapshot-paper_decision_events-stage":
+                thread.join(timeout=1)
+        cleanup_interrupted_partials(Path(args.out_root))
+    assert not partial.exists()
+
+
 def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_path, monkeypatch):
     sources = create_sources(tmp_path)
     args = snapshot_worker_args(tmp_path, sources)

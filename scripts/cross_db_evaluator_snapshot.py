@@ -7506,11 +7506,19 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         failure_stage_budget = (
             current_failure_stage_budget or previous_shared_stage_budget
         )
-        failure_stage_anchor = previous_history_anchor
+        failure_stage_anchor = (
+            None
+            if isinstance(current_failure_stage_budget, dict)
+            else previous_history_anchor
+        )
         if (
             status_path
             and lock_acquired
             and isinstance(current_failure_stage_budget, dict)
+            and current_failure_stage_budget.get("captured_before_cleanup") is True
+            and current_failure_stage_budget.get("cleanup_completed") is True
+            and current_failure_stage_budget.get("stage_files_removed") is True
+            and current_failure_stage_budget.get("no_unregistered_stage_files") is True
         ):
             failure_stage_anchor = write_shared_stage_budget_anchor(
                 status_path,

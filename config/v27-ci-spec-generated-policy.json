@@ -270,7 +270,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "d567441d88b1c0d838955163227e14f3ef01986634afd0073da9cf7582c603da",
+      "impact_hash": "a5be60ace471724ac2d3ce1c48ed79eba0abe4b94481da3cb2d554d4a4cc9f7b",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -394,7 +394,7 @@
         "scripts/agent_autoloop_stage_runner.py": "2e748b1a0d6d62671897f70ecfdb7075f065f9a969c849c2a02bc940850b5462",
         "scripts/agent_capture_discovery_loop.py": "342738ce9611789ef467234283fb5a7603c227c35229c62d31637642a3573e95",
         "scripts/autoloop_oos_refresh_worker.py": "5300c65b404497aa00d1e1b97303d7096be4b657daa7e6e23130bf87ad09e021",
-        "scripts/cross_db_evaluator_snapshot.py": "4a0df7500a212ffc9b864d4f11ebffda560b8600cb9b69b25eafdb750f349dcd",
+        "scripts/cross_db_evaluator_snapshot.py": "a28753a7a4c42aa19da63b1d7df8f653137f991e929e2f9fc9e0b7c9796b0749",
         "scripts/evaluator_db_contract.py": "6b1e323045d8adf80f615145db1199efadea52ea2e1676b123115747d02b64b6",
         "scripts/generate_v27_contract_client.py": "3d8c06fd2242773e306d2a49a6e5191f6aceac8c3ed7c9659bfc677381e83c7a",
         "scripts/offline_raw_gold_silver_funnel_audit.py": "50501e0f07ca46421ff87cf819dfd57e740c2431c517fe49b3c69093a019bd05",
@@ -450,7 +450,7 @@
         "tests/test_autoloop_evaluator_snapshot_provenance.py": "6f1c27ec3ebdb166b819ae24b1d7cba11e224b5bdb80a358aa95a82437cb4e3b",
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
-        "tests/test_cross_db_evaluator_snapshot.py": "1d1ae9e3495ed404bbd8db623d7cea15aecd05b93cd84f85fe98001285167f55",
+        "tests/test_cross_db_evaluator_snapshot.py": "8510ee604e6f94d02e2eaf293bdeffe116dba27cc1126c586b7db17871443c08",
         "tests/test_data_lifecycle_retention.py": "9e3c76903d16787b9b9513047da21d685bbc4aae05ed2b1672f86281e4c583d0",
         "tests/test_evaluator_db_contract.py": "2ba63500b1acd00ccb683a455ff11d3c67922e3617acdbf89a79c52bd2ff115b",
         "tests/test_runtime_v27_writer_topology_audit.py": "3e6c144ec960adcf9893f841effc6c36719b45fac052de712b8dd99ec514793e"
