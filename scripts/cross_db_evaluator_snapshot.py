@@ -163,8 +163,13 @@ if not re.fullmatch(r"[a-f0-9]{32}", _worker_process_instance_id):
     _worker_process_instance_id = secrets.token_hex(16)
     os.environ[WORKER_PROCESS_INSTANCE_ENV] = _worker_process_instance_id
 WORKER_PROCESS_INSTANCE_ID = _worker_process_instance_id
-_WORKER_RESTART_POISONED_OUT_ROOTS: dict[str, dict[str, Any]] = {}
-_RUN_SNAPSHOT_ONCE_LOCK = threading.Lock()
+# importlib.reload reuses the module dictionary but reexecutes assignments.
+# Preserve process-lifecycle guards so reload cannot bypass restart poison or
+# create a second lock while the original worker is still active.
+if "_WORKER_RESTART_POISONED_OUT_ROOTS" not in globals():
+    _WORKER_RESTART_POISONED_OUT_ROOTS: dict[str, dict[str, Any]] = {}
+if "_RUN_SNAPSHOT_ONCE_LOCK" not in globals():
+    _RUN_SNAPSHOT_ONCE_LOCK = threading.Lock()
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 MAX_RESEARCH_HISTORY_HOURS = 24.0 * 30.0
 DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS

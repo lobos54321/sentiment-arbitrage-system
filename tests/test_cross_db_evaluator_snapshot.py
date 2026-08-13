@@ -1,3 +1,4 @@
+import importlib
 import json
 from pathlib import Path
 import sqlite3
@@ -4855,6 +4856,43 @@ def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
         assert reentered_build is False
         assert reentered_status == poisoned_status
         assert json.loads(status_path.read_text(encoding="utf-8")) == poisoned_status
+        assert partial.is_dir()
+
+        poison_map_before_reload = (
+            snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS
+        )
+        run_lock_before_reload = snapshot_module._RUN_SNAPSHOT_ONCE_LOCK
+        worker_instance_before_reload = (
+            snapshot_module.WORKER_PROCESS_INSTANCE_ID
+        )
+        assert importlib.reload(snapshot_module) is snapshot_module
+        assert (
+            snapshot_module.WORKER_PROCESS_INSTANCE_ID
+            == worker_instance_before_reload
+        )
+        assert (
+            snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS
+            is poison_map_before_reload
+        )
+        assert snapshot_module._RUN_SNAPSHOT_ONCE_LOCK is run_lock_before_reload
+
+        reentered_build = False
+        monkeypatch.setattr(
+            snapshot_module,
+            "build_snapshot_bundle",
+            unexpected_same_process_reentry,
+        )
+        args.status_out = None
+        assert snapshot_module.run_snapshot_once(args) == poisoned_status
+        assert reentered_build is False
+        assert partial.is_dir()
+        alternate_status_path = Path(args.out_root) / "reload-status.json"
+        args.status_out = str(alternate_status_path)
+        assert snapshot_module.run_snapshot_once(args) == poisoned_status
+        assert reentered_build is False
+        assert json.loads(
+            alternate_status_path.read_text(encoding="utf-8")
+        ) == poisoned_status
         assert partial.is_dir()
     finally:
         release.set()
