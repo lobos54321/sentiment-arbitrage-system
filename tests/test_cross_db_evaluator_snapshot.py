@@ -383,7 +383,7 @@ def test_shared_stage_advisory_uses_dbstat_and_indexed_count(tmp_path):
         Path(sources["paper"]),
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         review_lower_epoch=now - 96 * 3600,
-        long_lower_epoch=now - 840 * 3600,
+        long_lower_epoch=now - 720 * 3600,
         upper_epoch=now,
         busy_timeout_ms=30000,
     )
@@ -585,7 +585,7 @@ def test_dbstat_advisory_keeps_edge_samples_diagnostic_only(
         Path(sources["paper"]),
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         review_lower_epoch=now - 96 * 3600,
-        long_lower_epoch=now - 840 * 3600,
+        long_lower_epoch=now - 720 * 3600,
         upper_epoch=now,
         busy_timeout_ms=30000,
     )
@@ -616,7 +616,7 @@ def test_dbstat_advisory_keeps_edge_samples_diagnostic_only(
         ],
         source_page_report=page_report,
         review_lower_epoch=now - 96 * 3600,
-        long_lower_epoch=now - 840 * 3600,
+        long_lower_epoch=now - 720 * 3600,
         upper_epoch=now,
         budget_bytes=snapshot_module.round_up_stage_page(
             max(
@@ -664,7 +664,7 @@ def test_candidate_signal_only_index_bound_ignores_huge_candidate_ids(
         Path(sources["paper"]),
         parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
         review_lower_epoch=now - 96 * 3600,
-        long_lower_epoch=now - 840 * 3600,
+        long_lower_epoch=now - 720 * 3600,
         upper_epoch=now,
         busy_timeout_ms=30000,
     )
@@ -734,7 +734,7 @@ def test_multilevel_candidate_table_uses_exact_signal_index_row_count(
         estimator,
         "candidate_shadow_observations",
         review_lower_epoch=now - 96 * 3600,
-        long_lower_epoch=now - 840 * 3600,
+        long_lower_epoch=now - 720 * 3600,
         upper_epoch=now,
         pinned_read_view={
             "read_view_id": "1" * 32,
@@ -783,7 +783,7 @@ def test_candidate_order_index_requires_exact_signal_id_key(tmp_path):
             Path(sources["paper"]),
             parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
             review_lower_epoch=now - 96 * 3600,
-            long_lower_epoch=now - 840 * 3600,
+            long_lower_epoch=now - 720 * 3600,
             upper_epoch=now,
             busy_timeout_ms=30000,
         )
@@ -815,7 +815,7 @@ def test_shared_stage_estimate_fails_closed_when_dbstat_is_unavailable(
             Path(sources["paper"]),
             parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
             review_lower_epoch=now - 96 * 3600,
-            long_lower_epoch=now - 840 * 3600,
+            long_lower_epoch=now - 720 * 3600,
             upper_epoch=now,
             busy_timeout_ms=30000,
         )
@@ -891,7 +891,7 @@ def test_dbstat_timeout_uses_bounded_sample_advisory_on_pinned_view(
             connection,
             target,
             review_lower_epoch=now - 96 * 3600,
-            long_lower_epoch=now - 840 * 3600,
+            long_lower_epoch=now - 720 * 3600,
             upper_epoch=now,
             pinned_read_view={
                 "read_view_id": "7" * 32,
@@ -1045,7 +1045,7 @@ def test_indexed_count_timeout_uses_bounded_sample_before_dbstat(
             connection,
             target,
             review_lower_epoch=now - 96 * 3600,
-            long_lower_epoch=now - 840 * 3600,
+            long_lower_epoch=now - 720 * 3600,
             upper_epoch=now,
             pinned_read_view={
                 "read_view_id": "8" * 32,
@@ -1211,7 +1211,7 @@ def test_indexed_count_fallback_preserves_deadline_precedence(
                 connection,
                 "opportunity_event_path_samples",
                 review_lower_epoch=now - 96 * 3600,
-                long_lower_epoch=now - 840 * 3600,
+                long_lower_epoch=now - 720 * 3600,
                 upper_epoch=now,
                 pinned_read_view={
                     "read_view_id": "9" * 32,
@@ -3824,7 +3824,7 @@ def test_selective_snapshot_applies_one_bounded_upper_time_to_all_databases(tmp_
         min_free_after_gib=0,
         max_output_gib=0.1,
         review_history_hours=96,
-        long_history_hours=24 * 35,
+        long_history_hours=24 * 30,
         snapshot_id="20260101T000000Z-1234abcd",
     )
 
@@ -3844,6 +3844,24 @@ def test_selective_snapshot_applies_one_bounded_upper_time_to_all_databases(tmp_
     } == {report["snapshot_ts"]}
     assert report["databases"]["signal"]["selected_tables"]["premium_signals"]["rows_copied"] == 1
     assert report["databases"]["paper"]["selected_tables"]["candidate_shadow_observations"]["rows_copied"] == 1
+
+
+def test_snapshot_rejects_research_history_beyond_30_day_cap(tmp_path):
+    sources = create_sources(tmp_path)
+
+    with pytest.raises(ValueError, match="30-day research retention cap"):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(tmp_path / "evidence"),
+            repo_root=str(ROOT),
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            review_history_hours=96,
+            long_history_hours=721,
+            snapshot_id="20260101T000000Z-1234abcd",
+        )
+
+    assert not (tmp_path / "evidence").exists()
 
 
 def test_writer_commit_after_all_read_views_are_pinned_is_not_visible(
@@ -4321,7 +4339,7 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
         min_free_after_gib=0,
         max_output_gib=0.1,
         review_history_hours=96,
-        long_history_hours=840,
+        long_history_hours=720,
         source_busy_timeout_ms=30000,
         max_source_read_lock_sec=300,
         keep_previous=0,

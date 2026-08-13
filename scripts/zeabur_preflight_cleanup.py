@@ -23,6 +23,17 @@ from urllib.parse import quote
 
 
 DATA_DIR = Path(os.environ.get("ZEABUR_DATA_DIR", "/app/data"))
+MAX_RESEARCH_RETENTION_DAYS = 30
+
+
+def bounded_research_retention_days(value: object, default: int = 30) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(1, min(parsed, MAX_RESEARCH_RETENTION_DAYS))
+
+
 MAX_LOG_BYTES = int(float(os.environ.get("ZEABUR_LOG_TRIM_MAX_MB", "256")) * 1024 * 1024)
 KEEP_LOG_BYTES = int(float(os.environ.get("ZEABUR_LOG_TRIM_KEEP_MB", "64")) * 1024 * 1024)
 JSONL_TRIM_ENABLED = os.environ.get("ZEABUR_JSONL_TRIM_ENABLED", "true").lower() != "false"
@@ -33,8 +44,13 @@ PAPER_EVIDENCE_JSONL_KEEP_BYTES = int(float(os.environ.get("ZEABUR_PAPER_EVIDENC
 PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED = os.environ.get(
     "ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED", "true"
 ).lower() != "false"
-PAPER_EVIDENCE_JSONL_HOT_DAYS = max(
-    1, int(float(os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_HOT_DAYS", "7")))
+PAPER_EVIDENCE_JSONL_HOT_DAYS = bounded_research_retention_days(
+    os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_HOT_DAYS", "7"),
+    7,
+)
+PAPER_EVIDENCE_JSONL_ARCHIVE_RETENTION_DAYS = bounded_research_retention_days(
+    os.environ.get("ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_RETENTION_DAYS", "30"),
+    30,
 )
 PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES = max(
     0,
@@ -42,6 +58,16 @@ PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES = max(
         float(
             os.environ.get(
                 "ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES", "4"
+            )
+        )
+    ),
+)
+PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES = max(
+    0,
+    int(
+        float(
+            os.environ.get(
+                "ZEABUR_PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES", "4"
             )
         )
     ),
@@ -80,6 +106,7 @@ PAPER_DB_BACKUP_KEEP = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_KEEP", "12"))
 PAPER_DB_BACKUP_MIN_INTERVAL_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_MIN_INTERVAL_SEC", "3600"))
 PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC = int(os.environ.get("ZEABUR_PAPER_DB_BACKUP_PARTIAL_MAX_AGE_SEC", "86400"))
 PAPER_EVIDENCE_DAILY_RE = re.compile(r"^paper-events-(\d{8})\.jsonl$")
+PAPER_EVIDENCE_ARCHIVE_RE = re.compile(r"^paper-events-(\d{8})\.jsonl\.gz$")
 ARCHIVE_COPY_CHUNK_BYTES = 1024 * 1024
 
 LOG_NAMES = [
@@ -351,10 +378,31 @@ def paper_evidence_jsonl_day(path: Path):
         return None
 
 
+def paper_evidence_archive_day(path: Path):
+    match = PAPER_EVIDENCE_ARCHIVE_RE.fullmatch(path.name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
 def oldest_hot_paper_evidence_day(*, now_ts: float | None = None):
     now = float(time.time() if now_ts is None else now_ts)
     return datetime.fromtimestamp(now, timezone.utc).date() - timedelta(
         days=PAPER_EVIDENCE_JSONL_HOT_DAYS - 1
+    )
+
+
+def oldest_retained_paper_evidence_day(*, now_ts: float | None = None):
+    now = float(time.time() if now_ts is None else now_ts)
+    retention_days = bounded_research_retention_days(
+        PAPER_EVIDENCE_JSONL_ARCHIVE_RETENTION_DAYS,
+        MAX_RESEARCH_RETENTION_DAYS,
+    )
+    return datetime.fromtimestamp(now, timezone.utc).date() - timedelta(
+        days=retention_days - 1
     )
 
 
@@ -515,6 +563,102 @@ def archive_paper_evidence_jsonl_files(
     return summary
 
 
+def garbage_collect_paper_evidence_archives(
+    *,
+    now_ts: float | None = None,
+    deadline: float | None = None,
+) -> dict:
+    retention_days = bounded_research_retention_days(
+        PAPER_EVIDENCE_JSONL_ARCHIVE_RETENTION_DAYS,
+        MAX_RESEARCH_RETENTION_DAYS,
+    )
+    summary = {
+        "enabled": PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES > 0,
+        "retention_days": retention_days,
+        "max_total_research_retention_days": MAX_RESEARCH_RETENTION_DAYS,
+        "max_files": PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES,
+        "eligible": 0,
+        "deleted": [],
+        "deferred_source_present": [],
+        "errors": [],
+        "freed_bytes": 0,
+    }
+    if PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES <= 0:
+        return summary
+    evidence_dir = DATA_DIR / "paper_evidence_log"
+    if not evidence_dir.exists():
+        return summary
+    oldest_retained_day = oldest_retained_paper_evidence_day(now_ts=now_ts)
+    candidates = []
+    for path in evidence_dir.glob("paper-events-*.jsonl.gz"):
+        day = paper_evidence_archive_day(path)
+        if day is not None and day < oldest_retained_day:
+            candidates.append((day, path))
+    candidates.sort(key=lambda item: (item[0], item[1].name))
+    summary["eligible"] = len(candidates)
+    lock_path = evidence_dir / ".append.lock"
+    if deadline is None:
+        deadline = time.monotonic() + PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC
+    try:
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            acquire_lock_before_deadline(lock_fh, deadline=deadline)
+            try:
+                for _day, path in candidates:
+                    if len(summary["deleted"]) >= PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES:
+                        break
+                    if archive_deadline_expired(deadline):
+                        raise TimeoutError(
+                            "paper evidence archive GC work deadline exceeded"
+                        )
+                    source = path.with_suffix("")
+                    if source.exists():
+                        summary["deferred_source_present"].append(str(path))
+                        continue
+                    try:
+                        with gzip.open(path, "rb") as archive_fh:
+                            uncompressed_bytes, archive_sha256 = stream_sha256(
+                                archive_fh,
+                                deadline=deadline,
+                            )
+                        if archive_deadline_expired(deadline):
+                            raise TimeoutError(
+                                "paper evidence archive GC work deadline exceeded"
+                            )
+                        archive_bytes = path.stat().st_size
+                        path.unlink()
+                        fsync_directory(evidence_dir)
+                        summary["deleted"].append(
+                            {
+                                "archive": str(path),
+                                "archive_bytes": archive_bytes,
+                                "uncompressed_bytes": uncompressed_bytes,
+                                "uncompressed_sha256": archive_sha256,
+                                "verified": True,
+                            }
+                        )
+                        summary["freed_bytes"] += archive_bytes
+                    except TimeoutError:
+                        raise
+                    except Exception as exc:
+                        summary["errors"].append(
+                            {
+                                "archive": str(path),
+                                "error": f"{type(exc).__name__}:{exc}",
+                            }
+                        )
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    except Exception as exc:
+        summary["errors"].append(
+            {
+                "archive": str(evidence_dir),
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+        )
+        log(f"WARN paper evidence archive GC failed for {evidence_dir}: {exc}")
+    return summary
+
+
 def trim_runtime_jsonl_files() -> None:
     trim_jsonl_tail(
         DATA_DIR / "gmgn_candidates.jsonl",
@@ -530,6 +674,13 @@ def trim_runtime_jsonl_files() -> None:
     if evidence_dir.exists():
         deadline = time.monotonic() + PAPER_EVIDENCE_JSONL_ARCHIVE_TIMEOUT_SEC
         archive_paper_evidence_jsonl_files(deadline=deadline)
+        gc_summary = garbage_collect_paper_evidence_archives(deadline=deadline)
+        if gc_summary["deleted"]:
+            log(
+                "expired paper evidence archives "
+                f"files={len(gc_summary['deleted'])} "
+                f"freed_bytes={gc_summary['freed_bytes']}"
+            )
         oldest_hot_day = oldest_hot_paper_evidence_day()
         lock_path = evidence_dir / ".append.lock"
         try:

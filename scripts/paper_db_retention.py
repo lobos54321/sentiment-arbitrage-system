@@ -28,6 +28,10 @@ from paper_db_integrity_guard import require_unmarked_paper_db
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = PROJECT_ROOT / "data" / "paper_trades.db"
 DEFAULT_ARCHIVE_DIR = PROJECT_ROOT / "data" / "archive" / "paper-db-retention"
+MAX_RESEARCH_RETENTION_DAYS = 30.0
+RETENTION_SCHEDULER_SCHEMA_VERSION = "paper_db_retention_scheduler.v1"
+RETENTION_SCHEDULER_STATE_NAME = ".retention-scheduler.json"
+RETENTION_SCHEDULER_INITIAL_TABLE = "opportunity_events"
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -64,12 +68,20 @@ class RetentionPolicy:
     compact_columns: tuple[str, ...] = ()
     summary_dimensions: tuple[str, ...] = ()
     required_archive_columns: tuple[str, ...] = ()
+    maximum_days: float = MAX_RESEARCH_RETENTION_DAYS
 
     def days(self) -> float:
-        return max(0.0, _env_float(self.days_env, self.default_days))
+        return min(
+            MAX_RESEARCH_RETENTION_DAYS,
+            max(0.0, float(self.maximum_days)),
+            max(0.0, _env_float(self.days_env, self.default_days)),
+        )
 
     def archive_days(self) -> float:
-        return max(0.0, _env_float(self.archive_days_env, self.default_archive_days))
+        return min(
+            MAX_RESEARCH_RETENTION_DAYS,
+            max(0.0, _env_float(self.archive_days_env, self.default_archive_days)),
+        )
 
     def effective_days(self, pressure_level: str) -> float:
         configured = self.days()
@@ -230,7 +242,7 @@ RETENTION_POLICIES = [
         storage_class="bounded_full_archive",
         archive_kind="full",
         archive_days_env="PAPER_DB_RETENTION_CANDIDATE_VIRTUAL_ARCHIVE_DAYS",
-        default_archive_days=45.0,
+        default_archive_days=30.0,
         summary_dimensions=("family", "candidate_id", "status", "exit_reason"),
         required_archive_columns=("signal_id", "candidate_id", "status", "observed_at", "payload_json"),
     ),
@@ -244,7 +256,7 @@ RETENTION_POLICIES = [
         storage_class="bounded_full_archive",
         archive_kind="full",
         archive_days_env="PAPER_DB_RETENTION_MISSED_ARCHIVE_DAYS",
-        default_archive_days=45.0,
+        default_archive_days=30.0,
         summary_dimensions=("component", "decision", "reject_reason", "status"),
         required_archive_columns=("token_ca", "status", "payload_json"),
     ),
@@ -263,7 +275,7 @@ RETENTION_POLICIES = [
         storage_class="bounded_full_archive",
         archive_kind="full",
         archive_days_env="PAPER_DB_RETENTION_PATH_SAMPLE_ARCHIVE_DAYS",
-        default_archive_days=90.0,
+        default_archive_days=30.0,
         summary_dimensions=("trade_id",),
         required_archive_columns=("trade_id", "sample_ts"),
     ),
@@ -277,7 +289,7 @@ RETENTION_POLICIES = [
         storage_class="summary_only",
         archive_kind="summary",
         archive_days_env="PAPER_DB_RETENTION_WATCH_SHADOW_SUMMARY_DAYS",
-        default_archive_days=180.0,
+        default_archive_days=30.0,
         summary_dimensions=("parent_blocker", "horizon_sec", "quote_clean", "snapshot_pass", "reason"),
         required_archive_columns=("parent_blocker",),
     ),
@@ -357,7 +369,7 @@ RETENTION_POLICIES = [
         storage_class="summary_only",
         archive_kind="summary",
         archive_days_env="PAPER_DB_RETENTION_LATENCY_SUMMARY_DAYS",
-        default_archive_days=180.0,
+        default_archive_days=30.0,
         summary_dimensions=("source", "stage"),
         required_archive_columns=("source", "stage"),
     ),
@@ -372,7 +384,7 @@ RETENTION_POLICIES = [
         storage_class="bounded_compact_archive",
         archive_kind="compact",
         archive_days_env="PAPER_DB_RETENTION_FAST_QUEUE_ARCHIVE_DAYS",
-        default_archive_days=90.0,
+        default_archive_days=30.0,
         compact_columns=(
             "id",
             "created_at",
@@ -393,6 +405,54 @@ RETENTION_POLICIES = [
         ),
         summary_dimensions=("status", "source_type", "entry_branch", "last_error"),
         required_archive_columns=("created_at", "token_ca", "status"),
+    ),
+    RetentionPolicy(
+        table="opportunity_events",
+        ts_expr="event_ts",
+        days_env="PAPER_DB_RETENTION_OPPORTUNITY_EVENT_DAYS",
+        default_days=7.0,
+        pressure_days=3.0,
+        description=(
+            "high-volume executable opportunity evidence retained for the 168h "
+            "research window"
+        ),
+        storage_class="bounded_full_archive",
+        archive_kind="full",
+        archive_days_env="PAPER_DB_RETENTION_OPPORTUNITY_EVENT_ARCHIVE_DAYS",
+        default_archive_days=30.0,
+        summary_dimensions=(
+            "source_type",
+            "source_component",
+            "quote_clean",
+            "would_enter_a_class",
+            "did_enter",
+        ),
+        required_archive_columns=("opportunity_key", "event_ts", "token_ca"),
+        maximum_days=7.0,
+    ),
+    RetentionPolicy(
+        table="opportunity_event_path_samples",
+        ts_expr="sample_ts",
+        days_env="PAPER_DB_RETENTION_OPPORTUNITY_PATH_DAYS",
+        default_days=7.0,
+        pressure_days=3.0,
+        description=(
+            "high-volume executable opportunity path samples retained for the "
+            "168h research window"
+        ),
+        storage_class="bounded_full_archive",
+        archive_kind="full",
+        archive_days_env="PAPER_DB_RETENTION_OPPORTUNITY_PATH_ARCHIVE_DAYS",
+        default_archive_days=30.0,
+        summary_dimensions=(
+            "quote_clean",
+            "quote_executable",
+            "route_available",
+            "no_route_flag",
+            "trapped_flag",
+        ),
+        required_archive_columns=("opportunity_key", "sample_ts"),
+        maximum_days=7.0,
     ),
 ]
 
@@ -506,6 +566,7 @@ def archive_rows(
     batch_no: int,
     mode: str,
     selected_columns: list[str],
+    now_ts: float,
 ) -> dict:
     archive_dir.mkdir(parents=True, exist_ok=True)
     month = time.strftime("%Y-%m", time.gmtime(cutoff_ts))
@@ -565,11 +626,17 @@ def archive_rows(
                 max_rowid = rowid if max_rowid is None else max(int(max_rowid), int(rowid))
             except (TypeError, ValueError):
                 pass
-    gc_after_ts = time.time() + policy.archive_days() * 86400.0
+    created_at_ts = float(now_ts)
+    configured_gc_after_ts = created_at_ts + policy.archive_days() * 86400.0
+    # Keep the archive until even its newest row has reached the global age cap.
+    # Using the oldest row here could erase newer rows in the same batch early.
+    retention_basis_ts = float(max_ts) if max_ts is not None else created_at_ts
+    hard_gc_after_ts = retention_basis_ts + MAX_RESEARCH_RETENTION_DAYS * 86400.0
+    gc_after_ts = min(configured_gc_after_ts, hard_gc_after_ts)
     manifest = {
         "schema_version": "paper_db_retention_archive.v2",
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "created_at_ts": time.time(),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_at_ts)),
+        "created_at_ts": created_at_ts,
         "mode": mode,
         "table": policy.table,
         "storage_class": policy.storage_class,
@@ -587,6 +654,8 @@ def archive_rows(
         "verification": verification,
         "dimension_counts": summarize_dimensions(rows, policy.summary_dimensions),
         "archive_retention_days": policy.archive_days(),
+        "max_total_research_retention_days": MAX_RESEARCH_RETENTION_DAYS,
+        "hard_gc_after_ts": hard_gc_after_ts,
         "gc_after_ts": gc_after_ts,
         "gc_after_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(gc_after_ts)),
         "source_delete_status": "pending" if mode == "apply" else "not_requested",
@@ -707,6 +776,7 @@ def apply_policy(
                 batch_no=batch_no,
                 mode=mode,
                 selected_columns=selected_columns,
+                now_ts=now_ts,
             )
             summary["archived"] += len(rows)
             if mode == "apply":
@@ -819,12 +889,14 @@ def garbage_collect_archives(
     verify_payloads: bool,
     pressure_level: str = "normal",
     critical_max_age_days: float = 14.0,
+    max_total_retention_days: float = MAX_RESEARCH_RETENTION_DAYS,
 ) -> dict:
     summary = {
         "enabled": True,
         "seen": 0,
         "scanned": 0,
         "eligible": 0,
+        "hard_retention_cap_eligible": 0,
         "critical_pressure_eligible": 0,
         "deleted_manifests": 0,
         "deleted_archives": 0,
@@ -857,28 +929,45 @@ def garbage_collect_archives(
         except (TypeError, ValueError):
             refuse(manifest_path, "missing_gc_after_ts")
             continue
-        declared_expired = gc_after_ts <= now_ts
         try:
             created_at_ts = float(manifest.get("created_at_ts"))
         except (TypeError, ValueError):
             created_at_ts = 0.0
+        try:
+            retention_ts_max = float(manifest.get("retention_ts_max"))
+        except (TypeError, ValueError):
+            retention_ts_max = 0.0
+        retention_basis_ts = retention_ts_max if retention_ts_max > 0 else created_at_ts
+        hard_gc_after_ts = (
+            retention_basis_ts + max(0.0, float(max_total_retention_days)) * 86400.0
+            if retention_basis_ts > 0
+            else None
+        )
+        declared_expired = gc_after_ts <= now_ts
+        hard_retention_cap_expired = bool(
+            hard_gc_after_ts is not None and hard_gc_after_ts <= now_ts
+        )
         critical_expired = bool(
             pressure_level == "critical"
             and manifest.get("archive_kind") != "summary"
             and created_at_ts > 0
             and created_at_ts <= now_ts - max(0.0, critical_max_age_days) * 86400.0
         )
-        if not declared_expired and not critical_expired:
+        if not declared_expired and not critical_expired and not hard_retention_cap_expired:
             continue
         summary["eligible"] += 1
+        if hard_retention_cap_expired and not declared_expired:
+            summary["hard_retention_cap_eligible"] += 1
         if critical_expired and not declared_expired:
             summary["critical_pressure_eligible"] += 1
-        eligible_since_ts = min(
-            gc_after_ts,
-            created_at_ts + max(0.0, critical_max_age_days) * 86400.0
-            if critical_expired
-            else gc_after_ts,
-        )
+        eligible_candidates = [gc_after_ts]
+        if critical_expired:
+            eligible_candidates.append(
+                created_at_ts + max(0.0, critical_max_age_days) * 86400.0
+            )
+        if hard_retention_cap_expired and hard_gc_after_ts is not None:
+            eligible_candidates.append(hard_gc_after_ts)
+        eligible_since_ts = min(eligible_candidates)
         eligible_manifests.append(
             (eligible_since_ts, str(manifest_path), manifest_path, manifest)
         )
@@ -1004,6 +1093,76 @@ def update_bounded_growth_history(
     return projection
 
 
+def retention_scheduler_state_path(archive_dir: Path) -> Path:
+    return archive_dir / RETENTION_SCHEDULER_STATE_NAME
+
+
+def load_retention_scheduler_state(archive_dir: Path) -> dict:
+    tables = [policy.table for policy in RETENTION_POLICIES]
+    initial_table = (
+        RETENTION_SCHEDULER_INITIAL_TABLE
+        if RETENTION_SCHEDULER_INITIAL_TABLE in tables
+        else tables[0]
+    )
+    state_path = retention_scheduler_state_path(archive_dir)
+    result = {
+        "schema_version": RETENTION_SCHEDULER_SCHEMA_VERSION,
+        "state_path": str(state_path),
+        "next_table": initial_table,
+        "loaded": False,
+        "load_error": None,
+    }
+    if not state_path.exists():
+        return result
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if payload.get("schema_version") != RETENTION_SCHEDULER_SCHEMA_VERSION:
+            raise ValueError("scheduler schema mismatch")
+        next_table = str(payload.get("next_table") or "")
+        if next_table not in tables:
+            raise ValueError("scheduler next_table is not a retention policy")
+        result["next_table"] = next_table
+        result["loaded"] = True
+    except Exception as exc:
+        result["load_error"] = f"{type(exc).__name__}:{exc}"
+    return result
+
+
+def rotated_retention_policies(next_table: str) -> list[RetentionPolicy]:
+    policies = list(RETENTION_POLICIES)
+    start = next(
+        (index for index, policy in enumerate(policies) if policy.table == next_table),
+        0,
+    )
+    return policies[start:] + policies[:start]
+
+
+def write_retention_scheduler_state(
+    archive_dir: Path,
+    *,
+    next_table: str,
+    run_id: str,
+    now_ts: float,
+) -> Path:
+    if next_table not in {policy.table for policy in RETENTION_POLICIES}:
+        raise ValueError(f"invalid retention scheduler table: {next_table}")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    state_path = retention_scheduler_state_path(archive_dir)
+    temporary = state_path.with_name(
+        state_path.name + f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    )
+    payload = {
+        "schema_version": RETENTION_SCHEDULER_SCHEMA_VERSION,
+        "next_table": next_table,
+        "updated_at_ts": float(now_ts),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
+        "run_id": run_id,
+    }
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(temporary, state_path)
+    return state_path
+
+
 def run_retention(
     *,
     db_path: str | os.PathLike,
@@ -1026,6 +1185,24 @@ def run_retention(
     run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now_ts)) + "_" + uuid.uuid4().hex[:8]
     storage_root = db_path.parent if db_path.parent.exists() else Path.cwd()
     storage = storage_health(storage_root, storage_usage_override)
+    scheduler = (
+        load_retention_scheduler_state(archive_path)
+        if mode == "apply"
+        else {
+            "schema_version": RETENTION_SCHEDULER_SCHEMA_VERSION,
+            "enabled": False,
+            "next_table": None,
+        }
+    )
+    scheduler["enabled"] = mode == "apply"
+    scheduler["start_table"] = scheduler.get("next_table")
+    scheduler["advance_count"] = 0
+    scheduler["last_advanced_from"] = None
+    policy_sequence = (
+        rotated_retention_policies(str(scheduler["next_table"]))
+        if mode == "apply"
+        else list(RETENTION_POLICIES)
+    )
     summary = {
         "schema_version": "paper_db_retention.v2",
         "run_id": run_id,
@@ -1038,6 +1215,8 @@ def run_retention(
         "storage_before": storage,
         "protected_tables": sorted(PROTECTED_TABLES),
         "protected_tables_selected": [],
+        "max_total_research_retention_days": MAX_RESEARCH_RETENTION_DAYS,
+        "scheduler": scheduler,
         "policies": [],
         "total_eligible": 0,
         "total_archived": 0,
@@ -1053,13 +1232,32 @@ def run_retention(
         if mode == "apply":
             db.execute("PRAGMA foreign_keys=OFF")
         total_budget_left = max_rows_total
-        for policy in RETENTION_POLICIES:
+        for policy_index, policy in enumerate(policy_sequence):
             if deadline_ts is not None and time.time() >= deadline_ts:
                 summary["stopped_reason"] = "time_budget_exhausted"
                 break
             if max_rows_total and total_budget_left <= 0:
                 summary["stopped_reason"] = "total_row_budget_exhausted"
                 break
+            if mode == "apply":
+                next_policy = policy_sequence[(policy_index + 1) % len(policy_sequence)]
+                # Advance before table work. If the outer timeout kills this run
+                # mid-policy, the next run still moves on instead of starving
+                # every later table forever.
+                with sqlite_single_writer(
+                    "paper_db_retention:scheduler",
+                    timeout_sec=_env_float("PAPER_DB_RETENTION_LOCK_TIMEOUT_SEC", 120.0),
+                ):
+                    state_path = write_retention_scheduler_state(
+                        archive_path,
+                        next_table=next_policy.table,
+                        run_id=run_id,
+                        now_ts=now_ts,
+                    )
+                scheduler["next_table"] = next_policy.table
+                scheduler["state_path"] = str(state_path)
+                scheduler["advance_count"] += 1
+                scheduler["last_advanced_from"] = policy.table
             policy_budget = max_rows_per_table
             if max_rows_total:
                 policy_budget = min(policy_budget, total_budget_left)
@@ -1106,8 +1304,13 @@ def run_retention(
             summary["wal_checkpoint_error"] = str(exc)
         if vacuum and mode == "apply" and summary["total_deleted"] > 0:
             try:
-                db.execute("VACUUM")
+                with sqlite_single_writer(
+                    "paper_db_retention:vacuum",
+                    timeout_sec=_env_float("PAPER_DB_RETENTION_LOCK_TIMEOUT_SEC", 120.0),
+                ):
+                    db.execute("VACUUM")
                 summary["vacuum"]["ran"] = True
+                summary["vacuum"]["single_writer_coordinated"] = True
             except Exception as exc:
                 summary["vacuum"]["error"] = str(exc)
         summary["sqlite_after"] = sqlite_storage_stats(db, db_path)
@@ -1115,9 +1318,11 @@ def run_retention(
         summary["storage"] = summary["storage_after"]
         summary["bounded_growth_contract"] = {
             "hot_window_floor_hours": 72,
+            "max_total_research_retention_days": MAX_RESEARCH_RETENTION_DAYS,
             "archives_expire": True,
             "unknown_archives_auto_deleted": False,
             "protected_trade_evidence_pruned": False,
+            "protected_trade_evidence_retention": "permanent",
             "promotion_allowed": False,
         }
         summary["status"] = "ok"

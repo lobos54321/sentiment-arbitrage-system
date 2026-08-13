@@ -1332,7 +1332,7 @@ function startEvaluatorSnapshotWorker(config) {
         '--min-free-after-gib', process.env.EVALUATOR_SNAPSHOT_MIN_FREE_AFTER_GIB || '5',
         '--max-output-gib', process.env.EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB || '10',
         '--review-history-hours', process.env.EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS || '96',
-        '--long-history-hours', process.env.EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS || '840',
+        '--long-history-hours', process.env.EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS || '720',
         '--source-busy-timeout-ms', process.env.EVALUATOR_SNAPSHOT_SOURCE_BUSY_TIMEOUT_MS || '30000',
         '--max-source-read-lock-sec', process.env.EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC || '300',
         '--keep-previous', '0',

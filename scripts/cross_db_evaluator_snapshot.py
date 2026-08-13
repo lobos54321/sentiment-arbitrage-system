@@ -151,7 +151,8 @@ PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
 MIN_PAPER_DECISION_STAGE_CAP_BYTES = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
-DEFAULT_LONG_HISTORY_HOURS = 24.0 * 35.0
+MAX_RESEARCH_HISTORY_HOURS = 24.0 * 30.0
+DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS
 DEFAULT_MAX_OUTPUT_GIB = 10.0
 DEFAULT_MAX_SOURCE_READ_LOCK_SEC = 300.0
 DEFAULT_FAILURE_RETRY_SEC = 60
@@ -6550,6 +6551,8 @@ def build_snapshot_bundle(
         raise ValueError("review_history_hours must cover at least 72 hours")
     if long_history_hours < review_history_hours:
         raise ValueError("long_history_hours must be >= review_history_hours")
+    if long_history_hours > MAX_RESEARCH_HISTORY_HOURS:
+        raise ValueError("long_history_hours must not exceed the 30-day research retention cap")
     if int(source_busy_timeout_ms) < 0:
         raise ValueError("source_busy_timeout_ms must be non-negative")
     if float(max_source_read_lock_sec) <= 0:

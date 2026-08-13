@@ -106,6 +106,7 @@ def test_apply_mode_archives_then_prunes_old_rows_only(tmp_path, monkeypatch):
 
     monkeypatch.setenv("PAPER_DB_RETENTION_DECISION_DAYS", "30")
     monkeypatch.setenv("PAPER_DB_RETENTION_PATH_SAMPLE_DAYS", "30")
+    monkeypatch.setenv("PAPER_DB_RETENTION_ARCHIVE_GC_ENABLED", "false")
     summary = retention.run_retention(
         db_path=db_path,
         archive_dir=archive_dir,

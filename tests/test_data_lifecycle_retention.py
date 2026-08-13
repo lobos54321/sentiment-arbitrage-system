@@ -105,6 +105,29 @@ def create_test_db(path: Path) -> None:
           event_ts INTEGER,
           payload_json TEXT
         );
+        CREATE TABLE opportunity_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          opportunity_key TEXT,
+          event_ts REAL,
+          token_ca TEXT,
+          source_type TEXT,
+          source_component TEXT,
+          quote_clean INTEGER,
+          would_enter_a_class INTEGER,
+          did_enter INTEGER,
+          raw_payload_json TEXT
+        );
+        CREATE TABLE opportunity_event_path_samples (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          opportunity_key TEXT,
+          sample_ts REAL,
+          quote_clean INTEGER,
+          quote_executable INTEGER,
+          route_available INTEGER,
+          no_route_flag INTEGER,
+          trapped_flag INTEGER,
+          raw_payload_json TEXT
+        );
         """
     )
     old_ts = NOW_TS - 10 * DAY
@@ -168,6 +191,30 @@ def create_test_db(path: Path) -> None:
             ("new-l", new_ts, new_ts, json.dumps({"detail": "new"})),
         ],
     )
+    db.executemany(
+        """
+        INSERT INTO opportunity_events
+          (opportunity_key, event_ts, token_ca, source_type, source_component,
+           quote_clean, would_enter_a_class, did_enter, raw_payload_json)
+        VALUES (?, ?, ?, 'replay', 'test', 1, 1, 0, ?)
+        """,
+        [
+            ("old-opportunity", old_ts, "old-o", json.dumps({"detail": "historical"})),
+            ("new-opportunity", new_ts, "new-o", json.dumps({"detail": "current"})),
+        ],
+    )
+    db.executemany(
+        """
+        INSERT INTO opportunity_event_path_samples
+          (opportunity_key, sample_ts, quote_clean, quote_executable,
+           route_available, no_route_flag, trapped_flag, raw_payload_json)
+        VALUES (?, ?, 1, 1, 1, 0, 0, ?)
+        """,
+        [
+            ("old-opportunity", old_ts, json.dumps({"path": "historical"})),
+            ("new-opportunity", new_ts, json.dumps({"path": "current"})),
+        ],
+    )
     db.commit()
     db.close()
 
@@ -182,6 +229,8 @@ def test_value_aware_retention_preserves_core_and_compacts_large_rows(tmp_path, 
     archive_dir = tmp_path / "archive"
     create_test_db(db_path)
     monkeypatch.setenv("PAPER_DB_RETENTION_ARCHIVE_GC_ENABLED", "false")
+    monkeypatch.setenv("PAPER_DB_RETENTION_OPPORTUNITY_EVENT_DAYS", "999")
+    monkeypatch.setenv("PAPER_DB_RETENTION_OPPORTUNITY_PATH_DAYS", "999")
 
     result = run_retention(
         db_path=db_path,
@@ -203,7 +252,18 @@ def test_value_aware_retention_preserves_core_and_compacts_large_rows(tmp_path, 
     assert result["schema_version"] == "paper_db_retention.v2"
     assert result["storage"]["pressure_level"] == "normal"
     assert result["protected_tables_selected"] == []
-    assert result["total_deleted"] == 5
+    assert result["total_deleted"] == 7
+    assert result["max_total_research_retention_days"] == 30.0
+    opportunity_policy = next(
+        policy for policy in result["policies"]
+        if policy["table"] == "opportunity_events"
+    )
+    opportunity_path_policy = next(
+        policy for policy in result["policies"]
+        if policy["table"] == "opportunity_event_path_samples"
+    )
+    assert opportunity_policy["retention_days"] == 7.0
+    assert opportunity_path_policy["retention_days"] == 7.0
 
     db = sqlite3.connect(db_path)
     assert db.execute("SELECT COUNT(*) FROM paper_trades").fetchone()[0] == 1
@@ -213,6 +273,10 @@ def test_value_aware_retention_preserves_core_and_compacts_large_rows(tmp_path, 
     assert db.execute("SELECT token_ca FROM candidate_shadow_observations").fetchall() == [("new-c",)]
     assert db.execute("SELECT token_ca FROM candidate_shadow_virtual_trades").fetchall() == [("new-v",)]
     assert db.execute("SELECT token_ca FROM latency_audit_events").fetchall() == [("new-l",)]
+    assert db.execute("SELECT token_ca FROM opportunity_events").fetchall() == [("new-o",)]
+    assert db.execute(
+        "SELECT opportunity_key FROM opportunity_event_path_samples"
+    ).fetchall() == [("new-opportunity",)]
     db.close()
 
     a_class_manifest_path = next((archive_dir / "a_class_decision_events").rglob("*.manifest.json"))
@@ -237,6 +301,16 @@ def test_value_aware_retention_preserves_core_and_compacts_large_rows(tmp_path, 
     assert latency_manifest["archive_file"] is None
     assert latency_manifest["dimension_counts"]["source"] == {"telegram": 1}
     assert latency_manifest["dimension_counts"]["stage"] == {"ingest": 1}
+
+    opportunity_manifest_path = next(
+        (archive_dir / "opportunity_events").rglob("*.manifest.json")
+    )
+    opportunity_manifest = json.loads(
+        opportunity_manifest_path.read_text(encoding="utf-8")
+    )
+    opportunity_rows = read_archive_rows(Path(opportunity_manifest["archive_file"]))
+    assert json.loads(opportunity_rows[0]["raw_payload_json"])["detail"] == "historical"
+    assert opportunity_manifest["max_total_research_retention_days"] == 30.0
 
 
 def test_archive_gc_deletes_only_verified_v2_manifest_owned_files(tmp_path, monkeypatch):
@@ -267,7 +341,7 @@ def test_archive_gc_deletes_only_verified_v2_manifest_owned_files(tmp_path, monk
 
     refused_gc = garbage_collect_archives(
         archive_dir=archive_dir,
-        now_ts=time.time() + 5,
+        now_ts=NOW_TS + 5,
         max_manifests=100,
         verify_payloads=True,
     )
@@ -278,7 +352,7 @@ def test_archive_gc_deletes_only_verified_v2_manifest_owned_files(tmp_path, monk
     managed_manifest_path.write_text(json.dumps(managed_manifest), encoding="utf-8")
     gc = garbage_collect_archives(
         archive_dir=archive_dir,
-        now_ts=time.time() + 5,
+        now_ts=NOW_TS + 5,
         max_manifests=100,
         verify_payloads=True,
     )
@@ -336,9 +410,120 @@ def test_archive_gc_budget_ignores_unexpired_manifests_sorted_first(tmp_path):
     assert len(list(future_dir.glob("*.manifest.json"))) == 11
 
 
-def test_policy_contract_and_disk_pressure_floor():
+def test_archive_gc_uses_newest_row_for_30_day_total_age_cap(tmp_path):
+    archive_dir = tmp_path / "archive"
+    archive_dir.mkdir()
+    manifest_path = archive_dir / "mixed-age.manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "paper_db_retention_archive.v2",
+                "archive_kind": "summary",
+                "archive_file": None,
+                "mode": "apply",
+                "source_delete_status": "verified",
+                "created_at_ts": NOW_TS,
+                "retention_ts_min": NOW_TS - 40 * DAY,
+                "retention_ts_max": NOW_TS - 10 * DAY,
+                "gc_after_ts": NOW_TS + 100 * DAY,
+                "row_count": 2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    before_newest_row_expires = garbage_collect_archives(
+        archive_dir=archive_dir,
+        now_ts=NOW_TS + 19 * DAY,
+        max_manifests=10,
+        verify_payloads=True,
+    )
+    assert before_newest_row_expires["deleted_manifests"] == 0
+    assert manifest_path.exists()
+
+    after_newest_row_expires = garbage_collect_archives(
+        archive_dir=archive_dir,
+        now_ts=NOW_TS + 20 * DAY,
+        max_manifests=10,
+        verify_payloads=True,
+    )
+    assert after_newest_row_expires["hard_retention_cap_eligible"] == 1
+    assert after_newest_row_expires["deleted_manifests"] == 1
+    assert not manifest_path.exists()
+
+
+def test_cross_run_scheduler_prevents_global_budget_starvation(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper_trades.db"
+    archive_dir = tmp_path / "archive"
+    create_test_db(db_path)
+    monkeypatch.setenv("PAPER_DB_RETENTION_ARCHIVE_GC_ENABLED", "false")
+
+    first = run_retention(
+        db_path=db_path,
+        archive_dir=archive_dir,
+        mode="apply",
+        batch_size=1,
+        max_rows_per_table=1,
+        max_rows_total=1,
+        max_seconds=30,
+        now_ts=NOW_TS,
+    )
+    assert first["total_deleted"] == 1
+    assert first["scheduler"]["start_table"] == "opportunity_events"
+    assert first["scheduler"]["next_table"] == "opportunity_event_path_samples"
+    db = sqlite3.connect(db_path)
+    assert db.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM opportunity_event_path_samples"
+    ).fetchone()[0] == 2
+    db.execute(
+        """
+        INSERT INTO candidate_shadow_observations
+          (signal_id, token_ca, signal_ts, candidate_id, family, matched,
+           reason, observed_at, payload_json)
+        VALUES (99, 'newly-fed-old-candidate', ?, 'current_all', 'base', 1,
+                'matched', ?, '{}')
+        """,
+        (NOW_TS - 40 * DAY, NOW_TS - 40 * DAY),
+    )
+    db.commit()
+    db.close()
+
+    second = run_retention(
+        db_path=db_path,
+        archive_dir=archive_dir,
+        mode="apply",
+        batch_size=1,
+        max_rows_per_table=1,
+        max_rows_total=1,
+        max_seconds=30,
+        now_ts=NOW_TS,
+    )
+    assert second["total_deleted"] == 1
+    assert second["scheduler"]["start_table"] == "opportunity_event_path_samples"
+    db = sqlite3.connect(db_path)
+    assert db.execute(
+        "SELECT COUNT(*) FROM opportunity_event_path_samples"
+    ).fetchone()[0] == 1
+    assert db.execute(
+        "SELECT COUNT(*) FROM candidate_shadow_observations"
+    ).fetchone()[0] >= 2
+    db.close()
+
+
+def test_policy_contract_and_disk_pressure_floor(monkeypatch):
     validate_policy_contract(RETENTION_POLICIES)
     assert not ({policy.table for policy in RETENTION_POLICIES} & PROTECTED_TABLES)
+    assert all(policy.days() <= 30 for policy in RETENTION_POLICIES)
+    assert all(policy.archive_days() <= 30 for policy in RETENTION_POLICIES)
+    candidate_policy = next(
+        policy for policy in RETENTION_POLICIES
+        if policy.table == "candidate_shadow_observations"
+    )
+    monkeypatch.setenv(candidate_policy.days_env, "999")
+    monkeypatch.setenv(candidate_policy.archive_days_env, "999")
+    assert candidate_policy.days() == 30
+    assert candidate_policy.archive_days() == 30
 
     health = storage_health(
         Path("."),
@@ -459,7 +644,7 @@ def test_critical_pressure_can_expire_verified_research_archive_after_14_days(tm
         now_ts=NOW_TS,
     )
     archive_path = next((archive_dir / "a_class_decision_events").rglob("*.jsonl.gz"))
-    future = time.time() + 15 * DAY
+    future = NOW_TS + 15 * DAY
 
     normal_gc = garbage_collect_archives(
         archive_dir=archive_dir,

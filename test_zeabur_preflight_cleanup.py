@@ -187,6 +187,63 @@ def test_old_paper_evidence_shards_are_bounded_and_verifiable(tmp_path, monkeypa
     assert (evidence_dir / "paper-events-20260806.jsonl").exists()
 
 
+def test_paper_evidence_research_retention_is_hard_capped_at_30_days():
+    assert preflight.bounded_research_retention_days("999", 7) == 30
+    assert preflight.bounded_research_retention_days("0", 7) == 1
+    assert preflight.bounded_research_retention_days("invalid", 7) == 7
+
+
+def test_expired_paper_evidence_archives_are_verified_then_deleted(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    evidence_dir = data_dir / "paper_evidence_log"
+    evidence_dir.mkdir(parents=True)
+    expired = evidence_dir / "paper-events-20260713.jsonl.gz"
+    boundary = evidence_dir / "paper-events-20260714.jsonl.gz"
+    corrupt = evidence_dir / "paper-events-20260712.jsonl.gz"
+    with gzip.open(expired, "wb") as fh:
+        fh.write(b'{"event_id":"expired"}\n')
+    with gzip.open(boundary, "wb") as fh:
+        fh.write(b'{"event_id":"boundary"}\n')
+    corrupt.write_bytes(b"not-gzip")
+    monkeypatch.setattr(preflight, "DATA_DIR", data_dir)
+    monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_RETENTION_DAYS", 30)
+    monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES", 4)
+    now_ts = dt.datetime(2026, 8, 12, tzinfo=dt.timezone.utc).timestamp()
+
+    summary = preflight.garbage_collect_paper_evidence_archives(now_ts=now_ts)
+
+    assert summary["eligible"] == 2
+    assert len(summary["deleted"]) == 1
+    assert summary["deleted"][0]["verified"] is True
+    assert not expired.exists()
+    assert boundary.exists()
+    assert corrupt.exists()
+    assert len(summary["errors"]) == 1
+    assert summary["max_total_research_retention_days"] == 30
+
+
+def test_archive_gc_defers_when_plain_source_still_exists(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    evidence_dir = data_dir / "paper_evidence_log"
+    evidence_dir.mkdir(parents=True)
+    source = evidence_dir / "paper-events-20260701.jsonl"
+    archive = Path(f"{source}.gz")
+    source.write_bytes(b'{"event_id":"late"}\n')
+    with gzip.open(archive, "wb") as fh:
+        fh.write(b'{"event_id":"archived"}\n')
+    monkeypatch.setattr(preflight, "DATA_DIR", data_dir)
+    monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES", 4)
+
+    summary = preflight.garbage_collect_paper_evidence_archives(
+        now_ts=dt.datetime(2026, 8, 12, tzinfo=dt.timezone.utc).timestamp()
+    )
+
+    assert summary["deleted"] == []
+    assert summary["deferred_source_present"] == [str(archive)]
+    assert source.exists()
+    assert archive.exists()
+
+
 def test_archive_pass_is_idempotent(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     evidence_dir = data_dir / "paper_evidence_log"
@@ -407,6 +464,7 @@ def test_cold_shards_beyond_archive_bound_are_not_tail_trimmed(tmp_path, monkeyp
     monkeypatch.setattr(preflight, "DATA_DIR", data_dir)
     monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_ENABLED", True)
     monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_MAX_FILES", 1)
+    monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_ARCHIVE_GC_MAX_FILES", 0)
     monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_MAX_BYTES", 64)
     monkeypatch.setattr(preflight, "PAPER_EVIDENCE_JSONL_KEEP_BYTES", 48)
 

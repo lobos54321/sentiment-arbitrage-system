@@ -22,6 +22,7 @@ test('Zeabur startup restores bounded research-only workers', () => {
   assert.match(startup, /export EVALUATOR_SNAPSHOT_WORKER_ENABLED=/);
   assert.match(startup, /export EVALUATOR_SNAPSHOT_STATUS=/);
   assert.match(startup, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC.*:-300/);
+  assert.match(startup, /EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS.*:-720/);
   assert.match(startup, /while true; do[\s\S]*cross_db_evaluator_snapshot\.py[\s\S]*restarting in \$\{EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC\}s/);
   assert.match(startup, /kill -0 "\$EVALUATOR_SNAPSHOT_PID"/);
   assert.match(startup, /PUMP_FUN_SHADOW_WORKER_ENABLED.*:-true/);
@@ -76,6 +77,7 @@ test('every AutoLoop launcher uses the separate evidence DB', () => {
   assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_LOCK_FILE/);
   assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_OUTPUT_GIB/);
   assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC/);
+  assert.match(indexRuntime, /EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS \|\| '720'/);
   assert.match(indexRuntime, /'--paper-db', evidenceDb/);
   assert.doesNotMatch(
     indexRuntime,
@@ -110,6 +112,7 @@ test('P8 remains isolated and prunes only its own expired shadow rows', () => {
   assert.match(pumpObserver, /reusable_bytes/);
   assert.match(pumpObserver, /legacy_database_migrated/);
   assert.match(pumpObserver, /insufficient_free_space_for_bounded_vacuum/);
+  assert.match(pumpObserver, /Math\.min\([^\n]*args\.retentionDays[^\n]*30\)/);
   assert.match(pumpWorker, /ACTIVE_CHILD_PGID/);
   assert.match(pumpWorker, /kill -TERM -- "-\$ACTIVE_CHILD_PGID"/);
   assert.match(pumpWorker, /kill -KILL -- "-\$ACTIVE_CHILD_PGID"/);

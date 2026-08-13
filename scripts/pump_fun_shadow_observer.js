@@ -80,7 +80,7 @@ function parseArgs(argv = process.argv.slice(2)) {
   args.inputJson = args.inputJson ? resolvePath(args.inputJson) : '';
   args.durationSec = Math.max(1, Math.min(Number.isFinite(args.durationSec) ? args.durationSec : 60, 3600));
   args.limit = Math.max(1, Math.min(Number.isFinite(args.limit) ? args.limit : 1000, 100000));
-  args.retentionDays = Math.max(3, Math.min(Number.isFinite(args.retentionDays) ? args.retentionDays : 30, 365));
+  args.retentionDays = Math.max(3, Math.min(Number.isFinite(args.retentionDays) ? args.retentionDays : 30, 30));
   args.autoVacuumMigrationMaxMb = Math.max(
     0,
     Math.min(Number.isFinite(args.autoVacuumMigrationMaxMb) ? args.autoVacuumMigrationMaxMb : 256, 2048)
