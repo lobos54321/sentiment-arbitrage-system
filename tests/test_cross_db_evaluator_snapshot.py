@@ -4753,6 +4753,122 @@ def test_unreaped_parallel_stage_persists_failed_status_without_history_anchor(
     assert not partial.exists()
 
 
+def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(
+        tmp_path,
+        sources,
+        max_runs=0,
+        snapshot_id="20260101T000000Z-1234abd5",
+    )
+    assert snapshot_module.run_snapshot_once(args)["accepted"] is True
+    args.snapshot_id = "20260101T010000Z-1234abd6"
+    args.max_source_read_lock_sec = 0.5
+    status_path = Path(args.status_out)
+    partial = (
+        Path(args.out_root)
+        / "snapshots"
+        / ".20260101T010000Z-1234abd6.partial"
+    )
+    out_root_key = str(Path(args.out_root).resolve())
+    release = threading.Event()
+    entered = threading.Event()
+    original_stage = snapshot_module.stage_single_source_table
+    original_atomic_json = snapshot_module.atomic_json
+    restart_status_write_failed = False
+
+    def hold_paper_decision_stage(connection, table, rule, **kwargs):
+        if table == "paper_decision_events":
+            entered.set()
+            release.wait(timeout=3)
+        return original_stage(connection, table, rule, **kwargs)
+
+    def fail_first_restart_required_status(path, payload):
+        nonlocal restart_status_write_failed
+        if (
+            not restart_status_write_failed
+            and Path(path) == status_path
+            and payload.get("worker_restart_required") is True
+        ):
+            restart_status_write_failed = True
+            raise OSError("injected_restart_status_write_failure")
+        return original_atomic_json(path, payload)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "PARALLEL_STAGE_CANCEL_GRACE_SEC",
+        0.02,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "stage_single_source_table",
+        hold_paper_decision_stage,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "atomic_json",
+        fail_first_restart_required_status,
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(
+            OSError,
+            match="injected_restart_status_write_failure",
+        ):
+            snapshot_module.run_snapshot_once(args)
+        elapsed = time.monotonic() - started
+
+        assert entered.is_set()
+        assert restart_status_write_failed is True
+        assert elapsed < 1.5
+        assert partial.is_dir()
+        assert any(
+            thread.name == "snapshot-paper_decision_events-stage"
+            and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+        stale_status = json.loads(status_path.read_text(encoding="utf-8"))
+        assert stale_status["worker_restart_required"] is False
+        assert stale_status["attempt_running"] is True
+        poisoned_status = (
+            snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS[out_root_key]
+        )
+        assert poisoned_status["worker_restart_required"] is True
+        assert poisoned_status["cleanup_deferred_until_worker_restart"] is True
+
+        reentered_build = False
+
+        def unexpected_same_process_reentry(**_kwargs):
+            nonlocal reentered_build
+            reentered_build = True
+            raise RuntimeError("status_write_failure_poison_bypassed")
+
+        monkeypatch.setattr(
+            snapshot_module,
+            "build_snapshot_bundle",
+            unexpected_same_process_reentry,
+        )
+        reentered_status = snapshot_module.run_snapshot_once(args)
+        assert reentered_build is False
+        assert reentered_status == poisoned_status
+        assert json.loads(status_path.read_text(encoding="utf-8")) == poisoned_status
+        assert partial.is_dir()
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "snapshot-paper_decision_events-stage":
+                thread.join(timeout=1)
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            out_root_key,
+            None,
+        )
+        cleanup_interrupted_partials(Path(args.out_root))
+    assert not partial.exists()
+
+
 def test_new_worker_instance_cleans_deferred_partial_before_attempt(
     tmp_path,
     monkeypatch,

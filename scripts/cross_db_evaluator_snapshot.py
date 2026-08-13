@@ -7625,12 +7625,12 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             ),
         }
-        if status_path and lock_acquired:
-            atomic_json(status_path, status)
         if worker_restart_required:
             _WORKER_RESTART_POISONED_OUT_ROOTS[out_root_key] = json.loads(
                 json.dumps(status)
             )
+        if status_path and lock_acquired:
+            atomic_json(status_path, status)
     print(json.dumps(status, sort_keys=True), flush=True)
     return status
 
