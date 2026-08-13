@@ -331,6 +331,48 @@ def test_remaining_source_read_lock_wait_never_extends_deadline(monkeypatch):
         )
 
 
+def test_parallel_stage_cancel_grace_is_shared_and_requires_worker_restart():
+    release = threading.Event()
+    runtimes = {}
+    for table in ("paper_decision_events", "a_class_decision_events"):
+        cancel_event = threading.Event()
+        start_event = threading.Event()
+        copy_start_event = threading.Event()
+        thread = threading.Thread(
+            target=release.wait,
+            name=f"stubborn-{table}",
+            daemon=True,
+        )
+        thread.start()
+        runtimes[table] = {
+            "thread": thread,
+            "cancel_event": cancel_event,
+            "start_event": start_event,
+            "copy_start_event": copy_start_event,
+            "pin_barrier": threading.Barrier(1),
+        }
+
+    started = time.monotonic()
+    unreaped = snapshot_module.cancel_parallel_stage_runtimes(
+        runtimes,
+        grace_sec=0.02,
+    )
+    elapsed = time.monotonic() - started
+    try:
+        assert unreaped == (
+            "paper_decision_events",
+            "a_class_decision_events",
+        )
+        assert elapsed < 0.2
+        assert all(runtime["cancel_event"].is_set() for runtime in runtimes.values())
+        assert all(runtime["start_event"].is_set() for runtime in runtimes.values())
+        assert all(runtime["copy_start_event"].is_set() for runtime in runtimes.values())
+    finally:
+        release.set()
+        for runtime in runtimes.values():
+            runtime["thread"].join(timeout=1)
+
+
 def test_shared_stage_estimate_timeout_is_calibrated_below_lock_budget():
     assert snapshot_module.SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC == 20.0
     assert snapshot_module.SHARED_STAGE_ESTIMATE_TIMEOUT_SEC == 180.0
@@ -3366,6 +3408,67 @@ def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lo
     final.close()
 
 
+def test_heavy_parallel_stage_uses_index_bounded_rowid_range_without_row_loss(
+    tmp_path,
+):
+    source = tmp_path / "source-paper.db"
+    stage_path = tmp_path / "paper-decision-stage.db"
+    now = time.time()
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        """
+        CREATE TABLE paper_decision_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_ts REAL NOT NULL,
+          payload_json TEXT
+        );
+        CREATE INDEX idx_pde_event_ts ON paper_decision_events(event_ts);
+        """
+    )
+    source_db.executemany(
+        "INSERT INTO paper_decision_events(event_ts,payload_json) VALUES (?,?)",
+        [
+            (now - 60, '{"selected":1}'),
+            (now - 10 * 86400, '{"old":true}'),
+            (now + 3600, '{"future":true}'),
+            (now - 30, '{"selected":2}'),
+        ],
+    )
+    source_db.commit()
+    source_db.close()
+
+    stage = sqlite3.connect(stage_path)
+    stage.row_factory = sqlite3.Row
+    stage.execute("ATTACH DATABASE ? AS src", (str(source),))
+    report, _deferred_indexes, _destination_schema = (
+        snapshot_module.stage_single_source_table(
+            stage,
+            "paper_decision_events",
+            DATABASE_SPECS["paper"]["tables"]["paper_decision_events"],
+            review_lower_epoch=now - 96 * 3600,
+            long_lower_epoch=now - 720 * 3600,
+            upper_epoch=now,
+        )
+    )
+    rows = stage.execute(
+        "SELECT id,payload_json FROM paper_decision_events ORDER BY id"
+    ).fetchall()
+    stage.close()
+
+    assert [tuple(row) for row in rows] == [
+        (1, '{"selected":1}'),
+        (4, '{"selected":2}'),
+    ]
+    assert report["rows_copied"] == 2
+    assert report["source_copy_strategy"] == "indexed_time_bounds_then_rowid_range"
+    assert report["source_copy_rowid_lower"] == 1
+    assert report["source_copy_rowid_upper"] == 4
+    assert report["source_copy_rowid_span"] == 4
+    assert report["source_copy_time_predicate_rechecked"] is True
+    assert report["source_copy_query_plan_uses_integer_primary_key_range"] is True
+    assert report["source_copy_query_plan_full_table_scan_detected"] is False
+
+
 def test_candidate_projection_requires_integer_primary_key_rowid_alias(tmp_path):
     source = tmp_path / "paper.db"
     source_db = sqlite3.connect(source)
@@ -3527,6 +3630,72 @@ def test_parallel_paper_stage_deadline_fails_closed_and_cleans_partial(
     assert not partial.exists()
     for config in snapshot_module.PARALLEL_PAPER_STAGE_CONFIGS.values():
         assert not (partial / config["filename"]).exists()
+
+
+def test_unreaped_parallel_stage_defers_cleanup_to_supervisor_restart(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "unreaped-parallel-stage-evidence"
+    release = threading.Event()
+    entered = threading.Event()
+    original_stage = snapshot_module.stage_single_source_table
+
+    def hold_paper_decision_stage(connection, table, rule, **kwargs):
+        if table == "paper_decision_events":
+            entered.set()
+            release.wait(timeout=3)
+        return original_stage(connection, table, rule, **kwargs)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "PARALLEL_STAGE_CANCEL_GRACE_SEC",
+        0.02,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "stage_single_source_table",
+        hold_paper_decision_stage,
+    )
+    started = time.monotonic()
+    with pytest.raises(snapshot_module.ConcurrentSnapshotError) as raised:
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            max_output_gib=0.1,
+            max_source_read_lock_sec=0.5,
+            snapshot_id="20260101T000000Z-1234abd2",
+        )
+    elapsed = time.monotonic() - started
+    partial = out / "snapshots" / ".20260101T000000Z-1234abd2.partial"
+    try:
+        assert entered.is_set()
+        assert elapsed < 1.5
+        assert raised.value.worker_restart_required is True
+        assert raised.value.errors["paper"]["worker_restart_required"] is True
+        assert getattr(
+            raised.value,
+            "cleanup_deferred_until_worker_restart",
+            False,
+        ) is True
+        assert partial.is_dir()
+        assert (
+            partial
+            / snapshot_module.PARALLEL_PAPER_STAGE_CONFIGS[
+                "paper_decision_events"
+            ]["filename"]
+        ).is_file()
+    finally:
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == "snapshot-paper_decision_events-stage":
+                thread.join(timeout=1)
+        cleanup_interrupted_partials(out)
+    assert not partial.exists()
 
 
 def test_parallel_stage_sqlite_busy_is_classified_and_preserves_identity(tmp_path):
@@ -4351,6 +4520,39 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
         failure_retry_sec=60,
         initial_delay_sec=0,
     )
+
+
+def test_unreaped_parallel_stage_stops_continuous_worker_for_supervisor_restart(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=0)
+
+    def fail_snapshot(**_kwargs):
+        raise snapshot_module.ConcurrentSnapshotError(
+            {
+                "paper": {
+                    "error_code": "parallel_paper_stage_timeout",
+                    "error_type": "RuntimeError",
+                    "stage": "release_source_read_view",
+                    "worker_restart_required": True,
+                }
+            }
+        )
+
+    monkeypatch.setattr(snapshot_module, "build_snapshot_bundle", fail_snapshot)
+    status = snapshot_module.run_snapshot_once(args)
+
+    assert status["accepted"] is False
+    assert status["last_failure_code"] == "parallel_paper_stage_timeout"
+    assert status["worker_restart_required"] is True
+    assert status["running"] is False
+    assert status["next_attempt_delay_sec"] is None
+    assert status["next_attempt_at"] is None
+    assert status["last_failure_details"]["paper"][
+        "worker_restart_required"
+    ] is True
 
 
 def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_path, monkeypatch):

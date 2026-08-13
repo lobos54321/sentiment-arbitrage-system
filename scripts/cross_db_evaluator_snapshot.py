@@ -135,6 +135,12 @@ PARALLEL_PAPER_STAGE_CONFIGS = {
     },
 }
 PARALLEL_PAPER_STAGE_TABLES = tuple(PARALLEL_PAPER_STAGE_CONFIGS)
+HEAVY_PARALLEL_ROWID_RANGE_TABLES = frozenset(
+    {
+        "paper_decision_events",
+        "a_class_decision_events",
+    }
+)
 PARALLEL_PAPER_REQUIRED_STAGE_TABLES = tuple(
     table
     for table, config in PARALLEL_PAPER_STAGE_CONFIGS.items()
@@ -156,6 +162,7 @@ DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS
 DEFAULT_MAX_OUTPUT_GIB = 10.0
 DEFAULT_MAX_SOURCE_READ_LOCK_SEC = 300.0
 DEFAULT_FAILURE_RETRY_SEC = 60
+PARALLEL_STAGE_CANCEL_GRACE_SEC = 2.0
 MIN_FAILURE_RETRY_SEC = 60
 SECOND_FAILURE_RETRY_SEC = 900
 THIRD_FAILURE_RETRY_SEC = 3600
@@ -921,6 +928,7 @@ class ConcurrentSnapshotError(RuntimeError):
 
     def __init__(self, errors: dict[str, dict[str, Any]]):
         self.errors = {}
+        self.worker_restart_required = False
         for name, details in sorted((errors or {}).items()):
             details = details or {}
             bounded = {
@@ -937,12 +945,26 @@ class ConcurrentSnapshotError(RuntimeError):
                 bounded["sqlite_errorcode"] = sqlite_errorcode
             if isinstance(sqlite_errorname, str) and sqlite_errorname:
                 bounded["sqlite_errorname"] = sqlite_errorname
+            if details.get("worker_restart_required") is True:
+                bounded["worker_restart_required"] = True
+                self.worker_restart_required = True
             self.errors[str(name)] = bounded
         summary = ",".join(
             f"{details['error_code']}:{name}:{details['stage']}"
             for name, details in self.errors.items()
         )
         super().__init__(f"concurrent evaluator snapshot failed: {summary}")
+
+
+def exception_requires_worker_restart(exc: BaseException) -> bool:
+    if getattr(exc, "worker_restart_required", False) is True:
+        return True
+    if isinstance(exc, ConcurrentSnapshotError):
+        return any(
+            details.get("worker_restart_required") is True
+            for details in exc.errors.values()
+        )
+    return False
 
 
 def snapshot_component_failure_code(exc: BaseException) -> str:
@@ -1984,6 +2006,107 @@ def source_query_plan_evidence(
         "uses_declared_index": uses_declared_index,
         "uses_range_search": uses_range_search,
         "full_table_scan_detected": full_table_scan_detected,
+    }
+
+
+def integer_primary_key_rowid_alias(
+    connection: sqlite3.Connection,
+    table: str,
+) -> str | None:
+    if str(table) not in HEAVY_PARALLEL_ROWID_RANGE_TABLES:
+        return None
+    schema_row = connection.execute(
+        "SELECT sql FROM src.sqlite_master WHERE type='table' AND name=?",
+        (str(table),),
+    ).fetchone()
+    create_sql = str(schema_row[0] or "") if schema_row is not None else ""
+    if "WITHOUT ROWID" in create_sql.upper():
+        return None
+    primary_key_rows = [
+        row
+        for row in connection.execute(
+            f"PRAGMA src.table_info({quote_identifier(str(table))})"
+        )
+        if int(row["pk"] or 0) > 0
+    ]
+    if len(primary_key_rows) != 1:
+        return None
+    row = primary_key_rows[0]
+    if str(row["type"] or "").strip().upper() != "INTEGER":
+        return None
+    return str(row["name"])
+
+
+def indexed_time_bounds_rowid_copy_plan(
+    connection: sqlite3.Connection,
+    table: str,
+    selection: dict[str, Any],
+) -> dict[str, Any] | None:
+    rowid_alias = integer_primary_key_rowid_alias(connection, table)
+    if not rowid_alias or not selection.get("source_index_name"):
+        return None
+    alias = quote_identifier(rowid_alias)
+    boundary_row = connection.execute(
+        f"SELECT MIN({alias}), MAX({alias}) "
+        f"FROM {source_table_reference(table, selection)} "
+        f"WHERE {selection['predicate_sql']}",
+        selection["parameters"],
+    ).fetchone()
+    if (
+        boundary_row is None
+        or boundary_row[0] is None
+        or boundary_row[1] is None
+    ):
+        return None
+    lower = int(boundary_row[0])
+    upper = int(boundary_row[1])
+    if lower > upper:
+        raise RuntimeError(
+            f"selective_snapshot_source_query_plan_not_indexed:{table}:"
+            "invalid_rowid_bounds"
+        )
+    relation = f"src.{quote_identifier(str(table))} NOT INDEXED"
+    predicate_sql = (
+        f"{alias} >= ? AND {alias} <= ? "
+        f"AND ({selection['predicate_sql']})"
+    )
+    parameters = [lower, upper, *selection["parameters"]]
+    plan_rows = connection.execute(
+        f"EXPLAIN QUERY PLAN SELECT {alias} FROM {relation} "
+        f"WHERE {predicate_sql} LIMIT 1",
+        parameters,
+    ).fetchall()
+    details = [str(row[3]) for row in plan_rows]
+    table_token = str(table).lower()
+    uses_integer_primary_key_range = any(
+        "search" in detail.lower()
+        and "integer primary key" in detail.lower()
+        and "rowid>" in detail.lower()
+        and "rowid<" in detail.lower()
+        for detail in details
+    )
+    full_table_scan_detected = any(
+        "scan" in detail.lower() and table_token in detail.lower()
+        for detail in details
+    )
+    if not uses_integer_primary_key_range or full_table_scan_detected:
+        raise RuntimeError(
+            f"selective_snapshot_source_query_plan_not_indexed:{table}:"
+            f"rowid_range:{details}"
+        )
+    return {
+        "strategy": "indexed_time_bounds_then_rowid_range",
+        "relation": relation,
+        "predicate_sql": predicate_sql,
+        "parameters": parameters,
+        "rowid_alias": rowid_alias,
+        "rowid_lower": lower,
+        "rowid_upper": upper,
+        "rowid_span": upper - lower + 1,
+        "query_plan": details,
+        "query_plan_uses_integer_primary_key_range": True,
+        "query_plan_full_table_scan_detected": False,
+        "time_predicate_rechecked": True,
     }
 
 
@@ -3733,6 +3856,11 @@ def stage_single_source_table(
             f"selective_snapshot_source_query_plan_not_indexed:{table}:"
             f"{selection.get('source_index_name')}:{query_plan['details']}"
         )
+    rowid_copy_plan = indexed_time_bounds_rowid_copy_plan(
+        connection,
+        table,
+        selection,
+    )
     source_column_contract = table_column_contract(
         connection,
         table,
@@ -3759,11 +3887,26 @@ def stage_single_source_table(
         quote_identifier(name)
         for name in source_column_contract["column_names"]
     )
+    copy_relation = (
+        rowid_copy_plan["relation"]
+        if rowid_copy_plan is not None
+        else source_table_reference(table, selection)
+    )
+    copy_predicate_sql = (
+        rowid_copy_plan["predicate_sql"]
+        if rowid_copy_plan is not None
+        else selection["predicate_sql"]
+    )
+    copy_parameters = (
+        rowid_copy_plan["parameters"]
+        if rowid_copy_plan is not None
+        else selection["parameters"]
+    )
     connection.execute(
         f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
-        f"SELECT {column_sql} FROM {source_table_reference(table, selection)} "
-        f"WHERE {selection['predicate_sql']}",
-        selection["parameters"],
+        f"SELECT {column_sql} FROM {copy_relation} "
+        f"WHERE {copy_predicate_sql}",
+        copy_parameters,
     )
     copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
     deferred_indexes = [
@@ -3807,6 +3950,53 @@ def stage_single_source_table(
         "source_query_plan_uses_index": query_plan["uses_declared_index"],
         "source_query_plan_uses_range_search": query_plan["uses_range_search"],
         "source_query_plan_full_table_scan_detected": query_plan["full_table_scan_detected"],
+        "source_copy_strategy": (
+            rowid_copy_plan["strategy"]
+            if rowid_copy_plan is not None
+            else "indexed_time_range"
+        ),
+        "source_copy_rowid_alias": (
+            rowid_copy_plan["rowid_alias"]
+            if rowid_copy_plan is not None
+            else None
+        ),
+        "source_copy_rowid_lower": (
+            rowid_copy_plan["rowid_lower"]
+            if rowid_copy_plan is not None
+            else None
+        ),
+        "source_copy_rowid_upper": (
+            rowid_copy_plan["rowid_upper"]
+            if rowid_copy_plan is not None
+            else None
+        ),
+        "source_copy_rowid_span": (
+            rowid_copy_plan["rowid_span"]
+            if rowid_copy_plan is not None
+            else None
+        ),
+        "source_copy_query_plan": (
+            rowid_copy_plan["query_plan"]
+            if rowid_copy_plan is not None
+            else query_plan["details"]
+        ),
+        "source_copy_query_plan_uses_integer_primary_key_range": (
+            rowid_copy_plan[
+                "query_plan_uses_integer_primary_key_range"
+            ]
+            if rowid_copy_plan is not None
+            else False
+        ),
+        "source_copy_query_plan_full_table_scan_detected": (
+            rowid_copy_plan["query_plan_full_table_scan_detected"]
+            if rowid_copy_plan is not None
+            else query_plan["full_table_scan_detected"]
+        ),
+        "source_copy_time_predicate_rechecked": (
+            rowid_copy_plan["time_predicate_rechecked"]
+            if rowid_copy_plan is not None
+            else False
+        ),
         "horizon": rule.get("horizon") if selection["mode"] == "recent" else None,
         "storage_projection": {
             "schema_version": PAPER_DECISION_STAGE_SCHEMA_VERSION,
@@ -4212,17 +4402,43 @@ def snapshot_one(
     pinned_read_views = [pin_report]
     all_source_read_views_released_at = read_view_released
     if parallel_paper_stage_states:
-        join_timeout = float(pin_report["source_read_lock_limit_sec"]) + 60.0
+        main_lock_deadline = (
+            float(pin_report["pinned_started_monotonic"])
+            + float(pin_report["source_read_lock_limit_sec"])
+        )
         for table in parallel_stage_tables:
             runtime = parallel_paper_stage_states.get(table)
             if runtime is None:
                 raise RuntimeError(f"parallel_paper_stage_missing:{table}")
             stage_thread = runtime["thread"]
-            stage_thread.join(timeout=join_timeout)
+            runtime_lock_deadline = runtime.get("state", {}).get(
+                "lock_deadline_monotonic"
+            )
+            stage_lock_deadline = (
+                float(runtime_lock_deadline)
+                if isinstance(runtime_lock_deadline, (int, float))
+                else main_lock_deadline
+            )
+            remaining = max(0.0, stage_lock_deadline - time.monotonic())
+            if remaining > 0:
+                stage_thread.join(timeout=remaining)
             if stage_thread.is_alive():
-                runtime["cancel_event"].set()
-                stage_thread.join(timeout=30)
-                raise RuntimeError(f"parallel_paper_stage_timeout:{table}")
+                unreaped = cancel_parallel_stage_runtimes(
+                    parallel_paper_stage_states,
+                    grace_sec=PARALLEL_STAGE_CANCEL_GRACE_SEC,
+                )
+                stage_exception = runtime["state"].get("exception")
+                if not unreaped and isinstance(
+                    stage_exception,
+                    BaseException,
+                ):
+                    raise stage_exception
+                timeout_exc = RuntimeError(
+                    f"parallel_paper_stage_timeout:{table}"
+                )
+                if unreaped:
+                    setattr(timeout_exc, "worker_restart_required", True)
+                raise timeout_exc
         for table in parallel_stage_tables:
             runtime = parallel_paper_stage_states[table]
             stage_state = runtime["state"]
@@ -4821,6 +5037,7 @@ def build_parallel_table_stage(
     pinned_barrier: threading.Barrier,
     copy_start_event: threading.Event,
     cancel_event: threading.Event,
+    runtime_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     connection: sqlite3.Connection | None = None
     progress: dict[str, Any] = {"stage": "open_parallel_stage"}
@@ -4829,6 +5046,8 @@ def build_parallel_table_stage(
     try:
         timeout_sec = max(0.001, float(busy_timeout_ms) / 1000.0)
         connection = sqlite3.connect(destination, timeout=timeout_sec, uri=True)
+        if runtime_state is not None:
+            runtime_state["connection"] = connection
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
         connection.execute("PRAGMA journal_mode=OFF")
@@ -4847,6 +5066,9 @@ def build_parallel_table_stage(
         pin_started = time.time()
         pin_started_monotonic = time.monotonic()
         lock_deadline = pin_started_monotonic + float(max_source_read_lock_sec)
+        if runtime_state is not None:
+            runtime_state["pin_started_monotonic"] = pin_started_monotonic
+            runtime_state["lock_deadline_monotonic"] = lock_deadline
 
         def interrupt_expired_or_cancelled() -> int:
             return 1 if cancel_event.is_set() or time.monotonic() >= lock_deadline else 0
@@ -5050,6 +5272,55 @@ def build_parallel_table_stage(
             except sqlite3.Error:
                 pass
             connection.close()
+        if runtime_state is not None:
+            runtime_state["connection"] = None
+
+
+def cancel_parallel_stage_runtimes(
+    runtimes: dict[str, dict[str, Any]],
+    *,
+    grace_sec: float = PARALLEL_STAGE_CANCEL_GRACE_SEC,
+) -> tuple[str, ...]:
+    active = {
+        str(table): runtime
+        for table, runtime in runtimes.items()
+        if runtime.get("thread") is not None
+        and runtime["thread"].is_alive()
+    }
+    if not active:
+        return ()
+    now = time.monotonic()
+    requested_deadline = now + max(0.0, float(grace_sec))
+    prior_deadlines = [
+        float(runtime["cancel_deadline_monotonic"])
+        for runtime in active.values()
+        if isinstance(runtime.get("cancel_deadline_monotonic"), (int, float))
+    ]
+    shared_deadline = min([requested_deadline, *prior_deadlines])
+    for runtime in active.values():
+        runtime.setdefault("cancel_deadline_monotonic", shared_deadline)
+        runtime["cancel_event"].set()
+        runtime["start_event"].set()
+        runtime["copy_start_event"].set()
+        connection = runtime.get("state", {}).get("connection")
+        if connection is not None:
+            try:
+                connection.interrupt()
+            except sqlite3.Error:
+                pass
+        try:
+            runtime["pin_barrier"].abort()
+        except threading.BrokenBarrierError:
+            pass
+    for runtime in active.values():
+        remaining = max(0.0, shared_deadline - time.monotonic())
+        if remaining > 0:
+            runtime["thread"].join(timeout=remaining)
+    return tuple(
+        table
+        for table, runtime in active.items()
+        if runtime["thread"].is_alive()
+    )
 
 
 def snapshot_all_concurrently(
@@ -5227,6 +5498,7 @@ def snapshot_all_concurrently(
                                 pinned_barrier=parallel_pin_barrier,
                                 copy_start_event=stage_copy_start,
                                 cancel_event=stage_cancel,
+                                runtime_state=state,
                             )
                         except Exception as stage_exc:
                             # Publish the concrete stage error before aborting
@@ -5253,6 +5525,7 @@ def snapshot_all_concurrently(
                     stage_thread = threading.Thread(
                         target=parallel_stage_worker,
                         name=f"snapshot-{table}-stage",
+                        daemon=True,
                     )
                     parallel_stage_runtimes[table] = {
                         "thread": stage_thread,
@@ -5449,19 +5722,15 @@ def snapshot_all_concurrently(
             sqlite_errorcode, sqlite_errorname = sqlite_error_identity(exc)
             if shared_budget_coordinator is not None:
                 shared_budget_coordinator.abort(exc)
+            worker_restart_required = exception_requires_worker_restart(exc)
             if parallel_stage_runtimes:
-                for runtime in parallel_stage_runtimes.values():
-                    runtime["cancel_event"].set()
-                    runtime["start_event"].set()
-                    runtime["copy_start_event"].set()
-                try:
-                    next(iter(parallel_stage_runtimes.values()))[
-                        "pin_barrier"
-                    ].abort()
-                except threading.BrokenBarrierError:
-                    pass
-                for runtime in parallel_stage_runtimes.values():
-                    runtime["thread"].join(timeout=30)
+                unreaped = cancel_parallel_stage_runtimes(
+                    parallel_stage_runtimes,
+                    grace_sec=PARALLEL_STAGE_CANCEL_GRACE_SEC,
+                )
+                worker_restart_required = bool(
+                    worker_restart_required or unreaped
+                )
             completed_parallel_stages = [
                 table
                 for table, runtime in parallel_stage_runtimes.items()
@@ -5490,6 +5759,8 @@ def snapshot_all_concurrently(
                 exc = RuntimeError(
                     f"selective snapshot exceeded database budget for {name}"
                 )
+            if worker_restart_required:
+                setattr(exc, "worker_restart_required", True)
             for barrier in (start_barrier, pinned_barrier):
                 try:
                     barrier.abort()
@@ -5540,25 +5811,11 @@ def snapshot_all_concurrently(
                 error_details["sqlite_errorcode"] = sqlite_errorcode
             if sqlite_errorname:
                 error_details["sqlite_errorname"] = sqlite_errorname
+            if worker_restart_required:
+                error_details["worker_restart_required"] = True
             with result_lock:
                 errors[name] = error_details
         finally:
-            alive_parallel_runtimes = [
-                runtime
-                for runtime in parallel_stage_runtimes.values()
-                if runtime["thread"].is_alive()
-            ]
-            if alive_parallel_runtimes:
-                for runtime in alive_parallel_runtimes:
-                    runtime["cancel_event"].set()
-                    runtime["start_event"].set()
-                    runtime["copy_start_event"].set()
-                try:
-                    alive_parallel_runtimes[0]["pin_barrier"].abort()
-                except threading.BrokenBarrierError:
-                    pass
-                for runtime in alive_parallel_runtimes:
-                    runtime["thread"].join(timeout=30)
             if connection is not None:
                 try:
                     connection.rollback()
@@ -6942,12 +7199,18 @@ def build_snapshot_bundle(
             shared_budget_plan,
             exc,
         )
-        cleanup_completed = True
-        try:
-            if partial_dir.exists():
-                shutil.rmtree(partial_dir)
-        except Exception:
-            cleanup_completed = False
+        worker_restart_required = exception_requires_worker_restart(exc)
+        cleanup_deferred = bool(
+            worker_restart_required and partial_dir.exists()
+        )
+        cleanup_completed = not partial_dir.exists()
+        if not worker_restart_required:
+            cleanup_completed = True
+            try:
+                if partial_dir.exists():
+                    shutil.rmtree(partial_dir)
+            except Exception:
+                cleanup_completed = False
         if isinstance(shared_failure_evidence, dict):
             shared_failure_evidence["cleanup_completed"] = cleanup_completed
             shared_failure_evidence["stage_files_removed"] = bool(
@@ -6959,7 +7222,11 @@ def build_snapshot_bundle(
                 )
             )
             setattr(exc, "shared_stage_budget", shared_failure_evidence)
+        if cleanup_deferred:
+            setattr(exc, "cleanup_deferred_until_worker_restart", True)
         if not cleanup_completed:
+            if worker_restart_required:
+                raise
             cleanup_exc = RuntimeError("shared_stage_cleanup_failed")
             if isinstance(shared_failure_evidence, dict):
                 setattr(
@@ -7139,6 +7406,8 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             if previous_shared_stage_budget is not None
             else None
         ),
+        "worker_restart_required": False,
+        "cleanup_deferred_until_worker_restart": False,
         "promotion_allowed": False,
     }
     lock_acquired = False
@@ -7227,6 +7496,10 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         finished = utc_iso()
         failure_code = snapshot_failure_code(exc)
         failure_details = snapshot_failure_details(exc)
+        worker_restart_required = exception_requires_worker_restart(exc)
+        cleanup_deferred = bool(
+            getattr(exc, "cleanup_deferred_until_worker_restart", False)
+        )
         current_failure_stage_budget = (
             shared_stage_budget_evidence_from_exception(exc)
         )
@@ -7266,7 +7539,11 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         )
         status = {
             **base_status,
-            "running": continuous_worker if lock_acquired else False,
+            "running": bool(
+                continuous_worker
+                and lock_acquired
+                and not worker_restart_required
+            ),
             "attempt_running": False,
             "finished_at": finished,
             "last_failure_at": finished,
@@ -7282,10 +7559,16 @@ def run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
             "consecutive_failure_code_count": consecutive_failure_code_count,
             "error": bounded_error_text(exc),
             "status_artifact_preserved": not lock_acquired,
-            "next_attempt_delay_sec": next_attempt_delay if continuous_worker else None,
+            "worker_restart_required": worker_restart_required,
+            "cleanup_deferred_until_worker_restart": cleanup_deferred,
+            "next_attempt_delay_sec": (
+                next_attempt_delay
+                if continuous_worker and not worker_restart_required
+                else None
+            ),
             "next_attempt_at": (
                 utc_iso(time.time() + next_attempt_delay)
-                if continuous_worker
+                if continuous_worker and not worker_restart_required
                 else None
             ),
         }
@@ -7339,6 +7622,8 @@ def main() -> int:
     while max_runs <= 0 or run_count < max_runs:
         run_count += 1
         last_status = run_snapshot_once(args)
+        if last_status.get("worker_restart_required") is True:
+            break
         if max_runs > 0 and run_count >= max_runs:
             break
         time.sleep(
