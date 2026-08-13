@@ -179,7 +179,7 @@ WORKER_PROCESS_INSTANCE_ID = _worker_process_instance_id
 if "_WORKER_RESTART_POISONED_OUT_ROOTS" not in globals():
     _WORKER_RESTART_POISONED_OUT_ROOTS: dict[str, dict[str, Any]] = {}
 if "_RUN_SNAPSHOT_ONCE_LOCK" not in globals():
-    _RUN_SNAPSHOT_ONCE_LOCK = threading.Lock()
+    _RUN_SNAPSHOT_ONCE_LOCK = threading.RLock()
 if "_WORKER_OWNER_LEASES" not in globals():
     _WORKER_OWNER_LEASES: dict[str, Any] = {}
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
@@ -7487,6 +7487,52 @@ def cleanup_interrupted_partials(root: Path) -> list[str]:
             expected_lease_identity=expected_lease_identity,
         )
         authorized.append((path, record, directory_identity))
+    if _snapshot_worker_lease_identity(root) != expected_lease_identity:
+        raise SnapshotWorkerOwnerInvalidError(
+            "lease_changed_after_partial_authorization"
+        )
+    expected_inventory = {
+        path.name: directory_identity
+        for path, _record, directory_identity in authorized
+    }
+    current_inventory: dict[str, tuple[int, int]] = {}
+    for candidate in snapshots.iterdir():
+        if not PARTIAL_SNAPSHOT_NAME_RE.fullmatch(candidate.name):
+            continue
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_inventory_file_type"
+            )
+        candidate_stat = candidate.stat()
+        current_inventory[candidate.name] = (
+            int(candidate_stat.st_dev),
+            int(candidate_stat.st_ino),
+        )
+    if current_inventory != expected_inventory:
+        raise SnapshotWorkerOwnerInvalidError(
+            "partial_inventory_changed_after_authorization"
+        )
+    for path, expected_record, expected_directory_identity in authorized:
+        if path.is_symlink() or not path.is_dir():
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_changed_after_authorization"
+            )
+        current_stat = path.stat()
+        if (
+            int(current_stat.st_dev),
+            int(current_stat.st_ino),
+        ) != expected_directory_identity:
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_replaced_after_authorization"
+            )
+        if _load_snapshot_partial_owner(path) != expected_record:
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_owner_changed_after_authorization"
+            )
+    if _snapshot_worker_lease_identity(root) != expected_lease_identity:
+        raise SnapshotWorkerOwnerInvalidError(
+            "lease_changed_before_partial_cleanup"
+        )
     removed = []
     for index, (
         path,
@@ -7525,6 +7571,10 @@ def cleanup_interrupted_partials(root: Path) -> list[str]:
             raise SnapshotWorkerOwnerInvalidError("partial_replaced_before_cleanup")
         if _load_snapshot_partial_owner(path) != expected_record:
             raise SnapshotWorkerOwnerInvalidError("partial_owner_changed_before_cleanup")
+        if _snapshot_worker_lease_identity(root) != expected_lease_identity:
+            raise SnapshotWorkerOwnerInvalidError(
+                "lease_changed_before_partial_delete"
+            )
         shutil.rmtree(path)
         removed.append(str(path))
     if _interrupted_snapshot_partial_exists(root):
@@ -8025,7 +8075,7 @@ def _build_snapshot_bundle_owned(
         raise
 
 
-def build_snapshot_bundle(
+def _build_snapshot_bundle_entry(
     *,
     sources: dict[str, str],
     out_root: str,
@@ -8063,10 +8113,18 @@ def build_snapshot_bundle(
         raise ValueError(f"invalid snapshot id: {snapshot_id}")
     root = Path(out_root).expanduser().resolve()
     direct_owner = partial_owner is None
+    root_key = str(root)
+    prior_lease_handle = _WORKER_OWNER_LEASES.get(root_key)
     owner = partial_owner
     if direct_owner:
         owner = ensure_snapshot_worker_owner(root)
         cleanup_interrupted_partials(root)
+    direct_lease_handle = _WORKER_OWNER_LEASES.get(root_key)
+    release_direct_lease = bool(
+        direct_owner
+        and direct_lease_handle is not None
+        and direct_lease_handle is not prior_lease_handle
+    )
     try:
         manifest = _build_snapshot_bundle_owned(
             sources=sources,
@@ -8088,12 +8146,52 @@ def build_snapshot_bundle(
             partial_owner=owner,
         )
     except BaseException as exc:
-        if direct_owner and not exception_requires_worker_restart(exc):
+        if release_direct_lease and not exception_requires_worker_restart(exc):
             _release_direct_snapshot_worker_owner(root, owner)
         raise
-    if direct_owner:
+    if release_direct_lease:
         _release_direct_snapshot_worker_owner(root, owner)
     return manifest
+
+
+def build_snapshot_bundle(
+    *,
+    sources: dict[str, str],
+    out_root: str,
+    repo_root: str,
+    max_skew_sec: float = 300,
+    min_free_after_gib: float = 5,
+    max_output_gib: float = DEFAULT_MAX_OUTPUT_GIB,
+    review_history_hours: float = DEFAULT_REVIEW_HISTORY_HOURS,
+    long_history_hours: float = DEFAULT_LONG_HISTORY_HOURS,
+    source_busy_timeout_ms: int = 30000,
+    max_source_read_lock_sec: float = DEFAULT_MAX_SOURCE_READ_LOCK_SEC,
+    keep_previous: int = 0,
+    snapshot_id: str | None = None,
+    previous_shared_stage_budget: dict[str, Any] | None = None,
+    previous_shared_stage_budget_anchor: dict[str, Any] | None = None,
+    partial_owner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with _RUN_SNAPSHOT_ONCE_LOCK:
+        return _build_snapshot_bundle_entry(
+            sources=sources,
+            out_root=out_root,
+            repo_root=repo_root,
+            max_skew_sec=max_skew_sec,
+            min_free_after_gib=min_free_after_gib,
+            max_output_gib=max_output_gib,
+            review_history_hours=review_history_hours,
+            long_history_hours=long_history_hours,
+            source_busy_timeout_ms=source_busy_timeout_ms,
+            max_source_read_lock_sec=max_source_read_lock_sec,
+            keep_previous=keep_previous,
+            snapshot_id=snapshot_id,
+            previous_shared_stage_budget=previous_shared_stage_budget,
+            previous_shared_stage_budget_anchor=(
+                previous_shared_stage_budget_anchor
+            ),
+            partial_owner=partial_owner,
+        )
 
 
 def self_test() -> None:

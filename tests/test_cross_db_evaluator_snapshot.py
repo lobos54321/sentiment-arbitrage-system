@@ -4506,7 +4506,7 @@ def test_partial_cleanup_detects_late_directory_before_any_delete(
 
     with pytest.raises(
         snapshot_module.SnapshotWorkerOwnerInvalidError,
-        match="partial_inventory_changed_during_cleanup",
+        match="partial_inventory_changed_(?:after_authorization|during_cleanup)",
     ):
         cleanup_interrupted_partials(out_root)
 
@@ -4544,6 +4544,59 @@ def test_partial_cleanup_rejects_lease_path_replaced_after_lock(
         cleanup_interrupted_partials(out_root)
 
     assert partial.is_dir()
+
+
+def test_partial_cleanup_rechecks_lease_after_partial_authorization(
+    tmp_path,
+    monkeypatch,
+):
+    out_root = tmp_path / "evidence"
+    partial = (
+        out_root
+        / "snapshots"
+        / ".20260101T010000Z-abcdef12.partial"
+    )
+    partial.mkdir(parents=True)
+    payload = partial / ".paper-decision-events-stage.db"
+    payload.write_bytes(b"stage")
+    snapshot_module._acquire_snapshot_worker_lease(out_root)
+    held_lease = snapshot_module._snapshot_worker_lease_identity(out_root)
+    write_partial_owner_fixture(partial, lease_identity=held_lease)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda _pid: {"state": "exited", "identity": None},
+    )
+    original_authorize = snapshot_module._authorize_snapshot_partial_cleanup
+    lease_replaced = False
+
+    def authorize_then_replace_lease(*args, **kwargs):
+        nonlocal lease_replaced
+        result = original_authorize(*args, **kwargs)
+        if not lease_replaced:
+            lease_path = snapshot_module.snapshot_worker_owner_lock_path(
+                out_root
+            )
+            lease_path.unlink()
+            lease_path.write_text("replacement lease\n", encoding="utf-8")
+            lease_replaced = True
+        return result
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "_authorize_snapshot_partial_cleanup",
+        authorize_then_replace_lease,
+    )
+
+    with pytest.raises(
+        snapshot_module.SnapshotWorkerOwnerInvalidError,
+        match="lease_path_replaced",
+    ):
+        cleanup_interrupted_partials(out_root)
+
+    assert lease_replaced is True
+    assert partial.is_dir()
+    assert payload.is_file()
 
 
 def test_partial_owner_writer_rejects_a_forged_creator(
@@ -4617,6 +4670,33 @@ def test_direct_build_marker_write_failure_leaves_no_visible_partial(
     assert not any("partial-bootstrap" in path.name for path in snapshots.iterdir())
     assert not snapshot_module.snapshot_worker_owner_path(out_root).exists()
     assert str(out_root.resolve()) not in snapshot_module._WORKER_OWNER_LEASES
+
+
+def test_direct_build_does_not_release_a_preexisting_process_lease(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    out_root = tmp_path / "evidence"
+    owner = snapshot_module.ensure_snapshot_worker_owner(out_root)
+    out_root_key = str(out_root.resolve())
+    original_handle = snapshot_module._WORKER_OWNER_LEASES[out_root_key]
+
+    manifest = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out_root),
+        repo_root=str(ROOT),
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T010000Z-abcdef12",
+    )
+
+    assert manifest["accepted"] is True
+    assert snapshot_module._WORKER_OWNER_LEASES[out_root_key] is original_handle
+    assert json.loads(
+        snapshot_module.snapshot_worker_owner_path(out_root).read_text(
+            encoding="utf-8"
+        )
+    ) == owner
 
 
 def test_missing_required_watermark_rejects_bundle(tmp_path):
@@ -5391,6 +5471,55 @@ def test_run_snapshot_once_serializes_same_process_callers(monkeypatch):
     second = threading.Thread(
         target=snapshot_module.run_snapshot_once,
         args=(SimpleNamespace(),),
+    )
+    first.start()
+    assert first_entered.wait(timeout=1)
+    second.start()
+    try:
+        assert second_entered.wait(timeout=0.05) is False
+    finally:
+        release_first.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_entered.is_set()
+    assert call_count == 2
+
+
+def test_direct_snapshot_builds_share_the_same_process_lock(monkeypatch):
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    call_count = 0
+
+    def bounded_build(**_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            first_entered.set()
+            release_first.wait(timeout=1)
+        else:
+            second_entered.set()
+        return {"accepted": True}
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "_build_snapshot_bundle_entry",
+        bounded_build,
+    )
+    kwargs = {
+        "sources": {},
+        "out_root": "/tmp/direct-build-lock-test",
+        "repo_root": str(ROOT),
+    }
+    first = threading.Thread(
+        target=snapshot_module.build_snapshot_bundle,
+        kwargs=kwargs,
+    )
+    second = threading.Thread(
+        target=snapshot_module.build_snapshot_bundle,
+        kwargs=kwargs,
     )
     first.start()
     assert first_entered.wait(timeout=1)
