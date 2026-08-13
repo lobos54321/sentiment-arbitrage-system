@@ -17,8 +17,10 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat as stat_module
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -157,6 +159,11 @@ PAPER_DECISION_STAGE_SCHEMA = PARALLEL_PAPER_STAGE_CONFIGS["paper_decision_event
 PAPER_DECISION_STAGE_TABLE = "paper_decision_events"
 MIN_PAPER_DECISION_STAGE_CAP_BYTES = MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
 WORKER_STATUS_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_status.v1"
+WORKER_OWNER_SCHEMA_VERSION = "cross_db_evaluator_snapshot_worker_owner.v1"
+WORKER_PROCESS_IDENTITY_SCHEMA_VERSION = "process_identity.v1"
+WORKER_OWNER_FILENAME = ".snapshot-worker-owner.json"
+WORKER_OWNER_LOCK_FILENAME = ".snapshot-worker-owner.lock"
+WORKER_OWNER_MAX_BYTES = 16 * 1024
 WORKER_PROCESS_INSTANCE_ENV = "_CROSS_DB_EVALUATOR_SNAPSHOT_PROCESS_INSTANCE_ID"
 _worker_process_instance_id = os.environ.get(WORKER_PROCESS_INSTANCE_ENV, "")
 if not re.fullmatch(r"[a-f0-9]{32}", _worker_process_instance_id):
@@ -170,6 +177,8 @@ if "_WORKER_RESTART_POISONED_OUT_ROOTS" not in globals():
     _WORKER_RESTART_POISONED_OUT_ROOTS: dict[str, dict[str, Any]] = {}
 if "_RUN_SNAPSHOT_ONCE_LOCK" not in globals():
     _RUN_SNAPSHOT_ONCE_LOCK = threading.Lock()
+if "_WORKER_OWNER_LEASES" not in globals():
+    _WORKER_OWNER_LEASES: dict[str, Any] = {}
 DEFAULT_REVIEW_HISTORY_HOURS = 96.0
 MAX_RESEARCH_HISTORY_HOURS = 24.0 * 30.0
 DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS
@@ -587,6 +596,443 @@ def read_json_object(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+class PriorSnapshotWorkerActiveError(RuntimeError):
+    """Fail closed while a prior worker can still own live stage inodes."""
+
+    def __init__(self, owner: dict[str, Any] | None, liveness: str):
+        super().__init__("evaluator_snapshot_prior_worker_active")
+        self.worker_restart_required = True
+        self.cleanup_deferred_until_worker_restart = True
+        owner = owner if isinstance(owner, dict) else {}
+        self.prior_worker_pid = _positive_process_pid(owner.get("pid"))
+        identity = owner.get("process_identity")
+        self.prior_worker_identity_source = str(
+            identity.get("source") if isinstance(identity, dict) else "unknown"
+        )
+        self.prior_worker_liveness = str(liveness)
+
+
+class SnapshotWorkerOwnerInvalidError(RuntimeError):
+    """Fail closed when safe ownership transfer cannot be proven."""
+
+    def __init__(self, reason: str):
+        super().__init__(f"evaluator_snapshot_worker_owner_invalid:{reason}")
+        self.worker_restart_required = True
+        self.cleanup_deferred_until_worker_restart = True
+
+
+def snapshot_worker_owner_path(out_root: Path) -> Path:
+    return out_root.expanduser().resolve() / WORKER_OWNER_FILENAME
+
+
+def snapshot_worker_owner_lock_path(out_root: Path) -> Path:
+    return out_root.expanduser().resolve() / WORKER_OWNER_LOCK_FILENAME
+
+
+def _acquire_snapshot_worker_lease(out_root: Path) -> None:
+    """Hold a filesystem lease until this worker process really exits."""
+    out_root_key = str(out_root.expanduser().resolve())
+    existing = _WORKER_OWNER_LEASES.get(out_root_key)
+    if existing is not None:
+        try:
+            fcntl.flock(existing.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except (OSError, ValueError):
+            _WORKER_OWNER_LEASES.pop(out_root_key, None)
+            try:
+                existing.close()
+            except Exception:
+                pass
+    lease_path = snapshot_worker_owner_lock_path(out_root)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = None
+    try:
+        descriptor = os.open(lease_path, flags, 0o600)
+        if not stat_module.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            descriptor = None
+            raise SnapshotWorkerOwnerInvalidError("lease_file_type")
+        handle = os.fdopen(descriptor, "r+", encoding="utf-8")
+        descriptor = None
+    except (OSError, ValueError) as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise SnapshotWorkerOwnerInvalidError("lease_open_failed") from exc
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        try:
+            active_owner = _load_snapshot_worker_owner(
+                snapshot_worker_owner_path(out_root)
+            )
+        except SnapshotWorkerOwnerInvalidError:
+            active_owner = None
+        raise PriorSnapshotWorkerActiveError(
+            active_owner,
+            "process_lifetime_lease_held",
+        ) from exc
+    except OSError as exc:
+        handle.close()
+        raise SnapshotWorkerOwnerInvalidError("lease_lock_failed") from exc
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()} {WORKER_PROCESS_INSTANCE_ID} {utc_iso()}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        fsync_directory(lease_path.parent)
+    except Exception as exc:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        raise SnapshotWorkerOwnerInvalidError("lease_persist_failed") from exc
+    _WORKER_OWNER_LEASES[out_root_key] = handle
+
+
+def _release_snapshot_worker_lease(out_root: Path) -> None:
+    out_root_key = str(out_root.expanduser().resolve())
+    handle = _WORKER_OWNER_LEASES.pop(out_root_key, None)
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _positive_process_pid(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if 0 < pid <= 2_147_483_647 else None
+
+
+def _pid_liveness(pid: int) -> str:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return "exited"
+    except PermissionError:
+        return "alive"
+    except OSError:
+        return "unknown"
+    return "alive"
+
+
+def _valid_worker_process_identity(identity: Any) -> bool:
+    if not isinstance(identity, dict):
+        return False
+    if identity.get("schema_version") != WORKER_PROCESS_IDENTITY_SCHEMA_VERSION:
+        return False
+    source = identity.get("source")
+    if source == "linux_proc_stat":
+        boot_id = str(identity.get("boot_id") or "")
+        start_ticks = identity.get("start_time_ticks")
+        return bool(
+            re.fullmatch(
+                r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}",
+                boot_id,
+            )
+            and isinstance(start_ticks, int)
+            and not isinstance(start_ticks, bool)
+            and start_ticks > 0
+        )
+    if source == "ps_lstart":
+        start_time = str(identity.get("start_time") or "")
+        return bool(start_time and len(start_time) <= 128)
+    return False
+
+
+def snapshot_process_identity(pid: int) -> dict[str, Any]:
+    """Return PID liveness plus a start-identity that survives PID reuse."""
+    normalized_pid = _positive_process_pid(pid)
+    if normalized_pid is None:
+        return {"state": "exited", "identity": None}
+    if sys.platform.startswith("linux"):
+        stat_path = Path(f"/proc/{normalized_pid}/stat")
+        try:
+            stat_text = stat_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {"state": "exited", "identity": None}
+        except (OSError, UnicodeError):
+            return {"state": _pid_liveness(normalized_pid), "identity": None}
+        closing_parenthesis = stat_text.rfind(")")
+        fields = (
+            stat_text[closing_parenthesis + 2 :].split()
+            if closing_parenthesis >= 0
+            else []
+        )
+        if len(fields) <= 19:
+            return {"state": _pid_liveness(normalized_pid), "identity": None}
+        if fields[0] in {"X", "Z"}:
+            return {"state": "exited", "identity": None}
+        try:
+            start_ticks = int(fields[19])
+            boot_id = (
+                Path("/proc/sys/kernel/random/boot_id")
+                .read_text(encoding="utf-8")
+                .strip()
+                .lower()
+            )
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return {"state": _pid_liveness(normalized_pid), "identity": None}
+        identity = {
+            "schema_version": WORKER_PROCESS_IDENTITY_SCHEMA_VERSION,
+            "source": "linux_proc_stat",
+            "boot_id": boot_id,
+            "start_time_ticks": start_ticks,
+        }
+        if not _valid_worker_process_identity(identity):
+            return {"state": _pid_liveness(normalized_pid), "identity": None}
+        return {"state": "alive", "identity": identity}
+    if _pid_liveness(normalized_pid) == "exited":
+        return {"state": "exited", "identity": None}
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "stat=", "-o", "lstart=", "-p", str(normalized_pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"state": _pid_liveness(normalized_pid), "identity": None}
+    normalized_output = " ".join(completed.stdout.split())
+    output_fields = normalized_output.split(maxsplit=1)
+    if completed.returncode != 0 or len(output_fields) != 2:
+        return {"state": _pid_liveness(normalized_pid), "identity": None}
+    if output_fields[0].startswith(("X", "Z")):
+        return {"state": "exited", "identity": None}
+    identity = {
+        "schema_version": WORKER_PROCESS_IDENTITY_SCHEMA_VERSION,
+        "source": "ps_lstart",
+        "start_time": output_fields[1],
+    }
+    if not _valid_worker_process_identity(identity):
+        return {"state": _pid_liveness(normalized_pid), "identity": None}
+    return {"state": "alive", "identity": identity}
+
+
+def _worker_owner_record_valid(owner: Any) -> bool:
+    if not isinstance(owner, dict):
+        return False
+    if owner.get("schema_version") != WORKER_OWNER_SCHEMA_VERSION:
+        return False
+    if _positive_process_pid(owner.get("pid")) is None:
+        return False
+    worker_instance_id = str(owner.get("worker_instance_id") or "")
+    legacy_recovered = owner.get("legacy_status_recovered") is True
+    if not re.fullmatch(r"[a-f0-9]{32}", worker_instance_id):
+        if not (legacy_recovered and worker_instance_id == ""):
+            return False
+    identity = owner.get("process_identity")
+    if identity is None:
+        return legacy_recovered
+    return _valid_worker_process_identity(identity)
+
+
+def _worker_owner_record(
+    *,
+    pid: int,
+    worker_instance_id: str,
+    process_identity: dict[str, Any] | None,
+    legacy_status_recovered: bool,
+) -> dict[str, Any]:
+    normalized_instance = str(worker_instance_id or "")
+    if legacy_status_recovered and not re.fullmatch(
+        r"[a-f0-9]{32}", normalized_instance
+    ):
+        normalized_instance = ""
+    record = {
+        "schema_version": WORKER_OWNER_SCHEMA_VERSION,
+        "pid": int(pid),
+        "worker_instance_id": normalized_instance,
+        "process_identity": process_identity,
+        "legacy_status_recovered": bool(legacy_status_recovered),
+        "acquired_at": utc_iso(),
+    }
+    if not _worker_owner_record_valid(record):
+        raise SnapshotWorkerOwnerInvalidError("record_contract")
+    return record
+
+
+def _write_snapshot_worker_owner(path: Path, owner: dict[str, Any]) -> None:
+    if not _worker_owner_record_valid(owner):
+        raise SnapshotWorkerOwnerInvalidError("write_contract")
+    atomic_json(path, owner)
+    fsync_directory(path.parent)
+
+
+def _load_snapshot_worker_owner(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise SnapshotWorkerOwnerInvalidError("file_type")
+    try:
+        if path.stat().st_size > WORKER_OWNER_MAX_BYTES:
+            raise SnapshotWorkerOwnerInvalidError("oversized")
+        owner = json.loads(path.read_text(encoding="utf-8"))
+    except SnapshotWorkerOwnerInvalidError:
+        raise
+    except Exception as exc:
+        raise SnapshotWorkerOwnerInvalidError("unreadable") from exc
+    if not _worker_owner_record_valid(owner):
+        raise SnapshotWorkerOwnerInvalidError("contract")
+    return owner
+
+
+def _legacy_worker_owner_candidate(status: Any) -> dict[str, Any] | None:
+    if not isinstance(status, dict):
+        return None
+    if status.get("schema_version") != WORKER_STATUS_SCHEMA_VERSION:
+        return None
+    if not any(
+        status.get(field) is True
+        for field in (
+            "worker_restart_required",
+            "cleanup_deferred_until_worker_restart",
+            "running",
+            "attempt_running",
+        )
+    ):
+        return None
+    pid = _positive_process_pid(status.get("pid"))
+    if pid is None:
+        return None
+    worker_instance_id = str(status.get("worker_instance_id") or "")
+    if pid == os.getpid() and worker_instance_id == WORKER_PROCESS_INSTANCE_ID:
+        return None
+    return {"pid": pid, "worker_instance_id": worker_instance_id}
+
+
+def _interrupted_snapshot_partial_exists(out_root: Path) -> bool:
+    snapshots = out_root / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    return any(
+        path.is_dir() and PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name)
+        for path in snapshots.iterdir()
+    )
+
+
+def ensure_snapshot_worker_owner(
+    out_root: Path,
+    *,
+    legacy_statuses: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
+    """Claim cleanup ownership only after any prior process has exited."""
+    _acquire_snapshot_worker_lease(out_root)
+    owner_path = snapshot_worker_owner_path(out_root)
+    owner = _load_snapshot_worker_owner(owner_path)
+    if owner is not None:
+        owner_pid = int(owner["pid"])
+        owner_instance = str(owner.get("worker_instance_id") or "")
+        if (
+            owner_pid == os.getpid()
+            and owner_instance == WORKER_PROCESS_INSTANCE_ID
+        ):
+            current = snapshot_process_identity(os.getpid())
+            current_identity = current.get("identity")
+            if current.get("state") != "alive" or not _valid_worker_process_identity(
+                current_identity
+            ):
+                raise RuntimeError("evaluator_snapshot_process_identity_unavailable")
+            stored_current_identity = owner.get("process_identity")
+            if (
+                stored_current_identity is not None
+                and stored_current_identity != current_identity
+            ):
+                raise SnapshotWorkerOwnerInvalidError(
+                    "current_identity_mismatch"
+                )
+            if stored_current_identity is None:
+                owner = _worker_owner_record(
+                    pid=os.getpid(),
+                    worker_instance_id=WORKER_PROCESS_INSTANCE_ID,
+                    process_identity=current_identity,
+                    legacy_status_recovered=False,
+                )
+                _write_snapshot_worker_owner(owner_path, owner)
+            return owner
+        observed = snapshot_process_identity(owner_pid)
+        observed_state = str(observed.get("state") or "unknown")
+        observed_identity = observed.get("identity")
+        stored_identity = owner.get("process_identity")
+        identity_mismatch = bool(
+            observed_state == "alive"
+            and _valid_worker_process_identity(observed_identity)
+            and _valid_worker_process_identity(stored_identity)
+            and observed_identity != stored_identity
+        )
+        if observed_state != "exited" and not identity_mismatch:
+            liveness = (
+                "alive_matching_identity"
+                if observed_state == "alive"
+                and observed_identity == stored_identity
+                and _valid_worker_process_identity(stored_identity)
+                else "identity_unavailable"
+            )
+            raise PriorSnapshotWorkerActiveError(owner, liveness)
+    else:
+        prior_worker_exit_proven = False
+        for legacy_status in legacy_statuses:
+            candidate = _legacy_worker_owner_candidate(legacy_status)
+            if candidate is None:
+                continue
+            observed = snapshot_process_identity(int(candidate["pid"]))
+            if observed.get("state") == "exited":
+                prior_worker_exit_proven = True
+                continue
+            identity = observed.get("identity")
+            legacy_owner = _worker_owner_record(
+                pid=int(candidate["pid"]),
+                worker_instance_id=str(candidate.get("worker_instance_id") or ""),
+                process_identity=(
+                    identity if _valid_worker_process_identity(identity) else None
+                ),
+                legacy_status_recovered=True,
+            )
+            _write_snapshot_worker_owner(owner_path, legacy_owner)
+            raise PriorSnapshotWorkerActiveError(
+                legacy_owner,
+                (
+                    "alive_identity_captured"
+                    if _valid_worker_process_identity(identity)
+                    else "identity_unavailable"
+                ),
+            )
+        if (
+            _interrupted_snapshot_partial_exists(out_root)
+            and not prior_worker_exit_proven
+        ):
+            raise SnapshotWorkerOwnerInvalidError(
+                "missing_with_interrupted_partials"
+            )
+    current = snapshot_process_identity(os.getpid())
+    current_identity = current.get("identity")
+    if current.get("state") != "alive" or not _valid_worker_process_identity(
+        current_identity
+    ):
+        raise RuntimeError("evaluator_snapshot_process_identity_unavailable")
+    current_owner = _worker_owner_record(
+        pid=os.getpid(),
+        worker_instance_id=WORKER_PROCESS_INSTANCE_ID,
+        process_identity=current_identity,
+        legacy_status_recovered=False,
+    )
+    _write_snapshot_worker_owner(owner_path, current_owner)
+    return current_owner
+
+
 def shared_stage_budget_anchor_path(
     status_path: Path,
     attempt_id: Any,
@@ -984,6 +1430,9 @@ def exception_requires_worker_restart(exc: BaseException) -> bool:
 def snapshot_component_failure_code(exc: BaseException) -> str:
     text = str(exc)
     known = (
+        "evaluator_snapshot_prior_worker_active",
+        "evaluator_snapshot_worker_owner_invalid",
+        "evaluator_snapshot_process_identity_unavailable",
         "source_read_lock_budget_exceeded",
         "shared_stage_capacity_insufficient",
         "shared_stage_estimate_timeout",
@@ -1117,6 +1566,9 @@ def snapshot_failure_code(exc: BaseException) -> str:
         return "concurrent_evaluator_snapshot_failed"
     known = (
         "evaluator_snapshot_lock_held",
+        "evaluator_snapshot_prior_worker_active",
+        "evaluator_snapshot_worker_owner_invalid",
+        "evaluator_snapshot_process_identity_unavailable",
         "source_read_lock_budget_exceeded",
         "shared_stage_capacity_insufficient",
         "shared_stage_estimate_timeout",
@@ -7330,13 +7782,25 @@ def self_test() -> None:
 
 def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
     started = utc_iso()
-    out_root_key = str(Path(args.out_root).expanduser().resolve())
+    out_root_path = Path(args.out_root).expanduser().resolve()
+    out_root_key = str(out_root_path)
     status_path = (
         Path(args.status_out).expanduser().resolve()
         if args.status_out
         else None
     )
     previous = read_json_object(status_path) if status_path else {}
+    canonical_status_path = out_root_path / "snapshot_status.json"
+    canonical_previous = (
+        previous
+        if status_path == canonical_status_path
+        else read_json_object(canonical_status_path)
+    )
+    legacy_statuses = tuple(
+        status
+        for status in (canonical_previous, previous)
+        if isinstance(status, dict) and status
+    )
     poisoned_status = _WORKER_RESTART_POISONED_OUT_ROOTS.get(out_root_key)
     previous_worker_instance_id = str(
         previous.get("worker_instance_id") or ""
@@ -7458,16 +7922,21 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "worker_restart_required": False,
         "cleanup_deferred_until_worker_restart": False,
+        "worker_owner_path": str(snapshot_worker_owner_path(out_root_path)),
         "promotion_allowed": False,
     }
     lock_acquired = False
     try:
         with exclusive_lock(Path(args.lock_file).expanduser().resolve()):
             lock_acquired = True
+            ensure_snapshot_worker_owner(
+                out_root_path,
+                legacy_statuses=legacy_statuses,
+            )
             if status_path:
                 atomic_json(status_path, base_status)
             interrupted_partials_removed = cleanup_interrupted_partials(
-                Path(args.out_root).expanduser().resolve()
+                out_root_path
             )
             manifest = build_snapshot_bundle(
                 sources={
@@ -7630,12 +8099,26 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             ),
         }
+        prior_worker_pid = _positive_process_pid(
+            getattr(exc, "prior_worker_pid", None)
+        )
+        if prior_worker_pid is not None:
+            status["prior_worker_pid"] = prior_worker_pid
+            status["prior_worker_identity_source"] = str(
+                getattr(exc, "prior_worker_identity_source", "unknown")
+            )
+        if hasattr(exc, "prior_worker_liveness"):
+            status["prior_worker_liveness"] = str(
+                getattr(exc, "prior_worker_liveness", "unknown")
+            )
         if worker_restart_required:
             _WORKER_RESTART_POISONED_OUT_ROOTS[out_root_key] = json.loads(
                 json.dumps(status)
             )
         if status_path and lock_acquired:
             atomic_json(status_path, status)
+    if not continuous_worker and status.get("worker_restart_required") is not True:
+        _release_snapshot_worker_lease(out_root_path)
     print(json.dumps(status, sort_keys=True), flush=True)
     return status
 

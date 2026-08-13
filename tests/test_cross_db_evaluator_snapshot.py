@@ -1,7 +1,9 @@
 import importlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -36,6 +38,9 @@ import paper_trade_monitor as paper_monitor  # noqa: E402
 @pytest.fixture(autouse=True)
 def snapshot_commit(monkeypatch):
     monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
+    yield
+    for out_root_key in list(snapshot_module._WORKER_OWNER_LEASES):
+        snapshot_module._release_snapshot_worker_lease(Path(out_root_key))
 
 
 def create_sources(root):
@@ -4523,6 +4528,309 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
     )
 
 
+def process_identity_fixture(label):
+    return {
+        "schema_version": (
+            snapshot_module.WORKER_PROCESS_IDENTITY_SCHEMA_VERSION
+        ),
+        "source": "ps_lstart",
+        "start_time": label,
+    }
+
+
+def test_snapshot_process_identity_binds_current_pid_to_start_time():
+    observed = snapshot_module.snapshot_process_identity(os.getpid())
+
+    assert observed["state"] == "alive"
+    assert snapshot_module._valid_worker_process_identity(
+        observed["identity"]
+    )
+
+
+def test_linux_process_identity_binds_boot_and_start_ticks(monkeypatch):
+    stat_fields = ["S", *("0" for _ in range(18)), "987654", "0"]
+    boot_id = "12345678-1234-1234-1234-123456789abc"
+
+    def proc_read_text(path, *, encoding):
+        assert encoding == "utf-8"
+        if str(path) == "/proc/424242/stat":
+            return f"424242 (worker name) {' '.join(stat_fields)}"
+        if str(path) == "/proc/sys/kernel/random/boot_id":
+            return f"{boot_id}\n"
+        raise AssertionError(path)
+
+    monkeypatch.setattr(snapshot_module.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "read_text", proc_read_text)
+
+    observed = snapshot_module.snapshot_process_identity(424242)
+
+    assert observed == {
+        "state": "alive",
+        "identity": {
+            "schema_version": (
+                snapshot_module.WORKER_PROCESS_IDENTITY_SCHEMA_VERSION
+            ),
+            "source": "linux_proc_stat",
+            "boot_id": boot_id,
+            "start_time_ticks": 987654,
+        },
+    }
+
+
+def test_worker_owner_lease_remains_held_until_process_release(tmp_path):
+    out_root = tmp_path / "worker-evidence"
+    snapshot_module.ensure_snapshot_worker_owner(out_root)
+    lease_path = snapshot_module.snapshot_worker_owner_lock_path(out_root)
+    partial = (
+        out_root / "snapshots" / ".20260101T000000Z-1234abcd.partial"
+    )
+    partial.mkdir(parents=True)
+    (partial / ".paper-decision-events-stage.db").write_bytes(b"stage")
+    replacement_status_path = out_root / "replacement-status.json"
+    replacement = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "cross_db_evaluator_snapshot.py"),
+            "--out-root",
+            str(out_root),
+            "--lock-file",
+            str(tmp_path / "replacement.lock"),
+            "--status-out",
+            str(replacement_status_path),
+            "--max-runs",
+            "1",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    replacement_status = json.loads(
+        replacement_status_path.read_text(encoding="utf-8")
+    )
+
+    assert replacement.returncode == 1
+    assert partial.is_dir()
+    assert replacement_status["last_failure_code"] == (
+        "evaluator_snapshot_prior_worker_active"
+    )
+    assert replacement_status["worker_restart_required"] is True
+    assert replacement_status["prior_worker_liveness"] == (
+        "process_lifetime_lease_held"
+    )
+
+    probe_code = (
+        "import fcntl,pathlib,sys;"
+        "handle=pathlib.Path(sys.argv[1]).open('r+');"
+        "result='acquired';"
+        "\ntry: fcntl.flock(handle.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)"
+        "\nexcept BlockingIOError: result='blocked'"
+        "\nprint(result)"
+    )
+
+    snapshot_module._release_snapshot_worker_lease(out_root)
+    released_probe = subprocess.run(
+        [sys.executable, "-c", probe_code, str(lease_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+    assert released_probe.stdout.strip() == "acquired"
+
+
+def test_worker_owner_identity_mismatch_allows_pid_reuse_takeover(
+    tmp_path,
+    monkeypatch,
+):
+    out_root = tmp_path / "worker-evidence"
+    owner_path = snapshot_module.snapshot_worker_owner_path(out_root)
+    owner_path.parent.mkdir(parents=True)
+    previous_identity = process_identity_fixture("previous-start")
+    reused_identity = process_identity_fixture("reused-start")
+    current_identity = process_identity_fixture("current-start")
+    previous_owner = snapshot_module._worker_owner_record(
+        pid=424242,
+        worker_instance_id="0" * 32,
+        process_identity=previous_identity,
+        legacy_status_recovered=False,
+    )
+    snapshot_module.atomic_json(owner_path, previous_owner)
+
+    def identity_probe(pid):
+        if pid == 424242:
+            return {"state": "alive", "identity": reused_identity}
+        assert pid == os.getpid()
+        return {"state": "alive", "identity": current_identity}
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        identity_probe,
+    )
+    claimed = snapshot_module.ensure_snapshot_worker_owner(out_root)
+
+    assert claimed["pid"] == os.getpid()
+    assert claimed["worker_instance_id"] == (
+        snapshot_module.WORKER_PROCESS_INSTANCE_ID
+    )
+    assert claimed["process_identity"] == current_identity
+    assert json.loads(owner_path.read_text(encoding="utf-8")) == claimed
+
+
+def test_worker_owner_unknown_identity_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    out_root = tmp_path / "worker-evidence"
+    owner_path = snapshot_module.snapshot_worker_owner_path(out_root)
+    owner_path.parent.mkdir(parents=True)
+    previous_owner = snapshot_module._worker_owner_record(
+        pid=424242,
+        worker_instance_id="0" * 32,
+        process_identity=process_identity_fixture("previous-start"),
+        legacy_status_recovered=False,
+    )
+    snapshot_module.atomic_json(owner_path, previous_owner)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda _pid: {"state": "alive", "identity": None},
+    )
+
+    with pytest.raises(
+        snapshot_module.PriorSnapshotWorkerActiveError,
+        match="evaluator_snapshot_prior_worker_active",
+    ) as raised:
+        snapshot_module.ensure_snapshot_worker_owner(out_root)
+
+    assert raised.value.prior_worker_liveness == "identity_unavailable"
+    assert json.loads(owner_path.read_text(encoding="utf-8")) == previous_owner
+
+
+def test_current_worker_owner_identity_mismatch_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    out_root = tmp_path / "worker-evidence"
+    owner_path = snapshot_module.snapshot_worker_owner_path(out_root)
+    owner_path.parent.mkdir(parents=True)
+    owner = snapshot_module._worker_owner_record(
+        pid=os.getpid(),
+        worker_instance_id=snapshot_module.WORKER_PROCESS_INSTANCE_ID,
+        process_identity=process_identity_fixture("recorded-start"),
+        legacy_status_recovered=False,
+    )
+    snapshot_module.atomic_json(owner_path, owner)
+    monkeypatch.setattr(
+        snapshot_module,
+        "snapshot_process_identity",
+        lambda _pid: {
+            "state": "alive",
+            "identity": process_identity_fixture("different-start"),
+        },
+    )
+
+    with pytest.raises(
+        snapshot_module.SnapshotWorkerOwnerInvalidError,
+        match="current_identity_mismatch",
+    ):
+        snapshot_module.ensure_snapshot_worker_owner(out_root)
+
+    assert json.loads(owner_path.read_text(encoding="utf-8")) == owner
+
+
+def test_invalid_worker_owner_blocks_cleanup_and_build(tmp_path, monkeypatch):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=0)
+    owner_path = snapshot_module.snapshot_worker_owner_path(
+        Path(args.out_root)
+    )
+    owner_path.parent.mkdir(parents=True)
+    owner_path.write_text("{not-json", encoding="utf-8")
+    partial = (
+        Path(args.out_root)
+        / "snapshots"
+        / ".20260101T000000Z-1234abcd.partial"
+    )
+    partial.mkdir(parents=True)
+    (partial / ".paper-decision-events-stage.db").write_bytes(b"stage")
+    build_called = False
+
+    def unexpected_build(**_kwargs):
+        nonlocal build_called
+        build_called = True
+        raise AssertionError("invalid owner must block before build")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "build_snapshot_bundle",
+        unexpected_build,
+    )
+    args.status_out = None
+    try:
+        status = snapshot_module.run_snapshot_once(args)
+
+        assert build_called is False
+        assert partial.is_dir()
+        assert status["last_failure_code"] == (
+            "evaluator_snapshot_worker_owner_invalid"
+        )
+        assert status["worker_restart_required"] is True
+        assert status["cleanup_deferred_until_worker_restart"] is True
+    finally:
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        owner_path.unlink(missing_ok=True)
+        cleanup_interrupted_partials(Path(args.out_root))
+
+
+def test_missing_worker_owner_with_unattributed_partial_fails_closed(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=0)
+    partial = (
+        Path(args.out_root)
+        / "snapshots"
+        / ".20260101T000000Z-1234abcd.partial"
+    )
+    partial.mkdir(parents=True)
+    (partial / ".paper-decision-events-stage.db").write_bytes(b"stage")
+    build_called = False
+
+    def unexpected_build(**_kwargs):
+        nonlocal build_called
+        build_called = True
+        raise AssertionError("unattributed partial must block before build")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "build_snapshot_bundle",
+        unexpected_build,
+    )
+    args.status_out = None
+    try:
+        status = snapshot_module.run_snapshot_once(args)
+
+        assert build_called is False
+        assert partial.is_dir()
+        assert status["last_failure_code"] == (
+            "evaluator_snapshot_worker_owner_invalid"
+        )
+        assert status["worker_restart_required"] is True
+        assert status["cleanup_deferred_until_worker_restart"] is True
+    finally:
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        cleanup_interrupted_partials(Path(args.out_root))
+
+
 def test_unreaped_parallel_stage_stops_continuous_worker_for_supervisor_restart(
     tmp_path,
     monkeypatch,
@@ -4687,6 +4995,9 @@ def test_unreaped_parallel_stage_persists_failed_status_without_history_anchor(
         assert persisted["next_attempt_delay_sec"] is None
         assert persisted["next_attempt_at"] is None
         assert partial.is_dir()
+        assert str(Path(args.out_root).resolve()) in (
+            snapshot_module._WORKER_OWNER_LEASES
+        )
         evidence = persisted["shared_stage_budget"]
         assert evidence["cleanup_completed"] is False
         assert evidence["stage_files_removed"] is False
@@ -4861,6 +5172,7 @@ def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
         poison_map_before_reload = (
             snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS
         )
+        owner_leases_before_reload = snapshot_module._WORKER_OWNER_LEASES
         run_lock_before_reload = snapshot_module._RUN_SNAPSHOT_ONCE_LOCK
         worker_instance_before_reload = (
             snapshot_module.WORKER_PROCESS_INSTANCE_ID
@@ -4874,6 +5186,7 @@ def test_unreaped_stage_status_write_failure_poison_precedes_persistence(
             snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS
             is poison_map_before_reload
         )
+        assert snapshot_module._WORKER_OWNER_LEASES is owner_leases_before_reload
         assert snapshot_module._RUN_SNAPSHOT_ONCE_LOCK is run_lock_before_reload
 
         reentered_build = False
@@ -4965,6 +5278,154 @@ def test_new_worker_instance_cleans_deferred_partial_before_attempt(
     assert status["worker_instance_id"] == (
         snapshot_module.WORKER_PROCESS_INSTANCE_ID
     )
+
+
+def test_replacement_worker_preserves_partial_while_prior_worker_is_alive(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=0)
+    status_path = Path(args.status_out)
+    status_path.parent.mkdir(parents=True)
+    prior_instance = (
+        "0" * 32
+        if snapshot_module.WORKER_PROCESS_INSTANCE_ID != "0" * 32
+        else "1" * 32
+    )
+    partial = (
+        Path(args.out_root)
+        / "snapshots"
+        / ".20260101T000000Z-1234abcd.partial"
+    )
+    partial.mkdir(parents=True)
+    stage_path = partial / ".paper-decision-events-stage.db"
+    stage_path.write_bytes(b"stage")
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pathlib,sys,time;"
+                "handle=pathlib.Path(sys.argv[1]).open('rb');"
+                "print('ready', flush=True);"
+                "time.sleep(30)"
+            ),
+            str(stage_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    build_observations = []
+
+    def replacement_build_probe(**_kwargs):
+        build_observations.append(partial.exists())
+        raise RuntimeError("replacement_process_probe_stop")
+
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        status_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": snapshot_module.WORKER_STATUS_SCHEMA_VERSION,
+                    "pid": holder.pid,
+                    "worker_instance_id": prior_instance,
+                    "status": "failed",
+                    "running": False,
+                    "attempt_running": False,
+                    "accepted": False,
+                    "worker_restart_required": True,
+                    "cleanup_deferred_until_worker_restart": True,
+                    "promotion_allowed": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            snapshot_module,
+            "build_snapshot_bundle",
+            replacement_build_probe,
+        )
+
+        # The production status can be overwritten by the failed replacement;
+        # the canonical owner record must retain the actual old PID.
+        blocked = snapshot_module.run_snapshot_once(args)
+
+        assert build_observations == []
+        assert partial.is_dir()
+        assert stage_path.is_file()
+        assert holder.poll() is None
+        assert blocked["status"] == "failed"
+        assert blocked["accepted"] is False
+        assert blocked["last_failure_code"] == (
+            "evaluator_snapshot_prior_worker_active"
+        )
+        assert blocked["worker_restart_required"] is True
+        assert blocked["cleanup_deferred_until_worker_restart"] is True
+        assert json.loads(status_path.read_text(encoding="utf-8")) == blocked
+        owner_path = snapshot_module.snapshot_worker_owner_path(
+            Path(args.out_root)
+        )
+        blocked_owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        assert blocked_owner["pid"] == holder.pid
+        assert blocked_owner["legacy_status_recovered"] is True
+
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        args.status_out = None
+        no_status_blocked = snapshot_module.run_snapshot_once(args)
+        assert build_observations == []
+        assert partial.is_dir()
+        assert no_status_blocked["last_failure_code"] == (
+            "evaluator_snapshot_prior_worker_active"
+        )
+
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        alternate_status_path = Path(args.out_root) / "replacement-status.json"
+        args.status_out = str(alternate_status_path)
+        alternate_blocked = snapshot_module.run_snapshot_once(args)
+        assert build_observations == []
+        assert partial.is_dir()
+        assert alternate_blocked["last_failure_code"] == (
+            "evaluator_snapshot_prior_worker_active"
+        )
+        assert json.loads(
+            alternate_status_path.read_text(encoding="utf-8")
+        ) == alternate_blocked
+
+        holder.terminate()
+        holder.wait(timeout=3)
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        args.status_out = None
+        replacement = snapshot_module.run_snapshot_once(args)
+        assert build_observations == [False]
+        assert not partial.exists()
+        assert replacement["worker_restart_required"] is False
+        replacement_owner = json.loads(
+            owner_path.read_text(encoding="utf-8")
+        )
+        assert replacement_owner["pid"] == os.getpid()
+        assert replacement_owner["legacy_status_recovered"] is False
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=3)
+        snapshot_module._WORKER_RESTART_POISONED_OUT_ROOTS.pop(
+            str(Path(args.out_root).resolve()),
+            None,
+        )
+        cleanup_interrupted_partials(Path(args.out_root))
 
 
 def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_path, monkeypatch):
