@@ -708,6 +708,28 @@ def _release_snapshot_worker_lease(out_root: Path) -> None:
         handle.close()
 
 
+def _release_direct_snapshot_worker_owner(
+    out_root: Path,
+    owner: dict[str, Any],
+) -> None:
+    if _interrupted_snapshot_partial_exists(out_root):
+        raise SnapshotWorkerOwnerInvalidError(
+            "direct_owner_release_with_partials"
+        )
+    if owner.get("lease_identity") != _snapshot_worker_lease_identity(out_root):
+        raise SnapshotWorkerOwnerInvalidError(
+            "direct_owner_release_lease_mismatch"
+        )
+    owner_path = snapshot_worker_owner_path(out_root)
+    if _load_snapshot_worker_owner(owner_path) != owner:
+        raise SnapshotWorkerOwnerInvalidError(
+            "direct_owner_release_record_mismatch"
+        )
+    owner_path.unlink()
+    fsync_directory(owner_path.parent)
+    _release_snapshot_worker_lease(out_root)
+
+
 def _snapshot_worker_lease_identity(out_root: Path) -> dict[str, int]:
     out_root_key = str(out_root.expanduser().resolve())
     handle = _WORKER_OWNER_LEASES.get(out_root_key)
@@ -719,6 +741,17 @@ def _snapshot_worker_lease_identity(out_root: Path) -> dict[str, int]:
         raise SnapshotWorkerOwnerInvalidError("lease_identity_unavailable") from exc
     if not stat_module.S_ISREG(file_stat.st_mode):
         raise SnapshotWorkerOwnerInvalidError("lease_file_type")
+    lease_path = snapshot_worker_owner_lock_path(out_root)
+    try:
+        path_stat = lease_path.lstat()
+    except OSError as exc:
+        raise SnapshotWorkerOwnerInvalidError("lease_path_unavailable") from exc
+    if (
+        not stat_module.S_ISREG(path_stat.st_mode)
+        or int(path_stat.st_dev) != int(file_stat.st_dev)
+        or int(path_stat.st_ino) != int(file_stat.st_ino)
+    ):
+        raise SnapshotWorkerOwnerInvalidError("lease_path_replaced")
     return {
         "device": int(file_stat.st_dev),
         "inode": int(file_stat.st_ino),
@@ -1002,12 +1035,22 @@ def _write_snapshot_partial_owner(
     *,
     snapshot_id: str,
     owner: dict[str, Any],
+    bootstrap: bool = False,
 ) -> dict[str, Any]:
     if partial_dir.is_symlink() or not partial_dir.is_dir():
         raise SnapshotWorkerOwnerInvalidError("partial_owner_directory")
     if partial_dir.parent.name != "snapshots":
         raise SnapshotWorkerOwnerInvalidError("partial_owner_location")
-    if _snapshot_id_from_partial_dir(partial_dir) != snapshot_id:
+    if bootstrap:
+        expected_prefix = f".{snapshot_id}.partial-bootstrap-"
+        if not (
+            partial_dir.name.startswith(expected_prefix)
+            and re.fullmatch(r"[a-f0-9]{8}", partial_dir.name[len(expected_prefix) :])
+        ):
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_owner_bootstrap_name"
+            )
+    elif _snapshot_id_from_partial_dir(partial_dir) != snapshot_id:
         raise SnapshotWorkerOwnerInvalidError("partial_owner_snapshot_id")
     if not _worker_owner_record_valid(owner):
         raise SnapshotWorkerOwnerInvalidError("partial_owner_root_contract")
@@ -1069,12 +1112,16 @@ def _load_snapshot_partial_owner(partial_dir: Path) -> dict[str, Any]:
 
 def _authorize_snapshot_partial_cleanup(
     partial_dir: Path,
+    *,
+    expected_lease_identity: dict[str, int],
 ) -> tuple[dict[str, Any], tuple[int, int]]:
     if partial_dir.is_symlink() or not partial_dir.is_dir():
         raise SnapshotWorkerOwnerInvalidError("partial_file_type")
     directory_stat = partial_dir.stat()
     record = _load_snapshot_partial_owner(partial_dir)
     owner = record["owner"]
+    if owner.get("lease_identity") != expected_lease_identity:
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_lease_mismatch")
     owner_pid = int(owner["pid"])
     stored_identity = owner["process_identity"]
     observed = snapshot_process_identity(owner_pid)
@@ -1934,17 +1981,35 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def snapshot_directory_report(path: Path, *, include_manifest: bool) -> dict[str, Any]:
+def snapshot_directory_report(
+    path: Path,
+    *,
+    include_manifest: bool,
+    allow_partial_owner: bool = False,
+) -> dict[str, Any]:
     allowed = set(SNAPSHOT_DATABASE_FILENAMES)
     if include_manifest:
         allowed.add("manifest.json")
     entries = list(path.iterdir()) if path.is_dir() else []
-    files = [item for item in entries if item.is_file()]
+    files = [
+        item
+        for item in entries
+        if item.is_file()
+        and not (
+            allow_partial_owner and item.name == PARTIAL_OWNER_FILENAME
+        )
+    ]
     actual_names = {item.name for item in files}
     unexpected = sorted(
         item.name
         for item in entries
-        if not item.is_file() or item.name not in allowed
+        if not (
+            allow_partial_owner
+            and item.is_file()
+            and not item.is_symlink()
+            and item.name == PARTIAL_OWNER_FILENAME
+        )
+        and (not item.is_file() or item.name not in allowed)
     )
     missing = sorted(allowed - actual_names)
     sizes = {item.name: int(item.stat().st_size) for item in files}
@@ -2258,13 +2323,18 @@ def write_bounded_manifest(
     manifest: dict[str, Any],
     *,
     output_cap_bytes: int,
+    allow_partial_owner: bool = False,
 ) -> dict[str, Any]:
     manifest_path = partial_dir / "manifest.json"
     manifest["manifest_size_bytes"] = 0
     manifest["output_size_bytes"] = int(manifest.get("database_payload_size_bytes") or 0)
     for _attempt in range(8):
         atomic_json(manifest_path, manifest)
-        directory = snapshot_directory_report(partial_dir, include_manifest=True)
+        directory = snapshot_directory_report(
+            partial_dir,
+            include_manifest=True,
+            allow_partial_owner=allow_partial_owner,
+        )
         if not directory["accepted"]:
             raise RuntimeError(f"snapshot bundle contains unexpected files: {directory}")
         manifest_size = int(directory["files"]["manifest.json"])
@@ -7407,14 +7477,43 @@ def cleanup_interrupted_partials(root: Path) -> list[str]:
     snapshots = root / "snapshots"
     if not snapshots.is_dir():
         return []
+    expected_lease_identity = _snapshot_worker_lease_identity(root)
     authorized: list[tuple[Path, dict[str, Any], tuple[int, int]]] = []
     for path in sorted(snapshots.iterdir(), key=lambda item: item.name):
         if not PARTIAL_SNAPSHOT_NAME_RE.fullmatch(path.name):
             continue
-        record, directory_identity = _authorize_snapshot_partial_cleanup(path)
+        record, directory_identity = _authorize_snapshot_partial_cleanup(
+            path,
+            expected_lease_identity=expected_lease_identity,
+        )
         authorized.append((path, record, directory_identity))
     removed = []
-    for path, expected_record, expected_directory_identity in authorized:
+    for index, (
+        path,
+        expected_record,
+        expected_directory_identity,
+    ) in enumerate(authorized):
+        expected_remaining = {
+            candidate.name: directory_identity
+            for candidate, _record, directory_identity in authorized[index:]
+        }
+        current_remaining: dict[str, tuple[int, int]] = {}
+        for candidate in snapshots.iterdir():
+            if not PARTIAL_SNAPSHOT_NAME_RE.fullmatch(candidate.name):
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise SnapshotWorkerOwnerInvalidError(
+                    "partial_inventory_file_type"
+                )
+            candidate_stat = candidate.stat()
+            current_remaining[candidate.name] = (
+                int(candidate_stat.st_dev),
+                int(candidate_stat.st_ino),
+            )
+        if current_remaining != expected_remaining:
+            raise SnapshotWorkerOwnerInvalidError(
+                "partial_inventory_changed_during_cleanup"
+            )
         if path.is_symlink() or not path.is_dir():
             raise SnapshotWorkerOwnerInvalidError("partial_changed_before_cleanup")
         current_stat = path.stat()
@@ -7428,10 +7527,14 @@ def cleanup_interrupted_partials(root: Path) -> list[str]:
             raise SnapshotWorkerOwnerInvalidError("partial_owner_changed_before_cleanup")
         shutil.rmtree(path)
         removed.append(str(path))
+    if _interrupted_snapshot_partial_exists(root):
+        raise SnapshotWorkerOwnerInvalidError(
+            "partial_inventory_changed_during_cleanup"
+        )
     return removed
 
 
-def build_snapshot_bundle(
+def _build_snapshot_bundle_owned(
     *,
     sources: dict[str, str],
     out_root: str,
@@ -7449,6 +7552,8 @@ def build_snapshot_bundle(
     previous_shared_stage_budget_anchor: dict[str, Any] | None = None,
     partial_owner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if partial_owner is None:
+        raise SnapshotWorkerOwnerInvalidError("partial_owner_required")
     root = Path(out_root).expanduser().resolve()
     source_paths = {name: Path(path).expanduser().resolve() for name, path in sources.items()}
     if set(source_paths) != set(DATABASE_SPECS):
@@ -7478,13 +7583,25 @@ def build_snapshot_bundle(
     partial_dir = snapshots_root / f".{sid}.partial"
     if final_dir.exists() or partial_dir.exists():
         raise FileExistsError(sid)
-    partial_dir.mkdir()
-    if partial_owner is not None:
+    bootstrap_dir = snapshots_root / (
+        f".{sid}.partial-bootstrap-{os.urandom(4).hex()}"
+    )
+    bootstrap_dir.mkdir()
+    try:
         _write_snapshot_partial_owner(
-            partial_dir,
+            bootstrap_dir,
             snapshot_id=sid,
             owner=partial_owner,
+            bootstrap=True,
         )
+        os.replace(bootstrap_dir, partial_dir)
+        fsync_directory(snapshots_root)
+    except BaseException:
+        if bootstrap_dir.exists():
+            shutil.rmtree(bootstrap_dir)
+        if partial_dir.exists():
+            shutil.rmtree(partial_dir)
+        raise
     preflight: dict[str, Any] | None = None
     shared_budget_plan: dict[str, Any] | None = None
     try:
@@ -7690,11 +7807,11 @@ def build_snapshot_bundle(
             int(report["snapshot_size_bytes"]) for report in database_reports.values()
         )
         output_cap_bytes = int(preflight["selective_snapshot_output_cap_bytes"])
-        if partial_owner is not None:
-            marker_path = snapshot_partial_owner_path(partial_dir)
-            marker_path.unlink()
-            fsync_directory(partial_dir)
-        payload_directory = snapshot_directory_report(partial_dir, include_manifest=False)
+        payload_directory = snapshot_directory_report(
+            partial_dir,
+            include_manifest=False,
+            allow_partial_owner=True,
+        )
         if not payload_directory["accepted"]:
             raise RuntimeError(f"snapshot payload contains unexpected files: {payload_directory}")
         if int(payload_directory["total_size_bytes"]) != database_payload_size_bytes:
@@ -7823,6 +7940,7 @@ def build_snapshot_bundle(
             partial_dir,
             manifest,
             output_cap_bytes=output_cap_bytes,
+            allow_partial_owner=True,
         )
         if manifest["output_cap_passed"] is not True:
             raise RuntimeError(f"cross-database snapshot output cap failed: {manifest}")
@@ -7837,6 +7955,9 @@ def build_snapshot_bundle(
         try:
             os.replace(partial_dir, final_dir)
             fsync_directory(snapshots_root)
+            final_marker_path = snapshot_partial_owner_path(final_dir)
+            final_marker_path.unlink()
+            fsync_directory(final_dir)
             publish_current(root, final_dir)
             fsync_directory(root)
             atomic_json(latest_path, manifest)
@@ -7902,6 +8023,77 @@ def build_snapshot_bundle(
                 )
             raise cleanup_exc from exc
         raise
+
+
+def build_snapshot_bundle(
+    *,
+    sources: dict[str, str],
+    out_root: str,
+    repo_root: str,
+    max_skew_sec: float = 300,
+    min_free_after_gib: float = 5,
+    max_output_gib: float = DEFAULT_MAX_OUTPUT_GIB,
+    review_history_hours: float = DEFAULT_REVIEW_HISTORY_HOURS,
+    long_history_hours: float = DEFAULT_LONG_HISTORY_HOURS,
+    source_busy_timeout_ms: int = 30000,
+    max_source_read_lock_sec: float = DEFAULT_MAX_SOURCE_READ_LOCK_SEC,
+    keep_previous: int = 0,
+    snapshot_id: str | None = None,
+    previous_shared_stage_budget: dict[str, Any] | None = None,
+    previous_shared_stage_budget_anchor: dict[str, Any] | None = None,
+    partial_owner: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if set(sources) != set(DATABASE_SPECS):
+        raise ValueError(f"sources must be exactly {sorted(DATABASE_SPECS)}")
+    normalized_review_hours = float(review_history_hours)
+    normalized_long_hours = float(long_history_hours)
+    if normalized_review_hours < 72:
+        raise ValueError("review_history_hours must cover at least 72 hours")
+    if normalized_long_hours < normalized_review_hours:
+        raise ValueError("long_history_hours must be >= review_history_hours")
+    if normalized_long_hours > MAX_RESEARCH_HISTORY_HOURS:
+        raise ValueError(
+            "long_history_hours must not exceed the 30-day research retention cap"
+        )
+    if int(source_busy_timeout_ms) < 0:
+        raise ValueError("source_busy_timeout_ms must be non-negative")
+    if float(max_source_read_lock_sec) <= 0:
+        raise ValueError("max_source_read_lock_sec must be positive")
+    if snapshot_id is not None and not SNAPSHOT_NAME_RE.fullmatch(snapshot_id):
+        raise ValueError(f"invalid snapshot id: {snapshot_id}")
+    root = Path(out_root).expanduser().resolve()
+    direct_owner = partial_owner is None
+    owner = partial_owner
+    if direct_owner:
+        owner = ensure_snapshot_worker_owner(root)
+        cleanup_interrupted_partials(root)
+    try:
+        manifest = _build_snapshot_bundle_owned(
+            sources=sources,
+            out_root=out_root,
+            repo_root=repo_root,
+            max_skew_sec=max_skew_sec,
+            min_free_after_gib=min_free_after_gib,
+            max_output_gib=max_output_gib,
+            review_history_hours=normalized_review_hours,
+            long_history_hours=normalized_long_hours,
+            source_busy_timeout_ms=source_busy_timeout_ms,
+            max_source_read_lock_sec=max_source_read_lock_sec,
+            keep_previous=keep_previous,
+            snapshot_id=snapshot_id,
+            previous_shared_stage_budget=previous_shared_stage_budget,
+            previous_shared_stage_budget_anchor=(
+                previous_shared_stage_budget_anchor
+            ),
+            partial_owner=owner,
+        )
+    except BaseException as exc:
+        if direct_owner and not exception_requires_worker_restart(exc):
+            _release_direct_snapshot_worker_owner(root, owner)
+        raise
+    if direct_owner:
+        _release_direct_snapshot_worker_owner(root, owner)
+    return manifest
 
 
 def self_test() -> None:
