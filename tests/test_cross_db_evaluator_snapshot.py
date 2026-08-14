@@ -266,15 +266,20 @@ def test_parallel_stage_required_flags_match_selection_contract():
         )
 
 
-def test_parallel_stage_bulk_pages_start_at_production_calibrated_half_gib():
+def test_parallel_stage_bulk_pages_start_at_production_calibrated_384_mib():
     threshold = snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
 
-    assert threshold == 512 * 1024**2
+    assert threshold == 384 * 1024**2
     assert snapshot_module.parallel_paper_stage_page_size(
         threshold - snapshot_module.SHARED_STAGE_PAGE_SIZE
     ) == snapshot_module.SHARED_STAGE_PAGE_SIZE
     assert snapshot_module.parallel_paper_stage_page_size(threshold) == (
         snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+    )
+    assert all(
+        snapshot_module.parallel_paper_stage_page_size(grant)
+        == snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+        for grant in (523_489_280, 530_358_272, 518_160_384)
     )
 
 

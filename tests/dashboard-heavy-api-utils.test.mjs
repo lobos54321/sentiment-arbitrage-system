@@ -64,14 +64,17 @@ import {
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
 
-test('parallel stage bulk-page claims use the production-calibrated half-GiB floor', () => {
+test('parallel stage bulk-page claims use the production-calibrated 384 MiB floor', () => {
   const threshold = PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES;
 
-  assert.equal(threshold, 512 * 1024 ** 2);
+  assert.equal(threshold, 384 * 1024 ** 2);
   assert.equal(parallelPaperStagePageClaimValid(65536, 65536, threshold), true);
   assert.equal(parallelPaperStagePageClaimValid(65536, 65536, threshold - 4096), false);
   assert.equal(parallelPaperStagePageClaimValid(4096, 4096, threshold - 4096), true);
   assert.equal(parallelPaperStagePageClaimValid(8192, 8192, threshold), false);
+  for (const grant of [523_489_280, 530_358_272, 518_160_384]) {
+    assert.equal(parallelPaperStagePageClaimValid(65536, 65536, grant), true);
+  }
 });
 
 test('shared stage hashes match the Python cross-runtime golden vector', () => {
