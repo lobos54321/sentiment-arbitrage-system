@@ -9424,6 +9424,12 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     },
   };
   const parallelPaperStageTables = Object.keys(parallelPaperStageConfigs);
+  const parallelPaperStageBulkPageSize = 65536;
+  const parallelPaperStageBulkPageMinBudgetBytes = 1024 ** 3;
+  const parallelPaperStagePageSizes = new Set([
+    4096,
+    parallelPaperStageBulkPageSize,
+  ]);
   const requiredParallelPaperStageTables = parallelPaperStageTables.filter(
     (table) => parallelPaperStageConfigs[table].required === true,
   );
@@ -11175,7 +11181,12 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && Number.isFinite(stageBudgetBytes)
         && stageBudgetBytes === diskParallelStageCaps[table]
         && stageSizeBytes <= stageBudgetBytes
-        && stagePageSize === 4096
+        && parallelPaperStagePageSizes.has(stagePageSize)
+        && stageSizeBytes % stagePageSize === 0
+        && (
+          stagePageSize !== parallelPaperStageBulkPageSize
+          || stageBudgetBytes >= parallelPaperStageBulkPageMinBudgetBytes
+        )
         && Number.isFinite(rowsCopied)
         && rowsCopied >= 0
         && Number.isFinite(rowsMerged)
@@ -11219,7 +11230,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && Array.isArray(nested.quick_check)
         && nested.quick_check.length === 1
         && nested.quick_check[0] === 'ok'
-        && Number(nested.stage_page_size) === 4096
+        && Number(nested.stage_page_size) === stagePageSize
         && Number(nested.stage_size_bytes) === stageSizeBytes
         && Number(nested.stage_budget_bytes) === stageBudgetBytes
         && nested.source_read_lock_budget_passed === true

@@ -23,9 +23,12 @@ from cross_db_evaluator_snapshot import (
     DATABASE_SPECS,
     MIN_CANDIDATE_STAGE_CAP_BYTES,
     MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
+    PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES,
+    PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE,
     PARALLEL_PAPER_OPTIONAL_STAGE_TABLES,
     PARALLEL_PAPER_REQUIRED_STAGE_TABLES,
     PARALLEL_PAPER_STAGE_CONFIGS,
+    PARALLEL_PAPER_STAGE_PAGE_SIZES,
     PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
     PARALLEL_PAPER_STAGE_STORAGE_MODE,
     PARALLEL_PAPER_STAGE_TABLES,
@@ -1988,7 +1991,14 @@ def evaluator_snapshot_bundle_status(
                             or stage_size_bytes <= 0
                             or stage_budget_bytes != int(parallel_stage_caps[table])
                             or stage_size_bytes > stage_budget_bytes
-                            or stage_page_size != 4096
+                            or stage_page_size not in PARALLEL_PAPER_STAGE_PAGE_SIZES
+                            or stage_size_bytes % stage_page_size != 0
+                            or (
+                                stage_page_size
+                                == PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+                                and stage_budget_bytes
+                                < PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
+                            )
                             or rows_copied != int(selection_report.get("rows_copied"))
                             or rows_merged != rows_copied
                             or merge_duration_sec < 0
@@ -2051,7 +2061,8 @@ def evaluator_snapshot_bundle_status(
                             != rows_copied
                             or int(nested_stage.get("rows_merged")) != rows_merged
                             or nested_stage.get("quick_check") != ["ok"]
-                            or int(nested_stage.get("stage_page_size")) != 4096
+                            or int(nested_stage.get("stage_page_size"))
+                            != stage_page_size
                             or int(nested_stage.get("stage_size_bytes"))
                             != stage_size_bytes
                             or int(nested_stage.get("stage_budget_bytes"))

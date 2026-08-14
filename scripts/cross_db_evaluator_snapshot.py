@@ -52,6 +52,11 @@ SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
 )
 SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
 SHARED_STAGE_PAGE_SIZE = 4096
+PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE = 65536
+PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES = 1024**3
+PARALLEL_PAPER_STAGE_PAGE_SIZES = frozenset(
+    {SHARED_STAGE_PAGE_SIZE, PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE}
+)
 SHARED_STAGE_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 SHARED_STAGE_ESTIMATE_SAMPLE_ROWS = 256
 # Keep the indexed count/sample path bounded below the independent 300-second
@@ -535,6 +540,17 @@ def round_up_stage_page(value: Any) -> int:
         // SHARED_STAGE_PAGE_SIZE
         * SHARED_STAGE_PAGE_SIZE
     )
+
+
+def parallel_paper_stage_page_size(budget_bytes: Any) -> int:
+    """Use wider pages only for temporary stages large enough to benefit."""
+    try:
+        normalized_budget = max(0, int(budget_bytes or 0))
+    except (TypeError, ValueError, OverflowError):
+        normalized_budget = 0
+    if normalized_budget >= PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES:
+        return PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+    return SHARED_STAGE_PAGE_SIZE
 
 
 def remaining_source_read_lock_wait(
@@ -5762,8 +5778,6 @@ def build_parallel_table_stage(
         connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("PRAGMA synchronous=OFF")
         connection.execute("PRAGMA temp_store=FILE")
-        page_size = 4096
-        connection.execute(f"PRAGMA page_size={page_size}")
         resolved_budget_bytes = max(0, int(budget_bytes or 0))
         source_uri = f"file:{quote(str(source.resolve()), safe='/')}?mode=ro"
         progress["stage"] = "attach_source"
@@ -5829,6 +5843,14 @@ def build_parallel_table_stage(
         if resolved_budget_bytes < MIN_PARALLEL_PAPER_STAGE_CAP_BYTES:
             raise RuntimeError(
                 f"shared_stage_capacity_insufficient:{table}"
+            )
+        page_size = parallel_paper_stage_page_size(resolved_budget_bytes)
+        connection.execute(f"PRAGMA page_size={page_size}")
+        actual_page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        if actual_page_size != page_size:
+            raise RuntimeError(
+                f"parallel_paper_stage_failed:page_size_invalid:{table}:"
+                f"{actual_page_size}:{page_size}"
             )
         connection.execute(
             f"PRAGMA max_page_count={max(1, resolved_budget_bytes // page_size)}"
@@ -8195,6 +8217,12 @@ def build_snapshot_bundle(
 
 
 def self_test() -> None:
+    assert parallel_paper_stage_page_size(
+        PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES - SHARED_STAGE_PAGE_SIZE
+    ) == SHARED_STAGE_PAGE_SIZE
+    assert parallel_paper_stage_page_size(
+        PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
+    ) == PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         sources = {}

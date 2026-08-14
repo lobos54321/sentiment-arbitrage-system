@@ -3191,8 +3191,12 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
     assert stage["source_read_lock_budget_passed"] is True
     assert stage["merge_started_after_source_read_view_release"] is True
     assert paper_report["paper_decision_parallel_stage_used"] is True
-    assert paper_report["paper_decision_parallel_stage_page_size"] == 4096
-    assert stage["stage_page_size"] == 4096
+    assert paper_report["paper_decision_parallel_stage_page_size"] == (
+        snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+    )
+    assert stage["stage_page_size"] == (
+        snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+    )
     assert paper_report["paper_decision_parallel_read_view_pinned"] is True
     assert paper_report[
         "paper_decision_parallel_stage_merged_after_source_read_lock_release"
@@ -3247,7 +3251,9 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         ] == table_stage["destination_column_contract_sha256"]
         assert table_stage["row_count_matched"] is True
         assert aggregate["rows_copied"] == aggregate["rows_merged"] == 1
-        assert aggregate["stage_page_size"] == 4096
+        assert aggregate["stage_page_size"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+        )
         assert aggregate["stage_schema_mode"] == (
             snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
         )
