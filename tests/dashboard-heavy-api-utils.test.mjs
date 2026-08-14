@@ -47,6 +47,8 @@ import {
   readPaperReviewSnapshotHealth,
   readRuntimeFinalEvidenceHealth,
   readEvaluatorSnapshotWorkerHealth,
+  parallelPaperStagePageClaimValid,
+  PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES,
   sharedStageBudgetEvidenceSha256,
   sharedStageBudgetPlanSha256,
   readV27DenominatorReadModelHealth,
@@ -61,6 +63,16 @@ import {
   tryBeginPaperReport,
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
+
+test('parallel stage bulk-page claims use the production-calibrated half-GiB floor', () => {
+  const threshold = PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES;
+
+  assert.equal(threshold, 512 * 1024 ** 2);
+  assert.equal(parallelPaperStagePageClaimValid(65536, 65536, threshold), true);
+  assert.equal(parallelPaperStagePageClaimValid(65536, 65536, threshold - 4096), false);
+  assert.equal(parallelPaperStagePageClaimValid(4096, 4096, threshold - 4096), true);
+  assert.equal(parallelPaperStagePageClaimValid(8192, 8192, threshold), false);
+});
 
 test('shared stage hashes match the Python cross-runtime golden vector', () => {
   const payload = {

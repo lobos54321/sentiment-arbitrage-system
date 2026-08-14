@@ -53,7 +53,10 @@ SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
 SHARED_STAGE_TARGET_CANDIDATE = "candidate_shadow_observations"
 SHARED_STAGE_PAGE_SIZE = 4096
 PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE = 65536
-PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES = 1024**3
+# Production's 0.5-0.6 GiB wide-row stages remained I/O-bound on 4 KiB
+# overflow pages. Keep small-stage compatibility, but use bulk pages once a
+# stage is large enough to amortize them.
+PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES = 512 * 1024**2
 PARALLEL_PAPER_STAGE_PAGE_SIZES = frozenset(
     {SHARED_STAGE_PAGE_SIZE, PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE}
 )

@@ -266,6 +266,18 @@ def test_parallel_stage_required_flags_match_selection_contract():
         )
 
 
+def test_parallel_stage_bulk_pages_start_at_production_calibrated_half_gib():
+    threshold = snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
+
+    assert threshold == 512 * 1024**2
+    assert snapshot_module.parallel_paper_stage_page_size(
+        threshold - snapshot_module.SHARED_STAGE_PAGE_SIZE
+    ) == snapshot_module.SHARED_STAGE_PAGE_SIZE
+    assert snapshot_module.parallel_paper_stage_page_size(threshold) == (
+        snapshot_module.PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+    )
+
+
 def test_bundled_self_test_uses_projection_compatible_schema(capsys):
     snapshot_module.self_test()
     assert "SELF_TEST_PASS cross_db_evaluator_snapshot" in capsys.readouterr().out

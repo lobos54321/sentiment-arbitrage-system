@@ -9147,6 +9147,30 @@ function publicEvaluatorCopyTiming(value) {
   return result;
 }
 
+export const PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE = 65536;
+export const PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES = 512 * 1024 ** 2;
+const PARALLEL_PAPER_STAGE_PAGE_SIZES = new Set([
+  4096,
+  PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE,
+]);
+
+export function parallelPaperStagePageClaimValid(
+  stagePageSize,
+  stageSizeBytes,
+  stageBudgetBytes,
+) {
+  return Number.isFinite(stageSizeBytes)
+    && stageSizeBytes > 0
+    && Number.isFinite(stageBudgetBytes)
+    && stageBudgetBytes > 0
+    && PARALLEL_PAPER_STAGE_PAGE_SIZES.has(stagePageSize)
+    && stageSizeBytes % stagePageSize === 0
+    && (
+      stagePageSize !== PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
+      || stageBudgetBytes >= PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
+    );
+}
+
 export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
   const enabled = options.enabled === undefined
@@ -9424,12 +9448,6 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     },
   };
   const parallelPaperStageTables = Object.keys(parallelPaperStageConfigs);
-  const parallelPaperStageBulkPageSize = 65536;
-  const parallelPaperStageBulkPageMinBudgetBytes = 1024 ** 3;
-  const parallelPaperStagePageSizes = new Set([
-    4096,
-    parallelPaperStageBulkPageSize,
-  ]);
   const requiredParallelPaperStageTables = parallelPaperStageTables.filter(
     (table) => parallelPaperStageConfigs[table].required === true,
   );
@@ -11176,16 +11194,12 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && stage.source_constraints_deferred_off_source_lock === true
         && stage.destination_schema_restored_after_source_read_lock_release === true
         && stage.source_constraints_rebuilt_after_source_read_lock_release === true
-        && Number.isFinite(stageSizeBytes)
-        && stageSizeBytes > 0
-        && Number.isFinite(stageBudgetBytes)
         && stageBudgetBytes === diskParallelStageCaps[table]
         && stageSizeBytes <= stageBudgetBytes
-        && parallelPaperStagePageSizes.has(stagePageSize)
-        && stageSizeBytes % stagePageSize === 0
-        && (
-          stagePageSize !== parallelPaperStageBulkPageSize
-          || stageBudgetBytes >= parallelPaperStageBulkPageMinBudgetBytes
+        && parallelPaperStagePageClaimValid(
+          stagePageSize,
+          stageSizeBytes,
+          stageBudgetBytes,
         )
         && Number.isFinite(rowsCopied)
         && rowsCopied >= 0
