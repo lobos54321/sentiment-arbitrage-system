@@ -880,17 +880,28 @@ def test_each_parallel_paper_stage_nested_tampering_is_rejected(
 
 @pytest.mark.parametrize(
     ("field", "tampered_value"),
-    (
-        ("stage_schema_mode", "source_schema_with_constraints"),
-        ("source_create_sql_sha256", "0" * 64),
-        ("stage_create_sql_sha256", "0" * 64),
-        ("destination_create_sql_sha256", "0" * 64),
-        ("source_column_contract_sha256", "0" * 64),
-        ("stage_column_contract_sha256", "0" * 64),
-        ("destination_column_contract_sha256", "0" * 64),
-        ("stage_column_count", 999),
-        ("stage_column_contract_passed", False),
-        ("stage_index_count", 1),
+        (
+            ("stage_schema_mode", "source_schema_with_constraints"),
+            ("source_create_sql_sha256", "0" * 64),
+            ("destination_create_sql_sha256", "0" * 64),
+            ("source_column_contract_sha256", "0" * 64),
+            ("destination_column_contract_sha256", "0" * 64),
+            ("stage_storage_contract_sha256", "0" * 64),
+            ("stage_storage_contract_passed", False),
+            ("stage_codec_schema_version", "unknown-codec"),
+            ("stage_compression", "lossy"),
+            ("stage_chunk_target_bytes", 1),
+            ("stage_chunk_count", 999),
+            ("stage_raw_size_bytes", -1),
+            ("stage_compressed_payload_size_bytes", -1),
+            ("stage_rows_sha256", "0" * 64),
+            ("hydrated_rows_sha256", "0" * 64),
+            ("stage_chunk_integrity_passed", False),
+            ("stage_row_digest_matched", False),
+            ("compressed_during_source_read_lock", False),
+            ("hydrated_after_source_read_lock_release", False),
+            ("stage_column_count", 999),
+            ("stage_index_count", 1),
         ("source_constraints_deferred_off_source_lock", False),
         (
             "destination_schema_restored_after_source_read_lock_release",
@@ -1007,6 +1018,9 @@ def test_pinned_read_view_lineage_tampering_is_rejected(tmp_path, monkeypatch):
         "advisory_claims_physical_upper",
         "allocation_weight_tamper",
         "advisory_miss_inventory_tamper",
+        "storage_schema_version_tamper",
+        "history_storage_compatibility_tamper",
+        "history_storage_schema_tamper",
         "plan_hash_mismatch",
     ),
 )
@@ -1100,6 +1114,17 @@ def test_shared_stage_budget_tampering_is_rejected(
     elif mutation == "advisory_miss_inventory_tamper":
         shared["targets_exceeding_advisory"] = ["paper_decision_events"]
         shared["advisory_miss_count"] = 1
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "storage_schema_version_tamper":
+        p9["storage_schema_version"] = "parallel_paper_event_stage.v2"
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "history_storage_compatibility_tamper":
+        p9["history_storage_compatible"] = True
+        synchronize_shared_budget_copies(manifest)
+    elif mutation == "history_storage_schema_tamper":
+        p9["history_storage_schema_version"] = p9[
+            "storage_schema_version"
+        ]
         synchronize_shared_budget_copies(manifest)
     elif mutation == "plan_hash_mismatch":
         shared["plan_sha256"] = "0" * 64

@@ -26,6 +26,7 @@ import threading
 import time
 from typing import Any
 from urllib.parse import quote
+import zlib
 
 
 SCHEMA_VERSION = "cross_db_evaluator_snapshot.v3"
@@ -43,8 +44,21 @@ CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
 CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal"
 MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
 CANDIDATE_STAGE_BUDGET_MODE = "shared_stage_budget_coordinator"
-PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v2"
-PARALLEL_PAPER_STAGE_STORAGE_MODE = "constraint_free_full_fidelity"
+PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v3"
+PARALLEL_PAPER_STAGE_STORAGE_MODE = "lossless_compressed_chunk_spool"
+PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION = "sqlite_value_tlv_rows.v1"
+PARALLEL_PAPER_STAGE_COMPRESSION = "zlib_level_1"
+PARALLEL_PAPER_STAGE_COMPRESSION_LEVEL = 1
+PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES = 4 * 1024**2
+PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES = 64 * 1024**2
+PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES = (
+    PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES + 8
+)
+PARALLEL_PAPER_STAGE_MAX_COMPRESSED_CHUNK_BYTES = (
+    PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES + 1024**2
+)
+PARALLEL_PAPER_STAGE_METADATA_TABLE = "__a3_parallel_stage_metadata"
+PARALLEL_PAPER_STAGE_CHUNK_TABLE = "__a3_parallel_stage_chunks"
 MIN_PARALLEL_PAPER_STAGE_CAP_BYTES = 3 * 4096
 SHARED_STAGE_BUDGET_SCHEMA_VERSION = "shared_stage_budget.v2"
 SHARED_STAGE_BUDGET_ALLOCATION_MODE = (
@@ -491,6 +505,14 @@ def shared_stage_target_minimum_bytes(target: str) -> int:
         MIN_CANDIDATE_STAGE_CAP_BYTES
         if str(target) == SHARED_STAGE_TARGET_CANDIDATE
         else MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
+    )
+
+
+def shared_stage_target_storage_schema_version(target: str) -> str:
+    return (
+        CANDIDATE_STAGE_SCHEMA_VERSION
+        if str(target) == SHARED_STAGE_TARGET_CANDIDATE
+        else PARALLEL_PAPER_STAGE_SCHEMA_VERSION
     )
 
 
@@ -1501,6 +1523,9 @@ def validated_shared_stage_budget_history(
             "copy_completed": copy_completed,
             "cap_hit": cap_hit,
             "sqlite_full_observed": sqlite_full_observed,
+            "storage_schema_version": str(
+                raw.get("storage_schema_version") or ""
+            )[:80],
             "evidence_source": str(raw.get("evidence_source") or "")[:80],
         }
     if sum(
@@ -1694,6 +1719,24 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
         "parallel_paper_stage_destination_schema_invalid",
         "parallel_paper_stage_destination_schema_mismatch",
         "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_paper_stage_integer_out_of_range",
+        "parallel_paper_stage_non_finite_float",
+        "parallel_paper_stage_value_type_unsupported",
+        "parallel_paper_stage_row_column_count_mismatch",
+        "parallel_paper_stage_encoded_row_too_large",
+        "parallel_paper_stage_chunk_truncated",
+        "parallel_paper_stage_text_invalid_utf8",
+        "parallel_paper_stage_value_tag_invalid",
+        "parallel_paper_stage_row_trailing_bytes",
+        "parallel_paper_stage_chunk_trailing_bytes",
+        "parallel_paper_stage_chunk_size_invalid",
+        "parallel_paper_stage_chunk_decompression_invalid",
+        "parallel_paper_stage_chunk_decompression_failed",
+        "parallel_paper_stage_storage_contract_mismatch",
+        "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_chunk_sequence_invalid",
+        "parallel_paper_stage_chunk_integrity_failed",
+        "parallel_paper_stage_row_digest_mismatch",
         "parallel_stage_table_columns_missing",
         "parallel_stage_duplicate_columns",
         "parallel_stage_table_missing",
@@ -1830,6 +1873,24 @@ def snapshot_failure_code(exc: BaseException) -> str:
         "parallel_paper_stage_destination_schema_invalid",
         "parallel_paper_stage_destination_schema_mismatch",
         "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_paper_stage_integer_out_of_range",
+        "parallel_paper_stage_non_finite_float",
+        "parallel_paper_stage_value_type_unsupported",
+        "parallel_paper_stage_row_column_count_mismatch",
+        "parallel_paper_stage_encoded_row_too_large",
+        "parallel_paper_stage_chunk_truncated",
+        "parallel_paper_stage_text_invalid_utf8",
+        "parallel_paper_stage_value_tag_invalid",
+        "parallel_paper_stage_row_trailing_bytes",
+        "parallel_paper_stage_chunk_trailing_bytes",
+        "parallel_paper_stage_chunk_size_invalid",
+        "parallel_paper_stage_chunk_decompression_invalid",
+        "parallel_paper_stage_chunk_decompression_failed",
+        "parallel_paper_stage_storage_contract_mismatch",
+        "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_chunk_sequence_invalid",
+        "parallel_paper_stage_chunk_integrity_failed",
+        "parallel_paper_stage_row_digest_mismatch",
         "parallel_stage_table_columns_missing",
         "parallel_stage_duplicate_columns",
         "parallel_stage_table_missing",
@@ -4499,35 +4560,177 @@ def table_column_contract(
     }
 
 
-def constraint_free_stage_create_sql(
-    table: str,
-    column_contract: dict[str, Any],
-) -> str:
-    definitions = []
-    for column in column_contract.get("columns") or []:
-        name = quote_identifier(str(column["name"]))
-        declared_type = str(column.get("declared_type") or "").strip()
-        definitions.append(f"{name} {declared_type}" if declared_type else name)
-    if not definitions:
-        raise RuntimeError(f"parallel_stage_table_columns_missing:{table}")
-    return f"CREATE TABLE {quote_identifier(table)} ({', '.join(definitions)})"
-
-
-def stage_table_index_count(
-    connection: sqlite3.Connection,
-    table: str,
-    *,
-    schema: str = "main",
-) -> int:
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(schema)):
-        raise ValueError(f"unsupported SQLite schema: {schema}")
-    return int(
-        connection.execute(
-            f"SELECT COUNT(*) FROM {schema}.sqlite_master "
-            "WHERE type='index' AND tbl_name=?",
-            (table,),
-        ).fetchone()[0]
+def compressed_stage_storage_sql() -> tuple[str, str]:
+    return (
+        (
+            f"CREATE TABLE {quote_identifier(PARALLEL_PAPER_STAGE_METADATA_TABLE)} ("
+            "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
+            "stage_schema_version TEXT NOT NULL, "
+            "codec_schema_version TEXT NOT NULL, "
+            "compression TEXT NOT NULL, "
+            "source_table TEXT NOT NULL, "
+            "source_create_sql TEXT NOT NULL, "
+            "source_create_sql_sha256 TEXT NOT NULL, "
+            "source_column_contract_json TEXT NOT NULL, "
+            "source_column_contract_sha256 TEXT NOT NULL, "
+            "deferred_indexes_json TEXT NOT NULL, "
+            "row_count INTEGER NOT NULL CHECK(row_count >= 0), "
+            "chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0), "
+            "raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes >= 0), "
+            "compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes >= 0), "
+            "rows_sha256 TEXT NOT NULL, "
+            "storage_contract_sha256 TEXT NOT NULL)"
+        ),
+        (
+            f"CREATE TABLE {quote_identifier(PARALLEL_PAPER_STAGE_CHUNK_TABLE)} ("
+            "sequence INTEGER PRIMARY KEY CHECK(sequence >= 0), "
+            "row_count INTEGER NOT NULL CHECK(row_count > 0), "
+            "raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes > 0), "
+            "compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes > 0), "
+            "raw_sha256 TEXT NOT NULL, "
+            "compressed_sha256 TEXT NOT NULL, "
+            "payload BLOB NOT NULL)"
+        ),
     )
+
+
+def compressed_stage_storage_contract_sha256() -> str:
+    return sha256_text(
+        json.dumps(
+            list(compressed_stage_storage_sql()),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def encode_sqlite_stage_value(value: Any) -> bytes:
+    if value is None:
+        return b"\x00"
+    if isinstance(value, bool):
+        value = int(value)
+    if isinstance(value, int):
+        try:
+            return b"\x01" + struct.pack(">q", value)
+        except struct.error as exc:
+            raise RuntimeError("parallel_paper_stage_integer_out_of_range") from exc
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise RuntimeError("parallel_paper_stage_non_finite_float")
+        return b"\x02" + struct.pack(">d", value)
+    if isinstance(value, str):
+        payload = value.encode("utf-8")
+        return b"\x03" + struct.pack(">Q", len(payload)) + payload
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        payload = bytes(value)
+        return b"\x04" + struct.pack(">Q", len(payload)) + payload
+    raise RuntimeError(
+        f"parallel_paper_stage_value_type_unsupported:{type(value).__name__}"
+    )
+
+
+def encode_sqlite_stage_row(row: Any, column_count: int) -> bytes:
+    if len(row) != column_count:
+        raise RuntimeError("parallel_paper_stage_row_column_count_mismatch")
+    payload = b"".join(encode_sqlite_stage_value(value) for value in row)
+    if len(payload) > PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES:
+        raise RuntimeError("parallel_paper_stage_encoded_row_too_large")
+    return struct.pack(">Q", len(payload)) + payload
+
+
+def _decode_sqlite_stage_value(
+    payload: memoryview,
+    offset: int,
+) -> tuple[Any, int]:
+    if offset >= len(payload):
+        raise RuntimeError("parallel_paper_stage_chunk_truncated")
+    tag = int(payload[offset])
+    offset += 1
+    if tag == 0:
+        return None, offset
+    if tag in {1, 2}:
+        end = offset + 8
+        if end > len(payload):
+            raise RuntimeError("parallel_paper_stage_chunk_truncated")
+        value = struct.unpack(">q" if tag == 1 else ">d", payload[offset:end])[0]
+        if tag == 2 and not math.isfinite(value):
+            raise RuntimeError("parallel_paper_stage_non_finite_float")
+        return value, end
+    if tag in {3, 4}:
+        length_end = offset + 8
+        if length_end > len(payload):
+            raise RuntimeError("parallel_paper_stage_chunk_truncated")
+        length = int(struct.unpack(">Q", payload[offset:length_end])[0])
+        value_end = length_end + length
+        if value_end > len(payload):
+            raise RuntimeError("parallel_paper_stage_chunk_truncated")
+        raw = bytes(payload[length_end:value_end])
+        if tag == 3:
+            try:
+                return raw.decode("utf-8"), value_end
+            except UnicodeDecodeError as exc:
+                raise RuntimeError("parallel_paper_stage_text_invalid_utf8") from exc
+        return raw, value_end
+    raise RuntimeError(f"parallel_paper_stage_value_tag_invalid:{tag}")
+
+
+def decode_sqlite_stage_chunk(
+    payload: bytes,
+    *,
+    row_count: int,
+    column_count: int,
+) -> list[tuple[Any, ...]]:
+    view = memoryview(payload)
+    offset = 0
+    rows: list[tuple[Any, ...]] = []
+    for _ in range(row_count):
+        length_end = offset + 8
+        if length_end > len(view):
+            raise RuntimeError("parallel_paper_stage_chunk_truncated")
+        row_size = int(struct.unpack(">Q", view[offset:length_end])[0])
+        if row_size > PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES:
+            raise RuntimeError("parallel_paper_stage_encoded_row_too_large")
+        row_end = length_end + row_size
+        if row_end > len(view):
+            raise RuntimeError("parallel_paper_stage_chunk_truncated")
+        row_view = view[length_end:row_end]
+        row_offset = 0
+        values: list[Any] = []
+        for _column in range(column_count):
+            value, row_offset = _decode_sqlite_stage_value(row_view, row_offset)
+            values.append(value)
+        if row_offset != len(row_view):
+            raise RuntimeError("parallel_paper_stage_row_trailing_bytes")
+        rows.append(tuple(values))
+        offset = row_end
+    if offset != len(view):
+        raise RuntimeError("parallel_paper_stage_chunk_trailing_bytes")
+    return rows
+
+
+def decompress_sqlite_stage_chunk(
+    payload: bytes,
+    *,
+    expected_raw_size: int,
+) -> bytes:
+    if not 0 < expected_raw_size <= PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES:
+        raise RuntimeError("parallel_paper_stage_chunk_size_invalid")
+    decompressor = zlib.decompressobj()
+    try:
+        raw = decompressor.decompress(payload, expected_raw_size + 1)
+        if decompressor.unconsumed_tail or len(raw) > expected_raw_size:
+            raise RuntimeError("parallel_paper_stage_chunk_decompression_invalid")
+        raw += decompressor.flush(expected_raw_size + 1 - len(raw))
+    except zlib.error as exc:
+        raise RuntimeError("parallel_paper_stage_chunk_decompression_failed") from exc
+    if (
+        len(raw) != expected_raw_size
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise RuntimeError("parallel_paper_stage_chunk_decompression_invalid")
+    return raw
 
 
 def stage_single_source_table(
@@ -4541,6 +4744,7 @@ def stage_single_source_table(
     progress: dict[str, Any] | None = None,
     lock_started_monotonic: float | None = None,
     lock_limit_sec: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[
     dict[str, Any],
     list[tuple[str, str, str]],
@@ -4594,23 +4798,10 @@ def stage_single_source_table(
         table,
         schema="src",
     )
-    stage_create_sql = constraint_free_stage_create_sql(
-        table,
-        source_column_contract,
-    )
-    connection.execute(stage_create_sql)
-    stage_column_contract = table_column_contract(connection, table, schema="main")
-    stage_index_count = stage_table_index_count(connection, table, schema="main")
-    stage_column_contract_passed = bool(
-        stage_column_contract["sha256"] == source_column_contract["sha256"]
-        and stage_column_contract["column_names"]
-        == source_column_contract["column_names"]
-        and stage_index_count == 0
-    )
-    if not stage_column_contract_passed:
-        raise RuntimeError(
-            f"parallel_paper_stage_column_contract_mismatch:{table}"
-        )
+    storage_sql = compressed_stage_storage_sql()
+    for statement in storage_sql:
+        connection.execute(statement)
+    storage_contract_sha256 = compressed_stage_storage_contract_sha256()
     column_sql = ", ".join(
         quote_identifier(name)
         for name in source_column_contract["column_names"]
@@ -4630,13 +4821,6 @@ def stage_single_source_table(
         if rowid_copy_plan is not None
         else selection["parameters"]
     )
-    connection.execute(
-        f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
-        f"SELECT {column_sql} FROM {copy_relation} "
-        f"WHERE {copy_predicate_sql}",
-        copy_parameters,
-    )
-    copied_rows = int(connection.execute("SELECT changes()").fetchone()[0])
     deferred_indexes = [
         (table, str(row["name"]), str(row["sql"]))
         for row in connection.execute(
@@ -4645,6 +4829,126 @@ def stage_single_source_table(
             (table,),
         ).fetchall()
     ]
+    source_cursor = connection.execute(
+        f"SELECT {column_sql} FROM {copy_relation} "
+        f"WHERE {copy_predicate_sql}",
+        copy_parameters,
+    )
+    chunk_sequence = 0
+    chunk_rows = 0
+    copied_rows = 0
+    raw_size_bytes = 0
+    compressed_size_bytes = 0
+    rows_sha256 = hashlib.sha256()
+    chunk_buffer = bytearray()
+
+    def flush_chunk() -> None:
+        nonlocal chunk_sequence, chunk_rows, raw_size_bytes, compressed_size_bytes
+        if not chunk_buffer:
+            return
+        raw = bytes(chunk_buffer)
+        compressed = zlib.compress(
+            raw,
+            level=PARALLEL_PAPER_STAGE_COMPRESSION_LEVEL,
+        )
+        connection.execute(
+            f"INSERT INTO {quote_identifier(PARALLEL_PAPER_STAGE_CHUNK_TABLE)} "
+            "(sequence, row_count, raw_size_bytes, compressed_size_bytes, "
+            "raw_sha256, compressed_sha256, payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                chunk_sequence,
+                chunk_rows,
+                len(raw),
+                len(compressed),
+                hashlib.sha256(raw).hexdigest(),
+                hashlib.sha256(compressed).hexdigest(),
+                compressed,
+            ),
+        )
+        chunk_sequence += 1
+        raw_size_bytes += len(raw)
+        compressed_size_bytes += len(compressed)
+        chunk_buffer.clear()
+        chunk_rows = 0
+
+    def ensure_stage_copy_active() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("parallel_paper_stage_cancelled")
+        if (
+            lock_started_monotonic is not None
+            and lock_limit_sec is not None
+            and time.monotonic() >= lock_started_monotonic + float(lock_limit_sec)
+        ):
+            raise RuntimeError(
+                f"source_read_lock_budget_exceeded:paper:copy_table:{table}"
+            )
+
+    for row in source_cursor:
+        ensure_stage_copy_active()
+        encoded = encode_sqlite_stage_row(
+            row,
+            source_column_contract["column_count"],
+        )
+        if (
+            chunk_buffer
+            and len(chunk_buffer) + len(encoded)
+            > PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
+        ):
+            flush_chunk()
+            ensure_stage_copy_active()
+        chunk_buffer.extend(encoded)
+        rows_sha256.update(encoded)
+        chunk_rows += 1
+        copied_rows += 1
+        if progress is not None and copied_rows % 256 == 0:
+            progress["current_table_rows_copied"] = copied_rows
+            progress["current_table_raw_bytes"] = (
+                raw_size_bytes + len(chunk_buffer)
+            )
+            progress["current_table_compressed_bytes"] = compressed_size_bytes
+    flush_chunk()
+    ensure_stage_copy_active()
+    if progress is not None:
+        progress["current_table_rows_copied"] = copied_rows
+        progress["current_table_raw_bytes"] = raw_size_bytes
+        progress["current_table_compressed_bytes"] = compressed_size_bytes
+    source_column_contract_json = json.dumps(
+        source_column_contract["columns"],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    deferred_indexes_json = json.dumps(
+        deferred_indexes,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    connection.execute(
+        f"INSERT INTO {quote_identifier(PARALLEL_PAPER_STAGE_METADATA_TABLE)} "
+        "(singleton, stage_schema_version, codec_schema_version, compression, "
+        "source_table, source_create_sql, source_create_sql_sha256, "
+        "source_column_contract_json, source_column_contract_sha256, "
+        "deferred_indexes_json, row_count, chunk_count, raw_size_bytes, "
+        "compressed_size_bytes, rows_sha256, storage_contract_sha256) "
+        "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
+            PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+            PARALLEL_PAPER_STAGE_COMPRESSION,
+            table,
+            create_sql,
+            sha256_text(create_sql),
+            source_column_contract_json,
+            source_column_contract["sha256"],
+            deferred_indexes_json,
+            copied_rows,
+            chunk_sequence,
+            raw_size_bytes,
+            compressed_size_bytes,
+            rows_sha256.hexdigest(),
+            storage_contract_sha256,
+        ),
+    )
     table_finished_monotonic = time.monotonic()
     table_duration_sec = max(0.0, table_finished_monotonic - table_started_monotonic)
     source_lock_elapsed_sec = (
@@ -4729,17 +5033,23 @@ def stage_single_source_table(
         "storage_projection": {
             "schema_version": PAPER_DECISION_STAGE_SCHEMA_VERSION,
             "applied": False,
-            "reason": "parallel_full_fidelity_stage",
+            "reason": "parallel_lossless_compressed_chunk_spool",
             "payload_semantics_preserved": True,
         },
         "stage_schema_mode": PARALLEL_PAPER_STAGE_STORAGE_MODE,
         "source_create_sql_sha256": sha256_text(create_sql),
-        "stage_create_sql_sha256": sha256_text(stage_create_sql),
         "source_column_contract_sha256": source_column_contract["sha256"],
-        "stage_column_contract_sha256": stage_column_contract["sha256"],
-        "stage_column_count": stage_column_contract["column_count"],
-        "stage_column_contract_passed": stage_column_contract_passed,
-        "stage_index_count": stage_index_count,
+        "stage_storage_contract_sha256": storage_contract_sha256,
+        "stage_codec_schema_version": PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+        "stage_compression": PARALLEL_PAPER_STAGE_COMPRESSION,
+        "stage_chunk_target_bytes": PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
+        "stage_chunk_count": chunk_sequence,
+        "stage_raw_size_bytes": raw_size_bytes,
+        "stage_compressed_payload_size_bytes": compressed_size_bytes,
+        "stage_rows_sha256": rows_sha256.hexdigest(),
+        "stage_column_count": source_column_contract["column_count"],
+        "stage_storage_contract_passed": True,
+        "stage_index_count": 0,
         "source_constraints_deferred_off_source_lock": True,
         "indexes_created": [],
         "source_copy_duration_sec": round(table_duration_sec, 6),
@@ -4766,6 +5076,7 @@ def stage_single_source_table(
         "create_sql_sha256": sha256_text(create_sql),
         "column_names": list(source_column_contract["column_names"]),
         "column_contract_sha256": source_column_contract["sha256"],
+        "deferred_indexes_json": deferred_indexes_json,
     }
     return report, deferred_indexes, destination_schema
 
@@ -4778,30 +5089,53 @@ def merge_staged_table(
     destination_schema: dict[str, Any],
 ) -> dict[str, Any]:
     schema = quote_identifier(stage_schema)
-    row = connection.execute(
-        f"SELECT sql FROM {schema}.sqlite_master WHERE type='table' AND name=?",
-        (table,),
-    ).fetchone()
-    if row is None or not row["sql"]:
-        raise RuntimeError(f"parallel_stage_table_missing:{table}")
     if connection.execute(
         "SELECT 1 FROM main.sqlite_master WHERE name=?",
         (table,),
     ).fetchone():
         raise RuntimeError(f"parallel_stage_destination_collision:{table}")
-    stage_contract = table_column_contract(
-        connection,
-        table,
-        schema=stage_schema,
-    )
-    if (
-        stage_contract["sha256"]
-        != destination_schema.get("column_contract_sha256")
-        or stage_table_index_count(connection, table, schema=stage_schema) != 0
-    ):
-        raise RuntimeError(
-            f"parallel_paper_stage_column_contract_mismatch:{table}"
+    stage_tables = {
+        str(row["name"]): str(row["sql"] or "")
+        for row in connection.execute(
+            f"SELECT name, sql FROM {schema}.sqlite_master "
+            "WHERE type='table' ORDER BY name"
+        ).fetchall()
+    }
+    expected_stage_tables = {
+        PARALLEL_PAPER_STAGE_METADATA_TABLE,
+        PARALLEL_PAPER_STAGE_CHUNK_TABLE,
+    }
+    if set(stage_tables) != expected_stage_tables:
+        raise RuntimeError(f"parallel_stage_table_missing:{table}")
+    storage_contract_sha256 = compressed_stage_storage_contract_sha256()
+    if any(
+        not stage_tables.get(name)
+        for name in expected_stage_tables
+    ) or sha256_text(
+        json.dumps(
+            [
+                stage_tables[PARALLEL_PAPER_STAGE_METADATA_TABLE],
+                stage_tables[PARALLEL_PAPER_STAGE_CHUNK_TABLE],
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
+    ) != storage_contract_sha256:
+        raise RuntimeError(f"parallel_paper_stage_storage_contract_mismatch:{table}")
+    stage_index_count = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {schema}.sqlite_master WHERE type='index'"
+        ).fetchone()[0]
+    )
+    if stage_index_count != 0:
+        raise RuntimeError(f"parallel_paper_stage_storage_contract_mismatch:{table}")
+    metadata = connection.execute(
+        f"SELECT * FROM {schema}."
+        f"{quote_identifier(PARALLEL_PAPER_STAGE_METADATA_TABLE)}"
+    ).fetchall()
+    if len(metadata) != 1:
+        raise RuntimeError(f"parallel_paper_stage_metadata_invalid:{table}")
+    metadata_row = metadata[0]
     create_sql = str(destination_schema.get("create_sql") or "")
     expected_create_sql_sha256 = str(
         destination_schema.get("create_sql_sha256") or ""
@@ -4813,9 +5147,50 @@ def merge_staged_table(
         not create_sql
         or not column_names
         or sha256_text(create_sql) != expected_create_sql_sha256
+        or str(metadata_row["stage_schema_version"])
+        != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+        or str(metadata_row["codec_schema_version"])
+        != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+        or str(metadata_row["compression"])
+        != PARALLEL_PAPER_STAGE_COMPRESSION
+        or str(metadata_row["source_table"]) != table
+        or str(metadata_row["source_create_sql"]) != create_sql
+        or str(metadata_row["source_create_sql_sha256"])
+        != expected_create_sql_sha256
+        or str(metadata_row["source_column_contract_sha256"])
+        != str(destination_schema.get("column_contract_sha256") or "")
+        or str(metadata_row["deferred_indexes_json"])
+        != str(destination_schema.get("deferred_indexes_json") or "")
+        or str(metadata_row["storage_contract_sha256"])
+        != storage_contract_sha256
     ):
         raise RuntimeError(
             f"parallel_paper_stage_destination_schema_invalid:{table}"
+        )
+    try:
+        metadata_columns = json.loads(
+            str(metadata_row["source_column_contract_json"])
+        )
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"parallel_paper_stage_column_contract_mismatch:{table}"
+        ) from exc
+    metadata_column_contract = json.dumps(
+        metadata_columns,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if (
+        not isinstance(metadata_columns, list)
+        or any(not isinstance(column, dict) for column in metadata_columns)
+        or [str(column.get("name") or "") for column in metadata_columns]
+        != column_names
+        or sha256_text(metadata_column_contract)
+        != str(destination_schema.get("column_contract_sha256") or "")
+    ):
+        raise RuntimeError(
+            f"parallel_paper_stage_column_contract_mismatch:{table}"
         )
     connection.execute(create_sql)
     destination_row = connection.execute(
@@ -4841,16 +5216,105 @@ def merge_staged_table(
             f"parallel_paper_stage_destination_schema_mismatch:{table}"
         )
     column_sql = ", ".join(quote_identifier(name) for name in column_names)
-    connection.execute(
+    placeholders = ", ".join("?" for _ in column_names)
+    insert_sql = (
         f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
-        f"SELECT {column_sql} FROM {schema}.{quote_identifier(table)}"
+        f"VALUES ({placeholders})"
     )
+    expected_row_count = int(metadata_row["row_count"])
+    expected_chunk_count = int(metadata_row["chunk_count"])
+    expected_raw_size = int(metadata_row["raw_size_bytes"])
+    expected_compressed_size = int(metadata_row["compressed_size_bytes"])
+    expected_rows_sha256 = str(metadata_row["rows_sha256"])
+    if (
+        expected_row_count < 0
+        or expected_chunk_count < 0
+        or expected_raw_size < 0
+        or expected_compressed_size < 0
+        or not re.fullmatch(r"[a-f0-9]{64}", expected_rows_sha256)
+        or (expected_row_count == 0) != (expected_chunk_count == 0)
+    ):
+        raise RuntimeError(f"parallel_paper_stage_metadata_invalid:{table}")
+    chunk_rows_total = 0
+    raw_size_total = 0
+    compressed_size_total = 0
+    rows_sha256 = hashlib.sha256()
+    chunk_count = 0
+    before_changes = int(connection.total_changes)
+    for chunk in connection.execute(
+        f"SELECT sequence, row_count, raw_size_bytes, compressed_size_bytes, "
+        f"raw_sha256, compressed_sha256, payload FROM {schema}."
+        f"{quote_identifier(PARALLEL_PAPER_STAGE_CHUNK_TABLE)} "
+        "ORDER BY sequence"
+    ):
+        if int(chunk["sequence"]) != chunk_count:
+            raise RuntimeError(f"parallel_paper_stage_chunk_sequence_invalid:{table}")
+        row_count = int(chunk["row_count"])
+        raw_size = int(chunk["raw_size_bytes"])
+        compressed_size = int(chunk["compressed_size_bytes"])
+        compressed = bytes(chunk["payload"])
+        if (
+            row_count <= 0
+            or raw_size <= 0
+            or raw_size > PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES
+            or compressed_size <= 0
+            or compressed_size > PARALLEL_PAPER_STAGE_MAX_COMPRESSED_CHUNK_BYTES
+            or len(compressed) != compressed_size
+            or hashlib.sha256(compressed).hexdigest()
+            != str(chunk["compressed_sha256"])
+        ):
+            raise RuntimeError(f"parallel_paper_stage_chunk_integrity_failed:{table}")
+        raw = decompress_sqlite_stage_chunk(
+            compressed,
+            expected_raw_size=raw_size,
+        )
+        if hashlib.sha256(raw).hexdigest() != str(chunk["raw_sha256"]):
+            raise RuntimeError(f"parallel_paper_stage_chunk_integrity_failed:{table}")
+        rows = decode_sqlite_stage_chunk(
+            raw,
+            row_count=row_count,
+            column_count=len(column_names),
+        )
+        connection.executemany(insert_sql, rows)
+        rows_sha256.update(raw)
+        chunk_rows_total += row_count
+        raw_size_total += raw_size
+        compressed_size_total += compressed_size
+        chunk_count += 1
+    rows_merged = int(connection.total_changes) - before_changes
+    final_row_count = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {quote_identifier(table)}"
+        ).fetchone()[0]
+    )
+    row_digest_matched = bool(
+        rows_sha256.hexdigest() == expected_rows_sha256
+        and chunk_rows_total == expected_row_count
+        and rows_merged == expected_row_count
+        and final_row_count == expected_row_count
+        and chunk_count == expected_chunk_count
+        and raw_size_total == expected_raw_size
+        and compressed_size_total == expected_compressed_size
+    )
+    if not row_digest_matched:
+        raise RuntimeError(f"parallel_paper_stage_row_digest_mismatch:{table}")
     return {
-        "rows_merged": int(connection.execute("SELECT changes()").fetchone()[0]),
+        "rows_merged": rows_merged,
         "destination_create_sql_sha256": sha256_text(destination_create_sql),
         "destination_column_contract_sha256": destination_contract["sha256"],
         "destination_schema_restored": destination_schema_restored,
         "source_constraints_rebuilt_after_source_read_lock_release": True,
+        "stage_storage_contract_sha256": storage_contract_sha256,
+        "stage_storage_contract_passed": True,
+        "stage_index_count": stage_index_count,
+        "stage_chunk_count": chunk_count,
+        "stage_raw_size_bytes": raw_size_total,
+        "stage_compressed_payload_size_bytes": compressed_size_total,
+        "stage_rows_sha256": expected_rows_sha256,
+        "hydrated_rows_sha256": rows_sha256.hexdigest(),
+        "stage_chunk_integrity_passed": True,
+        "stage_row_digest_matched": row_digest_matched,
+        "final_row_count": final_row_count,
     }
 
 
@@ -5215,6 +5679,9 @@ def snapshot_one(
             destination_schema_restored_after_source_read_lock_release = bool(
                 merge_started >= all_source_read_views_released_at
                 and merge_result.get("destination_schema_restored") is True
+                and merge_result.get("stage_storage_contract_passed") is True
+                and merge_result.get("stage_chunk_integrity_passed") is True
+                and merge_result.get("stage_row_digest_matched") is True
                 and merge_result.get(
                     "source_constraints_rebuilt_after_source_read_lock_release"
                 )
@@ -5237,26 +5704,46 @@ def snapshot_one(
                 "source_create_sql_sha256": result.get(
                     "source_create_sql_sha256"
                 ),
-                "stage_create_sql_sha256": result.get(
-                    "stage_create_sql_sha256"
-                ),
                 "destination_create_sql_sha256": merge_result.get(
                     "destination_create_sql_sha256"
                 ),
                 "source_column_contract_sha256": result.get(
                     "source_column_contract_sha256"
                 ),
-                "stage_column_contract_sha256": result.get(
-                    "stage_column_contract_sha256"
-                ),
                 "destination_column_contract_sha256": merge_result.get(
                     "destination_column_contract_sha256"
                 ),
                 "stage_column_count": result.get("stage_column_count"),
-                "stage_column_contract_passed": result.get(
-                    "stage_column_contract_passed"
-                )
-                is True,
+                "stage_storage_contract_sha256": result.get(
+                    "stage_storage_contract_sha256"
+                ),
+                "stage_storage_contract_passed": merge_result.get(
+                    "stage_storage_contract_passed"
+                ) is True,
+                "stage_codec_schema_version": result.get(
+                    "stage_codec_schema_version"
+                ),
+                "stage_compression": result.get("stage_compression"),
+                "stage_chunk_target_bytes": result.get(
+                    "stage_chunk_target_bytes"
+                ),
+                "stage_chunk_count": merge_result.get("stage_chunk_count"),
+                "stage_raw_size_bytes": merge_result.get(
+                    "stage_raw_size_bytes"
+                ),
+                "stage_compressed_payload_size_bytes": merge_result.get(
+                    "stage_compressed_payload_size_bytes"
+                ),
+                "stage_rows_sha256": merge_result.get("stage_rows_sha256"),
+                "hydrated_rows_sha256": merge_result.get(
+                    "hydrated_rows_sha256"
+                ),
+                "stage_chunk_integrity_passed": merge_result.get(
+                    "stage_chunk_integrity_passed"
+                ) is True,
+                "stage_row_digest_matched": merge_result.get(
+                    "stage_row_digest_matched"
+                ) is True,
                 "stage_index_count": result.get("stage_index_count"),
                 "source_constraints_deferred_off_source_lock": result.get(
                     "source_constraints_deferred_off_source_lock"
@@ -5274,6 +5761,8 @@ def snapshot_one(
                 "stage_rows_copied": expected_rows,
                 "rows_merged": rows_merged,
                 "row_count_matched": rows_merged == expected_rows,
+                "compressed_during_source_read_lock": True,
+                "hydrated_after_source_read_lock_release": True,
                 "quick_check": result.get("quick_check") or [],
                 "stage_page_size": result.get("stage_page_size"),
                 "stage_size_bytes": result.get("stage_size_bytes"),
@@ -5325,27 +5814,51 @@ def snapshot_one(
                 "source_create_sql_sha256": result.get(
                     "source_create_sql_sha256"
                 ),
-                "stage_create_sql_sha256": result.get(
-                    "stage_create_sql_sha256"
-                ),
                 "destination_create_sql_sha256": merge_result.get(
                     "destination_create_sql_sha256"
                 ),
                 "source_column_contract_sha256": result.get(
                     "source_column_contract_sha256"
                 ),
-                "stage_column_contract_sha256": result.get(
-                    "stage_column_contract_sha256"
-                ),
                 "destination_column_contract_sha256": merge_result.get(
                     "destination_column_contract_sha256"
                 ),
                 "stage_column_count": int(result.get("stage_column_count") or 0),
-                "stage_column_contract_passed": result.get(
-                    "stage_column_contract_passed"
-                )
-                is True,
+                "stage_storage_contract_sha256": result.get(
+                    "stage_storage_contract_sha256"
+                ),
+                "stage_storage_contract_passed": merge_result.get(
+                    "stage_storage_contract_passed"
+                ) is True,
+                "stage_codec_schema_version": result.get(
+                    "stage_codec_schema_version"
+                ),
+                "stage_compression": result.get("stage_compression"),
+                "stage_chunk_target_bytes": int(
+                    result.get("stage_chunk_target_bytes") or 0
+                ),
+                "stage_chunk_count": int(
+                    merge_result.get("stage_chunk_count") or 0
+                ),
+                "stage_raw_size_bytes": int(
+                    merge_result.get("stage_raw_size_bytes") or 0
+                ),
+                "stage_compressed_payload_size_bytes": int(
+                    merge_result.get("stage_compressed_payload_size_bytes") or 0
+                ),
+                "stage_rows_sha256": merge_result.get("stage_rows_sha256"),
+                "hydrated_rows_sha256": merge_result.get(
+                    "hydrated_rows_sha256"
+                ),
+                "stage_chunk_integrity_passed": merge_result.get(
+                    "stage_chunk_integrity_passed"
+                ) is True,
+                "stage_row_digest_matched": merge_result.get(
+                    "stage_row_digest_matched"
+                ) is True,
                 "stage_index_count": int(result.get("stage_index_count") or 0),
+                "compressed_during_source_read_lock": True,
+                "hydrated_after_source_read_lock_release": True,
                 "source_constraints_deferred_off_source_lock": result.get(
                     "source_constraints_deferred_off_source_lock"
                 )
@@ -5896,9 +6409,17 @@ def build_parallel_table_stage(
             progress=progress,
             lock_started_monotonic=pin_started_monotonic,
             lock_limit_sec=max_source_read_lock_sec,
+            cancel_event=cancel_event,
         )
         if not isinstance(destination_schema, dict):
             raise RuntimeError(f"parallel_paper_stage_destination_schema_invalid:{table}")
+        if cancel_event.is_set():
+            raise RuntimeError("parallel_paper_stage_cancelled")
+        if time.monotonic() >= lock_deadline:
+            raise RuntimeError(
+                f"source_read_lock_budget_exceeded:paper:copy_table:{table}:"
+                f"{float(max_source_read_lock_sec):.3f}s"
+            )
         progress["stage"] = "release_parallel_source_read_view"
         connection.commit()
         read_view_released = time.time()
@@ -5915,27 +6436,72 @@ def build_parallel_table_stage(
             quick_check_rows = [
                 str(row[0]) for row in quick_check.execute("PRAGMA quick_check").fetchall()
             ]
-            persisted_stage_index_count = stage_table_index_count(
-                quick_check,
-                table,
-                schema="main",
+            persisted_stage_tables = {
+                str(row["name"]): str(row["sql"] or "")
+                for row in quick_check.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type='table' ORDER BY name"
+                ).fetchall()
+            }
+            persisted_stage_index_count = int(
+                quick_check.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index'"
+                ).fetchone()[0]
             )
-            persisted_stage_contract = table_column_contract(
-                quick_check,
-                table,
-                schema="main",
-            )
+            persisted_metadata = quick_check.execute(
+                f"SELECT * FROM "
+                f"{quote_identifier(PARALLEL_PAPER_STAGE_METADATA_TABLE)}"
+            ).fetchall()
         finally:
             quick_check.close()
         if quick_check_rows != ["ok"]:
             raise RuntimeError("parallel_paper_stage_quick_check_failed")
+        persisted_storage_contract_sha256 = sha256_text(
+            json.dumps(
+                [
+                    persisted_stage_tables.get(
+                        PARALLEL_PAPER_STAGE_METADATA_TABLE,
+                        "",
+                    ),
+                    persisted_stage_tables.get(
+                        PARALLEL_PAPER_STAGE_CHUNK_TABLE,
+                        "",
+                    ),
+                ],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         if (
             persisted_stage_index_count != 0
-            or persisted_stage_contract["sha256"]
+            or set(persisted_stage_tables)
+            != {
+                PARALLEL_PAPER_STAGE_METADATA_TABLE,
+                PARALLEL_PAPER_STAGE_CHUNK_TABLE,
+            }
+            or persisted_storage_contract_sha256
+            != compressed_stage_storage_contract_sha256()
+            or len(persisted_metadata) != 1
+            or str(persisted_metadata[0]["source_table"]) != table
+            or str(persisted_metadata[0]["source_create_sql_sha256"])
+            != destination_schema["create_sql_sha256"]
+            or str(persisted_metadata[0]["source_column_contract_sha256"])
             != destination_schema["column_contract_sha256"]
+            or str(persisted_metadata[0]["storage_contract_sha256"])
+            != persisted_storage_contract_sha256
+            or int(persisted_metadata[0]["row_count"])
+            != int(table_report["rows_copied"])
+            or int(persisted_metadata[0]["chunk_count"])
+            != int(table_report["stage_chunk_count"])
+            or int(persisted_metadata[0]["raw_size_bytes"])
+            != int(table_report["stage_raw_size_bytes"])
+            or int(persisted_metadata[0]["compressed_size_bytes"])
+            != int(table_report["stage_compressed_payload_size_bytes"])
+            or str(persisted_metadata[0]["rows_sha256"])
+            != str(table_report["stage_rows_sha256"])
         ):
             raise RuntimeError(
-                f"parallel_paper_stage_column_contract_mismatch:{table}"
+                f"parallel_paper_stage_storage_contract_mismatch:{table}"
             )
         duration_sec = read_view_released - pin_started
         return {
@@ -5953,13 +6519,25 @@ def build_parallel_table_stage(
             "destination_schema": destination_schema,
             "stage_schema_mode": PARALLEL_PAPER_STAGE_STORAGE_MODE,
             "source_create_sql_sha256": destination_schema["create_sql_sha256"],
-            "stage_create_sql_sha256": table_report["stage_create_sql_sha256"],
             "source_column_contract_sha256": destination_schema[
                 "column_contract_sha256"
             ],
-            "stage_column_contract_sha256": persisted_stage_contract["sha256"],
-            "stage_column_count": persisted_stage_contract["column_count"],
-            "stage_column_contract_passed": True,
+            "stage_storage_contract_sha256": (
+                persisted_storage_contract_sha256
+            ),
+            "stage_codec_schema_version": (
+                PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+            ),
+            "stage_compression": PARALLEL_PAPER_STAGE_COMPRESSION,
+            "stage_chunk_target_bytes": PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
+            "stage_chunk_count": int(table_report["stage_chunk_count"]),
+            "stage_raw_size_bytes": int(table_report["stage_raw_size_bytes"]),
+            "stage_compressed_payload_size_bytes": int(
+                table_report["stage_compressed_payload_size_bytes"]
+            ),
+            "stage_rows_sha256": str(table_report["stage_rows_sha256"]),
+            "stage_column_count": int(table_report["stage_column_count"]),
+            "stage_storage_contract_passed": True,
             "stage_index_count": persisted_stage_index_count,
             "source_constraints_deferred_off_source_lock": True,
             "pinned_read_view": pin_report,
@@ -6868,7 +7446,17 @@ def build_shared_stage_budget_plan(
             }
         ):
             raise ValueError(f"shared stage advisory contract invalid for {target}")
-        previous = history_targets.get(target) or {}
+        target_storage_schema_version = (
+            shared_stage_target_storage_schema_version(target)
+        )
+        raw_previous = history_targets.get(target) or {}
+        previous_storage_schema_version = str(
+            raw_previous.get("storage_schema_version") or ""
+        )
+        history_storage_compatible = bool(
+            previous_storage_schema_version == target_storage_schema_version
+        )
+        previous = raw_previous if history_storage_compatible else {}
         previous_high_water = round_up_stage_page(
             previous.get("high_water_bytes") or 0
         )
@@ -6898,6 +7486,7 @@ def build_shared_stage_budget_plan(
                 or PARALLEL_PAPER_STAGE_CONFIGS.get(target, {}).get("required")
                 is True
             ),
+            "storage_schema_version": target_storage_schema_version,
             "minimum_cap_bytes": minimum,
             "advisory_required_bytes": advisory_required,
             "advisory_strategy": estimate.get("strategy"),
@@ -6975,6 +7564,10 @@ def build_shared_stage_budget_plan(
                 )
             },
             "history_state": history_state,
+            "history_storage_schema_version": (
+                previous_storage_schema_version or None
+            ),
+            "history_storage_compatible": history_storage_compatible,
             "history_high_water_bytes": previous_high_water,
             "history_granted_cap_bytes": previous_grant,
             "history_cap_hit": cap_hit,
@@ -7080,6 +7673,10 @@ def build_shared_stage_budget_plan(
         for report in target_reports.values()
     )
     allocation_weight_total = sum(allocation_weights.values())
+    history_used = any(
+        report.get("history_storage_compatible") is True
+        for report in target_reports.values()
+    )
     plan = {
         "schema_version": SHARED_STAGE_BUDGET_SCHEMA_VERSION,
         "allocation_mode": SHARED_STAGE_BUDGET_ALLOCATION_MODE,
@@ -7098,14 +7695,30 @@ def build_shared_stage_budget_plan(
         "residual_pool_bytes": residual_pool,
         "borrowing_priority_targets": list(borrowing_priority),
         "allocation_weight_total_bytes": allocation_weight_total,
-        "history_used": history_report.get("accepted") is True,
-        "history_reason": history_report.get("reason"),
-        "history_attempt_id": history_report.get("attempt_id"),
-        "history_evidence_sha256": history_report.get("evidence_sha256"),
-        "history_anchor_schema_version": history_report.get(
-            "anchor_schema_version"
+        "history_used": history_used,
+        "history_reason": (
+            history_report.get("reason")
+            if history_used
+            else (
+                "history_storage_schema_incompatible"
+                if history_report.get("accepted") is True
+                else history_report.get("reason")
+            )
         ),
-        "history_lineage_validated": history_report.get("accepted") is True,
+        "history_attempt_id": (
+            history_report.get("attempt_id") if history_used else None
+        ),
+        "history_evidence_sha256": (
+            history_report.get("evidence_sha256") if history_used else None
+        ),
+        "history_anchor_schema_version": (
+            history_report.get("anchor_schema_version")
+            if history_used
+            else None
+        ),
+        "history_lineage_validated": bool(
+            history_used and history_report.get("accepted") is True
+        ),
         "fixed_percentage_allocation_used": False,
         "pinned_read_view_binding_required": bool(
             require_pinned_view_binding

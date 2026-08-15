@@ -25,6 +25,9 @@ from cross_db_evaluator_snapshot import (
     MIN_PARALLEL_PAPER_STAGE_CAP_BYTES,
     PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES,
     PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE,
+    PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
+    PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+    PARALLEL_PAPER_STAGE_COMPRESSION,
     PARALLEL_PAPER_OPTIONAL_STAGE_TABLES,
     PARALLEL_PAPER_REQUIRED_STAGE_TABLES,
     PARALLEL_PAPER_STAGE_CONFIGS,
@@ -56,6 +59,7 @@ from cross_db_evaluator_snapshot import (
     SHARED_STAGE_SAMPLE_ADVISORY_STRATEGY,
     SHARED_STAGE_TARGET_CANDIDATE,
     allocate_shared_stage_residual,
+    compressed_stage_storage_contract_sha256,
     parallel_paper_stage_inventory_valid,
     read_json_object,
     normalized_timestamp_sql,
@@ -69,6 +73,7 @@ from cross_db_evaluator_snapshot import (
     shared_stage_target_filename,
     shared_stage_target_minimum_bytes,
     shared_stage_target_names,
+    shared_stage_target_storage_schema_version,
 )
 
 
@@ -1017,6 +1022,15 @@ def validate_shared_stage_budget_contract(
         history_cap_hit = report.get("history_cap_hit") is True
         history_copy_completed = report.get("history_copy_completed") is True
         history_state = str(report.get("history_state") or "")
+        storage_schema_version = str(
+            report.get("storage_schema_version") or ""
+        )
+        history_storage_schema_version = str(
+            report.get("history_storage_schema_version") or ""
+        )
+        history_storage_compatible = (
+            report.get("history_storage_compatible") is True
+        )
         previous = (
             {
                 "high_water_bytes": history_high_water,
@@ -1067,6 +1081,17 @@ def validate_shared_stage_budget_contract(
             advisory_exceeded_targets.append(target)
         if (
             report.get("stage_filename") != shared_stage_target_filename(target)
+            or storage_schema_version
+            != shared_stage_target_storage_schema_version(target)
+            or history_storage_compatible != (history_state != "none")
+            or (
+                history_storage_compatible
+                and history_storage_schema_version != storage_schema_version
+            )
+            or (
+                not history_storage_compatible
+                and history_storage_schema_version == storage_schema_version
+            )
             or int(report.get("minimum_cap_bytes")) != minimum
             or report.get("advisory_query_bounded") is not True
             or report.get("physical_upper_bound_claimed") is not False
@@ -1895,27 +1920,8 @@ def evaluator_snapshot_bundle_status(
                             stage_report.get("source_read_lock_duration_sec")
                         )
                         final_schema = final_stage_schema_evidence.get(table) or {}
-                        final_columns = final_schema.get("columns") or []
-                        expected_stage_definitions = []
-                        for column in final_columns:
-                            column_name = quote_identifier(str(column["name"]))
-                            declared_type = str(
-                                column.get("declared_type") or ""
-                            ).strip()
-                            expected_stage_definitions.append(
-                                f"{column_name} {declared_type}"
-                                if declared_type
-                                else column_name
-                            )
-                        expected_stage_create_sql_sha256 = sha256_text(
-                            f"CREATE TABLE {quote_identifier(table)} "
-                            f"({', '.join(expected_stage_definitions)})"
-                        )
                         source_create_sql_sha256 = str(
                             stage_report.get("source_create_sql_sha256") or ""
-                        )
-                        stage_create_sql_sha256 = str(
-                            stage_report.get("stage_create_sql_sha256") or ""
                         )
                         destination_create_sql_sha256 = str(
                             stage_report.get("destination_create_sql_sha256")
@@ -1923,10 +1929,6 @@ def evaluator_snapshot_bundle_status(
                         )
                         source_column_contract_sha256 = str(
                             stage_report.get("source_column_contract_sha256")
-                            or ""
-                        )
-                        stage_column_contract_sha256 = str(
-                            stage_report.get("stage_column_contract_sha256")
                             or ""
                         )
                         destination_column_contract_sha256 = str(
@@ -1941,6 +1943,27 @@ def evaluator_snapshot_bundle_status(
                         stage_index_count = int(
                             stage_report.get("stage_index_count")
                         )
+                        stage_storage_contract_sha256 = str(
+                            stage_report.get("stage_storage_contract_sha256")
+                            or ""
+                        )
+                        stage_chunk_count = int(
+                            stage_report.get("stage_chunk_count")
+                        )
+                        stage_raw_size_bytes = int(
+                            stage_report.get("stage_raw_size_bytes")
+                        )
+                        stage_compressed_payload_size_bytes = int(
+                            stage_report.get(
+                                "stage_compressed_payload_size_bytes"
+                            )
+                        )
+                        stage_rows_sha256 = str(
+                            stage_report.get("stage_rows_sha256") or ""
+                        )
+                        hydrated_rows_sha256 = str(
+                            stage_report.get("hydrated_rows_sha256") or ""
+                        )
                         if (
                             stage_report.get("schema_version")
                             != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
@@ -1951,21 +1974,18 @@ def evaluator_snapshot_bundle_status(
                                 valid_sha256_hex(value)
                                 for value in (
                                     source_create_sql_sha256,
-                                    stage_create_sql_sha256,
                                     destination_create_sql_sha256,
                                     source_column_contract_sha256,
-                                    stage_column_contract_sha256,
                                     destination_column_contract_sha256,
+                                    stage_storage_contract_sha256,
+                                    stage_rows_sha256,
+                                    hydrated_rows_sha256,
                                 )
                             )
                             or source_create_sql_sha256
                             != destination_create_sql_sha256
                             or source_create_sql_sha256
                             != final_schema.get("create_sql_sha256")
-                            or stage_create_sql_sha256
-                            != expected_stage_create_sql_sha256
-                            or source_column_contract_sha256
-                            != stage_column_contract_sha256
                             or source_column_contract_sha256
                             != destination_column_contract_sha256
                             or source_column_contract_sha256
@@ -1973,8 +1993,38 @@ def evaluator_snapshot_bundle_status(
                             or stage_column_count
                             != int(final_schema.get("column_count"))
                             or int(final_schema.get("hidden_column_count")) != 0
-                            or stage_report.get("stage_column_contract_passed")
+                            or stage_storage_contract_sha256
+                            != compressed_stage_storage_contract_sha256()
+                            or stage_report.get("stage_storage_contract_passed")
                             is not True
+                            or stage_report.get("stage_codec_schema_version")
+                            != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+                            or stage_report.get("stage_compression")
+                            != PARALLEL_PAPER_STAGE_COMPRESSION
+                            or int(stage_report.get("stage_chunk_target_bytes"))
+                            != PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
+                            or stage_chunk_count < 0
+                            or stage_raw_size_bytes < 0
+                            or stage_compressed_payload_size_bytes < 0
+                            or stage_compressed_payload_size_bytes
+                            > stage_size_bytes
+                            or (rows_copied == 0) != (stage_chunk_count == 0)
+                            or (rows_copied == 0) != (stage_raw_size_bytes == 0)
+                            or (rows_copied == 0) != (
+                                stage_compressed_payload_size_bytes == 0
+                            )
+                            or stage_rows_sha256 != hydrated_rows_sha256
+                            or stage_report.get(
+                                "stage_chunk_integrity_passed"
+                            ) is not True
+                            or stage_report.get("stage_row_digest_matched")
+                            is not True
+                            or stage_report.get(
+                                "compressed_during_source_read_lock"
+                            ) is not True
+                            or stage_report.get(
+                                "hydrated_after_source_read_lock_release"
+                            ) is not True
                             or stage_index_count != 0
                             or stage_report.get(
                                 "source_constraints_deferred_off_source_lock"
@@ -2021,8 +2071,6 @@ def evaluator_snapshot_bundle_status(
                             != PARALLEL_PAPER_STAGE_STORAGE_MODE
                             or nested_stage.get("source_create_sql_sha256")
                             != source_create_sql_sha256
-                            or nested_stage.get("stage_create_sql_sha256")
-                            != stage_create_sql_sha256
                             or nested_stage.get("destination_create_sql_sha256")
                             != destination_create_sql_sha256
                             or nested_stage.get(
@@ -2030,17 +2078,46 @@ def evaluator_snapshot_bundle_status(
                             )
                             != source_column_contract_sha256
                             or nested_stage.get(
-                                "stage_column_contract_sha256"
-                            )
-                            != stage_column_contract_sha256
-                            or nested_stage.get(
                                 "destination_column_contract_sha256"
                             )
                             != destination_column_contract_sha256
                             or int(nested_stage.get("stage_column_count"))
                             != stage_column_count
-                            or nested_stage.get("stage_column_contract_passed")
+                            or nested_stage.get(
+                                "stage_storage_contract_sha256"
+                            ) != stage_storage_contract_sha256
+                            or nested_stage.get("stage_storage_contract_passed")
                             is not True
+                            or nested_stage.get("stage_codec_schema_version")
+                            != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+                            or nested_stage.get("stage_compression")
+                            != PARALLEL_PAPER_STAGE_COMPRESSION
+                            or int(nested_stage.get("stage_chunk_target_bytes"))
+                            != PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
+                            or int(nested_stage.get("stage_chunk_count"))
+                            != stage_chunk_count
+                            or int(nested_stage.get("stage_raw_size_bytes"))
+                            != stage_raw_size_bytes
+                            or int(
+                                nested_stage.get(
+                                    "stage_compressed_payload_size_bytes"
+                                )
+                            ) != stage_compressed_payload_size_bytes
+                            or nested_stage.get("stage_rows_sha256")
+                            != stage_rows_sha256
+                            or nested_stage.get("hydrated_rows_sha256")
+                            != hydrated_rows_sha256
+                            or nested_stage.get(
+                                "stage_chunk_integrity_passed"
+                            ) is not True
+                            or nested_stage.get("stage_row_digest_matched")
+                            is not True
+                            or nested_stage.get(
+                                "compressed_during_source_read_lock"
+                            ) is not True
+                            or nested_stage.get(
+                                "hydrated_after_source_read_lock_release"
+                            ) is not True
                             or int(nested_stage.get("stage_index_count")) != 0
                             or nested_stage.get(
                                 "source_constraints_deferred_off_source_lock"

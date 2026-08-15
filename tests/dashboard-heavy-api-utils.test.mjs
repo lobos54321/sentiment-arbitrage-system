@@ -49,6 +49,10 @@ import {
   readEvaluatorSnapshotWorkerHealth,
   parallelPaperStagePageClaimValid,
   PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES,
+  PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
+  PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+  PARALLEL_PAPER_STAGE_COMPRESSION,
+  PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
   sharedStageBudgetEvidenceSha256,
   sharedStageBudgetPlanSha256,
   readV27DenominatorReadModelHealth,
@@ -75,6 +79,13 @@ test('parallel stage bulk-page claims use the production-calibrated 384 MiB floo
   for (const grant of [523_489_280, 530_358_272, 518_160_384]) {
     assert.equal(parallelPaperStagePageClaimValid(65536, 65536, grant), true);
   }
+});
+
+test('parallel compressed-stage storage contract matches the Python golden hash', () => {
+  assert.equal(
+    PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
+    'a7704ff8eb3c5051112377902655f0d45a866c1a7f67bd35d3cbdb1b0990ccc6',
+  );
 });
 
 test('shared stage hashes match the Python cross-runtime golden vector', () => {
@@ -1746,20 +1757,32 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     ],
   });
   const stageSchemaEvidence = (columnCount = 10) => ({
-    schema_version: 'parallel_paper_event_stage.v2',
-    stage_schema_mode: 'constraint_free_full_fidelity',
+    schema_version: 'parallel_paper_event_stage.v3',
+    stage_schema_mode: 'lossless_compressed_chunk_spool',
     source_create_sql_sha256: '1'.repeat(64),
-    stage_create_sql_sha256: '2'.repeat(64),
     destination_create_sql_sha256: '1'.repeat(64),
     source_column_contract_sha256: '3'.repeat(64),
-    stage_column_contract_sha256: '3'.repeat(64),
     destination_column_contract_sha256: '3'.repeat(64),
+    stage_storage_contract_sha256:
+      PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
+    stage_codec_schema_version: PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+    stage_compression: PARALLEL_PAPER_STAGE_COMPRESSION,
+    stage_chunk_target_bytes: PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
+    stage_chunk_count: 1,
+    stage_raw_size_bytes: 4096,
+    stage_compressed_payload_size_bytes: 1024,
+    stage_rows_sha256: '4'.repeat(64),
+    hydrated_rows_sha256: '4'.repeat(64),
     stage_column_count: columnCount,
-    stage_column_contract_passed: true,
     stage_index_count: 0,
+    stage_storage_contract_passed: true,
+    stage_chunk_integrity_passed: true,
+    stage_row_digest_matched: true,
     source_constraints_deferred_off_source_lock: true,
     destination_schema_restored_after_source_read_lock_release: true,
     source_constraints_rebuilt_after_source_read_lock_release: true,
+    compressed_during_source_read_lock: true,
+    hydrated_after_source_read_lock_release: true,
   });
   const sharedAdvisoryEvidence = ({ target, advisory, actualRows }) => {
     const indexed = target !== 'opportunity_event_path_samples';
@@ -1869,6 +1892,11 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     target,
     source_table: target,
     stage_filename: stageFilename,
+    storage_schema_version: target === 'candidate_shadow_observations'
+      ? 'candidate_observation_selective_stage.v1'
+      : 'parallel_paper_event_stage.v3',
+    history_storage_schema_version: null,
+    history_storage_compatible: false,
     required: target !== 'opportunity_event_path_samples',
     minimum_cap_bytes: 12288,
     advisory_required_bytes: advisory,
@@ -2066,7 +2094,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
       shared_stage_estimates_bound_to_copy_read_views: true,
-      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v2',
+      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v3',
       parallel_paper_stage_tables: [
         'paper_decision_events',
         'a_class_decision_events',
@@ -2228,7 +2256,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             },
           },
           paper_decision_parallel_stage_used: true,
-          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v2',
+          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v3',
           paper_decision_parallel_read_view_pinned: true,
           paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
           paper_decision_parallel_stage_removed_before_publish: true,
@@ -2628,6 +2656,52 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(producerOnly.bundle_candidate_available, true);
   assert.equal(producerOnly.consumer_ready, false);
   assert.equal(producerOnly.consumer_state, 'authoritative_preflight_required');
+});
+
+test('evaluator snapshot worker rejects shared-stage storage lineage tampering', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  for (const [field, value] of [
+    ['storage_schema_version', 'parallel_paper_event_stage.v2'],
+    ['history_storage_compatible', true],
+    ['history_storage_schema_version', 'parallel_paper_event_stage.v3'],
+  ]) {
+    const fixture = evaluatorSnapshotHealthFixture(nowMs);
+    const manifestPayload = structuredClone(fixture.manifestPayload);
+    const shared = manifestPayload.shared_stage_budget;
+    shared.targets.paper_decision_events[field] = value;
+    shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+    shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+    manifestPayload.disk_preflight.shared_stage_budget = structuredClone(shared);
+    const statusPayload = structuredClone(fixture.statusPayload);
+    statusPayload.shared_stage_budget = structuredClone(shared);
+
+    const health = readEvaluatorSnapshotWorkerHealth({
+      nowMs,
+      enabled: true,
+      pid: 33333,
+      pidAlive: true,
+      lockPid: 33333,
+      lockPidAlive: true,
+      statusPayload,
+      manifestPayload,
+      statusArtifact: {
+        available: true,
+        mtime: '2026-08-08T03:59:30.000Z',
+        size_bytes: 100,
+      },
+      manifestArtifact: {
+        available: true,
+        mtime: '2026-08-08T03:59:30.000Z',
+        size_bytes: 1000,
+      },
+      manifestFileSha256: 'd'.repeat(64),
+      databaseArtifacts: fixture.databaseArtifacts,
+      authoritativePreflight: fixture.authoritativePreflight,
+    });
+
+    assert.equal(health.status, 'contract_blocked', field);
+    assert.equal(health.shared_stage_budget.contract_passed, false, field);
+  }
 });
 
 test('evaluator snapshot worker health validates bounded sample advisory fallback', () => {
@@ -3357,13 +3431,24 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
   for (const [field, tamperedValue] of [
     ['stage_schema_mode', 'source_schema_with_constraints'],
     ['source_create_sql_sha256', '0'.repeat(64)],
-    ['stage_create_sql_sha256', '0'.repeat(64)],
     ['destination_create_sql_sha256', '0'.repeat(64)],
     ['source_column_contract_sha256', '0'.repeat(64)],
-    ['stage_column_contract_sha256', '0'.repeat(64)],
     ['destination_column_contract_sha256', '0'.repeat(64)],
+    ['stage_storage_contract_sha256', '0'.repeat(64)],
+    ['stage_storage_contract_passed', false],
+    ['stage_codec_schema_version', 'unknown-codec'],
+    ['stage_compression', 'lossy'],
+    ['stage_chunk_target_bytes', 1],
+    ['stage_chunk_count', 999],
+    ['stage_raw_size_bytes', -1],
+    ['stage_compressed_payload_size_bytes', -1],
+    ['stage_rows_sha256', '0'.repeat(64)],
+    ['hydrated_rows_sha256', '0'.repeat(64)],
+    ['stage_chunk_integrity_passed', false],
+    ['stage_row_digest_matched', false],
+    ['compressed_during_source_read_lock', false],
+    ['hydrated_after_source_read_lock_release', false],
     ['stage_column_count', 999],
-    ['stage_column_contract_passed', false],
     ['stage_index_count', 1],
     ['source_constraints_deferred_off_source_lock', false],
     ['destination_schema_restored_after_source_read_lock_release', false],

@@ -171,6 +171,11 @@ def shared_stage_history(estimates, *, cap_hit_target=None):
             "high_water_bytes": high_water,
             "copy_completed": target != cap_hit_target,
             "cap_hit": target == cap_hit_target,
+            "storage_schema_version": (
+                snapshot_module.shared_stage_target_storage_schema_version(
+                    target
+                )
+            ),
             "evidence_source": "partial_stage_files_before_cleanup",
         }
     total = sum(row["granted_cap_bytes"] for row in targets.values())
@@ -254,6 +259,12 @@ def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
     )
     assert snapshot_module.shared_stage_budget_evidence_sha256(payload) == (
         "ac61bf1db4807887f4640760b0e57a5ca0e0c8a2ca90e29b068742de55fa1b49"
+    )
+
+
+def test_compressed_stage_storage_contract_matches_cross_runtime_vector():
+    assert snapshot_module.compressed_stage_storage_contract_sha256() == (
+        "a7704ff8eb3c5051112377902655f0d45a866c1a7f67bd35d3cbdb1b0990ccc6"
     )
 
 
@@ -1492,6 +1503,58 @@ def test_failed_stage_high_water_is_reused_by_next_shared_plan(tmp_path):
     assert next_plan["total_granted_bytes"] == next_plan["total_cap_bytes"]
 
 
+def test_legacy_full_row_stage_history_is_authenticated_but_not_reused():
+    estimates = shared_stage_estimates(
+        required_bytes={"paper_decision_events": 24576}
+    )
+    history = shared_stage_history(
+        estimates,
+        cap_hit_target="paper_decision_events",
+    )
+    for target in history["targets"].values():
+        target.pop("storage_schema_version")
+    history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        history
+    )
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+    anchor = shared_stage_history_anchor(history)
+
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=anchor,
+    )
+    assert validated["accepted"] is True
+
+    total_cap = sum(
+        row["advisory_required_bytes"]
+        for row in estimates["targets"].values()
+    ) + 10 * snapshot_module.SHARED_STAGE_PAGE_SIZE
+    plan = snapshot_module.build_shared_stage_budget_plan(
+        total_cap_bytes=total_cap,
+        parallel_stage_tables=snapshot_module.PARALLEL_PAPER_STAGE_TABLES,
+        estimates=estimates,
+        history=history,
+        history_anchor=anchor,
+        attempt_id="compressed-stage-next-attempt",
+    )
+
+    assert plan["accepted"] is True
+    assert plan["history_used"] is False
+    assert plan["history_reason"] == "history_storage_schema_incompatible"
+    assert plan["history_attempt_id"] is None
+    assert plan["history_evidence_sha256"] is None
+    for target, report in plan["targets"].items():
+        assert report["storage_schema_version"] == (
+            snapshot_module.shared_stage_target_storage_schema_version(target)
+        )
+        assert report["history_storage_schema_version"] is None
+        assert report["history_storage_compatible"] is False
+        assert report["history_state"] == "none"
+        assert report["history_high_water_bytes"] == 0
+
+
 def test_completed_parallel_stage_is_reused_with_completed_history_headroom(
     tmp_path,
 ):
@@ -2200,6 +2263,24 @@ def test_parallel_paper_decision_stage_uses_fixed_4k_pages_with_large_source_pag
         "parallel_paper_stage_destination_schema_invalid",
         "parallel_paper_stage_destination_schema_mismatch",
         "parallel_paper_stage_generated_columns_unsupported",
+        "parallel_paper_stage_integer_out_of_range",
+        "parallel_paper_stage_non_finite_float",
+        "parallel_paper_stage_value_type_unsupported",
+        "parallel_paper_stage_row_column_count_mismatch",
+        "parallel_paper_stage_encoded_row_too_large",
+        "parallel_paper_stage_chunk_truncated",
+        "parallel_paper_stage_text_invalid_utf8",
+        "parallel_paper_stage_value_tag_invalid",
+        "parallel_paper_stage_row_trailing_bytes",
+        "parallel_paper_stage_chunk_trailing_bytes",
+        "parallel_paper_stage_chunk_size_invalid",
+        "parallel_paper_stage_chunk_decompression_invalid",
+        "parallel_paper_stage_chunk_decompression_failed",
+        "parallel_paper_stage_storage_contract_mismatch",
+        "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_chunk_sequence_invalid",
+        "parallel_paper_stage_chunk_integrity_failed",
+        "parallel_paper_stage_row_digest_mismatch",
         "parallel_stage_table_columns_missing",
         "parallel_stage_duplicate_columns",
         "parallel_stage_table_missing",
@@ -3251,7 +3332,20 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         )
         assert table_stage["full_fidelity_row_copy"] is True
         assert table_stage["payload_semantics_preserved"] is True
-        assert table_stage["stage_column_contract_passed"] is True
+        assert table_stage["stage_storage_contract_passed"] is True
+        assert table_stage["stage_chunk_integrity_passed"] is True
+        assert table_stage["stage_row_digest_matched"] is True
+        assert table_stage["compressed_during_source_read_lock"] is True
+        assert table_stage["hydrated_after_source_read_lock_release"] is True
+        assert table_stage["stage_codec_schema_version"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+        )
+        assert table_stage["stage_compression"] == (
+            snapshot_module.PARALLEL_PAPER_STAGE_COMPRESSION
+        )
+        assert table_stage["stage_rows_sha256"] == table_stage[
+            "hydrated_rows_sha256"
+        ]
         assert table_stage["stage_index_count"] == 0
         assert table_stage["source_constraints_deferred_off_source_lock"] is True
         assert table_stage[
@@ -3264,8 +3358,11 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
             "destination_create_sql_sha256"
         ]
         assert table_stage["source_column_contract_sha256"] == table_stage[
-            "stage_column_contract_sha256"
-        ] == table_stage["destination_column_contract_sha256"]
+            "destination_column_contract_sha256"
+        ]
+        assert table_stage["stage_storage_contract_sha256"] == (
+            snapshot_module.compressed_stage_storage_contract_sha256()
+        )
         assert table_stage["row_count_matched"] is True
         assert aggregate["rows_copied"] == aggregate["rows_merged"] == 1
         assert aggregate["stage_page_size"] == (
@@ -3274,7 +3371,9 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
         assert aggregate["stage_schema_mode"] == (
             snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
         )
-        assert aggregate["stage_column_contract_passed"] is True
+        assert aggregate["stage_storage_contract_passed"] is True
+        assert aggregate["stage_chunk_integrity_passed"] is True
+        assert aggregate["stage_row_digest_matched"] is True
         assert aggregate["stage_index_count"] == 0
         assert aggregate["source_constraints_deferred_off_source_lock"] is True
         assert aggregate[
@@ -3287,8 +3386,11 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
             "destination_create_sql_sha256"
         ]
         assert aggregate["source_column_contract_sha256"] == aggregate[
-            "stage_column_contract_sha256"
-        ] == aggregate["destination_column_contract_sha256"]
+            "destination_column_contract_sha256"
+        ]
+        assert aggregate["stage_storage_contract_sha256"] == (
+            snapshot_module.compressed_stage_storage_contract_sha256()
+        )
         assert aggregate["removed_before_publish"] is True
     snapshot = sqlite3.connect(paper_report["snapshot_path"])
     try:
@@ -3325,7 +3427,7 @@ def test_paper_decision_events_use_parallel_pinned_stage_and_preserve_payload(
     assert not (snapshot_dir / ".candidate-observation-stage.db").exists()
 
 
-def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lock(
+def test_compressed_parallel_stage_restores_exact_destination_schema_off_lock(
     tmp_path,
 ):
     source = tmp_path / "source-paper.db"
@@ -3370,22 +3472,27 @@ def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lo
     )
     stage.commit()
     stage.execute("DETACH DATABASE src")
-    stage_create_sql = stage.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='opportunity_events'"
-    ).fetchone()[0]
+    stage_tables = {
+        row[0]
+        for row in stage.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
     assert report["rows_copied"] == 1
     assert report["stage_schema_mode"] == (
         snapshot_module.PARALLEL_PAPER_STAGE_STORAGE_MODE
     )
     assert report["stage_index_count"] == 0
-    assert report["stage_column_contract_passed"] is True
+    assert report["stage_storage_contract_passed"] is True
+    assert report["stage_chunk_count"] == 1
+    assert report["stage_raw_size_bytes"] > 0
+    assert report["stage_compressed_payload_size_bytes"] > 0
     assert report["source_constraints_deferred_off_source_lock"] is True
-    assert snapshot_module.stage_table_index_count(
-        stage,
-        "opportunity_events",
-    ) == 0
-    for forbidden in ("UNIQUE", "NOT NULL", "CHECK", "AUTOINCREMENT", "DEFAULT"):
-        assert forbidden not in stage_create_sql.upper()
+    assert stage_tables == {
+        snapshot_module.PARALLEL_PAPER_STAGE_METADATA_TABLE,
+        snapshot_module.PARALLEL_PAPER_STAGE_CHUNK_TABLE,
+    }
+    assert "opportunity_events" not in stage_tables
     stage.close()
 
     final = sqlite3.connect(final_path)
@@ -3407,6 +3514,9 @@ def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lo
     ).fetchone()[0]
     assert merged["rows_merged"] == 1
     assert merged["destination_schema_restored"] is True
+    assert merged["stage_storage_contract_passed"] is True
+    assert merged["stage_chunk_integrity_passed"] is True
+    assert merged["stage_row_digest_matched"] is True
     assert merged[
         "source_constraints_rebuilt_after_source_read_lock_release"
     ] is True
@@ -3436,6 +3546,236 @@ def test_constraint_free_parallel_stage_restores_exact_destination_schema_off_lo
     final.rollback()
     assert final.execute("PRAGMA quick_check").fetchone()[0] == "ok"
     final.close()
+
+
+def test_compressed_parallel_stage_round_trips_all_sqlite_storage_classes(
+    tmp_path,
+):
+    source = tmp_path / "mixed-values-source.db"
+    stage_path = tmp_path / "mixed-values-stage.db"
+    final_path = tmp_path / "mixed-values-final.db"
+    now = time.time()
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        """
+        CREATE TABLE opportunity_events (
+          id INTEGER PRIMARY KEY,
+          event_ts REAL NOT NULL,
+          null_value,
+          int_min INTEGER,
+          int_max INTEGER,
+          real_value REAL,
+          text_value TEXT,
+          blob_value BLOB
+        );
+        CREATE INDEX idx_opportunity_events_recent
+          ON opportunity_events(event_ts);
+        """
+    )
+    expected_values = (
+        1,
+        now - 10,
+        None,
+        -(2**63),
+        2**63 - 1,
+        1.25,
+        "雪\x00🚀",
+        b"\x00\xffbinary\x00payload",
+    )
+    source_db.execute(
+        "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?)",
+        expected_values,
+    )
+    source_db.commit()
+    expected_storage_types = tuple(
+        source_db.execute(
+            "SELECT typeof(id),typeof(event_ts),typeof(null_value),"
+            "typeof(int_min),typeof(int_max),typeof(real_value),"
+            "typeof(text_value),typeof(blob_value) FROM opportunity_events"
+        ).fetchone()
+    )
+    source_db.close()
+
+    stage = sqlite3.connect(stage_path)
+    stage.row_factory = sqlite3.Row
+    stage.execute("ATTACH DATABASE ? AS src", (str(source),))
+    report, _deferred_indexes, destination_schema = (
+        snapshot_module.stage_single_source_table(
+            stage,
+            "opportunity_events",
+            DATABASE_SPECS["paper"]["tables"]["opportunity_events"],
+            review_lower_epoch=now - 3600,
+            long_lower_epoch=now - 3600,
+            upper_epoch=now,
+        )
+    )
+    stage.commit()
+    stage.execute("DETACH DATABASE src")
+    stage.close()
+
+    final = sqlite3.connect(final_path)
+    final.row_factory = sqlite3.Row
+    final.execute("ATTACH DATABASE ? AS staged", (str(stage_path),))
+    merged = snapshot_module.merge_staged_table(
+        final,
+        stage_schema="staged",
+        table="opportunity_events",
+        destination_schema=destination_schema,
+    )
+    actual_values = tuple(
+        final.execute("SELECT * FROM opportunity_events").fetchone()
+    )
+    actual_storage_types = tuple(
+        final.execute(
+            "SELECT typeof(id),typeof(event_ts),typeof(null_value),"
+            "typeof(int_min),typeof(int_max),typeof(real_value),"
+            "typeof(text_value),typeof(blob_value) FROM opportunity_events"
+        ).fetchone()
+    )
+    final.close()
+
+    assert report["rows_copied"] == merged["rows_merged"] == 1
+    assert actual_values == expected_values
+    assert actual_storage_types == expected_storage_types
+    assert merged["stage_chunk_integrity_passed"] is True
+    assert merged["stage_row_digest_matched"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_marker"),
+    (
+        ("compressed_payload", "parallel_paper_stage_chunk_integrity_failed"),
+        ("raw_hash", "parallel_paper_stage_chunk_integrity_failed"),
+        ("oversized_chunk", "parallel_paper_stage_chunk_integrity_failed"),
+        ("rows_digest", "parallel_paper_stage_row_digest_mismatch"),
+    ),
+)
+def test_compressed_parallel_stage_tampering_fails_closed(
+    tmp_path,
+    mutation,
+    expected_marker,
+):
+    source = tmp_path / f"{mutation}-source.db"
+    stage_path = tmp_path / f"{mutation}-stage.db"
+    now = time.time()
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        "CREATE TABLE opportunity_events("
+        "id INTEGER PRIMARY KEY,event_ts REAL NOT NULL,raw_payload_json TEXT);"
+        "CREATE INDEX idx_opportunity_events_recent "
+        "ON opportunity_events(event_ts);"
+    )
+    source_db.execute(
+        "INSERT INTO opportunity_events VALUES (?,?,?)",
+        (1, now - 10, '{"important":"payload"}'),
+    )
+    source_db.commit()
+    source_db.close()
+
+    stage = sqlite3.connect(stage_path)
+    stage.row_factory = sqlite3.Row
+    stage.execute("ATTACH DATABASE ? AS src", (str(source),))
+    _report, _deferred_indexes, destination_schema = (
+        snapshot_module.stage_single_source_table(
+            stage,
+            "opportunity_events",
+            DATABASE_SPECS["paper"]["tables"]["opportunity_events"],
+            review_lower_epoch=now - 3600,
+            long_lower_epoch=now - 3600,
+            upper_epoch=now,
+        )
+    )
+    stage.commit()
+    stage.execute("DETACH DATABASE src")
+    chunk_table = snapshot_module.PARALLEL_PAPER_STAGE_CHUNK_TABLE
+    metadata_table = snapshot_module.PARALLEL_PAPER_STAGE_METADATA_TABLE
+    if mutation == "compressed_payload":
+        stage.execute(
+            f"UPDATE {chunk_table} SET payload=zeroblob(length(payload))"
+        )
+    elif mutation == "raw_hash":
+        stage.execute(
+            f"UPDATE {chunk_table} SET raw_sha256=?",
+            ("0" * 64,),
+        )
+    elif mutation == "oversized_chunk":
+        stage.execute(
+            f"UPDATE {chunk_table} SET raw_size_bytes=?",
+            (snapshot_module.PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES + 1,),
+        )
+    elif mutation == "rows_digest":
+        stage.execute(
+            f"UPDATE {metadata_table} SET rows_sha256=?",
+            ("0" * 64,),
+        )
+    else:
+        raise AssertionError(mutation)
+    stage.commit()
+    stage.close()
+
+    final = sqlite3.connect(tmp_path / f"{mutation}-final.db")
+    final.row_factory = sqlite3.Row
+    final.execute("ATTACH DATABASE ? AS staged", (str(stage_path),))
+    final.execute("SAVEPOINT hydrate")
+    with pytest.raises(RuntimeError, match=expected_marker):
+        snapshot_module.merge_staged_table(
+            final,
+            stage_schema="staged",
+            table="opportunity_events",
+            destination_schema=destination_schema,
+        )
+    final.execute("ROLLBACK TO hydrate")
+    final.execute("RELEASE hydrate")
+    assert final.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='opportunity_events'"
+    ).fetchone() is None
+    final.close()
+
+
+def test_compressed_parallel_stage_packs_repetitive_wide_payloads(
+    tmp_path,
+):
+    source = tmp_path / "wide-source.db"
+    stage_path = tmp_path / "wide-stage.db"
+    now = time.time()
+    source_db = sqlite3.connect(source)
+    source_db.executescript(
+        "CREATE TABLE opportunity_events("
+        "id INTEGER PRIMARY KEY,event_ts REAL NOT NULL,raw_payload_json TEXT);"
+        "CREATE INDEX idx_opportunity_events_recent "
+        "ON opportunity_events(event_ts);"
+    )
+    payload = '{"repetitive":"' + ("A" * 65536) + '"}'
+    source_db.executemany(
+        "INSERT INTO opportunity_events VALUES (?,?,?)",
+        [(row_id, now - 10, payload) for row_id in range(1, 65)],
+    )
+    source_db.commit()
+    source_db.close()
+
+    stage = sqlite3.connect(stage_path)
+    stage.row_factory = sqlite3.Row
+    stage.execute("ATTACH DATABASE ? AS src", (str(source),))
+    report, _deferred_indexes, _destination_schema = (
+        snapshot_module.stage_single_source_table(
+            stage,
+            "opportunity_events",
+            DATABASE_SPECS["paper"]["tables"]["opportunity_events"],
+            review_lower_epoch=now - 3600,
+            long_lower_epoch=now - 3600,
+            upper_epoch=now,
+        )
+    )
+    stage.commit()
+    stage.close()
+
+    assert report["rows_copied"] == 64
+    assert report["stage_raw_size_bytes"] > 4 * 1024**2
+    assert report["stage_compressed_payload_size_bytes"] < (
+        report["stage_raw_size_bytes"] // 10
+    )
+    assert stage_path.stat().st_size < report["stage_raw_size_bytes"]
 
 
 def test_heavy_parallel_stage_uses_index_bounded_rowid_range_without_row_loss(
@@ -3470,7 +3810,7 @@ def test_heavy_parallel_stage_uses_index_bounded_rowid_range_without_row_loss(
     stage = sqlite3.connect(stage_path)
     stage.row_factory = sqlite3.Row
     stage.execute("ATTACH DATABASE ? AS src", (str(source),))
-    report, _deferred_indexes, _destination_schema = (
+    report, _deferred_indexes, destination_schema = (
         snapshot_module.stage_single_source_table(
             stage,
             "paper_decision_events",
@@ -3480,16 +3820,31 @@ def test_heavy_parallel_stage_uses_index_bounded_rowid_range_without_row_loss(
             upper_epoch=now,
         )
     )
-    rows = stage.execute(
+    stage.commit()
+    stage.execute("DETACH DATABASE src")
+    stage.close()
+
+    final = sqlite3.connect(tmp_path / "rowid-range-final.db")
+    final.row_factory = sqlite3.Row
+    final.execute("ATTACH DATABASE ? AS staged", (str(stage_path),))
+    merged = snapshot_module.merge_staged_table(
+        final,
+        stage_schema="staged",
+        table="paper_decision_events",
+        destination_schema=destination_schema,
+    )
+    rows = final.execute(
         "SELECT id,payload_json FROM paper_decision_events ORDER BY id"
     ).fetchall()
-    stage.close()
+    final.close()
 
     assert [tuple(row) for row in rows] == [
         (1, '{"selected":1}'),
         (4, '{"selected":2}'),
     ]
     assert report["rows_copied"] == 2
+    assert merged["rows_merged"] == 2
+    assert merged["stage_row_digest_matched"] is True
     assert report["source_copy_strategy"] == "indexed_time_bounds_then_rowid_range"
     assert report["source_copy_rowid_lower"] == 1
     assert report["source_copy_rowid_upper"] == 4
