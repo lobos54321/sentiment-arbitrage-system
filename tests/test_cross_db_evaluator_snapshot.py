@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from collections import namedtuple
 from types import SimpleNamespace
 
@@ -2331,6 +2332,7 @@ def test_parallel_paper_decision_stage_uses_fixed_4k_pages_with_large_source_pag
         "parallel_paper_stage_chunk_decompression_failed",
         "parallel_paper_stage_storage_contract_mismatch",
         "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_producer_evidence_mismatch",
         "parallel_paper_stage_chunk_sequence_invalid",
         "parallel_paper_stage_chunk_integrity_failed",
         "parallel_paper_stage_row_digest_mismatch",
@@ -3785,8 +3787,12 @@ def test_compressed_parallel_stage_streams_one_row_across_bounded_chunks(
         ("compressed_payload", "parallel_paper_stage_chunk_integrity_failed"),
         ("raw_hash", "parallel_paper_stage_chunk_integrity_failed"),
         ("row_count", "parallel_paper_stage_chunk_integrity_failed"),
+        (
+            "coherent_payload_rehash",
+            "parallel_paper_stage_producer_evidence_mismatch",
+        ),
         ("oversized_chunk", "parallel_paper_stage_chunk_integrity_failed"),
-        ("rows_digest", "parallel_paper_stage_row_digest_mismatch"),
+        ("rows_digest", "parallel_paper_stage_producer_evidence_mismatch"),
     ),
 )
 def test_compressed_parallel_stage_tampering_fails_closed(
@@ -3839,6 +3845,37 @@ def test_compressed_parallel_stage_tampering_fails_closed(
         )
     elif mutation == "row_count":
         stage.execute(f"UPDATE {chunk_table} SET row_count=0")
+    elif mutation == "coherent_payload_rehash":
+        replacement = snapshot_module.encode_sqlite_stage_row(
+            (1, now - 10, '{"corrupted":"payload"}'),
+            3,
+        )
+        assert len(replacement) == destination_schema["stage_raw_size_bytes"]
+        compressed = zlib.compress(
+            replacement,
+            level=snapshot_module.PARALLEL_PAPER_STAGE_COMPRESSION_LEVEL,
+        )
+        stage.execute(
+            f"UPDATE {chunk_table} SET row_count=1,raw_size_bytes=?,"
+            "compressed_size_bytes=?,raw_sha256=?,compressed_sha256=?,"
+            "payload=?",
+            (
+                len(replacement),
+                len(compressed),
+                hashlib.sha256(replacement).hexdigest(),
+                hashlib.sha256(compressed).hexdigest(),
+                compressed,
+            ),
+        )
+        stage.execute(
+            f"UPDATE {metadata_table} SET row_count=1,chunk_count=1,"
+            "raw_size_bytes=?,compressed_size_bytes=?,rows_sha256=?",
+            (
+                len(replacement),
+                len(compressed),
+                hashlib.sha256(replacement).hexdigest(),
+            ),
+        )
     elif mutation == "oversized_chunk":
         stage.execute(
             f"UPDATE {chunk_table} SET raw_size_bytes=?",

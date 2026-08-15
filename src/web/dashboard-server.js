@@ -9014,6 +9014,7 @@ const EVALUATOR_PUBLIC_FAILURE_CODES = new Set([
   'parallel_paper_stage_chunk_decompression_failed',
   'parallel_paper_stage_storage_contract_mismatch',
   'parallel_paper_stage_metadata_invalid',
+  'parallel_paper_stage_producer_evidence_mismatch',
   'parallel_paper_stage_chunk_sequence_invalid',
   'parallel_paper_stage_chunk_integrity_failed',
   'parallel_paper_stage_row_digest_mismatch',

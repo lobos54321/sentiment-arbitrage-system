@@ -1731,6 +1731,7 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
         "parallel_paper_stage_chunk_decompression_failed",
         "parallel_paper_stage_storage_contract_mismatch",
         "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_producer_evidence_mismatch",
         "parallel_paper_stage_chunk_sequence_invalid",
         "parallel_paper_stage_chunk_integrity_failed",
         "parallel_paper_stage_row_digest_mismatch",
@@ -1885,6 +1886,7 @@ def snapshot_failure_code(exc: BaseException) -> str:
         "parallel_paper_stage_chunk_decompression_failed",
         "parallel_paper_stage_storage_contract_mismatch",
         "parallel_paper_stage_metadata_invalid",
+        "parallel_paper_stage_producer_evidence_mismatch",
         "parallel_paper_stage_chunk_sequence_invalid",
         "parallel_paper_stage_chunk_integrity_failed",
         "parallel_paper_stage_row_digest_mismatch",
@@ -5122,6 +5124,15 @@ def stage_single_source_table(
         "column_names": list(source_column_contract["column_names"]),
         "column_contract_sha256": source_column_contract["sha256"],
         "deferred_indexes_json": deferred_indexes_json,
+        "stage_schema_version": PARALLEL_PAPER_STAGE_SCHEMA_VERSION,
+        "stage_codec_schema_version": PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
+        "stage_compression": PARALLEL_PAPER_STAGE_COMPRESSION,
+        "stage_storage_contract_sha256": storage_contract_sha256,
+        "stage_row_count": copied_rows,
+        "stage_chunk_count": chunk_sequence,
+        "stage_raw_size_bytes": raw_size_bytes,
+        "stage_compressed_size_bytes": compressed_size_bytes,
+        "stage_rows_sha256": rows_sha256.hexdigest(),
     }
     return report, deferred_indexes, destination_schema
 
@@ -5188,10 +5199,41 @@ def merge_staged_table(
     column_names = [
         str(name) for name in destination_schema.get("column_names") or []
     ]
+    trusted_stage_rows_sha256 = str(
+        destination_schema.get("stage_rows_sha256") or ""
+    )
+    try:
+        trusted_stage_row_count = int(destination_schema["stage_row_count"])
+        trusted_stage_chunk_count = int(
+            destination_schema["stage_chunk_count"]
+        )
+        trusted_stage_raw_size = int(
+            destination_schema["stage_raw_size_bytes"]
+        )
+        trusted_stage_compressed_size = int(
+            destination_schema["stage_compressed_size_bytes"]
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"parallel_paper_stage_producer_evidence_mismatch:{table}"
+        ) from exc
     if (
         not create_sql
         or not column_names
         or sha256_text(create_sql) != expected_create_sql_sha256
+        or destination_schema.get("stage_schema_version")
+        != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
+        or destination_schema.get("stage_codec_schema_version")
+        != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+        or destination_schema.get("stage_compression")
+        != PARALLEL_PAPER_STAGE_COMPRESSION
+        or destination_schema.get("stage_storage_contract_sha256")
+        != storage_contract_sha256
+        or trusted_stage_row_count < 0
+        or trusted_stage_chunk_count < 0
+        or trusted_stage_raw_size < 0
+        or trusted_stage_compressed_size < 0
+        or not re.fullmatch(r"[a-f0-9]{64}", trusted_stage_rows_sha256)
         or str(metadata_row["stage_schema_version"])
         != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
         or str(metadata_row["codec_schema_version"])
@@ -5280,6 +5322,16 @@ def merge_staged_table(
         or (expected_row_count == 0) != (expected_chunk_count == 0)
     ):
         raise RuntimeError(f"parallel_paper_stage_metadata_invalid:{table}")
+    if (
+        expected_row_count != trusted_stage_row_count
+        or expected_chunk_count != trusted_stage_chunk_count
+        or expected_raw_size != trusted_stage_raw_size
+        or expected_compressed_size != trusted_stage_compressed_size
+        or expected_rows_sha256 != trusted_stage_rows_sha256
+    ):
+        raise RuntimeError(
+            f"parallel_paper_stage_producer_evidence_mismatch:{table}"
+        )
     chunk_rows_total = 0
     raw_size_total = 0
     compressed_size_total = 0
@@ -5341,6 +5393,7 @@ def merge_staged_table(
     )
     row_digest_matched = bool(
         rows_sha256.hexdigest() == expected_rows_sha256
+        and rows_sha256.hexdigest() == trusted_stage_rows_sha256
         and chunk_rows_total == expected_row_count
         and rows_merged == expected_row_count
         and final_row_count == expected_row_count
@@ -5708,6 +5761,15 @@ def snapshot_one(
             config = PARALLEL_PAPER_STAGE_CONFIGS[table]
             stage_schema = str(config["schema"])
             stage_path = Path(result["stage_path"])
+            current_stage_size = int(stage_path.stat().st_size)
+            if (
+                current_stage_size != int(result.get("stage_size_bytes") or 0)
+                or current_stage_size
+                > int(result.get("stage_budget_bytes") or 0)
+            ):
+                raise RuntimeError(
+                    f"parallel_paper_stage_producer_evidence_mismatch:{table}"
+                )
             if progress is not None:
                 progress["stage"] = f"merge_parallel_stage:{table}"
                 progress["current_table"] = table
@@ -5722,6 +5784,27 @@ def snapshot_one(
                 table=table,
                 destination_schema=result.get("destination_schema") or {},
             )
+            if (
+                int(merge_result.get("stage_chunk_count") or 0)
+                != int(result.get("stage_chunk_count") or 0)
+                or int(merge_result.get("stage_raw_size_bytes") or 0)
+                != int(result.get("stage_raw_size_bytes") or 0)
+                or int(
+                    merge_result.get(
+                        "stage_compressed_payload_size_bytes"
+                    )
+                    or 0
+                )
+                != int(
+                    result.get("stage_compressed_payload_size_bytes")
+                    or 0
+                )
+                or str(merge_result.get("stage_rows_sha256") or "")
+                != str(result.get("stage_rows_sha256") or "")
+            ):
+                raise RuntimeError(
+                    f"parallel_paper_stage_producer_evidence_mismatch:{table}"
+                )
             rows_merged = int(merge_result.get("rows_merged") or 0)
             expected_rows = int(
                 (result.get("table_report") or {}).get("rows_copied") or 0
