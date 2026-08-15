@@ -270,7 +270,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "0584d254b60d81b6f3926b416e2a4486cd195b1487b626f3e391bcdb8dec7421",
+      "impact_hash": "d29a5740fb215bd6ebc876b7e93db7fe8caa21ebf0fc303667bcc25a13d18546",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -409,7 +409,7 @@
         "scripts/paper_trade_monitor.py": "0e571b61b19ddfceeb88e3b100dff0d68fc415e4501b6c324db21fe34c441288",
         "scripts/pump_fun_shadow_observer.js": "f88bd72ca47a50694db90bc1bd0970db5bcdfa72d0293606dbfbbc30e56e24b6",
         "scripts/run_with_timeout.py": "65e60bdd1f91fa55264c006a80b2ae5e04ae19d244ae4e75e3f2224a76195225",
-        "scripts/run_zeabur_services.sh": "6ac99517a5ef937e4fa4b01b7a4bf3d96f1ac9f6ad3034e9e42705b19a667ea0",
+        "scripts/run_zeabur_services.sh": "034dcb39c0f4e9f02f93e7897ee60fa47fbb41d50a1b78a0ab9b5fb860562b25",
         "scripts/telegram_lifecycle_markov.py": "13a32477b07d009ec2ee616e6d6aa25d67a8b00260185fe98267642a4b4942a1",
         "scripts/v27_basic_contract_readiness.py": "95db8c3ae42528bedad6df8d57032979caa9816c246901b4ce37d1438329af44",
         "scripts/v27_denominator_projection.py": "553b0241fc6729cc2982b291d6dba9d2b8323d1a27ec7300378fa50afc2b0eb0",
@@ -452,7 +452,7 @@
         "tests/dashboard-agent-evaluator-db-source.test.mjs": "ba47e9b544f5689097a7d8f9852d592ae14944bbc2c102b9b81c7dc224e8aeba",
         "tests/dashboard-heavy-api-utils.test.mjs": "26b7a2ac840ce5073eca26257921ac2a9f593a556f1a109b74e9630baa5803a2",
         "tests/index-sidecar-config.test.mjs": "cdf80e960e57a7288da10c61dab4338f378d5ffc54dbe9ea983ef02f64e9e89d",
-        "tests/research-autoloop-recovery-config.test.mjs": "1f47ddf04b469542d7e735c740f87b3f31d2d6ff9fba2cd3b66361851cfaae83",
+        "tests/research-autoloop-recovery-config.test.mjs": "79f26ea3d9de29511d362f49e28c6a18ae900a6a6d07db02e361275838b5b248",
         "tests/test_autoloop_evaluator_snapshot_provenance.py": "6f1c27ec3ebdb166b819ae24b1d7cba11e224b5bdb80a358aa95a82437cb4e3b",
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",

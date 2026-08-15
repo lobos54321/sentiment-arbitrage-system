@@ -21,7 +21,11 @@ test('Zeabur startup restores bounded research-only workers', () => {
   assert.match(startup, /AGENT_CAPTURE_RUN_HISTORY_LIMIT.*:-8/);
   assert.match(startup, /export EVALUATOR_SNAPSHOT_WORKER_ENABLED=/);
   assert.match(startup, /export EVALUATOR_SNAPSHOT_STATUS=/);
-  assert.match(startup, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC.*:-300/);
+  assert.match(startup, /EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC.*:-900/);
+  assert.match(
+    startup,
+    /case "\$EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC" in[\s\S]*\[1-9\]\|\[1-9\]\[0-9\]\|\[1-8\]\[0-9\]\[0-9\]\|900\)[\s\S]*\*\) export EVALUATOR_SNAPSHOT_MAX_SOURCE_READ_LOCK_SEC=900/,
+  );
   assert.match(startup, /EVALUATOR_SNAPSHOT_LONG_HISTORY_HOURS.*:-720/);
   assert.match(startup, /while true; do[\s\S]*cross_db_evaluator_snapshot\.py[\s\S]*restarting in \$\{EVALUATOR_SNAPSHOT_RESTART_DELAY_SEC\}s/);
   assert.match(startup, /kill -0 "\$EVALUATOR_SNAPSHOT_PID"/);
