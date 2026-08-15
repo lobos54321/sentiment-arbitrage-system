@@ -5,6 +5,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
 import {
+  isDecimalIdentifier,
+  isEvidenceTimestamp,
+  numericEvidenceRule,
+  validateNumericEvidenceSchema,
+  validateNumericEvidenceValue,
+} from '../src/web/evaluator-evidence-schema.js';
+import {
   apiJsonHeaders,
   aClassStatusFromLiveSnapshot,
   apiEnvelopePayloadForHash,
@@ -93,7 +100,7 @@ test('parallel compressed-stage storage contract matches the Python golden hash'
 test('numeric evidence type contract matches the Python golden hash', () => {
   assert.equal(
     JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
-    '8338e46d071d0bd8a03956b890e8182d7d8aa3deedf150f48f9366c12cbcf244',
+    'c39db1a96055b6fb92e126ba3348893c20594c43de7b21e1b5379b758869c2a9',
   );
 });
 
@@ -2123,12 +2130,18 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         snapshot_id: snapshotId,
         manifest_sha256: 'd'.repeat(64),
         max_source_read_lock_duration_sec: 3.33,
+        numeric_evidence_schema_version: 'evaluator_snapshot_numeric_evidence.v2',
+        numeric_evidence_schema_sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+        numeric_evidence_schema_validated_before_publish: true,
       },
       shared_stage_budget: sharedStageBudget,
       promotion_allowed: false,
     },
     manifestPayload: {
       schema_version: 'cross_db_evaluator_snapshot.v3',
+      numeric_evidence_schema_version: 'evaluator_snapshot_numeric_evidence.v2',
+      numeric_evidence_schema_sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+      numeric_evidence_schema_validated_before_publish: true,
       snapshot_id: snapshotId,
       snapshot_ts: snapshotTs,
       git_commit: 'f'.repeat(40),
@@ -2224,6 +2237,12 @@ function evaluatorSnapshotHealthFixture(nowMs) {
         signal: databaseReport('signal'),
         paper: {
           ...databaseReport('paper'),
+          source_upper_watermarks: {
+            a_class_decision_events: { event_ts: snapshotTs },
+          },
+          upper_watermarks: {
+            a_class_decision_events: { id: 1, event_ts: snapshotTs },
+          },
           source_read_lock_duration_sec: 3.33,
           main_source_read_lock_duration_sec: 3.33,
           temporary_candidate_stage_size_bytes: 16000,
@@ -2650,6 +2669,314 @@ test('every current evaluator manifest numeric leaf is type guarded', () => {
   assert.equal(jsonNumericEvidenceTypesValid(manifest), true);
 });
 
+test('every dashboard numeric leaf obeys declarative type null and range rules', () => {
+  const fixture = evaluatorSnapshotHealthFixture(
+    Date.parse('2026-08-08T04:00:00.000Z'),
+  );
+  const manifest = structuredClone(fixture.manifestPayload);
+  const numericLeaves = [];
+  const collect = (value, path = '') => {
+    if (Array.isArray(value)) {
+      for (const child of value) {
+        const childPath = `${path}[]`;
+        if (typeof child === 'number') numericLeaves.push([childPath, child]);
+        else if (child && typeof child === 'object') collect(child, childPath);
+      }
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [field, child] of Object.entries(value)) {
+      const childPath = path ? `${path}.${field}` : field;
+      if (typeof child === 'number') numericLeaves.push([childPath, child]);
+      else if (child && typeof child === 'object') collect(child, childPath);
+    }
+  };
+  collect(manifest);
+  assert.ok(numericLeaves.length >= 150);
+  for (const [path, original] of numericLeaves) {
+    const baseline = validateNumericEvidenceValue(manifest, path, original);
+    assert.equal(baseline.accepted, true, `${path}:${JSON.stringify(baseline)}`);
+    let ruleMatch = numericEvidenceRule(path);
+    let prefix = '';
+    if (!ruleMatch) {
+      const parent = path.endsWith('[]')
+        ? path.slice(0, -2)
+        : path.slice(0, path.lastIndexOf('.'));
+      ruleMatch = numericEvidenceRule(parent);
+      prefix = 'element_';
+    }
+    assert.ok(ruleMatch, path);
+    const rule = ruleMatch[1];
+    const kind = rule[`${prefix}kind`];
+    const invalidValues = [
+      false,
+      {},
+      [],
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ];
+    if (kind === 'safe_integer_or_decimal_identifier') {
+      assert.equal(validateNumericEvidenceValue(manifest, path, '123').accepted, true, path);
+      invalidValues.push('01', '+1', '1.0');
+    } else {
+      invalidValues.push('123');
+    }
+    for (const invalid of invalidValues) {
+      const result = validateNumericEvidenceValue(manifest, path, invalid);
+      assert.equal(result.accepted, false, `${path}:${String(invalid)}`);
+    }
+    if (kind.startsWith('safe_integer')) {
+      assert.equal(validateNumericEvidenceValue(manifest, path, 0.5).accepted, false, path);
+      assert.equal(
+        validateNumericEvidenceValue(
+          manifest,
+          path,
+          Number.MAX_SAFE_INTEGER + 1,
+        ).accepted,
+        false,
+        path,
+      );
+    }
+    const minimum = rule[`${prefix}minimum`];
+    if (minimum != null) {
+      assert.equal(
+        validateNumericEvidenceValue(manifest, path, minimum - 1).accepted,
+        false,
+        path,
+      );
+    }
+    const maximum = rule[`${prefix}maximum`];
+    if (maximum != null) {
+      assert.equal(
+        validateNumericEvidenceValue(manifest, path, maximum + 1).accepted,
+        false,
+        path,
+      );
+    }
+    const nullResult = validateNumericEvidenceValue(manifest, path, null);
+    if (rule[`${prefix}nullable`] === false) {
+      assert.equal(nullResult.accepted, false, path);
+    } else if (rule.null_policy == null) {
+      assert.equal(nullResult.accepted, true, path);
+    }
+  }
+});
+
+test('declarative evidence schema rejects all dynamic watermark tamper shapes', () => {
+  const timestamp = 1_786_766_144;
+  const payload = {
+    numeric_evidence_schema_version: 'evaluator_snapshot_numeric_evidence.v2',
+    numeric_evidence_schema_sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+    numeric_evidence_schema_validated_before_publish: true,
+    databases: {
+      paper: {
+        selected_tables: {
+          a_class_decision_events: {
+            time_column: 'event_ts',
+            rows_copied: 1,
+          },
+        },
+        source_upper_watermarks: {
+          a_class_decision_events: { event_ts: timestamp },
+        },
+        upper_watermarks: {
+          a_class_decision_events: { id: 1, event_ts: timestamp },
+        },
+      },
+    },
+  };
+  const baseline = validateNumericEvidenceSchema(payload, { requireBinding: true });
+  assert.equal(baseline.accepted, true, JSON.stringify(baseline.errors));
+  assert.equal(baseline.numeric_leaf_count, 4);
+  assert.equal(baseline.declared_numeric_leaf_count, 4);
+
+  for (const container of [
+    payload.databases.paper.source_upper_watermarks.a_class_decision_events,
+    payload.databases.paper.upper_watermarks.a_class_decision_events,
+  ]) {
+    const original = container.event_ts;
+    container.event_ts = '2026-08-08T03:59:00.123456Z';
+    assert.equal(validateNumericEvidenceSchema(payload).accepted, true);
+    container.event_ts = '2026-08-08 03:59:00.123456';
+    assert.equal(validateNumericEvidenceSchema(payload).accepted, true);
+    container.event_ts = timestamp + 0.125;
+    assert.equal(validateNumericEvidenceSchema(payload).accepted, true);
+    container.event_ts = original;
+  }
+  for (const invalidTimestamp of [
+    '2026-02-31T00:00:00Z',
+    '2026-08-08T25:00:00Z',
+    '2026-08-08T03:59:00',
+    '2026-02-31 00:00:00',
+    '2026-08-08 25:00:00',
+    '1969-12-31T23:59:59Z',
+  ]) {
+    const container = payload.databases.paper.upper_watermarks
+      .a_class_decision_events;
+    const original = container.event_ts;
+    container.event_ts = invalidTimestamp;
+    assert.equal(validateNumericEvidenceSchema(payload).accepted, false);
+    container.event_ts = original;
+  }
+
+  const slots = [
+    payload.databases.paper.source_upper_watermarks.a_class_decision_events,
+    payload.databases.paper.upper_watermarks.a_class_decision_events,
+  ];
+  for (const container of slots) {
+    const original = container.event_ts;
+    for (const invalid of [
+      '1700000000',
+      false,
+      {},
+      [],
+      -1,
+      0.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ]) {
+      container.event_ts = invalid;
+      const report = validateNumericEvidenceSchema(payload);
+      assert.equal(report.accepted, false, String(invalid));
+      container.event_ts = original;
+    }
+  }
+
+  payload.databases.paper.source_upper_watermarks
+    .a_class_decision_events.event_ts = null;
+  payload.databases.paper.upper_watermarks
+    .a_class_decision_events.event_ts = null;
+  assert.equal(validateNumericEvidenceSchema(payload).accepted, false);
+  payload.databases.paper.selected_tables.a_class_decision_events.rows_copied = 0;
+  assert.equal(validateNumericEvidenceSchema(payload).accepted, true);
+
+  payload.undeclared_attacker_numeric_evidence = 1;
+  const unknown = validateNumericEvidenceSchema(payload);
+  assert.equal(unknown.accepted, false);
+  assert.ok(unknown.errors.some(
+    (error) => error.code === 'undeclared_numeric_evidence',
+  ));
+  delete payload.undeclared_attacker_numeric_evidence;
+  payload.undeclared_attacker_count = 1;
+  const suffixSpoof = validateNumericEvidenceSchema(payload);
+  assert.equal(suffixSpoof.accepted, false);
+  assert.ok(suffixSpoof.errors.some(
+    (error) => error.path === 'undeclared_attacker_count'
+      && error.code === 'undeclared_numeric_evidence',
+  ));
+});
+
+test('declarative evidence schema preserves strict production scalar variants', () => {
+  assert.equal(isEvidenceTimestamp('2026-08-08T03:59:00.123456Z'), true);
+  assert.equal(isEvidenceTimestamp('2026-08-08 03:59:00.123456'), true);
+  assert.equal(isEvidenceTimestamp('2026-02-31 00:00:00'), false);
+  for (const value of ['0', '1', '47959', String(Number.MAX_SAFE_INTEGER)]) {
+    assert.equal(isDecimalIdentifier(value), true, value);
+  }
+  for (const value of ['', '01', '+1', '-1', '1.0', String(Number.MAX_SAFE_INTEGER + 1)]) {
+    assert.equal(isDecimalIdentifier(value), false, value);
+  }
+
+  const payload = {
+    numeric_evidence_schema_version: 'evaluator_snapshot_numeric_evidence.v2',
+    numeric_evidence_schema_sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+    numeric_evidence_schema_validated_before_publish: true,
+    databases: {
+      paper: {
+        selected_tables: {
+          paper_decision_events: {
+            rows_copied: 1,
+            time_column: 'event_ts',
+            time_columns: ['event_ts', 'created_at'],
+          },
+        },
+        source_upper_watermarks: {
+          paper_decision_events: { event_ts: 1_786_766_144.125 },
+        },
+        upper_watermarks: {
+          paper_decision_events: {
+            id: 1,
+            event_ts: 1_786_766_144.125,
+            created_at: '2026-08-08 03:59:00',
+          },
+        },
+      },
+      raw: {
+        selected_tables: {
+          raw_signal_outcomes: { rows_copied: 1, time_column: 'updated_at' },
+        },
+        source_upper_watermarks: { raw_signal_outcomes: {} },
+        upper_watermarks: {
+          raw_signal_outcomes: { id: 1, signal_id: '47959', updated_at: 1_786_766_144 },
+        },
+      },
+    },
+  };
+  assert.equal(
+    validateNumericEvidenceSchema(payload, { requireBinding: true }).accepted,
+    true,
+  );
+  payload.databases.paper.upper_watermarks.paper_decision_events.event_ts = 0.5;
+  assert.equal(validateNumericEvidenceSchema(payload).accepted, false);
+  payload.databases.paper.upper_watermarks.paper_decision_events.event_ts = 1_786_766_144.125;
+  payload.databases.raw.upper_watermarks.raw_signal_outcomes.signal_id = '047959';
+  assert.equal(validateNumericEvidenceSchema(payload).accepted, false);
+});
+
+test('dashboard rejects coherent watermark and local schema-binding spoofing', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const base = {
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: fixture.statusPayload,
+    manifestPayload: fixture.manifestPayload,
+    statusArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 100 },
+    manifestArtifact: { available: true, mtime: '2026-08-08T03:59:30.000Z', size_bytes: 1000 },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  };
+
+  for (const invalid of ['1700000000', 0.5, null]) {
+    const manifest = structuredClone(fixture.manifestPayload);
+    manifest.databases.paper.source_upper_watermarks
+      .a_class_decision_events.event_ts = invalid;
+    manifest.databases.paper.upper_watermarks
+      .a_class_decision_events.event_ts = invalid;
+    const health = readEvaluatorSnapshotWorkerHealth({ ...base, manifestPayload: manifest });
+    assert.equal(health.status, 'contract_blocked', String(invalid));
+    assert.equal(health.consumer_ready, false, String(invalid));
+    assert.equal(
+      health.manifest_contract.numeric_evidence_types_passed,
+      false,
+      String(invalid),
+    );
+  }
+
+  const spoofedManifest = structuredClone(fixture.manifestPayload);
+  const spoofedStatus = structuredClone(fixture.statusPayload);
+  spoofedManifest.numeric_evidence_schema_sha256 = 'f'.repeat(64);
+  spoofedStatus.last_accepted_snapshot.numeric_evidence_schema_sha256 = (
+    'f'.repeat(64)
+  );
+  const spoofed = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: spoofedManifest,
+    statusPayload: spoofedStatus,
+  });
+  assert.equal(spoofed.status, 'contract_blocked');
+  assert.equal(
+    spoofed.manifest_contract.numeric_evidence_schema_binding_passed,
+    false,
+  );
+});
+
 test('evaluator snapshot worker health accepts only fresh matching indexed bundles', () => {
   const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
   const fixture = evaluatorSnapshotHealthFixture(nowMs);
@@ -2681,6 +3008,13 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(health.healthy, true);
   assert.equal(health.degraded, false);
   assert.equal(health.consumer_ready, true);
+  assert.deepEqual(health.numeric_evidence_schema, {
+    version: 'evaluator_snapshot_numeric_evidence.v2',
+    sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+    manifest_binding_valid: true,
+    producer_binding_valid: true,
+    binding_passed: true,
+  });
   assert.equal(health.bundle_candidate_available, true);
   assert.equal(health.consumer_state, 'authoritative_preflight_current');
   assert.equal(health.snapshot_identity_matched, true);

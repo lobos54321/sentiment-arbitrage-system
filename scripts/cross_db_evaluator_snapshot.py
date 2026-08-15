@@ -28,6 +28,14 @@ from typing import Any
 from urllib.parse import quote
 import zlib
 
+from evaluator_evidence_schema import (
+    EVIDENCE_SCHEMA_SHA256_FIELD,
+    EVIDENCE_SCHEMA_VALIDATED_FIELD,
+    EVIDENCE_SCHEMA_VERSION_FIELD,
+    bind_numeric_evidence_schema,
+    require_numeric_evidence_schema,
+)
+
 
 SCHEMA_VERSION = "cross_db_evaluator_snapshot.v3"
 PRUNABLE_SCHEMA_VERSIONS = {
@@ -2044,6 +2052,16 @@ def snapshot_manifest_summary(manifest: dict[str, Any]) -> dict[str, Any]:
     }
     return {
         "schema_version": manifest.get("schema_version"),
+        EVIDENCE_SCHEMA_VERSION_FIELD: manifest.get(
+            EVIDENCE_SCHEMA_VERSION_FIELD
+        ),
+        EVIDENCE_SCHEMA_SHA256_FIELD: manifest.get(
+            EVIDENCE_SCHEMA_SHA256_FIELD
+        ),
+        EVIDENCE_SCHEMA_VALIDATED_FIELD: manifest.get(
+            EVIDENCE_SCHEMA_VALIDATED_FIELD
+        )
+        is True,
         "snapshot_id": manifest.get("snapshot_id"),
         "snapshot_ts": manifest.get("snapshot_ts"),
         "generated_at": manifest.get("generated_at"),
@@ -2445,6 +2463,7 @@ def write_bounded_manifest(
     manifest["manifest_size_bytes"] = 0
     manifest["output_size_bytes"] = int(manifest.get("database_payload_size_bytes") or 0)
     for _attempt in range(8):
+        require_numeric_evidence_schema(manifest, require_binding=True)
         atomic_json(manifest_path, manifest)
         directory = snapshot_directory_report(
             partial_dir,
@@ -2464,6 +2483,7 @@ def write_bounded_manifest(
             and int(manifest.get("output_size_bytes") or 0) == total_size
         ):
             manifest["output_cap_passed"] = True
+            require_numeric_evidence_schema(manifest, require_binding=True)
             return directory
         manifest["manifest_size_bytes"] = manifest_size
         manifest["output_size_bytes"] = total_size
@@ -8819,6 +8839,8 @@ def _build_snapshot_bundle_owned(
         }
         if not accepted:
             raise RuntimeError(f"cross-database snapshot acceptance failed: {manifest}")
+        bind_numeric_evidence_schema(manifest)
+        require_numeric_evidence_schema(manifest, require_binding=True)
         write_bounded_manifest(
             partial_dir,
             manifest,
@@ -8835,6 +8857,7 @@ def _build_snapshot_bundle_owned(
             "removed_snapshots": [],
             "removal_errors": [],
         }
+        require_numeric_evidence_schema(manifest, require_binding=True)
         try:
             os.replace(partial_dir, final_dir)
             fsync_directory(snapshots_root)
@@ -8858,6 +8881,7 @@ def _build_snapshot_bundle_owned(
         retention = prune_old_snapshots(root, final_dir.name, max(0, int(keep_previous)))
         manifest["retention"].update(retention)
         try:
+            require_numeric_evidence_schema(manifest, require_binding=True)
             atomic_json(latest_path, manifest)
         except Exception as exc:
             manifest["retention"]["status_write_error"] = f"{type(exc).__name__}:{exc}"

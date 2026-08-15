@@ -35,6 +35,11 @@ from evaluator_db_contract import (  # noqa: E402
     evaluator_snapshot_bundle_status,
     validate_shared_stage_estimate_contract,
 )
+from evaluator_evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA_SHA256,
+    EVIDENCE_SCHEMA_VERSION,
+    validate_numeric_evidence_schema,
+)
 import paper_trade_monitor as paper_monitor  # noqa: E402
 
 
@@ -1997,13 +2002,18 @@ def test_authoritative_consumer_reads_the_persisted_predecessor_anchor(
             "status": "completed",
             "accepted": True,
             "snapshot_id": second["snapshot_id"],
-            "last_accepted_snapshot": {
-                "snapshot_id": second["snapshot_id"],
-                "manifest_path": str(manifest_path),
-                "manifest_sha256": snapshot_module.sha256_file(
-                    manifest_path
-                ),
-            },
+                "last_accepted_snapshot": {
+                    "snapshot_id": second["snapshot_id"],
+                    "manifest_path": str(manifest_path),
+                    "manifest_sha256": snapshot_module.sha256_file(
+                        manifest_path
+                    ),
+                    "numeric_evidence_schema_version": (
+                        EVIDENCE_SCHEMA_VERSION
+                    ),
+                    "numeric_evidence_schema_sha256": EVIDENCE_SCHEMA_SHA256,
+                    "numeric_evidence_schema_validated_before_publish": True,
+                },
             "promotion_allowed": False,
         },
     )
@@ -6882,6 +6892,22 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert accepted["manifest_path"].endswith("/manifest.json")
     assert len(accepted["manifest_sha256"]) == 64
     assert accepted["manifest_sha256"] == snapshot_module.sha256_file(Path(accepted["manifest_path"]))
+    assert accepted["numeric_evidence_schema_version"] == EVIDENCE_SCHEMA_VERSION
+    assert accepted["numeric_evidence_schema_sha256"] == EVIDENCE_SCHEMA_SHA256
+    assert accepted["numeric_evidence_schema_validated_before_publish"] is True
+    accepted_manifest = json.loads(
+        Path(accepted["manifest_path"]).read_text(encoding="utf-8")
+    )
+    assert accepted_manifest["numeric_evidence_schema_version"] == (
+        EVIDENCE_SCHEMA_VERSION
+    )
+    assert accepted_manifest["numeric_evidence_schema_sha256"] == (
+        EVIDENCE_SCHEMA_SHA256
+    )
+    assert (
+        accepted_manifest["numeric_evidence_schema_validated_before_publish"]
+        is True
+    )
     assert not (
         Path(accepted["manifest_path"]).parent
         / snapshot_module.PARTIAL_OWNER_FILENAME
@@ -6906,6 +6932,114 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert persisted["failure_retry_sec"] == 60
     assert persisted["consecutive_failure_count"] == 0
     assert persisted["promotion_allowed"] is False
+
+
+def test_producer_rejects_undeclared_numeric_before_any_publish(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    out = tmp_path / "schema-fail-closed-evidence"
+    original_bind = snapshot_module.bind_numeric_evidence_schema
+
+    def bind_with_undeclared_numeric(manifest):
+        original_bind(manifest)
+        manifest["undeclared_attacker_count"] = 1
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "bind_numeric_evidence_schema",
+        bind_with_undeclared_numeric,
+    )
+    with pytest.raises(
+        ValueError,
+        match="evaluator_snapshot_numeric_evidence_schema_invalid",
+    ):
+        build_snapshot_bundle(
+            sources=sources,
+            out_root=str(out),
+            repo_root=str(ROOT),
+            max_skew_sec=30,
+            min_free_after_gib=0,
+            snapshot_id="20260101T000000Z-5c4e0001",
+        )
+
+    assert not (out / "current").exists()
+    assert not (out / "latest_manifest.json").exists()
+
+
+def test_producer_accepts_strict_real_world_watermark_scalar_variants(
+    tmp_path,
+):
+    sources = create_sources(tmp_path)
+    now = time.time()
+    event_ts = now - 30.125
+    sqlite_created_at = time.strftime(
+        "%Y-%m-%d %H:%M:%S",
+        time.gmtime(now - 30),
+    )
+
+    paper = sqlite3.connect(sources["paper"])
+    paper.execute("ALTER TABLE paper_trades ADD COLUMN created_at DATETIME")
+    paper.execute(
+        "INSERT INTO paper_decision_events(id, event_ts) VALUES (1, ?)",
+        (event_ts,),
+    )
+    paper.execute(
+        "INSERT INTO a_class_decision_events(id, event_ts) VALUES (1, ?)",
+        (event_ts,),
+    )
+    paper.execute(
+        "INSERT INTO opportunity_events(id, event_ts) VALUES (1, ?)",
+        (event_ts,),
+    )
+    paper.execute(
+        "INSERT INTO paper_trades(id, entry_time, created_at) VALUES (1, ?, ?)",
+        (int(now - 30), sqlite_created_at),
+    )
+    paper.commit()
+    paper.close()
+
+    raw = sqlite3.connect(sources["raw"])
+    raw.execute("DROP TABLE raw_signal_outcomes")
+    raw.execute(
+        "CREATE TABLE raw_signal_outcomes("
+        "id INTEGER, signal_id TEXT, updated_at INTEGER)"
+    )
+    raw.execute(
+        "INSERT INTO raw_signal_outcomes(id, signal_id, updated_at) "
+        "VALUES (1, '47959', ?)",
+        (int(now - 30),),
+    )
+    raw.commit()
+    raw.close()
+
+    out = tmp_path / "real-world-watermark-evidence"
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(out),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-5c4e0002",
+    )
+    manifest = json.loads((out / "current" / "manifest.json").read_text())
+
+    assert manifest["accepted"] is True
+    assert validate_numeric_evidence_schema(
+        manifest,
+        require_binding=True,
+    )["accepted"] is True
+    assert manifest["databases"]["paper"]["upper_watermarks"][
+        "paper_decision_events"
+    ]["event_ts"] == pytest.approx(event_ts)
+    assert manifest["databases"]["paper"]["upper_watermarks"][
+        "paper_trades"
+    ]["created_at"] == sqlite_created_at
+    assert manifest["databases"]["raw"]["upper_watermarks"][
+        "raw_signal_outcomes"
+    ]["signal_id"] == "47959"
 
 
 def test_snapshot_worker_failure_preserves_last_accepted_summary(tmp_path, monkeypatch):

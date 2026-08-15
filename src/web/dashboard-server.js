@@ -26,6 +26,12 @@ import {
   runEvaluatorSnapshotPreflight,
 } from './evaluator-snapshot-preflight.js';
 import {
+  EVIDENCE_SCHEMA_VERSION,
+  JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+  jsonNumericEvidenceTypesValid,
+  numericEvidenceSchemaBindingValid,
+} from './evaluator-evidence-schema.js';
+import {
   buildTradeReplay,
   summarizeTradeReplays,
 } from './trade-replay-utils.js';
@@ -9220,112 +9226,10 @@ function jsonFiniteNumberOrNaN(value) {
     : Number.NaN;
 }
 
-const JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES = [
-  '_bytes',
-  '_count',
-  '_rows',
-  '_rows_copied',
-  '_rows_merged',
-  '_page_size',
-  '_pages',
-  '_numerator',
-  '_denominator',
-  '_hours',
-];
-const JSON_SAFE_INTEGER_EVIDENCE_FIELDS = new Set([
-  'application_id',
-  'destination_connection_total_changes',
-  'page_size',
-  'rows_copied',
-  'rows_merged',
-  'semantic_rows_verified',
-  'source_data_version_after',
-  'source_data_version_before',
-  'source_row_count_upper',
-  'source_schema_version',
-  'source_size_bytes_after',
-  'source_size_bytes_before',
-  'user_version',
-]);
-const JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES = [
-  '_sec',
-  '_epoch',
-  '_ratio',
-  '_monotonic',
-];
-const JSON_FINITE_NUMBER_EVIDENCE_FIELDS = new Set([
-  'snapshot_ts',
-  'source_mtime_after',
-  'source_mtime_before',
-]);
-const JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS = new Set([
-  'database_budget_bytes',
-  'padded_non_paper_estimate_bytes',
-  'source_compact_estimate_bytes',
-  'static_share_budget_bytes',
-  'supported_capture_windows_hours',
-  'temporary_parallel_paper_stage_cap_bytes',
-]);
-const JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS = new Set([
-  'parallel_paper_source_read_lock_duration_sec',
-]);
-export const JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256 = auditSha256Hex({
-  schema_version: 'evaluator_json_numeric_evidence_types.v1',
-  safe_integer_suffixes: JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES,
-  safe_integer_fields: [...JSON_SAFE_INTEGER_EVIDENCE_FIELDS].sort(),
-  finite_number_suffixes: JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES,
-  finite_number_fields: [...JSON_FINITE_NUMBER_EVIDENCE_FIELDS].sort(),
-  safe_integer_containers: [...JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS].sort(),
-  finite_number_containers: [...JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS].sort(),
-  database_schema_version_path_rule: 'databases\\.[^.]+\\.schema_version',
-});
-
-function jsonNumericEvidenceKind(field, path) {
-  if (/^databases\.[^.]+\.schema_version$/.test(path)) return 'safe_integer';
-  if (
-    JSON_SAFE_INTEGER_EVIDENCE_FIELDS.has(field)
-    || JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES.some((suffix) => field.endsWith(suffix))
-  ) return 'safe_integer';
-  if (
-    JSON_FINITE_NUMBER_EVIDENCE_FIELDS.has(field)
-    || JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES.some((suffix) => field.endsWith(suffix))
-  ) return 'finite_number';
-  return null;
-}
-
-export function jsonNumericEvidenceTypesValid(payload) {
-  const visit = (value, path, inheritedKind = null) => {
-    if (Array.isArray(value)) {
-      return value.every((child) => visit(child, `${path}[]`, inheritedKind));
-    }
-    if (value && typeof value === 'object') {
-      return Object.entries(value).every(([field, child]) => {
-        const childPath = path ? `${path}.${field}` : field;
-        const fieldKind = jsonNumericEvidenceKind(field, childPath);
-        const containerKind = JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS.has(field)
-          ? 'safe_integer'
-          : JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS.has(field)
-            ? 'finite_number'
-            : null;
-        const childKind = fieldKind || inheritedKind;
-        if (child && typeof child === 'object') {
-          if (fieldKind && !containerKind) return false;
-          return visit(child, childPath, containerKind || inheritedKind);
-        }
-        if (child == null) return true;
-        if (childKind === 'safe_integer') return Number.isSafeInteger(child);
-        if (childKind === 'finite_number') {
-          return typeof child === 'number' && Number.isFinite(child);
-        }
-        return true;
-      });
-    }
-    if (value == null || inheritedKind == null) return true;
-    if (inheritedKind === 'safe_integer') return Number.isSafeInteger(value);
-    return typeof value === 'number' && Number.isFinite(value);
-  };
-  return visit(payload, '');
-}
+export {
+  JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+  jsonNumericEvidenceTypesValid,
+};
 
 export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : Date.now();
@@ -9416,6 +9320,13 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   );
   const manifestNumericEvidenceTypesValid = Boolean(
     manifestPayloadValid && jsonNumericEvidenceTypesValid(manifestPayload)
+  );
+  const manifestNumericEvidenceSchemaBindingValid = Boolean(
+    manifestPayloadValid && numericEvidenceSchemaBindingValid(manifestPayload)
+  );
+  const producerNumericEvidenceSchemaBindingValid = Boolean(
+    statusPayloadValid
+    && numericEvidenceSchemaBindingValid(statusPayload.last_accepted_snapshot)
   );
   const pid = Number(options.pid ?? (statusPayloadValid ? statusPayload.pid : null) ?? lockPid) || null;
   const pidAlive = options.pidAlive === undefined ? processIsAlive(pid) : Boolean(options.pidAlive);
@@ -11807,6 +11718,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const manifestContractChecks = {
     accepted: manifestPayload?.accepted === true,
     numeric_evidence_types_passed: manifestNumericEvidenceTypesValid,
+    numeric_evidence_schema_binding_passed: Boolean(
+      manifestNumericEvidenceSchemaBindingValid
+      && producerNumericEvidenceSchemaBindingValid
+    ),
     manifest_sha256_matched: manifestSha256Matched,
     snapshot_timestamp_valid: snapshotTimestampValid,
     immutable: manifestPayload?.immutable === true,
@@ -12060,6 +11975,16 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     status_artifact: statusArtifact,
     manifest_artifact: manifestArtifact,
     manifest_contract: manifestContractChecks,
+    numeric_evidence_schema: {
+      version: EVIDENCE_SCHEMA_VERSION,
+      sha256: JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+      manifest_binding_valid: manifestNumericEvidenceSchemaBindingValid,
+      producer_binding_valid: producerNumericEvidenceSchemaBindingValid,
+      binding_passed: Boolean(
+        manifestNumericEvidenceSchemaBindingValid
+        && producerNumericEvidenceSchemaBindingValid
+      ),
+    },
     databases: databaseChecks,
     snapshot_files: snapshotFiles,
     indexed_selection: indexedSelection,

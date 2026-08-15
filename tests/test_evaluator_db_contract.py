@@ -30,6 +30,16 @@ from cross_db_evaluator_snapshot import (  # noqa: E402
     shared_stage_budget_evidence_sha256,
     shared_stage_budget_plan_sha256,
 )
+from evaluator_evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA_SHA256,
+    EVIDENCE_SCHEMA_VERSION,
+    is_decimal_identifier,
+    is_evidence_timestamp,
+    is_iso8601_timestamp,
+    numeric_evidence_rule,
+    validate_numeric_evidence_schema,
+    validate_numeric_evidence_value,
+)
 
 
 def create_live_sources(root):
@@ -64,7 +74,7 @@ def create_live_sources(root):
             "CREATE INDEX idx_opportunity_path_samples_sample_ts "
             "ON opportunity_event_path_samples(sample_ts)",
         ),
-        "raw": ("raw_signal_outcomes.db", "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id INTEGER, updated_at INTEGER)"),
+        "raw": ("raw_signal_outcomes.db", "CREATE TABLE raw_signal_outcomes(id INTEGER, signal_id TEXT, updated_at INTEGER)"),
         "kline": ("kline_cache.db", "CREATE TABLE kline_1m(token_ca TEXT, timestamp INTEGER)"),
     }
     sources = {}
@@ -84,6 +94,7 @@ def create_valid_bundle(
     *,
     include_optional_path_samples: bool = True,
     seed_shared_stage_rows: bool = False,
+    seed_all_database_rows: bool = False,
 ):
     live = tmp_path / "live"
     sources = create_live_sources(live)
@@ -92,7 +103,7 @@ def create_valid_bundle(
         paper.execute("DROP TABLE opportunity_event_path_samples")
         paper.commit()
         paper.close()
-    if seed_shared_stage_rows:
+    if seed_shared_stage_rows or seed_all_database_rows:
         now = int(time.time())
         paper = sqlite3.connect(sources["paper"])
         paper.execute(
@@ -113,6 +124,20 @@ def create_valid_bundle(
             "INSERT INTO opportunity_events(id, event_ts) VALUES (1, ?)",
             (now,),
         )
+        if seed_all_database_rows:
+            paper.execute(
+                "INSERT INTO candidate_shadow_virtual_trades(signal_id, observed_at) "
+                "VALUES (1, ?)",
+                (now,),
+            )
+            paper.execute(
+                "INSERT INTO a_class_mode_runtime_state(id, updated_at) VALUES (1, ?)",
+                (now,),
+            )
+            paper.execute(
+                "INSERT INTO paper_trades(id, entry_time) VALUES (1, ?)",
+                (now,),
+            )
         if include_optional_path_samples:
             paper.execute(
                 "INSERT INTO opportunity_event_path_samples("
@@ -123,6 +148,30 @@ def create_valid_bundle(
             )
         paper.commit()
         paper.close()
+    if seed_all_database_rows:
+        now = int(time.time())
+        signal = sqlite3.connect(sources["signal"])
+        signal.execute(
+            "INSERT INTO premium_signals(id, source_message_ts) VALUES (1, ?)",
+            (now,),
+        )
+        signal.commit()
+        signal.close()
+        raw = sqlite3.connect(sources["raw"])
+        raw.execute(
+            "INSERT INTO raw_signal_outcomes(id, signal_id, updated_at) "
+            "VALUES (1, 1, ?)",
+            (now,),
+        )
+        raw.commit()
+        raw.close()
+        kline = sqlite3.connect(sources["kline"])
+        kline.execute(
+            "INSERT INTO kline_1m(token_ca, timestamp) VALUES ('token-1', ?)",
+            (now,),
+        )
+        kline.commit()
+        kline.close()
     monkeypatch.setenv("ZEABUR_GIT_COMMIT_SHA", "a" * 40)
     out = live / "agent_evidence"
     manifest = build_snapshot_bundle(
@@ -150,6 +199,9 @@ def create_valid_bundle(
                     "snapshot_id": manifest["snapshot_id"],
                     "manifest_path": str(manifest_path),
                     "manifest_sha256": sha256_file(manifest_path),
+                    "numeric_evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+                    "numeric_evidence_schema_sha256": EVIDENCE_SCHEMA_SHA256,
+                    "numeric_evidence_schema_validated_before_publish": True,
                 },
                 "promotion_allowed": False,
             }
@@ -190,8 +242,103 @@ def test_missing_evidence_db_is_rejected(tmp_path):
 
 def test_numeric_evidence_contract_matches_dashboard_golden_hash():
     assert json_numeric_evidence_contract_sha256() == (
-        "8338e46d071d0bd8a03956b890e8182d7d8aa3deedf150f48f9366c12cbcf244"
+        "c39db1a96055b6fb92e126ba3348893c20594c43de7b21e1b5379b758869c2a9"
     )
+
+
+def test_numeric_evidence_timestamp_union_has_strict_cross_runtime_shape():
+    for value in (
+        "2026-08-08T03:59:00Z",
+        "2026-08-08T03:59:00.123456Z",
+        "2026-08-08T13:59:00+10:00",
+    ):
+        assert is_iso8601_timestamp(value) is True
+        assert is_evidence_timestamp(value) is True
+    for value in (
+        "2026-08-08 03:59:00",
+        "2026-08-08 03:59:00.123456",
+    ):
+        assert is_iso8601_timestamp(value) is False
+        assert is_evidence_timestamp(value) is True
+    for value in (
+        "123",
+        "2026-02-31T00:00:00Z",
+        "2026-08-08T25:00:00Z",
+        "2026-08-08T03:59:00",
+        "2026-02-31 00:00:00",
+        "2026-08-08 25:00:00",
+        "1969-12-31T23:59:59Z",
+    ):
+        assert is_evidence_timestamp(value) is False
+        assert is_iso8601_timestamp(value) is False
+
+    for value in ("0", "1", "47959", str(2**53 - 1)):
+        assert is_decimal_identifier(value) is True
+    for value in ("", "01", "+1", "-1", "1.0", str(2**53)):
+        assert is_decimal_identifier(value) is False
+
+
+def test_declarative_schema_preserves_strict_production_scalar_variants():
+    payload = {
+        "numeric_evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "numeric_evidence_schema_sha256": EVIDENCE_SCHEMA_SHA256,
+        "numeric_evidence_schema_validated_before_publish": True,
+        "databases": {
+            "paper": {
+                "selected_tables": {
+                    "paper_decision_events": {
+                        "rows_copied": 1,
+                        "time_column": "event_ts",
+                        "time_columns": ["event_ts", "created_at"],
+                    }
+                },
+                "source_upper_watermarks": {
+                    "paper_decision_events": {
+                        "event_ts": 1_786_766_144.125,
+                    }
+                },
+                "upper_watermarks": {
+                    "paper_decision_events": {
+                        "id": 1,
+                        "event_ts": 1_786_766_144.125,
+                        "created_at": "2026-08-08 03:59:00",
+                    }
+                },
+            },
+            "raw": {
+                "selected_tables": {
+                    "raw_signal_outcomes": {
+                        "rows_copied": 1,
+                        "time_column": "updated_at",
+                    }
+                },
+                "source_upper_watermarks": {"raw_signal_outcomes": {}},
+                "upper_watermarks": {
+                    "raw_signal_outcomes": {
+                        "id": 1,
+                        "signal_id": "47959",
+                        "updated_at": 1_786_766_144,
+                    }
+                },
+            },
+        },
+    }
+    assert validate_numeric_evidence_schema(
+        payload,
+        require_binding=True,
+    )["accepted"] is True
+
+    payload["databases"]["paper"]["upper_watermarks"][
+        "paper_decision_events"
+    ]["event_ts"] = 0.5
+    assert validate_numeric_evidence_schema(payload)["accepted"] is False
+    payload["databases"]["paper"]["upper_watermarks"][
+        "paper_decision_events"
+    ]["event_ts"] = 1_786_766_144.125
+    payload["databases"]["raw"]["upper_watermarks"][
+        "raw_signal_outcomes"
+    ]["signal_id"] = "047959"
+    assert validate_numeric_evidence_schema(payload)["accepted"] is False
 
 
 def test_every_current_manifest_numeric_leaf_is_type_guarded(
@@ -231,6 +378,323 @@ def test_every_current_manifest_numeric_leaf_is_type_guarded(
         assert json_numeric_evidence_types_valid(manifest) is False
         container[key] = original
     assert json_numeric_evidence_types_valid(manifest) is True
+
+
+def test_declarative_schema_covers_every_all_database_numeric_leaf(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    report = validate_numeric_evidence_schema(
+        manifest,
+        require_binding=True,
+    )
+
+    assert report["accepted"] is True
+    assert report["error_count"] == 0
+    assert report["numeric_leaf_count"] >= 1000
+    assert (
+        report["declared_numeric_leaf_count"]
+        == report["numeric_leaf_count"]
+    )
+    assert report["schema_sha256"] == EVIDENCE_SCHEMA_SHA256
+    assert (
+        report["rule_match_counts"]["nullable_watermark_values"]
+        + report["rule_match_counts"]["nullable_epoch_time_watermarks"]
+        >= 10
+    )
+    assert report["rule_match_counts"]["nullable_watermark_identifiers"] >= 5
+
+
+def test_every_numeric_leaf_obeys_declarative_type_null_and_range_rules(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    numeric_leaves = []
+
+    def collect(value, path=""):
+        if isinstance(value, dict):
+            for field, child in value.items():
+                child_path = f"{path}.{field}" if path else str(field)
+                if isinstance(child, (int, float)) and not isinstance(
+                    child, bool
+                ):
+                    numeric_leaves.append((child_path, child))
+                else:
+                    collect(child, child_path)
+        elif isinstance(value, list):
+            for child in value:
+                child_path = f"{path}[]"
+                if isinstance(child, (int, float)) and not isinstance(
+                    child, bool
+                ):
+                    numeric_leaves.append((child_path, child))
+                else:
+                    collect(child, child_path)
+
+    collect(manifest)
+    assert len(numeric_leaves) >= 1000
+    for path, original in numeric_leaves:
+        baseline = validate_numeric_evidence_value(manifest, path, original)
+        assert baseline["accepted"] is True, (path, original, baseline)
+        rule_match = numeric_evidence_rule(path)
+        if rule_match is None:
+            parent = path[:-2] if path.endswith("[]") else path.rsplit(".", 1)[0]
+            rule_match = numeric_evidence_rule(parent)
+            assert rule_match is not None and rule_match[0] == "container"
+            rule = rule_match[1]
+            prefix = "element_"
+        else:
+            rule = rule_match[1]
+            prefix = ""
+        kind = rule[f"{prefix}kind"]
+        invalid_values = [
+            False,
+            {},
+            [],
+            float("nan"),
+            float("inf"),
+        ]
+        if kind == "safe_integer_or_decimal_identifier":
+            assert validate_numeric_evidence_value(
+                manifest,
+                path,
+                "123",
+            )["accepted"] is True
+            invalid_values.extend(("01", "+1", "1.0"))
+        else:
+            invalid_values.append("123")
+        for invalid in invalid_values:
+            result = validate_numeric_evidence_value(manifest, path, invalid)
+            assert result["accepted"] is False, (path, invalid, result)
+        if kind.startswith("safe_integer"):
+            fractional = validate_numeric_evidence_value(
+                manifest,
+                path,
+                0.5,
+            )
+            assert fractional["accepted"] is False, path
+            unsafe = validate_numeric_evidence_value(
+                manifest,
+                path,
+                2**53,
+            )
+            assert unsafe["accepted"] is False, path
+        minimum = rule.get(f"{prefix}minimum")
+        if minimum is not None:
+            below = validate_numeric_evidence_value(
+                manifest,
+                path,
+                minimum - 1,
+            )
+            assert below["accepted"] is False, path
+        maximum = rule.get(f"{prefix}maximum")
+        if maximum is not None:
+            above = validate_numeric_evidence_value(
+                manifest,
+                path,
+                maximum + 1,
+            )
+            assert above["accepted"] is False, path
+        null_result = validate_numeric_evidence_value(manifest, path, None)
+        if rule.get(f"{prefix}nullable") is False:
+            assert null_result["accepted"] is False, path
+        elif rule.get("null_policy") is None:
+            assert null_result["accepted"] is True, path
+
+
+def test_all_nonempty_dynamic_watermarks_reject_every_invalid_numeric_shape(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    watermark_slots = []
+    for database_name, report in manifest["databases"].items():
+        for copy_name in ("source_upper_watermarks", "upper_watermarks"):
+            for table, watermarks in report[copy_name].items():
+                for field, value in watermarks.items():
+                    if isinstance(value, (int, float)) and not isinstance(
+                        value, bool
+                    ):
+                        watermark_slots.append(
+                            (
+                                f"databases.{database_name}.{copy_name}.{table}.{field}",
+                                watermarks,
+                                field,
+                                value,
+                            )
+                        )
+
+    assert len(watermark_slots) >= 20
+    invalid_values = (
+        "1700000000",
+        False,
+        {},
+        [],
+        -1,
+        2**53,
+        float("inf"),
+    )
+    for path, container, field, original in watermark_slots:
+        for invalid in invalid_values:
+            container[field] = invalid
+            report = validate_numeric_evidence_schema(manifest)
+            assert report["accepted"] is False, (path, invalid)
+            assert any(
+                error["path"] == path for error in report["errors"]
+            ), (path, invalid, report["errors"])
+            container[field] = original
+        rule = numeric_evidence_rule(path, field)
+        assert rule is not None and rule[0] == "scalar"
+        container[field] = 0.5
+        fractional_report = validate_numeric_evidence_schema(manifest)
+        assert fractional_report["accepted"] is False, path
+        container[field] = original
+
+    manifest["undeclared_attacker_numeric_evidence"] = 1
+    report = validate_numeric_evidence_schema(manifest)
+    assert report["accepted"] is False
+    assert report["errors"][0] == {
+        "path": "undeclared_attacker_numeric_evidence",
+        "code": "undeclared_numeric_evidence",
+    }
+    del manifest["undeclared_attacker_numeric_evidence"]
+    manifest["undeclared_attacker_count"] = 1
+    report = validate_numeric_evidence_schema(manifest)
+    assert report["accepted"] is False
+    assert report["errors"][0] == {
+        "path": "undeclared_attacker_count",
+        "code": "undeclared_numeric_evidence",
+    }
+
+
+def test_watermark_nullability_is_explicit_and_bound_to_empty_selected_table(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    source_watermark = manifest["databases"]["paper"][
+        "source_upper_watermarks"
+    ]["a_class_decision_events"]
+    destination_watermark = manifest["databases"]["paper"][
+        "upper_watermarks"
+    ]["a_class_decision_events"]
+
+    source_original = source_watermark["event_ts"]
+    destination_original = destination_watermark["event_ts"]
+    source_watermark["event_ts"] = None
+    destination_watermark["event_ts"] = None
+    assert validate_numeric_evidence_schema(manifest)["accepted"] is False
+
+    manifest["databases"]["paper"]["selected_tables"][
+        "a_class_decision_events"
+    ]["rows_copied"] = 0
+    assert validate_numeric_evidence_schema(manifest)["accepted"] is True
+
+    source_watermark["event_ts"] = source_original
+    destination_watermark["event_ts"] = destination_original
+    manifest["databases"]["paper"]["upper_watermarks"][
+        "a_class_decision_events"
+    ]["id"] = None
+    assert validate_numeric_evidence_schema(manifest)["accepted"] is True
+
+
+@pytest.mark.parametrize("tampered_value", ["1700000000", 0.5, None])
+def test_coherent_watermark_tamper_is_rejected_by_authoritative_consumer(
+    tmp_path,
+    monkeypatch,
+    tampered_value,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["databases"]["paper"]["source_upper_watermarks"][
+        "a_class_decision_events"
+    ]["event_ts"] = tampered_value
+    manifest["databases"]["paper"]["upper_watermarks"][
+        "a_class_decision_events"
+    ]["event_ts"] = tampered_value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_numeric_evidence_type_invalid" in status["blockers"]
+
+
+def test_coherent_schema_binding_spoof_is_rejected_by_authoritative_consumer(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["numeric_evidence_schema_sha256"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+    producer_path = out / "snapshot_status.json"
+    producer = json.loads(producer_path.read_text(encoding="utf-8"))
+    producer["last_accepted_snapshot"]["numeric_evidence_schema_sha256"] = (
+        "f" * 64
+    )
+    producer_path.write_text(json.dumps(producer), encoding="utf-8")
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_numeric_evidence_schema_invalid" in status["blockers"]
+    assert (
+        "evaluator_snapshot_producer_numeric_evidence_schema_invalid"
+        in status["blockers"]
+    )
 
 
 def test_active_paper_db_is_rejected_by_default(tmp_path):
@@ -286,12 +750,18 @@ def test_valid_cross_db_snapshot_bundle_is_required(tmp_path, monkeypatch):
     assert status["accepted"] is True
     assert status["snapshot_id"] == "20260101T000000Z-1234abcd"
     assert status["manifest_sha256"] == sha256_file(out / "current" / "manifest.json")
+    assert status["numeric_evidence_schema_version"] == EVIDENCE_SCHEMA_VERSION
+    assert status["numeric_evidence_schema_sha256"] == EVIDENCE_SCHEMA_SHA256
+    assert status["numeric_evidence_schema_binding_valid"] is True
     provenance = evaluator_snapshot_provenance(status)
     assert provenance["schema_version"] == "evaluator_snapshot_provenance.v1"
     assert provenance["accepted"] is True
     assert provenance["snapshot_id"] == status["snapshot_id"]
     assert provenance["manifest_sha256"] == status["manifest_sha256"]
     assert provenance["producer_manifest_sha256"] == status["manifest_sha256"]
+    assert provenance["numeric_evidence_schema_version"] == EVIDENCE_SCHEMA_VERSION
+    assert provenance["numeric_evidence_schema_sha256"] == EVIDENCE_SCHEMA_SHA256
+    assert provenance["numeric_evidence_schema_binding_valid"] is True
     assert provenance["producer_status_path"] == str(out / "snapshot_status.json")
     assert provenance["databases"]["paper"]["sha256_matches_manifest"] is True
     assert provenance["databases"]["paper"]["quick_check"] == ["ok"]

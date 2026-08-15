@@ -17,6 +17,15 @@ import stat
 import time
 from urllib.parse import quote
 
+from evaluator_evidence_schema import (
+    EVIDENCE_SCHEMA_SHA256,
+    EVIDENCE_SCHEMA_VERSION,
+    is_json_finite_number,
+    is_json_safe_integer,
+    numeric_evidence_schema_binding_valid,
+    numeric_evidence_schema_valid,
+)
+
 from cross_db_evaluator_snapshot import (
     CANDIDATE_OBSERVATION_ROW_TABLE,
     CANDIDATE_STAGE_BUDGET_MODE,
@@ -116,32 +125,10 @@ def valid_sha256_hex(value: object) -> bool:
     )
 
 
-def is_json_safe_integer(value: object) -> bool:
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return abs(value) <= 2**53 - 1
-    return bool(
-        isinstance(value, float)
-        and math.isfinite(value)
-        and value.is_integer()
-        and abs(value) <= 2**53 - 1
-    )
-
-
 def json_safe_integer(value: object, *, field: str) -> int:
     if not is_json_safe_integer(value):
         raise ValueError(f"{field} must be a JSON safe integer")
     return int(value)
-
-
-def is_json_finite_number(value: object) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    try:
-        return math.isfinite(float(value))
-    except (OverflowError, TypeError, ValueError):
-        return False
 
 
 def json_finite_number(value: object, *, field: str) -> float:
@@ -150,137 +137,14 @@ def json_finite_number(value: object, *, field: str) -> float:
     return float(value)
 
 
-JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES = (
-    "_bytes",
-    "_count",
-    "_rows",
-    "_rows_copied",
-    "_rows_merged",
-    "_page_size",
-    "_pages",
-    "_numerator",
-    "_denominator",
-    "_hours",
-)
-JSON_SAFE_INTEGER_EVIDENCE_FIELDS = frozenset(
-    {
-        "application_id",
-        "destination_connection_total_changes",
-        "page_size",
-        "rows_copied",
-        "rows_merged",
-        "semantic_rows_verified",
-        "source_data_version_after",
-        "source_data_version_before",
-        "source_row_count_upper",
-        "source_schema_version",
-        "source_size_bytes_after",
-        "source_size_bytes_before",
-        "user_version",
-    }
-)
-JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES = (
-    "_sec",
-    "_epoch",
-    "_ratio",
-    "_monotonic",
-)
-JSON_FINITE_NUMBER_EVIDENCE_FIELDS = frozenset(
-    {
-        "snapshot_ts",
-        "source_mtime_after",
-        "source_mtime_before",
-    }
-)
-JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS = frozenset(
-    {
-        "database_budget_bytes",
-        "padded_non_paper_estimate_bytes",
-        "source_compact_estimate_bytes",
-        "static_share_budget_bytes",
-        "supported_capture_windows_hours",
-        "temporary_parallel_paper_stage_cap_bytes",
-    }
-)
-JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS = frozenset(
-    {"parallel_paper_source_read_lock_duration_sec"}
-)
-
-
 def json_numeric_evidence_contract_sha256() -> str:
-    payload = {
-        "schema_version": "evaluator_json_numeric_evidence_types.v1",
-        "safe_integer_suffixes": list(JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES),
-        "safe_integer_fields": sorted(JSON_SAFE_INTEGER_EVIDENCE_FIELDS),
-        "finite_number_suffixes": list(JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES),
-        "finite_number_fields": sorted(JSON_FINITE_NUMBER_EVIDENCE_FIELDS),
-        "safe_integer_containers": sorted(
-            JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS
-        ),
-        "finite_number_containers": sorted(
-            JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS
-        ),
-        "database_schema_version_path_rule": (
-            r"databases\.[^.]+\.schema_version"
-        ),
-    }
-    return sha256_text(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    )
-
-
-def json_numeric_evidence_kind(field: str, path: str) -> str | None:
-    if re.fullmatch(r"databases\.[^.]+\.schema_version", path):
-        return "safe_integer"
-    if field in JSON_SAFE_INTEGER_EVIDENCE_FIELDS or field.endswith(
-        JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES
-    ):
-        return "safe_integer"
-    if field in JSON_FINITE_NUMBER_EVIDENCE_FIELDS or field.endswith(
-        JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES
-    ):
-        return "finite_number"
-    return None
+    return EVIDENCE_SCHEMA_SHA256
 
 
 def json_numeric_evidence_types_valid(payload: object) -> bool:
-    """Reject coercible numeric evidence across the entire manifest envelope."""
+    """Validate all numeric evidence using the shared declarative schema."""
 
-    def visit(value: object, path: str, inherited_kind: str | None = None) -> bool:
-        if isinstance(value, dict):
-            for field, child in value.items():
-                child_path = f"{path}.{field}" if path else str(field)
-                field_kind = json_numeric_evidence_kind(str(field), child_path)
-                container_kind = (
-                    "safe_integer"
-                    if field in JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS
-                    else "finite_number"
-                    if field in JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS
-                    else None
-                )
-                child_kind = field_kind or inherited_kind
-                if isinstance(child, (dict, list)):
-                    if field_kind is not None and container_kind is None:
-                        return False
-                    if not visit(child, child_path, container_kind or inherited_kind):
-                        return False
-                    continue
-                if child is None:
-                    continue
-                if child_kind == "safe_integer" and not is_json_safe_integer(child):
-                    return False
-                if child_kind == "finite_number" and not is_json_finite_number(child):
-                    return False
-            return True
-        if isinstance(value, list):
-            return all(visit(child, f"{path}[]", inherited_kind) for child in value)
-        if value is None or inherited_kind is None:
-            return True
-        if inherited_kind == "safe_integer":
-            return is_json_safe_integer(value)
-        return is_json_finite_number(value)
-
-    return visit(payload, "")
+    return numeric_evidence_schema_valid(payload)
 
 
 def sqlite_table_schema_evidence(
@@ -1853,6 +1717,10 @@ def evaluator_snapshot_bundle_status(
             producer_manifest_file = None
         if producer_manifest_file != manifest_file:
             blockers.append("evaluator_snapshot_producer_manifest_path_mismatch")
+        if not numeric_evidence_schema_binding_valid(producer_acceptance):
+            blockers.append(
+                "evaluator_snapshot_producer_numeric_evidence_schema_invalid"
+            )
     if manifest_loaded:
         shared_budget = manifest.get("shared_stage_budget") or {}
         if shared_budget.get("history_used") is True:
@@ -1881,6 +1749,8 @@ def evaluator_snapshot_bundle_status(
                         "evaluator_snapshot_shared_stage_history_anchor_invalid"
                     )
     if manifest_loaded:
+        if not numeric_evidence_schema_binding_valid(manifest):
+            blockers.append("evaluator_snapshot_numeric_evidence_schema_invalid")
         if not json_numeric_evidence_types_valid(manifest):
             blockers.append("evaluator_snapshot_numeric_evidence_type_invalid")
         if manifest.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
@@ -3110,6 +2980,12 @@ def evaluator_snapshot_bundle_status(
     blockers = list(dict.fromkeys(blockers))
     return {
         "schema_version": "evaluator_snapshot_bundle_contract.v1",
+        "numeric_evidence_schema_version": EVIDENCE_SCHEMA_VERSION,
+        "numeric_evidence_schema_sha256": EVIDENCE_SCHEMA_SHA256,
+        "numeric_evidence_schema_binding_valid": bool(
+            numeric_evidence_schema_binding_valid(manifest)
+            and numeric_evidence_schema_binding_valid(producer_acceptance)
+        ),
         "manifest_path": str(manifest_file),
         "manifest_sha256": manifest_sha256_value,
         "producer_status_path": str(producer_status_file),
@@ -3168,6 +3044,15 @@ def evaluator_snapshot_provenance(status: dict) -> dict:
         "schema_version": PROVENANCE_SCHEMA_VERSION,
         "consumer_verified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "contract_schema_version": payload.get("schema_version"),
+        "numeric_evidence_schema_version": payload.get(
+            "numeric_evidence_schema_version"
+        ),
+        "numeric_evidence_schema_sha256": payload.get(
+            "numeric_evidence_schema_sha256"
+        ),
+        "numeric_evidence_schema_binding_valid": (
+            payload.get("numeric_evidence_schema_binding_valid") is True
+        ),
         "accepted": payload.get("accepted") is True,
         "snapshot_id": payload.get("snapshot_id"),
         "snapshot_ts": payload.get("snapshot_ts"),
