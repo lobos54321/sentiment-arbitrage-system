@@ -5279,6 +5279,35 @@ def merge_staged_table(
         raise RuntimeError(
             f"parallel_paper_stage_column_contract_mismatch:{table}"
         )
+    try:
+        expected_row_count = int(metadata_row["row_count"])
+        expected_chunk_count = int(metadata_row["chunk_count"])
+        expected_raw_size = int(metadata_row["raw_size_bytes"])
+        expected_compressed_size = int(metadata_row["compressed_size_bytes"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"parallel_paper_stage_metadata_invalid:{table}"
+        ) from exc
+    expected_rows_sha256 = str(metadata_row["rows_sha256"])
+    if (
+        expected_row_count < 0
+        or expected_chunk_count < 0
+        or expected_raw_size < 0
+        or expected_compressed_size < 0
+        or not re.fullmatch(r"[a-f0-9]{64}", expected_rows_sha256)
+        or (expected_row_count == 0) != (expected_chunk_count == 0)
+    ):
+        raise RuntimeError(f"parallel_paper_stage_metadata_invalid:{table}")
+    if (
+        expected_row_count != trusted_stage_row_count
+        or expected_chunk_count != trusted_stage_chunk_count
+        or expected_raw_size != trusted_stage_raw_size
+        or expected_compressed_size != trusted_stage_compressed_size
+        or expected_rows_sha256 != trusted_stage_rows_sha256
+    ):
+        raise RuntimeError(
+            f"parallel_paper_stage_producer_evidence_mismatch:{table}"
+        )
     connection.execute(create_sql)
     destination_row = connection.execute(
         "SELECT sql FROM main.sqlite_master WHERE type='table' AND name=?",
@@ -5308,30 +5337,6 @@ def merge_staged_table(
         f"INSERT INTO {quote_identifier(table)} ({column_sql}) "
         f"VALUES ({placeholders})"
     )
-    expected_row_count = int(metadata_row["row_count"])
-    expected_chunk_count = int(metadata_row["chunk_count"])
-    expected_raw_size = int(metadata_row["raw_size_bytes"])
-    expected_compressed_size = int(metadata_row["compressed_size_bytes"])
-    expected_rows_sha256 = str(metadata_row["rows_sha256"])
-    if (
-        expected_row_count < 0
-        or expected_chunk_count < 0
-        or expected_raw_size < 0
-        or expected_compressed_size < 0
-        or not re.fullmatch(r"[a-f0-9]{64}", expected_rows_sha256)
-        or (expected_row_count == 0) != (expected_chunk_count == 0)
-    ):
-        raise RuntimeError(f"parallel_paper_stage_metadata_invalid:{table}")
-    if (
-        expected_row_count != trusted_stage_row_count
-        or expected_chunk_count != trusted_stage_chunk_count
-        or expected_raw_size != trusted_stage_raw_size
-        or expected_compressed_size != trusted_stage_compressed_size
-        or expected_rows_sha256 != trusted_stage_rows_sha256
-    ):
-        raise RuntimeError(
-            f"parallel_paper_stage_producer_evidence_mismatch:{table}"
-        )
     chunk_rows_total = 0
     raw_size_total = 0
     compressed_size_total = 0

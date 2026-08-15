@@ -3902,6 +3902,11 @@ def test_compressed_parallel_stage_tampering_fails_closed(
             table="opportunity_events",
             destination_schema=destination_schema,
         )
+    if mutation == "coherent_payload_rehash":
+        assert final.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='opportunity_events'"
+        ).fetchone() is None
     final.execute("ROLLBACK TO hydrate")
     final.execute("RELEASE hydrate")
     assert final.execute(
