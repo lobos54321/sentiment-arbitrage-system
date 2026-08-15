@@ -264,6 +264,49 @@ def test_shared_stage_hash_canonicalization_matches_cross_runtime_vector():
     )
 
 
+@pytest.mark.parametrize("value", (2**53, -(2**53), float(2**53)))
+def test_shared_stage_hash_rejects_unsafe_json_integers(value):
+    with pytest.raises(ValueError, match="safe integer"):
+        snapshot_module.shared_stage_budget_plan_sha256(
+            {
+                "capacity_sufficient": True,
+                "grants_sum_matches_total_cap": True,
+                "total_cap_bytes": value,
+                "total_granted_bytes": value,
+                "targets": {},
+            }
+        )
+
+
+@pytest.mark.parametrize("value", ("4096", False, None, 0.5, {}, []))
+def test_shared_stage_plan_hash_rejects_coercible_totals(value):
+    with pytest.raises(ValueError, match="safe integers"):
+        snapshot_module.shared_stage_budget_plan_sha256(
+            {
+                "capacity_sufficient": True,
+                "grants_sum_matches_total_cap": True,
+                "total_cap_bytes": value,
+                "total_granted_bytes": value,
+                "targets": {},
+            }
+        )
+
+
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_shared_stage_hash_rejects_non_finite_numbers(value):
+    with pytest.raises(ValueError, match="non-finite"):
+        snapshot_module.shared_stage_budget_plan_sha256(
+            {
+                "capacity_sufficient": True,
+                "grants_sum_matches_total_cap": True,
+                "total_cap_bytes": 4096,
+                "total_granted_bytes": 4096,
+                "diagnostic_ratio": value,
+                "targets": {},
+            }
+        )
+
+
 def test_compressed_stage_storage_contract_matches_cross_runtime_vector():
     assert snapshot_module.compressed_stage_storage_contract_sha256() == (
         "abddfbfe3e94bea539b850bd05fe5d76b9f5517671f406ac13259e51952ac1bf"
@@ -1762,6 +1805,9 @@ def test_capacity_insufficient_history_is_not_reused():
         ("stage_files_not_removed", "history_cleanup_invalid"),
         ("required_inventory_removed", "history_inventory_invalid"),
         ("target_grant_sum_mismatch", "history_total_invalid"),
+        ("numeric_string_grant", "history_numeric_invalid"),
+        ("fractional_high_water", "history_numeric_invalid"),
+        ("boolean_high_water", "history_numeric_invalid"),
     ),
 )
 def test_rehashed_unsafe_history_is_rejected(mutation, expected_reason):
@@ -1777,6 +1823,12 @@ def test_rehashed_unsafe_history_is_rejected(mutation, expected_reason):
         history["targets"] = {"paper_decision_events": p9}
     elif mutation == "target_grant_sum_mismatch":
         p9["granted_cap_bytes"] += 4096
+    elif mutation == "numeric_string_grant":
+        p9["granted_cap_bytes"] = str(p9["granted_cap_bytes"])
+    elif mutation == "fractional_high_water":
+        p9["high_water_bytes"] = 0.5
+    elif mutation == "boolean_high_water":
+        p9["high_water_bytes"] = False
     else:
         raise AssertionError(mutation)
     history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
@@ -1789,6 +1841,63 @@ def test_rehashed_unsafe_history_is_rejected(mutation, expected_reason):
         history,
         trusted_anchor=shared_stage_history_anchor(history),
     )
+    assert validated["accepted"] is False
+    assert validated["reason"] == expected_reason
+
+
+def test_integral_json_float_history_values_remain_usable():
+    estimates = shared_stage_estimates()
+    history = shared_stage_history(estimates)
+    target = history["targets"]["paper_decision_events"]
+    target["granted_cap_bytes"] = float(target["granted_cap_bytes"])
+    target["high_water_bytes"] = float(target["high_water_bytes"])
+    history["total_cap_bytes"] = float(history["total_cap_bytes"])
+    history["total_granted_bytes"] = float(history["total_granted_bytes"])
+    history["plan_sha256"] = snapshot_module.shared_stage_budget_plan_sha256(
+        history
+    )
+    history["evidence_sha256"] = (
+        snapshot_module.shared_stage_budget_evidence_sha256(history)
+    )
+
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=shared_stage_history_anchor(history),
+    )
+
+    assert validated["accepted"] is True
+    assert validated["targets"]["paper_decision_events"][
+        "granted_cap_bytes"
+    ] == int(target["granted_cap_bytes"])
+
+
+@pytest.mark.parametrize(
+    ("field_scope", "expected_reason"),
+    (
+        ("total_cap", "history_plan_hash_invalid"),
+        ("target_high_water", "history_evidence_hash_invalid"),
+    ),
+)
+def test_unsafe_integer_history_is_rejected_without_raising(
+    field_scope,
+    expected_reason,
+):
+    estimates = shared_stage_estimates()
+    history = shared_stage_history(estimates)
+    if field_scope == "total_cap":
+        history["total_cap_bytes"] = 2**53
+    elif field_scope == "target_high_water":
+        history["targets"]["paper_decision_events"][
+            "high_water_bytes"
+        ] = 2**53
+    else:  # pragma: no cover - parametrization is exhaustive
+        raise AssertionError(field_scope)
+
+    validated = snapshot_module.validated_shared_stage_budget_history(
+        history,
+        trusted_anchor=shared_stage_history_anchor(history),
+    )
+
     assert validated["accepted"] is False
     assert validated["reason"] == expected_reason
 

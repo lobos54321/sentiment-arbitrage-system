@@ -1854,6 +1854,9 @@ function sharedStageHashNormalize(value) {
       throw new TypeError('shared stage hash contains non-finite number');
     }
     if (Number.isSafeInteger(value)) return value;
+    if (Number.isInteger(value)) {
+      throw new TypeError('shared stage hash contains unsafe integer');
+    }
     return { __float64__: float64BitsHex(value) };
   }
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
@@ -1863,7 +1866,7 @@ function sharedStageHashNormalize(value) {
 }
 
 function jsonClone(value) {
-  return JSON.parse(JSON.stringify(value));
+  return structuredClone(value);
 }
 
 function sharedStageBudgetPlanHashPayload(plan) {
@@ -1893,10 +1896,16 @@ function sharedStageBudgetPlanHashPayload(plan) {
   ]) {
     payload[key] = null;
   }
+  if (
+    !Number.isSafeInteger(payload.total_granted_bytes)
+    || !Number.isSafeInteger(payload.total_cap_bytes)
+  ) {
+    throw new TypeError('shared stage plan totals must be safe integers');
+  }
   payload.accepted = Boolean(
     payload.capacity_sufficient === true
     && payload.grants_sum_matches_total_cap === true
-    && Number(payload.total_granted_bytes || 0) === Number(payload.total_cap_bytes || 0)
+    && payload.total_granted_bytes === payload.total_cap_bytes
   );
   for (const report of Object.values(payload.targets || {})) {
     if (!report || typeof report !== 'object' || Array.isArray(report)) continue;
@@ -9188,16 +9197,134 @@ export function parallelPaperStagePageClaimValid(
   stageSizeBytes,
   stageBudgetBytes,
 ) {
-  return Number.isFinite(stageSizeBytes)
+  return Number.isSafeInteger(stageSizeBytes)
     && stageSizeBytes > 0
-    && Number.isFinite(stageBudgetBytes)
+    && Number.isSafeInteger(stageBudgetBytes)
     && stageBudgetBytes > 0
+    && Number.isSafeInteger(stagePageSize)
     && PARALLEL_PAPER_STAGE_PAGE_SIZES.has(stagePageSize)
     && stageSizeBytes % stagePageSize === 0
     && (
       stagePageSize !== PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE
       || stageBudgetBytes >= PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
-    );
+  );
+}
+
+function jsonSafeIntegerOrNaN(value) {
+  return Number.isSafeInteger(value) ? value : Number.NaN;
+}
+
+function jsonFiniteNumberOrNaN(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : Number.NaN;
+}
+
+const JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES = [
+  '_bytes',
+  '_count',
+  '_rows',
+  '_rows_copied',
+  '_rows_merged',
+  '_page_size',
+  '_pages',
+  '_numerator',
+  '_denominator',
+  '_hours',
+];
+const JSON_SAFE_INTEGER_EVIDENCE_FIELDS = new Set([
+  'application_id',
+  'destination_connection_total_changes',
+  'page_size',
+  'rows_copied',
+  'rows_merged',
+  'semantic_rows_verified',
+  'source_data_version_after',
+  'source_data_version_before',
+  'source_row_count_upper',
+  'source_schema_version',
+  'source_size_bytes_after',
+  'source_size_bytes_before',
+  'user_version',
+]);
+const JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES = [
+  '_sec',
+  '_epoch',
+  '_ratio',
+  '_monotonic',
+];
+const JSON_FINITE_NUMBER_EVIDENCE_FIELDS = new Set([
+  'snapshot_ts',
+  'source_mtime_after',
+  'source_mtime_before',
+]);
+const JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS = new Set([
+  'database_budget_bytes',
+  'padded_non_paper_estimate_bytes',
+  'source_compact_estimate_bytes',
+  'static_share_budget_bytes',
+  'supported_capture_windows_hours',
+  'temporary_parallel_paper_stage_cap_bytes',
+]);
+const JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS = new Set([
+  'parallel_paper_source_read_lock_duration_sec',
+]);
+export const JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256 = auditSha256Hex({
+  schema_version: 'evaluator_json_numeric_evidence_types.v1',
+  safe_integer_suffixes: JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES,
+  safe_integer_fields: [...JSON_SAFE_INTEGER_EVIDENCE_FIELDS].sort(),
+  finite_number_suffixes: JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES,
+  finite_number_fields: [...JSON_FINITE_NUMBER_EVIDENCE_FIELDS].sort(),
+  safe_integer_containers: [...JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS].sort(),
+  finite_number_containers: [...JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS].sort(),
+  database_schema_version_path_rule: 'databases\\.[^.]+\\.schema_version',
+});
+
+function jsonNumericEvidenceKind(field, path) {
+  if (/^databases\.[^.]+\.schema_version$/.test(path)) return 'safe_integer';
+  if (
+    JSON_SAFE_INTEGER_EVIDENCE_FIELDS.has(field)
+    || JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES.some((suffix) => field.endsWith(suffix))
+  ) return 'safe_integer';
+  if (
+    JSON_FINITE_NUMBER_EVIDENCE_FIELDS.has(field)
+    || JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES.some((suffix) => field.endsWith(suffix))
+  ) return 'finite_number';
+  return null;
+}
+
+export function jsonNumericEvidenceTypesValid(payload) {
+  const visit = (value, path, inheritedKind = null) => {
+    if (Array.isArray(value)) {
+      return value.every((child) => visit(child, `${path}[]`, inheritedKind));
+    }
+    if (value && typeof value === 'object') {
+      return Object.entries(value).every(([field, child]) => {
+        const childPath = path ? `${path}.${field}` : field;
+        const fieldKind = jsonNumericEvidenceKind(field, childPath);
+        const containerKind = JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS.has(field)
+          ? 'safe_integer'
+          : JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS.has(field)
+            ? 'finite_number'
+            : null;
+        const childKind = fieldKind || inheritedKind;
+        if (child && typeof child === 'object') {
+          if (fieldKind && !containerKind) return false;
+          return visit(child, childPath, containerKind || inheritedKind);
+        }
+        if (child == null) return true;
+        if (childKind === 'safe_integer') return Number.isSafeInteger(child);
+        if (childKind === 'finite_number') {
+          return typeof child === 'number' && Number.isFinite(child);
+        }
+        return true;
+      });
+    }
+    if (value == null || inheritedKind == null) return true;
+    if (inheritedKind === 'safe_integer') return Number.isSafeInteger(value);
+    return typeof value === 'number' && Number.isFinite(value);
+  };
+  return visit(payload, '');
 }
 
 export function readEvaluatorSnapshotWorkerHealth(options = {}) {
@@ -9287,6 +9414,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && !manifestPayload.error_code
     && manifestPayload.schema_version === 'cross_db_evaluator_snapshot.v3'
   );
+  const manifestNumericEvidenceTypesValid = Boolean(
+    manifestPayloadValid && jsonNumericEvidenceTypesValid(manifestPayload)
+  );
   const pid = Number(options.pid ?? (statusPayloadValid ? statusPayload.pid : null) ?? lockPid) || null;
   const pidAlive = options.pidAlive === undefined ? processIsAlive(pid) : Boolean(options.pidAlive);
   const lockPidAlive = options.lockPidAlive === undefined ? processIsAlive(lockPid) : Boolean(options.lockPidAlive);
@@ -9297,7 +9427,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   );
 
   const epochMs = (value) => {
-    const numeric = Number(value);
+    const numeric = jsonFiniteNumberOrNaN(value);
     if (!Number.isFinite(numeric) || numeric <= 0) return null;
     return numeric >= 1e12 ? numeric : numeric * 1000;
   };
@@ -9308,7 +9438,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const processUptimeSec = Number.isFinite(Number(options.processUptimeSec))
     ? Number(options.processUptimeSec)
     : process.uptime();
-  const snapshotTs = manifestPayloadValid ? Number(manifestPayload.snapshot_ts) : null;
+  const snapshotTs = manifestPayloadValid
+    ? jsonFiniteNumberOrNaN(manifestPayload.snapshot_ts)
+    : null;
   const snapshotMs = epochMs(snapshotTs);
   const rawSnapshotAgeSec = snapshotMs == null ? null : (nowMs - snapshotMs) / 1000;
   const snapshotFutureSkewSec = rawSnapshotAgeSec != null && rawSnapshotAgeSec < 0
@@ -9326,6 +9458,26 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && snapshotAgeSec != null
     && snapshotAgeSec <= maxAgeSec
   );
+  const manifestReadLockLimit = jsonFiniteNumberOrNaN(
+    manifestPayload?.max_source_read_lock_sec,
+  );
+  const manifestOutputSizeBytes = jsonSafeIntegerOrNaN(
+    manifestPayload?.output_size_bytes,
+  );
+  const manifestOutputCapBytes = jsonSafeIntegerOrNaN(
+    manifestPayload?.output_cap_bytes,
+  );
+  const selectionContract = manifestPayload?.selection_contract
+    && typeof manifestPayload.selection_contract === 'object'
+    && !Array.isArray(manifestPayload.selection_contract)
+    ? manifestPayload.selection_contract
+    : {};
+  const selectionCommonUpperEpoch = jsonFiniteNumberOrNaN(
+    selectionContract.common_upper_epoch,
+  );
+  const selectionSupportedWindows = Array.isArray(
+    selectionContract.supported_capture_windows_hours,
+  ) ? selectionContract.supported_capture_windows_hours : [];
 
   const databaseReports = manifestPayloadValid && manifestPayload.databases && typeof manifestPayload.databases === 'object'
     ? manifestPayload.databases
@@ -9345,11 +9497,23 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       : snapshotPath
         ? agentArtifactStat(snapshotPath)
         : { available: false, error_code: 'evaluator_snapshot_database_path_missing' };
-    const expectedSizeBytes = Number(report.snapshot_size_bytes);
-    const actualSizeBytes = artifact?.available && Number.isFinite(Number(artifact.size_bytes))
-      ? Number(artifact.size_bytes)
+    const expectedSizeBytes = jsonSafeIntegerOrNaN(report.snapshot_size_bytes);
+    const actualSizeBytes = artifact?.available && Number.isSafeInteger(artifact.size_bytes)
+      ? artifact.size_bytes
       : null;
-    const expectedSizeValid = Number.isFinite(expectedSizeBytes) && expectedSizeBytes > 0;
+    const expectedSizeValid = Number.isSafeInteger(expectedSizeBytes) && expectedSizeBytes > 0;
+    const reportReadLockLimit = jsonFiniteNumberOrNaN(
+      report.source_read_lock_limit_sec,
+    );
+    const reportReadLockDuration = jsonFiniteNumberOrNaN(
+      report.source_read_lock_duration_sec,
+    );
+    const reportSelectionUpperEpoch = jsonFiniteNumberOrNaN(
+      report.selection_upper_epoch,
+    );
+    const temporaryFullBackupSizeBytes = jsonSafeIntegerOrNaN(
+      report.temporary_full_backup_size_bytes,
+    );
     const sizeMatchesManifest = Boolean(
       expectedSizeValid
       && actualSizeBytes != null
@@ -9364,11 +9528,31 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     };
     databaseChecks[name] = {
       manifest_report_available: Boolean(Object.keys(report).length),
+      manifest_schema_version_present: Number.isSafeInteger(report.schema_version),
       manifest_quick_check_passed: Array.isArray(report.quick_check) && report.quick_check.length === 1 && report.quick_check[0] === 'ok',
       manifest_sha256_present: typeof report.snapshot_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(report.snapshot_sha256),
       required_tables_present: Array.isArray(report.missing_required_tables) && report.missing_required_tables.length === 0,
       required_watermarks_present: Array.isArray(report.missing_required_watermarks) && report.missing_required_watermarks.length === 0,
       source_read_lock_budget_passed: report.source_read_lock_budget_passed === true,
+      source_read_lock_contract_passed: Boolean(
+        Number.isFinite(manifestReadLockLimit)
+        && manifestReadLockLimit > 0
+        && Number.isFinite(reportReadLockLimit)
+        && reportReadLockLimit > 0
+        && Math.abs(reportReadLockLimit - manifestReadLockLimit) <= 0.001
+        && Number.isFinite(reportReadLockDuration)
+        && reportReadLockDuration >= 0
+        && reportReadLockDuration <= reportReadLockLimit + 1.0
+      ),
+      source_read_lock_released_before_index_build:
+        report.source_read_lock_released_before_index_build === true,
+      source_open_mode_valid: report.source_open_mode === 'read_only_attached_uri',
+      selection_upper_epoch_matched: Boolean(
+        Number.isFinite(snapshotTs)
+        && Number.isFinite(reportSelectionUpperEpoch)
+        && Math.abs(reportSelectionUpperEpoch - snapshotTs) <= 0.001
+      ),
+      temporary_full_backup_absent: temporaryFullBackupSizeBytes === 0,
       database_budget_passed: report.database_budget_passed === true,
       snapshot_file_available: Boolean(artifact?.available),
       snapshot_size_matches_manifest: sizeMatchesManifest,
@@ -9399,7 +9583,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       source_query_plan_uses_index: selection.source_query_plan_uses_index === true,
       source_query_plan_uses_range_search: selection.source_query_plan_uses_range_search === true,
       source_query_plan_full_table_scan_detected: selection.source_query_plan_full_table_scan_detected === true,
-      rows_copied: Number.isFinite(Number(selection.rows_copied)) ? Number(selection.rows_copied) : null,
+      rows_copied: Number.isSafeInteger(selection.rows_copied)
+        ? selection.rows_copied
+        : null,
       passed: Boolean(
         selection.included === true
         && selection.predicate_strategy === 'indexed_epoch_seconds'
@@ -9414,6 +9600,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && selection.source_query_plan_uses_index === true
         && selection.source_query_plan_uses_range_search === true
         && selection.source_query_plan_full_table_scan_detected === false
+        && Number.isSafeInteger(selection.rows_copied)
+        && selection.rows_copied >= 0
       ),
     };
   }
@@ -9456,11 +9644,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const disk = manifestPayloadValid && manifestPayload.disk_preflight && typeof manifestPayload.disk_preflight === 'object'
     ? manifestPayload.disk_preflight
     : {};
-  const diskFreeBytes = Number(disk.free_bytes);
-  const diskOutputCapBytes = Number(disk.selective_snapshot_output_cap_bytes);
-  const diskReserveBytes = Number(disk.required_reserve_bytes);
-  const diskTotalStageCapBytes = Number(disk.temporary_stage_total_cap_bytes);
-  const diskCandidateStageCapBytes = Number(disk.temporary_candidate_stage_cap_bytes);
+  const diskFreeBytes = jsonSafeIntegerOrNaN(disk.free_bytes);
+  const diskOutputCapBytes = jsonSafeIntegerOrNaN(
+    disk.selective_snapshot_output_cap_bytes,
+  );
+  const diskReserveBytes = jsonSafeIntegerOrNaN(disk.required_reserve_bytes);
+  const diskTotalStageCapBytes = jsonSafeIntegerOrNaN(
+    disk.temporary_stage_total_cap_bytes,
+  );
+  const diskCandidateStageCapBytes = jsonSafeIntegerOrNaN(
+    disk.temporary_candidate_stage_cap_bytes,
+  );
   const parallelPaperStageConfigs = {
     paper_decision_events: {
       role: 'paper_decision_events_parallel_stage', required: true,
@@ -9519,16 +9713,26 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     : {};
   const diskParallelStageCaps = Object.fromEntries(
     activeParallelPaperStageTables.map(
-      (table) => [table, Number(rawDiskParallelStageCaps[table])],
+      (table) => [table, jsonSafeIntegerOrNaN(rawDiskParallelStageCaps[table])],
     ),
   );
   const diskPaperDecisionStageCapBytes = diskParallelStageCaps.paper_decision_events;
-  const diskCandidateStageMinimumBytes = Number(disk.candidate_stage_minimum_cap_bytes);
-  const diskParallelStageMinimumBytes = Number(disk.parallel_paper_stage_minimum_cap_bytes);
-  const diskPeakBytes = Number(disk.estimated_peak_working_bytes);
-  const diskFreeAtPeakBytes = Number(disk.estimated_free_at_peak_bytes);
-  const diskRawStageCapBytes = Number(disk.temporary_stage_raw_cap_bytes);
-  const diskStageAlignmentReserveBytes = Number(disk.temporary_stage_alignment_reserve_bytes);
+  const diskCandidateStageMinimumBytes = jsonSafeIntegerOrNaN(
+    disk.candidate_stage_minimum_cap_bytes,
+  );
+  const diskParallelStageMinimumBytes = jsonSafeIntegerOrNaN(
+    disk.parallel_paper_stage_minimum_cap_bytes,
+  );
+  const diskPeakBytes = jsonSafeIntegerOrNaN(disk.estimated_peak_working_bytes);
+  const diskFreeAtPeakBytes = jsonSafeIntegerOrNaN(
+    disk.estimated_free_at_peak_bytes,
+  );
+  const diskRawStageCapBytes = jsonSafeIntegerOrNaN(
+    disk.temporary_stage_raw_cap_bytes,
+  );
+  const diskStageAlignmentReserveBytes = jsonSafeIntegerOrNaN(
+    disk.temporary_stage_alignment_reserve_bytes,
+  );
   const expectedDiskRawStageCapBytes = Math.max(
     0,
     diskFreeBytes - diskOutputCapBytes - diskReserveBytes,
@@ -9686,10 +9890,18 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       const advisoryRequired = nonnegativeInt('advisory_required_bytes');
       const pinnedReadViewId = String(evidence.pinned_read_view_id || '');
       const pinnedReadViewRole = String(evidence.pinned_read_view_role || '');
-      const dbstatTimeout = Number(evidence.dbstat_timeout_sec);
-      const dbstatElapsed = Number(evidence.dbstat_elapsed_sec);
-      const indexedCountTimeout = Number(evidence.indexed_count_timeout_sec);
-      const indexedCountElapsed = Number(evidence.indexed_count_elapsed_sec);
+      const dbstatTimeout = jsonFiniteNumberOrNaN(
+        evidence.dbstat_timeout_sec,
+      );
+      const dbstatElapsed = jsonFiniteNumberOrNaN(
+        evidence.dbstat_elapsed_sec,
+      );
+      const indexedCountTimeout = jsonFiniteNumberOrNaN(
+        evidence.indexed_count_timeout_sec,
+      );
+      const indexedCountElapsed = jsonFiniteNumberOrNaN(
+        evidence.indexed_count_elapsed_sec,
+      );
       const averageDiagnostic = evidence.average_row_bytes_diagnostic;
       const maxDiagnostic = evidence.sample_max_row_bytes_diagnostic;
       const sourceDbstatFields = [
@@ -10018,7 +10230,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const maxDiagnostic = evidence.sample_max_row_bytes_diagnostic;
     if (
       averageDiagnostic != null
-      && (!Number.isFinite(Number(averageDiagnostic)) || Number(averageDiagnostic) < 0)
+      && (
+        typeof averageDiagnostic !== 'number'
+        || !Number.isFinite(averageDiagnostic)
+        || averageDiagnostic < 0
+      )
     ) return false;
     if (
       maxDiagnostic != null
@@ -10221,24 +10437,28 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       && !Array.isArray(rawSharedTargets[target])
       ? rawSharedTargets[target]
       : {};
-    const minimum = Number(raw.minimum_cap_bytes);
-    const advisory = Number(raw.advisory_required_bytes);
-    const baseline = Number(raw.baseline_required_bytes);
-    const allocationWeight = Number(raw.allocation_weight_bytes);
-    const grant = Number(raw.granted_cap_bytes);
-    const borrowed = Number(raw.borrowed_shared_pool_bytes);
-    const advisoryShortfall = Number(raw.advisory_shortfall_bytes);
-    const actual = Number(raw.actual_usage_bytes);
+    const minimum = jsonSafeIntegerOrNaN(raw.minimum_cap_bytes);
+    const advisory = jsonSafeIntegerOrNaN(raw.advisory_required_bytes);
+    const baseline = jsonSafeIntegerOrNaN(raw.baseline_required_bytes);
+    const allocationWeight = jsonSafeIntegerOrNaN(raw.allocation_weight_bytes);
+    const grant = jsonSafeIntegerOrNaN(raw.granted_cap_bytes);
+    const borrowed = jsonSafeIntegerOrNaN(raw.borrowed_shared_pool_bytes);
+    const advisoryShortfall = jsonSafeIntegerOrNaN(
+      raw.advisory_shortfall_bytes,
+    );
+    const actual = jsonSafeIntegerOrNaN(raw.actual_usage_bytes);
     const reportedStageActual = target === 'candidate_shadow_observations'
-      ? Number(databaseReports.paper?.temporary_candidate_stage_size_bytes)
-      : Number(
+      ? jsonSafeIntegerOrNaN(
+        databaseReports.paper?.temporary_candidate_stage_size_bytes,
+      )
+      : jsonSafeIntegerOrNaN(
         databaseReports.paper?.parallel_paper_stages?.[target]?.stage_size_bytes,
       );
-    const highWater = Number(raw.high_water_bytes);
-    const actualRowsCopied = Number(raw.actual_rows_copied);
-    const utilization = Number(raw.utilization_ratio);
-    const historyHighWater = Number(raw.history_high_water_bytes);
-    const historyGrant = Number(raw.history_granted_cap_bytes);
+    const highWater = jsonSafeIntegerOrNaN(raw.high_water_bytes);
+    const actualRowsCopied = jsonSafeIntegerOrNaN(raw.actual_rows_copied);
+    const utilization = jsonFiniteNumberOrNaN(raw.utilization_ratio);
+    const historyHighWater = jsonSafeIntegerOrNaN(raw.history_high_water_bytes);
+    const historyGrant = jsonSafeIntegerOrNaN(raw.history_granted_cap_bytes);
     const historyCapHit = raw.history_cap_hit === true;
     const historyCopyCompleted = raw.history_copy_completed === true;
     const historyState = String(raw.history_state || '');
@@ -10269,29 +10489,31 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const rowCountBindingMode = String(
       advisoryEvidence.row_count_binding_mode || '',
     );
-    const selectedTableRows = Number(paperSelections[target]?.rows_copied);
+    const selectedTableRows = jsonSafeIntegerOrNaN(
+      paperSelections[target]?.rows_copied,
+    );
     const rowCountBound = Boolean(
-      Number.isInteger(actualRowsCopied)
+      Number.isSafeInteger(actualRowsCopied)
       && actualRowsCopied >= 0
       && (
         (rowCountBindingMode === 'exact_selected_rows'
-          && Number.isInteger(advisoryRows)
+          && Number.isSafeInteger(advisoryRows)
           && actualRowsCopied === advisoryRows)
         || (rowCountBindingMode === 'full_source_row_upper'
-          && Number.isInteger(advisoryRows)
+          && Number.isSafeInteger(advisoryRows)
           && actualRowsCopied <= advisoryRows)
         || rowCountBindingMode
           === 'copy_report_exact_after_indexed_count_timeout'
       )
-      && Number.isInteger(selectedTableRows)
+      && Number.isSafeInteger(selectedTableRows)
       && selectedTableRows === actualRowsCopied
     );
     let expectedHistoryState = 'none';
     let expectedBaseline = minimum;
     let historyEvidenceValid = Boolean(
-      Number.isInteger(historyHighWater)
+      Number.isSafeInteger(historyHighWater)
       && historyHighWater >= 0
-      && Number.isInteger(historyGrant)
+      && Number.isSafeInteger(historyGrant)
       && historyGrant >= 0
     );
     if (historyState === 'none') {
@@ -10318,10 +10540,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         Math.max(minimum, historyHighWater * 1.20),
       );
     }
-    const advisoryExceeded = Number.isInteger(actual)
-      && Number.isInteger(advisory)
+    const advisoryExceeded = Number.isSafeInteger(actual)
+      && Number.isSafeInteger(advisory)
       && actual > advisory;
-    const advisoryDelta = Number.isInteger(actual) && Number.isInteger(advisory)
+    const advisoryDelta = Number.isSafeInteger(actual) && Number.isSafeInteger(advisory)
       ? actual - advisory
       : null;
     if (advisoryExceeded) sharedStageAdvisoryExceededTargets.push(target);
@@ -10335,40 +10557,41 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           ? historyStorageSchemaVersion === storageSchemaVersion
           : historyStorageSchemaVersion !== storageSchemaVersion
       )
-      && Number.isInteger(minimum)
+      && Number.isSafeInteger(minimum)
       && minimum === 12288
       && raw.advisory_query_bounded === true
       && raw.physical_upper_bound_claimed === false
       && advisoryEvidencePassed
-      && Number.isInteger(advisory)
+      && Number.isSafeInteger(advisory)
       && advisory >= minimum
       && advisory % 4096 === 0
       && historyEvidenceValid
       && historyState === expectedHistoryState
-      && Number.isInteger(expectedBaseline)
-      && Number.isInteger(baseline)
+      && Number.isSafeInteger(expectedBaseline)
+      && Number.isSafeInteger(baseline)
       && baseline === expectedBaseline
-      && Number.isInteger(allocationWeight)
+      && Number.isSafeInteger(allocationWeight)
       && allocationWeight >= 0
-      && Number.isInteger(grant)
+      && Number.isSafeInteger(grant)
       && grant >= baseline
       && grant % 4096 === 0
-      && Number.isInteger(borrowed)
+      && Number.isSafeInteger(borrowed)
       && borrowed === grant - baseline
-      && Number.isInteger(advisoryShortfall)
+      && Number.isSafeInteger(advisoryShortfall)
       && advisoryShortfall === Math.max(0, advisory - grant)
-      && Number.isInteger(actual)
+      && Number.isSafeInteger(actual)
       && actual > 0
-      && Number.isInteger(reportedStageActual)
+      && Number.isSafeInteger(reportedStageActual)
       && reportedStageActual === actual
       && actual <= grant
-      && Number.isInteger(highWater)
+      && Number.isSafeInteger(highWater)
       && highWater === actual
       && rowCountBound
       && raw.row_count_bound_to_snapshot === true
       && raw.advisory_exceeded === advisoryExceeded
-      && Number.isInteger(advisoryDelta)
-      && Number(raw.advisory_delta_bytes) === advisoryDelta
+      && Number.isSafeInteger(advisoryDelta)
+      && Number.isSafeInteger(raw.advisory_delta_bytes)
+      && raw.advisory_delta_bytes === advisoryDelta
       && raw.copy_completed === true
       && raw.cap_hit === false
       && raw.within_grant === true
@@ -10377,11 +10600,11 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       && Array.isArray(raw.evidence_sources)
       && raw.evidence_sources.length > 0
     );
-    if (Number.isInteger(grant)) sharedStageGrantSum += grant;
-    if (Number.isInteger(actual)) sharedStageActualSum += actual;
-    if (Number.isInteger(baseline)) sharedStageBaselineSum += baseline;
-    if (Number.isInteger(advisory)) sharedStageAdvisorySum += advisory;
-    if (Number.isInteger(borrowed)) sharedStageBorrowedSum += borrowed;
+    if (Number.isSafeInteger(grant)) sharedStageGrantSum += grant;
+    if (Number.isSafeInteger(actual)) sharedStageActualSum += actual;
+    if (Number.isSafeInteger(baseline)) sharedStageBaselineSum += baseline;
+    if (Number.isSafeInteger(advisory)) sharedStageAdvisorySum += advisory;
+    if (Number.isSafeInteger(borrowed)) sharedStageBorrowedSum += borrowed;
     sharedStageContractRows[target] = {
       raw,
       minimum,
@@ -10477,28 +10700,28 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       storage_schema_version: storageSchemaVersion || null,
       history_storage_schema_version: historyStorageSchemaVersion || null,
       history_storage_compatible: historyStorageCompatible,
-      advisory_required_bytes: Number.isInteger(advisory) ? advisory : null,
-      baseline_required_bytes: Number.isInteger(baseline) ? baseline : null,
-      allocation_weight_bytes: Number.isInteger(allocationWeight)
+      advisory_required_bytes: Number.isSafeInteger(advisory) ? advisory : null,
+      baseline_required_bytes: Number.isSafeInteger(baseline) ? baseline : null,
+      allocation_weight_bytes: Number.isSafeInteger(allocationWeight)
         ? allocationWeight
         : null,
-      granted_cap_bytes: Number.isInteger(grant) ? grant : null,
-      actual_usage_bytes: Number.isInteger(actual) ? actual : null,
-      reported_stage_actual_bytes: Number.isInteger(reportedStageActual)
+      granted_cap_bytes: Number.isSafeInteger(grant) ? grant : null,
+      actual_usage_bytes: Number.isSafeInteger(actual) ? actual : null,
+      reported_stage_actual_bytes: Number.isSafeInteger(reportedStageActual)
         ? reportedStageActual
         : null,
-      high_water_bytes: Number.isInteger(highWater) ? highWater : null,
-      actual_rows_copied: Number.isInteger(actualRowsCopied)
+      high_water_bytes: Number.isSafeInteger(highWater) ? highWater : null,
+      actual_rows_copied: Number.isSafeInteger(actualRowsCopied)
         ? actualRowsCopied
         : null,
       row_count_binding_mode: rowCountBindingMode || null,
       row_count_bound_to_snapshot: rowCountBound,
       advisory_exceeded: advisoryExceeded,
       advisory_delta_bytes: advisoryDelta,
-      advisory_shortfall_bytes: Number.isInteger(advisoryShortfall)
+      advisory_shortfall_bytes: Number.isSafeInteger(advisoryShortfall)
         ? advisoryShortfall
         : null,
-      borrowed_shared_pool_bytes: Number.isInteger(borrowed) ? borrowed : null,
+      borrowed_shared_pool_bytes: Number.isSafeInteger(borrowed) ? borrowed : null,
       utilization_ratio: Number.isFinite(utilization) ? utilization : null,
       copy_completed: raw.copy_completed === true,
       cap_hit: raw.cap_hit === true,
@@ -10506,11 +10729,19 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       passed: false,
     };
   }
-  const sharedStageTotalCapBytes = Number(manifestSharedStageBudget.total_cap_bytes);
-  const sharedStageTotalGrantedBytes = Number(manifestSharedStageBudget.total_granted_bytes);
-  const sharedStageActualTotalBytes = Number(manifestSharedStageBudget.actual_total_bytes);
-  const sharedStageUnconsumedBytes = Number(manifestSharedStageBudget.unconsumed_bytes);
-  const sharedStageResidualPool = Number.isInteger(sharedStageTotalCapBytes)
+  const sharedStageTotalCapBytes = jsonSafeIntegerOrNaN(
+    manifestSharedStageBudget.total_cap_bytes,
+  );
+  const sharedStageTotalGrantedBytes = jsonSafeIntegerOrNaN(
+    manifestSharedStageBudget.total_granted_bytes,
+  );
+  const sharedStageActualTotalBytes = jsonSafeIntegerOrNaN(
+    manifestSharedStageBudget.actual_total_bytes,
+  );
+  const sharedStageUnconsumedBytes = jsonSafeIntegerOrNaN(
+    manifestSharedStageBudget.unconsumed_bytes,
+  );
+  const sharedStageResidualPool = Number.isSafeInteger(sharedStageTotalCapBytes)
     ? sharedStageTotalCapBytes - sharedStageBaselineSum
     : null;
   const sharedStageExpectedPriority = sharedStageCapHitTargets.length > 0
@@ -10534,7 +10765,9 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const normalized = targets.map((target, index) => ({
       target,
       index,
-      weight: Math.max(4096, Number(weights[target]) || 0),
+      weight: Number.isSafeInteger(weights[target]) && weights[target] >= 0
+        ? Math.max(4096, weights[target])
+        : Number.NaN,
     }));
     if (normalized.some(({ weight }) => !Number.isSafeInteger(weight))) return null;
     const totalWeight = normalized.reduce(
@@ -10712,34 +10945,39 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && rawSharedAdvisoryExceededTargets.every(
       (target, index) => target === sharedStageAdvisoryExceededTargets[index],
     )
-    && Number(manifestSharedStageBudget.advisory_miss_count)
+    && Number.isSafeInteger(manifestSharedStageBudget.advisory_miss_count)
+    && manifestSharedStageBudget.advisory_miss_count
       === sharedStageAdvisoryExceededTargets.length
-    && Boolean(manifestSharedStageBudget.history_used)
-      === sharedStageHistoryUsedExpected
-    && Number(manifestSharedStageBudget.minimum_total_bytes)
+    && typeof manifestSharedStageBudget.history_used === 'boolean'
+    && manifestSharedStageBudget.history_used === sharedStageHistoryUsedExpected
+    && Number.isSafeInteger(manifestSharedStageBudget.minimum_total_bytes)
+    && manifestSharedStageBudget.minimum_total_bytes
       === expectedSharedStageTargets.length * 12288
-    && Number(manifestSharedStageBudget.baseline_required_total_bytes)
+    && Number.isSafeInteger(manifestSharedStageBudget.baseline_required_total_bytes)
+    && manifestSharedStageBudget.baseline_required_total_bytes
       === sharedStageBaselineSum
-    && Number(manifestSharedStageBudget.advisory_demand_total_bytes)
+    && Number.isSafeInteger(manifestSharedStageBudget.advisory_demand_total_bytes)
+    && manifestSharedStageBudget.advisory_demand_total_bytes
       === sharedStageAdvisorySum
-    && Number(manifestSharedStageBudget.allocation_weight_total_bytes)
+    && Number.isSafeInteger(manifestSharedStageBudget.allocation_weight_total_bytes)
+    && manifestSharedStageBudget.allocation_weight_total_bytes
       === Object.values(sharedStageExpectedWeights).reduce(
         (sum, value) => sum + value,
         0,
       )
-    && Number(manifestSharedStageBudget.residual_pool_bytes)
-      === sharedStageResidualPool
+    && Number.isSafeInteger(manifestSharedStageBudget.residual_pool_bytes)
+    && manifestSharedStageBudget.residual_pool_bytes === sharedStageResidualPool
     && sharedStageBorrowedSum === sharedStageResidualPool
-    && Number.isInteger(sharedStageTotalCapBytes)
+    && Number.isSafeInteger(sharedStageTotalCapBytes)
     && sharedStageTotalCapBytes === expectedDiskTotalStageCapBytes
-    && Number.isInteger(sharedStageTotalGrantedBytes)
+    && Number.isSafeInteger(sharedStageTotalGrantedBytes)
     && sharedStageTotalGrantedBytes === sharedStageTotalCapBytes
     && sharedStageGrantSum === sharedStageTotalCapBytes
     && manifestSharedStageBudget.grants_sum_matches_total_cap === true
-    && Number.isInteger(sharedStageActualTotalBytes)
+    && Number.isSafeInteger(sharedStageActualTotalBytes)
     && sharedStageActualTotalBytes === sharedStageActualSum
     && sharedStageActualTotalBytes <= sharedStageTotalCapBytes
-    && Number.isInteger(sharedStageUnconsumedBytes)
+    && Number.isSafeInteger(sharedStageUnconsumedBytes)
     && sharedStageUnconsumedBytes
       === sharedStageTotalCapBytes - sharedStageActualTotalBytes
     && manifestSharedStageBudget.all_targets_within_grant === true
@@ -10767,7 +11005,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       diskPeakBytes,
       diskFreeAtPeakBytes,
       ...Object.values(diskParallelStageCaps),
-    ].every((value) => Number.isFinite(value) && value >= 0)
+    ].every((value) => Number.isSafeInteger(value) && value >= 0)
     && diskOutputCapBytes > 0
     && diskRawStageCapBytes === expectedDiskRawStageCapBytes
     && diskStageAlignmentReserveBytes === expectedDiskAlignmentReserveBytes
@@ -10793,16 +11031,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       (table) => diskParallelStageCaps[table]
         === sharedStageBudgetTargets[table]?.granted_cap_bytes,
     )
-    && Number(disk.temporary_paper_decision_stage_cap_bytes)
-      === diskPaperDecisionStageCapBytes
+    && Number.isSafeInteger(disk.temporary_paper_decision_stage_cap_bytes)
+    && disk.temporary_paper_decision_stage_cap_bytes === diskPaperDecisionStageCapBytes
     && disk.candidate_stage_budget_mode === 'shared_stage_budget_coordinator'
     && disk.fixed_percentage_allocation_used === false
     && diskPeakBytes === diskOutputCapBytes + diskTotalStageCapBytes
     && diskFreeAtPeakBytes === diskFreeBytes - diskPeakBytes
     && diskFreeAtPeakBytes >= diskReserveBytes
-    && Number(disk.estimated_free_after_bytes)
-      === diskFreeBytes - diskOutputCapBytes
-    && Number(disk.temporary_full_backup_bytes || 0) === 0
+    && Number.isSafeInteger(disk.estimated_free_after_bytes)
+    && disk.estimated_free_after_bytes === diskFreeBytes - diskOutputCapBytes
+    && Number.isSafeInteger(disk.temporary_full_backup_bytes)
+    && disk.temporary_full_backup_bytes === 0
     && disk.fail_closed_on_insufficient_space === true
   );
   const statusSharedStageBudget = statusPayloadValid
@@ -10826,7 +11065,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   ]) {
     const raw = publicSharedBudgetTargetsRaw[target];
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const numeric = (field) => (
+    const integer = (field) => (
+      Number.isSafeInteger(raw[field]) ? raw[field] : null
+    );
+    const finiteNumber = (field) => (
       typeof raw[field] === 'number' && Number.isFinite(raw[field])
         ? raw[field]
         : null
@@ -10836,25 +11078,30 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       && !Array.isArray(raw.advisory_evidence)
       ? raw.advisory_evidence
       : {};
-    const evidenceNumeric = (field) => (
+    const evidenceInteger = (field) => (
+      Number.isSafeInteger(advisoryEvidence[field])
+        ? advisoryEvidence[field]
+        : null
+    );
+    const evidenceFiniteNumber = (field) => (
       typeof advisoryEvidence[field] === 'number'
       && Number.isFinite(advisoryEvidence[field])
         ? advisoryEvidence[field]
         : null
     );
-    const publicAdvisory = numeric('advisory_required_bytes');
-    const publicMinimum = numeric('minimum_cap_bytes');
+    const publicAdvisory = integer('advisory_required_bytes');
+    const publicMinimum = integer('minimum_cap_bytes');
     publicSharedStageBudgetTargets[target] = {
       advisory_required_bytes: publicAdvisory,
-      baseline_required_bytes: numeric('baseline_required_bytes'),
-      allocation_weight_bytes: numeric('allocation_weight_bytes'),
-      granted_cap_bytes: numeric('granted_cap_bytes'),
-      actual_usage_bytes: numeric('actual_usage_bytes'),
-      high_water_bytes: numeric('high_water_bytes'),
-      borrowed_shared_pool_bytes: numeric('borrowed_shared_pool_bytes'),
-      advisory_shortfall_bytes: numeric('advisory_shortfall_bytes'),
-      advisory_delta_bytes: numeric('advisory_delta_bytes'),
-      utilization_ratio: numeric('utilization_ratio'),
+      baseline_required_bytes: integer('baseline_required_bytes'),
+      allocation_weight_bytes: integer('allocation_weight_bytes'),
+      granted_cap_bytes: integer('granted_cap_bytes'),
+      actual_usage_bytes: integer('actual_usage_bytes'),
+      high_water_bytes: integer('high_water_bytes'),
+      borrowed_shared_pool_bytes: integer('borrowed_shared_pool_bytes'),
+      advisory_shortfall_bytes: integer('advisory_shortfall_bytes'),
+      advisory_delta_bytes: integer('advisory_delta_bytes'),
+      utilization_ratio: finiteNumber('utilization_ratio'),
       advisory_strategy: typeof raw.advisory_strategy === 'string'
         ? raw.advisory_strategy.slice(0, 80)
         : null,
@@ -10880,45 +11127,45 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         typeof advisoryEvidence.indexed_count_timed_out === 'boolean'
           ? advisoryEvidence.indexed_count_timed_out
           : null,
-      indexed_count_timeout_sec: evidenceNumeric('indexed_count_timeout_sec'),
-      indexed_count_elapsed_sec: evidenceNumeric('indexed_count_elapsed_sec'),
+      indexed_count_timeout_sec: evidenceFiniteNumber('indexed_count_timeout_sec'),
+      indexed_count_elapsed_sec: evidenceFiniteNumber('indexed_count_elapsed_sec'),
       dbstat_completed: typeof advisoryEvidence.dbstat_completed === 'boolean'
         ? advisoryEvidence.dbstat_completed
         : null,
       dbstat_timed_out: typeof advisoryEvidence.dbstat_timed_out === 'boolean'
         ? advisoryEvidence.dbstat_timed_out
         : null,
-      dbstat_timeout_sec: evidenceNumeric('dbstat_timeout_sec'),
-      dbstat_elapsed_sec: evidenceNumeric('dbstat_elapsed_sec'),
+      dbstat_timeout_sec: evidenceFiniteNumber('dbstat_timeout_sec'),
+      dbstat_elapsed_sec: evidenceFiniteNumber('dbstat_elapsed_sec'),
       dbstat_skipped_reason:
         typeof advisoryEvidence.dbstat_skipped_reason === 'string'
           ? advisoryEvidence.dbstat_skipped_reason.slice(0, 80)
           : null,
-      selected_row_count: evidenceNumeric('selected_row_count'),
-      sample_row_count_advisory_basis: evidenceNumeric(
+      selected_row_count: evidenceInteger('selected_row_count'),
+      sample_row_count_advisory_basis: evidenceInteger(
         'sample_row_count_advisory_basis',
       ),
-      sample_row_bytes_basis: evidenceNumeric('sample_row_bytes_basis'),
-      table_sample_payload_advisory_bytes: evidenceNumeric(
+      sample_row_bytes_basis: evidenceInteger('sample_row_bytes_basis'),
+      table_sample_payload_advisory_bytes: evidenceInteger(
         'table_sample_payload_advisory_bytes',
       ),
-      source_dbstat_physical_bytes: evidenceNumeric(
+      source_dbstat_physical_bytes: evidenceInteger(
         'source_dbstat_physical_bytes',
       ),
-      source_dbstat_payload_bytes: evidenceNumeric(
+      source_dbstat_payload_bytes: evidenceInteger(
         'source_dbstat_payload_bytes',
       ),
-      source_dbstat_max_payload_bytes: evidenceNumeric(
+      source_dbstat_max_payload_bytes: evidenceInteger(
         'source_dbstat_max_payload_bytes',
       ),
-      table_scaled_physical_advisory_bytes: evidenceNumeric(
+      table_scaled_physical_advisory_bytes: evidenceInteger(
         'table_scaled_physical_advisory_bytes',
       ),
-      table_advisory_bytes: evidenceNumeric('table_advisory_bytes'),
-      candidate_order_index_advisory_bytes: evidenceNumeric(
+      table_advisory_bytes: evidenceInteger('table_advisory_bytes'),
+      candidate_order_index_advisory_bytes: evidenceInteger(
         'candidate_order_index_advisory_bytes',
       ),
-      diagnostic_sample_rows: evidenceNumeric('sample_rows'),
+      diagnostic_sample_rows: evidenceInteger('sample_rows'),
       pinned_read_view_role:
         typeof advisoryEvidence.pinned_read_view_role === 'string'
           ? advisoryEvidence.pinned_read_view_role.slice(0, 80)
@@ -10959,17 +11206,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         .map(String)
         .filter((target) => Object.hasOwn(sharedStageTargetFilenames, target))
       : [],
-    total_cap_bytes: Number.isFinite(Number(publicSharedBudgetSource.total_cap_bytes))
-      ? Number(publicSharedBudgetSource.total_cap_bytes)
+    total_cap_bytes: Number.isSafeInteger(publicSharedBudgetSource.total_cap_bytes)
+      ? publicSharedBudgetSource.total_cap_bytes
       : null,
-    total_granted_bytes: Number.isFinite(Number(publicSharedBudgetSource.total_granted_bytes))
-      ? Number(publicSharedBudgetSource.total_granted_bytes)
+    total_granted_bytes: Number.isSafeInteger(publicSharedBudgetSource.total_granted_bytes)
+      ? publicSharedBudgetSource.total_granted_bytes
       : null,
-    actual_total_bytes: Number.isFinite(Number(publicSharedBudgetSource.actual_total_bytes))
-      ? Number(publicSharedBudgetSource.actual_total_bytes)
+    actual_total_bytes: Number.isSafeInteger(publicSharedBudgetSource.actual_total_bytes)
+      ? publicSharedBudgetSource.actual_total_bytes
       : null,
-    unconsumed_bytes: Number.isFinite(Number(publicSharedBudgetSource.unconsumed_bytes))
-      ? Number(publicSharedBudgetSource.unconsumed_bytes)
+    unconsumed_bytes: Number.isSafeInteger(publicSharedBudgetSource.unconsumed_bytes)
+      ? publicSharedBudgetSource.unconsumed_bytes
       : null,
     capacity_sufficient: publicSharedBudgetSource.capacity_sufficient === true,
     capacity_sufficient_basis:
@@ -10987,10 +11234,10 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     all_advisory_estimates_pinned_read_view_bound:
       publicSharedBudgetSource
         .all_advisory_estimates_pinned_read_view_bound === true,
-    advisory_demand_total_bytes: Number.isFinite(
-      Number(publicSharedBudgetSource.advisory_demand_total_bytes),
+    advisory_demand_total_bytes: Number.isSafeInteger(
+      publicSharedBudgetSource.advisory_demand_total_bytes,
     )
-      ? Number(publicSharedBudgetSource.advisory_demand_total_bytes)
+      ? publicSharedBudgetSource.advisory_demand_total_bytes
       : null,
     advisory_miss_count: Number.isSafeInteger(
       publicSharedBudgetSource.advisory_miss_count,
@@ -11039,21 +11286,35 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && new Set(pinnedReadViewIds).size === pinnedReadViewIds.length
   );
   const pinnedMidpoints = allPinnedReadViews
-    .map((row) => Number(row.pinned_midpoint_epoch))
+    .map((row) => jsonFiniteNumberOrNaN(row.pinned_midpoint_epoch))
+    .filter((value) => Number.isFinite(value));
+  const pinnedReadLockLimits = allPinnedReadViews
+    .map((row) => jsonFiniteNumberOrNaN(row.source_read_lock_limit_sec))
     .filter((value) => Number.isFinite(value));
   const expectedPinnedViewCount = 4 + activeParallelPaperStageTables.length;
   const recomputedPinnedSkew = pinnedMidpoints.length === expectedPinnedViewCount
     ? Math.max(...pinnedMidpoints) - Math.min(...pinnedMidpoints)
     : null;
-  const manifestPinnedSkew = Number(manifestPayload?.cross_database_time_skew_sec);
-  const manifestMaxPinnedSkew = Number(manifestPayload?.max_allowed_cross_database_time_skew_sec);
+  const manifestPinnedSkew = jsonFiniteNumberOrNaN(
+    manifestPayload?.cross_database_time_skew_sec,
+  );
+  const manifestMaxPinnedSkew = jsonFiniteNumberOrNaN(
+    manifestPayload?.max_allowed_cross_database_time_skew_sec,
+  );
   const pinnedReadViewLineagePassed = Boolean(
     allPinnedReadViews.length === expectedPinnedViewCount
-    && Number(manifestPayload?.pinned_read_view_count) === expectedPinnedViewCount
+    && Number.isSafeInteger(manifestPayload?.pinned_read_view_count)
+    && manifestPayload.pinned_read_view_count === expectedPinnedViewCount
     && actualPinnedRoles.size === expectedPinnedViewCount
     && [...expectedPinnedRoles].every((role) => actualPinnedRoles.has(role))
     && pinnedReadViewIdsValid
     && pinnedMidpoints.length === expectedPinnedViewCount
+    && pinnedReadLockLimits.length === expectedPinnedViewCount
+    && pinnedReadLockLimits.every(
+      (value) => value > 0
+        && Number.isFinite(manifestReadLockLimit)
+        && Math.abs(value - manifestReadLockLimit) <= 0.001,
+    )
     && recomputedPinnedSkew != null
     && recomputedPinnedSkew >= 0
     && Number.isFinite(manifestPinnedSkew)
@@ -11066,6 +11327,57 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const paperReport = databaseReports.paper && typeof databaseReports.paper === 'object'
     ? databaseReports.paper
     : {};
+  const candidateSelection = paperSelections.candidate_shadow_observations
+    && typeof paperSelections.candidate_shadow_observations === 'object'
+    && !Array.isArray(paperSelections.candidate_shadow_observations)
+    ? paperSelections.candidate_shadow_observations
+    : {};
+  const candidateProjection = candidateSelection.storage_projection
+    && typeof candidateSelection.storage_projection === 'object'
+    && !Array.isArray(candidateSelection.storage_projection)
+    ? candidateSelection.storage_projection
+    : {};
+  const candidateStageSizeBytes = jsonSafeIntegerOrNaN(
+    paperReport.temporary_candidate_stage_size_bytes,
+  );
+  const candidateProjectionSourceStageSizeBytes = jsonSafeIntegerOrNaN(
+    candidateProjection.source_stage_size_bytes,
+  );
+  const candidateProjectionDurationSec = jsonFiniteNumberOrNaN(
+    paperReport.candidate_projection_duration_sec,
+  );
+  const candidateProjectionPlan = Array.isArray(candidateProjection.stage_query_plan)
+    ? candidateProjection.stage_query_plan
+    : [];
+  const candidateProjectionPassed = Boolean(
+    candidateProjection.applied === true
+    && Number.isSafeInteger(candidateStageSizeBytes)
+    && candidateStageSizeBytes > 0
+    && Number.isSafeInteger(diskCandidateStageCapBytes)
+    && diskCandidateStageCapBytes > 0
+    && candidateStageSizeBytes <= diskCandidateStageCapBytes
+    && Number.isFinite(candidateProjectionDurationSec)
+    && candidateProjectionDurationSec >= 0
+    && candidateProjection.projection_started_after_source_read_view_release === true
+    && candidateProjection.source_stage_schema_version
+      === 'candidate_observation_selective_stage.v1'
+    && candidateProjectionSourceStageSizeBytes === candidateStageSizeBytes
+    && candidateProjection.stage_order_index_name === 'idx_a3_candidate_stage_signal'
+    && candidateProjection.stage_query_plan_uses_order_index === true
+    && candidateProjection.stage_query_plan_temp_btree_detected === false
+    && candidateProjectionPlan.length > 0
+    && candidateProjectionPlan.some(
+      (item) => String(item).includes('idx_a3_candidate_stage_signal'),
+    )
+    && candidateProjectionPlan.every(
+      (item) => !String(item).toUpperCase().includes('TEMP B-TREE'),
+    )
+    && candidateProjection.schema_version
+      === 'candidate_observation_payload_projection.v1'
+    && candidateProjection.payload_semantics_preserved === true
+    && candidateProjection.unknown_payload_keys_preserved === true
+    && candidateProjection.missing_and_null_keys_preserved === true
+  );
   const rawParallelPaperStages = paperReport.parallel_paper_stages
     && typeof paperReport.parallel_paper_stages === 'object'
     && !Array.isArray(paperReport.parallel_paper_stages)
@@ -11161,13 +11473,37 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const stage = rawParallelPaperStages[table] && typeof rawParallelPaperStages[table] === 'object'
       ? rawParallelPaperStages[table]
       : {};
-    const stageSizeBytes = Number(stage.stage_size_bytes);
-    const stageBudgetBytes = Number(stage.stage_budget_bytes);
-    const stagePageSize = Number(stage.stage_page_size);
-    const rowsCopied = Number(stage.rows_copied);
-    const rowsMerged = Number(stage.rows_merged);
-    const selectionRowsCopied = Number(selection.rows_copied);
-    const lockDurationSec = Number(stage.source_read_lock_duration_sec);
+    const stageSizeBytes = Number.isSafeInteger(stage.stage_size_bytes)
+      ? stage.stage_size_bytes
+      : Number.NaN;
+    const stageBudgetBytes = Number.isSafeInteger(stage.stage_budget_bytes)
+      ? stage.stage_budget_bytes
+      : Number.NaN;
+    const stagePageSize = Number.isSafeInteger(stage.stage_page_size)
+      ? stage.stage_page_size
+      : Number.NaN;
+    const rowsCopied = Number.isSafeInteger(stage.rows_copied)
+      ? stage.rows_copied
+      : Number.NaN;
+    const rowsMerged = Number.isSafeInteger(stage.rows_merged)
+      ? stage.rows_merged
+      : Number.NaN;
+    const selectionRowsCopied = Number.isSafeInteger(selection.rows_copied)
+      ? selection.rows_copied
+      : Number.NaN;
+    const lockDurationSec = jsonFiniteNumberOrNaN(
+      stage.source_read_lock_duration_sec,
+    );
+    const mergeDurationSec = jsonFiniteNumberOrNaN(stage.merge_duration_sec);
+    const rawParallelLockDurationSec = jsonFiniteNumberOrNaN(
+      rawParallelLockDurations[table],
+    );
+    const nestedLockDurationSec = jsonFiniteNumberOrNaN(
+      nested.source_read_lock_duration_sec,
+    );
+    const nestedMergeDurationSec = jsonFiniteNumberOrNaN(
+      nested.merge_duration_sec,
+    );
     const sourceCreateSqlSha256 = String(stage.source_create_sql_sha256 || '');
     const destinationCreateSqlSha256 = String(stage.destination_create_sql_sha256 || '');
     const sourceColumnContractSha256 = String(stage.source_column_contract_sha256 || '');
@@ -11175,15 +11511,23 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const stageStorageContractSha256 = String(stage.stage_storage_contract_sha256 || '');
     const stageRowsSha256 = String(stage.stage_rows_sha256 || '');
     const hydratedRowsSha256 = String(stage.hydrated_rows_sha256 || '');
-    const stageColumnCount = Number(stage.stage_column_count);
-    const stageChunkTargetBytes = Number(stage.stage_chunk_target_bytes);
-    const stageChunkCount = Number(stage.stage_chunk_count);
-    const stageRawSizeBytes = Number(stage.stage_raw_size_bytes);
-    const stageCompressedPayloadSizeBytes = Number(
+    const stageColumnCount = Number.isSafeInteger(stage.stage_column_count)
+      ? stage.stage_column_count
+      : Number.NaN;
+    const stageChunkTargetBytes = Number.isSafeInteger(stage.stage_chunk_target_bytes)
+      ? stage.stage_chunk_target_bytes
+      : Number.NaN;
+    const stageChunkCount = Number.isSafeInteger(stage.stage_chunk_count)
+      ? stage.stage_chunk_count
+      : Number.NaN;
+    const stageRawSizeBytes = Number.isSafeInteger(stage.stage_raw_size_bytes)
+      ? stage.stage_raw_size_bytes
+      : Number.NaN;
+    const stageCompressedPayloadSizeBytes = Number.isSafeInteger(
       stage.stage_compressed_payload_size_bytes,
-    );
+    ) ? stage.stage_compressed_payload_size_bytes : Number.NaN;
     const rawStageIndexCount = stage.stage_index_count;
-    const stageIndexCount = Number.isInteger(rawStageIndexCount)
+    const stageIndexCount = Number.isSafeInteger(rawStageIndexCount)
       ? rawStageIndexCount
       : null;
     parallelPaperStages[table] = {
@@ -11195,9 +11539,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       rows_copied: Number.isFinite(rowsCopied) ? rowsCopied : null,
       rows_merged: Number.isFinite(rowsMerged) ? rowsMerged : null,
       source_read_lock_duration_sec: Number.isFinite(lockDurationSec) ? lockDurationSec : null,
-      merge_duration_sec: Number.isFinite(Number(stage.merge_duration_sec))
-        ? Number(stage.merge_duration_sec)
-        : null,
+      merge_duration_sec: Number.isFinite(mergeDurationSec) ? mergeDurationSec : null,
       removed_before_publish: stage.removed_before_publish === true,
       stage_schema_mode: stage.stage_schema_mode || null,
       source_create_sql_sha256: sha256Pattern.test(sourceCreateSqlSha256)
@@ -11231,8 +11573,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       hydrated_rows_sha256: sha256Pattern.test(hydratedRowsSha256)
         ? hydratedRowsSha256
         : null,
-      stage_column_count: Number.isInteger(stageColumnCount) ? stageColumnCount : null,
-      stage_index_count: Number.isInteger(stageIndexCount) ? stageIndexCount : null,
+      stage_column_count: Number.isSafeInteger(stageColumnCount) ? stageColumnCount : null,
+      stage_index_count: Number.isSafeInteger(stageIndexCount) ? stageIndexCount : null,
       stage_storage_contract_passed: stage.stage_storage_contract_passed === true,
       stage_chunk_integrity_passed: stage.stage_chunk_integrity_passed === true,
       stage_row_digest_matched: stage.stage_row_digest_matched === true,
@@ -11269,12 +11611,12 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && (rowsCopied === 0) === (stageCompressedPayloadSizeBytes === 0)
         && sha256Pattern.test(stageRowsSha256)
         && hydratedRowsSha256 === stageRowsSha256
-        && Number.isInteger(stageColumnCount)
+        && Number.isSafeInteger(stageColumnCount)
         && stageColumnCount > 0
         && stage.stage_storage_contract_passed === true
         && stage.stage_chunk_integrity_passed === true
         && stage.stage_row_digest_matched === true
-        && Number.isInteger(rawStageIndexCount)
+        && Number.isSafeInteger(rawStageIndexCount)
         && stageIndexCount === 0
         && stage.source_constraints_deferred_off_source_lock === true
         && stage.destination_schema_restored_after_source_read_lock_release === true
@@ -11286,17 +11628,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
           stageSizeBytes,
           stageBudgetBytes,
         )
-        && Number.isFinite(rowsCopied)
+        && Number.isSafeInteger(rowsCopied)
         && rowsCopied >= 0
-        && Number.isFinite(rowsMerged)
+        && Number.isSafeInteger(rowsMerged)
         && rowsMerged === rowsCopied
-        && Number.isFinite(selectionRowsCopied)
+        && Number.isSafeInteger(selectionRowsCopied)
         && selectionRowsCopied === rowsCopied
         && Number.isFinite(lockDurationSec)
         && lockDurationSec >= 0
-        && lockDurationSec === Number(rawParallelLockDurations[table])
-        && Number.isFinite(Number(stage.merge_duration_sec))
-        && Number(stage.merge_duration_sec) >= 0
+        && lockDurationSec === rawParallelLockDurationSec
+        && Number.isFinite(mergeDurationSec)
+        && mergeDurationSec >= 0
         && stage.source_read_lock_budget_passed === true
         && stage.merged_after_source_read_lock_release === true
         && stage.removed_before_publish === true
@@ -11307,6 +11649,28 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && stage.payload_semantics_preserved === true
         && stage.compressed_during_source_read_lock === true
         && stage.hydrated_after_source_read_lock_release === true
+        && selection.stage_schema_mode === stage.stage_schema_mode
+        && selection.source_create_sql_sha256 === sourceCreateSqlSha256
+        && selection.source_column_contract_sha256 === sourceColumnContractSha256
+        && selection.source_constraints_deferred_off_source_lock === true
+        && selection.stage_storage_contract_sha256 === stageStorageContractSha256
+        && selection.stage_storage_contract_passed === true
+        && selection.stage_codec_schema_version === stage.stage_codec_schema_version
+        && selection.stage_compression === stage.stage_compression
+        && Number.isSafeInteger(selection.stage_column_count)
+        && selection.stage_column_count === stageColumnCount
+        && Number.isSafeInteger(selection.stage_index_count)
+        && selection.stage_index_count === stageIndexCount
+        && Number.isSafeInteger(selection.stage_chunk_target_bytes)
+        && selection.stage_chunk_target_bytes === stageChunkTargetBytes
+        && Number.isSafeInteger(selection.stage_chunk_count)
+        && selection.stage_chunk_count === stageChunkCount
+        && Number.isSafeInteger(selection.stage_raw_size_bytes)
+        && selection.stage_raw_size_bytes === stageRawSizeBytes
+        && Number.isSafeInteger(selection.stage_compressed_payload_size_bytes)
+        && selection.stage_compressed_payload_size_bytes
+          === stageCompressedPayloadSizeBytes
+        && selection.stage_rows_sha256 === stageRowsSha256
         && nested.schema_version === 'parallel_paper_event_stage.v4'
         && nested.role === parallelPaperStageConfigs[table].role
         && nested.stage_schema_mode === stage.stage_schema_mode
@@ -11317,18 +11681,23 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && nested.stage_storage_contract_sha256 === stageStorageContractSha256
         && nested.stage_codec_schema_version === stage.stage_codec_schema_version
         && nested.stage_compression === stage.stage_compression
-        && Number(nested.stage_chunk_target_bytes) === stageChunkTargetBytes
-        && Number(nested.stage_chunk_count) === stageChunkCount
-        && Number(nested.stage_raw_size_bytes) === stageRawSizeBytes
-        && Number(nested.stage_compressed_payload_size_bytes)
+        && Number.isSafeInteger(nested.stage_chunk_target_bytes)
+        && nested.stage_chunk_target_bytes === stageChunkTargetBytes
+        && Number.isSafeInteger(nested.stage_chunk_count)
+        && nested.stage_chunk_count === stageChunkCount
+        && Number.isSafeInteger(nested.stage_raw_size_bytes)
+        && nested.stage_raw_size_bytes === stageRawSizeBytes
+        && Number.isSafeInteger(nested.stage_compressed_payload_size_bytes)
+        && nested.stage_compressed_payload_size_bytes
           === stageCompressedPayloadSizeBytes
         && nested.stage_rows_sha256 === stageRowsSha256
         && nested.hydrated_rows_sha256 === hydratedRowsSha256
-        && Number(nested.stage_column_count) === stageColumnCount
+        && Number.isSafeInteger(nested.stage_column_count)
+        && nested.stage_column_count === stageColumnCount
         && nested.stage_storage_contract_passed === true
         && nested.stage_chunk_integrity_passed === true
         && nested.stage_row_digest_matched === true
-        && Number.isInteger(nested.stage_index_count)
+        && Number.isSafeInteger(nested.stage_index_count)
         && nested.stage_index_count === 0
         && nested.source_constraints_deferred_off_source_lock === true
         && nested.destination_schema_restored_after_source_read_lock_release === true
@@ -11338,23 +11707,36 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && nested.compressed_during_source_read_lock === true
         && nested.hydrated_after_source_read_lock_release === true
         && nested.row_count_matched === true
-        && Number(nested.stage_rows_copied) === rowsCopied
-        && Number(nested.rows_merged) === rowsMerged
+        && Number.isSafeInteger(nested.stage_rows_copied)
+        && nested.stage_rows_copied === rowsCopied
+        && Number.isSafeInteger(nested.rows_merged)
+        && nested.rows_merged === rowsMerged
+        && Number.isFinite(nestedMergeDurationSec)
+        && nestedMergeDurationSec === mergeDurationSec
+        && Number.isFinite(nestedLockDurationSec)
+        && nestedLockDurationSec === lockDurationSec
         && Array.isArray(nested.quick_check)
         && nested.quick_check.length === 1
         && nested.quick_check[0] === 'ok'
-        && Number(nested.stage_page_size) === stagePageSize
-        && Number(nested.stage_size_bytes) === stageSizeBytes
-        && Number(nested.stage_budget_bytes) === stageBudgetBytes
+        && Number.isSafeInteger(nested.stage_page_size)
+        && nested.stage_page_size === stagePageSize
+        && Number.isSafeInteger(nested.stage_size_bytes)
+        && nested.stage_size_bytes === stageSizeBytes
+        && Number.isSafeInteger(nested.stage_budget_bytes)
+        && nested.stage_budget_bytes === stageBudgetBytes
         && nested.source_read_lock_budget_passed === true
         && nested.merge_started_after_source_read_view_release === true
       ),
     };
   }
-  const paperMainLockDuration = Number(paperReport.main_source_read_lock_duration_sec);
-  const paperReportedMaxLockDuration = Number(paperReport.source_read_lock_duration_sec);
+  const paperMainLockDuration = jsonFiniteNumberOrNaN(
+    paperReport.main_source_read_lock_duration_sec,
+  );
+  const paperReportedMaxLockDuration = jsonFiniteNumberOrNaN(
+    paperReport.source_read_lock_duration_sec,
+  );
   const parallelLockDurationValues = activeParallelPaperStageTables.map(
-    (table) => Number(rawParallelLockDurations[table]),
+    (table) => jsonFiniteNumberOrNaN(rawParallelLockDurations[table]),
   );
   const paperReportParallelStageTables = Array.isArray(paperReport.parallel_paper_stage_tables)
     ? paperReport.parallel_paper_stage_tables.map(String)
@@ -11362,7 +11744,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const parallelPaperStagesPassed = Boolean(
     parallelPaperStageInventoryValid
     && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v4'
-    && Number(manifestPayload?.parallel_paper_stage_count) === activeParallelPaperStageTables.length
+    && Number.isSafeInteger(manifestPayload?.parallel_paper_stage_count)
+    && manifestPayload.parallel_paper_stage_count === activeParallelPaperStageTables.length
     && manifestPayload?.parallel_paper_stages_all_pinned === true
     && manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true
     && manifestPayload?.parallel_paper_stages_all_removed_before_publish === true
@@ -11370,7 +11753,8 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && paperReportParallelStageTables.every(
       (table, index) => table === activeParallelPaperStageTables[index],
     )
-    && Number(paperReport.parallel_paper_stage_count) === activeParallelPaperStageTables.length
+    && Number.isSafeInteger(paperReport.parallel_paper_stage_count)
+    && paperReport.parallel_paper_stage_count === activeParallelPaperStageTables.length
     && paperReport.parallel_paper_stages_all_pinned === true
     && paperReport.parallel_paper_stages_all_merged_after_source_read_lock_release === true
     && paperReport.parallel_paper_stages_all_removed_before_publish === true
@@ -11399,10 +11783,18 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     && paperReport.paper_decision_parallel_read_view_pinned === true
     && paperReport.paper_decision_parallel_stage_merged_after_source_read_lock_release === true
     && paperReport.paper_decision_parallel_stage_removed_before_publish === true
-    && Number(paperReport.paper_decision_parallel_stage_size_bytes) === paperDecisionStage.stage_size_bytes
-    && Number(paperReport.paper_decision_parallel_stage_budget_bytes) === paperDecisionStage.stage_budget_bytes
-    && Number(paperReport.paper_decision_parallel_stage_page_size) === paperDecisionStage.stage_page_size
-    && Number(paperReport.paper_decision_parallel_stage_rows_merged) === paperDecisionStage.rows_merged
+    && Number.isSafeInteger(paperReport.paper_decision_parallel_stage_size_bytes)
+    && paperReport.paper_decision_parallel_stage_size_bytes === paperDecisionStage.stage_size_bytes
+    && Number.isSafeInteger(paperReport.paper_decision_parallel_stage_budget_bytes)
+    && paperReport.paper_decision_parallel_stage_budget_bytes === paperDecisionStage.stage_budget_bytes
+    && Number.isSafeInteger(paperReport.paper_decision_parallel_stage_page_size)
+    && paperReport.paper_decision_parallel_stage_page_size === paperDecisionStage.stage_page_size
+    && Number.isSafeInteger(paperReport.paper_decision_parallel_stage_rows_merged)
+    && paperReport.paper_decision_parallel_stage_rows_merged === paperDecisionStage.rows_merged
+    && typeof paperReport.paper_decision_parallel_stage_merge_duration_sec === 'number'
+    && Number.isFinite(paperReport.paper_decision_parallel_stage_merge_duration_sec)
+    && paperReport.paper_decision_parallel_stage_merge_duration_sec
+      === paperDecisionStage.merge_duration_sec
   );
   const producerManifestSha256 = statusPayloadValid
     ? statusPayload.last_accepted_snapshot?.manifest_sha256 || null
@@ -11414,6 +11806,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   );
   const manifestContractChecks = {
     accepted: manifestPayload?.accepted === true,
+    numeric_evidence_types_passed: manifestNumericEvidenceTypesValid,
     manifest_sha256_matched: manifestSha256Matched,
     snapshot_timestamp_valid: snapshotTimestampValid,
     immutable: manifestPayload?.immutable === true,
@@ -11423,9 +11816,17 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     cross_database_time_skew_passed: manifestPayload?.cross_database_time_skew_passed === true,
     pinned_read_view_lineage_passed: pinnedReadViewLineagePassed,
     source_read_lock_budget_passed: manifestPayload?.source_read_lock_budget_passed === true,
+    source_read_lock_limit_valid: Number.isFinite(manifestReadLockLimit)
+      && manifestReadLockLimit > 0,
     indexes_built_after_source_read_lock_release: manifestPayload?.indexes_built_after_source_read_lock_release === true,
-    candidate_projection_after_source_read_lock_release: manifestPayload?.candidate_projection_after_source_read_lock_release === true,
-    candidate_stage_removed_before_publish: manifestPayload?.candidate_stage_removed_before_publish === true,
+    candidate_projection_after_source_read_lock_release: Boolean(
+      manifestPayload?.candidate_projection_after_source_read_lock_release === true
+      && candidateProjectionPassed
+    ),
+    candidate_stage_removed_before_publish: Boolean(
+      manifestPayload?.candidate_stage_removed_before_publish === true
+      && paperReport.temporary_candidate_stage_removed_before_publish === true
+    ),
     parallel_paper_stage_inventory_passed: parallelPaperStageInventoryValid,
     parallel_paper_stages_all_pinned: manifestPayload?.parallel_paper_stages_all_pinned === true,
     parallel_paper_stages_all_merged_after_source_read_lock_release: manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true,
@@ -11438,7 +11839,24 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     source_mutation_free: manifestPayload?.source_mutation_free === true,
     bounded_selective_snapshot: manifestPayload?.bounded_selective_snapshot === true,
     selection_upper_bounds_consistent: manifestPayload?.selection_upper_bounds_consistent === true,
-    output_cap_passed: manifestPayload?.output_cap_passed === true,
+    selection_contract_passed: Boolean(
+      selectionContract.schema_version === 'evaluator_snapshot_selection.v1'
+      && selectionContract.future_rows_excluded === true
+      && selectionContract.table_rules_are_explicit === true
+      && [24, 48, 72].every((hours) => selectionSupportedWindows.includes(hours))
+      && Number.isFinite(snapshotTs)
+      && Number.isFinite(selectionCommonUpperEpoch)
+      && Math.abs(selectionCommonUpperEpoch - snapshotTs) <= 0.001
+    ),
+    output_cap_passed: Boolean(
+      manifestPayload?.output_cap_passed === true
+      && Number.isSafeInteger(manifestOutputSizeBytes)
+      && manifestOutputSizeBytes > 0
+      && Number.isSafeInteger(manifestOutputCapBytes)
+      && manifestOutputCapBytes > 0
+      && manifestOutputSizeBytes <= manifestOutputCapBytes
+      && manifestOutputCapBytes === diskOutputCapBytes
+    ),
     partial_artifacts_absent: manifestPayload?.partial_artifacts_absent === true,
     active_database_reads_forbidden: manifestPayload?.active_database_reads_allowed_for_autoloop === false,
     disk_preflight_passed: diskPreflightPassed,
@@ -11612,31 +12030,31 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     last_failure_at: statusPayloadValid ? statusPayload.last_failure_at || null : null,
     last_failure_code: producerFailureCode,
     last_failure_details: producerFailureDetails,
-    error_count: statusPayloadValid ? Number(statusPayload.error_count || 0) : 0,
+    error_count: statusPayloadValid && Number.isSafeInteger(statusPayload.error_count)
+      ? statusPayload.error_count
+      : 0,
     consecutive_failure_count: statusPayloadValid
-      && statusPayload.consecutive_failure_count != null
-      && Number.isFinite(Number(statusPayload.consecutive_failure_count))
-      ? Number(statusPayload.consecutive_failure_count)
+      && Number.isSafeInteger(statusPayload.consecutive_failure_count)
+      ? statusPayload.consecutive_failure_count
       : null,
     consecutive_failure_code_count: statusPayloadValid
-      && statusPayload.consecutive_failure_code_count != null
-      && Number.isFinite(Number(statusPayload.consecutive_failure_code_count))
-      ? Number(statusPayload.consecutive_failure_code_count)
+      && Number.isSafeInteger(statusPayload.consecutive_failure_code_count)
+      ? statusPayload.consecutive_failure_code_count
       : null,
     success_interval_sec: statusPayloadValid
-      && statusPayload.success_interval_sec != null
-      && Number.isFinite(Number(statusPayload.success_interval_sec))
-      ? Number(statusPayload.success_interval_sec)
+      && typeof statusPayload.success_interval_sec === 'number'
+      && Number.isFinite(statusPayload.success_interval_sec)
+      ? statusPayload.success_interval_sec
       : intervalSec,
     failure_retry_sec: statusPayloadValid
-      && statusPayload.failure_retry_sec != null
-      && Number.isFinite(Number(statusPayload.failure_retry_sec))
-      ? Number(statusPayload.failure_retry_sec)
+      && typeof statusPayload.failure_retry_sec === 'number'
+      && Number.isFinite(statusPayload.failure_retry_sec)
+      ? statusPayload.failure_retry_sec
       : null,
     next_attempt_delay_sec: statusPayloadValid
-      && statusPayload.next_attempt_delay_sec != null
-      && Number.isFinite(Number(statusPayload.next_attempt_delay_sec))
-      ? Number(statusPayload.next_attempt_delay_sec)
+      && typeof statusPayload.next_attempt_delay_sec === 'number'
+      && Number.isFinite(statusPayload.next_attempt_delay_sec)
+      ? statusPayload.next_attempt_delay_sec
       : null,
     next_attempt_at: statusPayloadValid ? statusPayload.next_attempt_at || null : null,
     status_artifact: statusArtifact,
@@ -11705,36 +12123,40 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     },
     source_read_lock: {
       budget_passed: manifestPayload?.source_read_lock_budget_passed === true,
-      limit_sec: Number.isFinite(Number(manifestPayload?.max_source_read_lock_sec))
-        ? Number(manifestPayload.max_source_read_lock_sec)
+      limit_sec: Number.isFinite(manifestReadLockLimit)
+        ? manifestReadLockLimit
         : null,
-      max_duration_sec: Number.isFinite(Number(statusPayload?.last_accepted_snapshot?.max_source_read_lock_duration_sec))
-        ? Number(statusPayload.last_accepted_snapshot.max_source_read_lock_duration_sec)
+      max_duration_sec: typeof statusPayload?.last_accepted_snapshot
+        ?.max_source_read_lock_duration_sec === 'number'
+        && Number.isFinite(
+          statusPayload.last_accepted_snapshot.max_source_read_lock_duration_sec,
+        )
+        ? statusPayload.last_accepted_snapshot.max_source_read_lock_duration_sec
         : null,
     },
     cross_database_time_skew: {
       passed: manifestPayload?.cross_database_time_skew_passed === true,
-      skew_sec: Number.isFinite(Number(manifestPayload?.cross_database_time_skew_sec))
-        ? Number(manifestPayload.cross_database_time_skew_sec)
+      skew_sec: Number.isFinite(manifestPinnedSkew)
+        ? manifestPinnedSkew
         : null,
-      max_allowed_sec: Number.isFinite(Number(manifestPayload?.max_allowed_cross_database_time_skew_sec))
-        ? Number(manifestPayload.max_allowed_cross_database_time_skew_sec)
+      max_allowed_sec: Number.isFinite(manifestMaxPinnedSkew)
+        ? manifestMaxPinnedSkew
         : null,
     },
     output_budget: {
       passed: manifestPayload?.output_cap_passed === true,
-      size_bytes: Number.isFinite(Number(manifestPayload?.output_size_bytes))
-        ? Number(manifestPayload.output_size_bytes)
+      size_bytes: Number.isSafeInteger(manifestOutputSizeBytes)
+        ? manifestOutputSizeBytes
         : null,
-      cap_bytes: Number.isFinite(Number(manifestPayload?.output_cap_bytes))
-        ? Number(manifestPayload.output_cap_bytes)
+      cap_bytes: Number.isSafeInteger(manifestOutputCapBytes)
+        ? manifestOutputCapBytes
         : null,
       disk_preflight_passed: diskPreflightPassed,
-      estimated_free_after_bytes: Number.isFinite(Number(disk.estimated_free_after_bytes))
-        ? Number(disk.estimated_free_after_bytes)
+      estimated_free_after_bytes: Number.isSafeInteger(disk.estimated_free_after_bytes)
+        ? disk.estimated_free_after_bytes
         : null,
-      required_reserve_bytes: Number.isFinite(Number(disk.required_reserve_bytes))
-        ? Number(disk.required_reserve_bytes)
+      required_reserve_bytes: Number.isSafeInteger(disk.required_reserve_bytes)
+        ? disk.required_reserve_bytes
         : null,
     },
     blockers: [...new Set(blockers)],

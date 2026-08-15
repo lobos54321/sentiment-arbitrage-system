@@ -116,6 +116,173 @@ def valid_sha256_hex(value: object) -> bool:
     )
 
 
+def is_json_safe_integer(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return abs(value) <= 2**53 - 1
+    return bool(
+        isinstance(value, float)
+        and math.isfinite(value)
+        and value.is_integer()
+        and abs(value) <= 2**53 - 1
+    )
+
+
+def json_safe_integer(value: object, *, field: str) -> int:
+    if not is_json_safe_integer(value):
+        raise ValueError(f"{field} must be a JSON safe integer")
+    return int(value)
+
+
+def is_json_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def json_finite_number(value: object, *, field: str) -> float:
+    if not is_json_finite_number(value):
+        raise ValueError(f"{field} must be a finite JSON number")
+    return float(value)
+
+
+JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES = (
+    "_bytes",
+    "_count",
+    "_rows",
+    "_rows_copied",
+    "_rows_merged",
+    "_page_size",
+    "_pages",
+    "_numerator",
+    "_denominator",
+    "_hours",
+)
+JSON_SAFE_INTEGER_EVIDENCE_FIELDS = frozenset(
+    {
+        "application_id",
+        "destination_connection_total_changes",
+        "page_size",
+        "rows_copied",
+        "rows_merged",
+        "semantic_rows_verified",
+        "source_data_version_after",
+        "source_data_version_before",
+        "source_row_count_upper",
+        "source_schema_version",
+        "source_size_bytes_after",
+        "source_size_bytes_before",
+        "user_version",
+    }
+)
+JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES = (
+    "_sec",
+    "_epoch",
+    "_ratio",
+    "_monotonic",
+)
+JSON_FINITE_NUMBER_EVIDENCE_FIELDS = frozenset(
+    {
+        "snapshot_ts",
+        "source_mtime_after",
+        "source_mtime_before",
+    }
+)
+JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS = frozenset(
+    {
+        "database_budget_bytes",
+        "padded_non_paper_estimate_bytes",
+        "source_compact_estimate_bytes",
+        "static_share_budget_bytes",
+        "supported_capture_windows_hours",
+        "temporary_parallel_paper_stage_cap_bytes",
+    }
+)
+JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS = frozenset(
+    {"parallel_paper_source_read_lock_duration_sec"}
+)
+
+
+def json_numeric_evidence_contract_sha256() -> str:
+    payload = {
+        "schema_version": "evaluator_json_numeric_evidence_types.v1",
+        "safe_integer_suffixes": list(JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES),
+        "safe_integer_fields": sorted(JSON_SAFE_INTEGER_EVIDENCE_FIELDS),
+        "finite_number_suffixes": list(JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES),
+        "finite_number_fields": sorted(JSON_FINITE_NUMBER_EVIDENCE_FIELDS),
+        "safe_integer_containers": sorted(
+            JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS
+        ),
+        "finite_number_containers": sorted(
+            JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS
+        ),
+        "database_schema_version_path_rule": (
+            r"databases\.[^.]+\.schema_version"
+        ),
+    }
+    return sha256_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def json_numeric_evidence_kind(field: str, path: str) -> str | None:
+    if re.fullmatch(r"databases\.[^.]+\.schema_version", path):
+        return "safe_integer"
+    if field in JSON_SAFE_INTEGER_EVIDENCE_FIELDS or field.endswith(
+        JSON_SAFE_INTEGER_EVIDENCE_SUFFIXES
+    ):
+        return "safe_integer"
+    if field in JSON_FINITE_NUMBER_EVIDENCE_FIELDS or field.endswith(
+        JSON_FINITE_NUMBER_EVIDENCE_SUFFIXES
+    ):
+        return "finite_number"
+    return None
+
+
+def json_numeric_evidence_types_valid(payload: object) -> bool:
+    """Reject coercible numeric evidence across the entire manifest envelope."""
+
+    def visit(value: object, path: str, inherited_kind: str | None = None) -> bool:
+        if isinstance(value, dict):
+            for field, child in value.items():
+                child_path = f"{path}.{field}" if path else str(field)
+                field_kind = json_numeric_evidence_kind(str(field), child_path)
+                container_kind = (
+                    "safe_integer"
+                    if field in JSON_SAFE_INTEGER_EVIDENCE_CONTAINERS
+                    else "finite_number"
+                    if field in JSON_FINITE_NUMBER_EVIDENCE_CONTAINERS
+                    else None
+                )
+                child_kind = field_kind or inherited_kind
+                if isinstance(child, (dict, list)):
+                    if field_kind is not None and container_kind is None:
+                        return False
+                    if not visit(child, child_path, container_kind or inherited_kind):
+                        return False
+                    continue
+                if child is None:
+                    continue
+                if child_kind == "safe_integer" and not is_json_safe_integer(child):
+                    return False
+                if child_kind == "finite_number" and not is_json_finite_number(child):
+                    return False
+            return True
+        if isinstance(value, list):
+            return all(visit(child, f"{path}[]", inherited_kind) for child in value)
+        if value is None or inherited_kind is None:
+            return True
+        if inherited_kind == "safe_integer":
+            return is_json_safe_integer(value)
+        return is_json_finite_number(value)
+
+    return visit(payload, "")
+
+
 def sqlite_table_schema_evidence(
     path: Path,
     tables: tuple[str, ...] | list[str],
@@ -359,8 +526,16 @@ def validate_shared_stage_sample_estimate_contract(
     """Validate the indexed-sample fallback as an allocation hint only."""
 
     def nonnegative_int(name: str) -> int:
-        value = evidence.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        try:
+            value = json_safe_integer(
+                evidence.get(name),
+                field=f"{target}.advisory_evidence.{name}",
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage sample advisory numeric invalid:{target}:{name}"
+            ) from None
+        if value < 0:
             raise ValueError(
                 f"shared stage sample advisory numeric invalid:{target}:{name}"
             )
@@ -385,8 +560,14 @@ def validate_shared_stage_sample_estimate_contract(
     sample_basis = nonnegative_int("sample_row_bytes_basis")
     pinned_read_view_id = str(evidence.get("pinned_read_view_id") or "")
     pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
-    dbstat_timeout = evidence.get("dbstat_timeout_sec")
-    dbstat_elapsed = evidence.get("dbstat_elapsed_sec")
+    dbstat_timeout = json_finite_number(
+        evidence.get("dbstat_timeout_sec"),
+        field=f"{target}.advisory_evidence.dbstat_timeout_sec",
+    )
+    dbstat_elapsed = json_finite_number(
+        evidence.get("dbstat_elapsed_sec"),
+        field=f"{target}.advisory_evidence.dbstat_elapsed_sec",
+    )
     indexed_count_timeout = evidence.get("indexed_count_timeout_sec")
     indexed_count_elapsed = evidence.get("indexed_count_elapsed_sec")
     expected_schema = (
@@ -430,14 +611,8 @@ def validate_shared_stage_sample_estimate_contract(
         or evidence.get("advisory_formula") != expected_formula
         or report.get("advisory_strategy") != expected_strategy
         or evidence.get("capacity_sample_used") is not True
-        or isinstance(dbstat_timeout, bool)
-        or not isinstance(dbstat_timeout, (int, float))
-        or not math.isfinite(float(dbstat_timeout))
-        or float(dbstat_timeout) != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
-        or isinstance(dbstat_elapsed, bool)
-        or not isinstance(dbstat_elapsed, (int, float))
-        or not math.isfinite(float(dbstat_elapsed))
-        or float(dbstat_elapsed) < 0
+        or dbstat_timeout != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
+        or dbstat_elapsed < 0
         or evidence.get("row_count_binding_mode") != expected_binding_mode
         or evidence.get("source_row_count_upper") is not None
         or evidence.get("source_row_count_upper_basis")
@@ -457,23 +632,24 @@ def validate_shared_stage_sample_estimate_contract(
         raise ValueError(f"shared stage sample advisory evidence invalid:{target}")
 
     if indexed_count_timeout_contract:
+        indexed_count_timeout = json_finite_number(
+            indexed_count_timeout,
+            field=f"{target}.advisory_evidence.indexed_count_timeout_sec",
+        )
+        indexed_count_elapsed = json_finite_number(
+            indexed_count_elapsed,
+            field=f"{target}.advisory_evidence.indexed_count_elapsed_sec",
+        )
         if (
             evidence.get("indexed_count_completed") is not False
             or evidence.get("indexed_count_timed_out") is not True
-            or isinstance(indexed_count_timeout, bool)
-            or not isinstance(indexed_count_timeout, (int, float))
-            or not math.isfinite(float(indexed_count_timeout))
-            or float(indexed_count_timeout)
+            or indexed_count_timeout
             != SHARED_STAGE_INDEXED_COUNT_TIMEOUT_SEC
-            or isinstance(indexed_count_elapsed, bool)
-            or not isinstance(indexed_count_elapsed, (int, float))
-            or not math.isfinite(float(indexed_count_elapsed))
-            or float(indexed_count_elapsed) + 0.000001
-            < float(indexed_count_timeout)
-            or float(indexed_count_elapsed) >= SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
+            or indexed_count_elapsed + 0.000001 < indexed_count_timeout
+            or indexed_count_elapsed >= SHARED_STAGE_ESTIMATE_TIMEOUT_SEC
             or evidence.get("dbstat_completed") is not False
             or evidence.get("dbstat_timed_out") is not False
-            or float(dbstat_elapsed) != 0.0
+            or dbstat_elapsed != 0.0
             or evidence.get("dbstat_skipped_reason")
             != "indexed_count_timeout"
         ):
@@ -483,7 +659,7 @@ def validate_shared_stage_sample_estimate_contract(
     elif (
         evidence.get("dbstat_completed") is not False
         or evidence.get("dbstat_timed_out") is not True
-        or float(dbstat_elapsed) + 0.000001 < float(dbstat_timeout)
+        or dbstat_elapsed + 0.000001 < dbstat_timeout
     ):
         raise ValueError(f"shared stage sample dbstat evidence invalid:{target}")
 
@@ -501,30 +677,47 @@ def validate_shared_stage_sample_estimate_contract(
 
     average_diagnostic = evidence.get("average_row_bytes_diagnostic")
     max_diagnostic = evidence.get("sample_max_row_bytes_diagnostic")
-    if average_diagnostic is not None and (
-        isinstance(average_diagnostic, bool)
-        or not isinstance(average_diagnostic, (int, float))
-        or not math.isfinite(float(average_diagnostic))
-        or float(average_diagnostic) < 0
-    ):
-        raise ValueError(
-            f"shared stage sample diagnostic invalid:{target}:average"
-        )
-    if max_diagnostic is not None and (
-        isinstance(max_diagnostic, bool)
-        or not isinstance(max_diagnostic, int)
-        or max_diagnostic < 0
-    ):
-        raise ValueError(
-            f"shared stage sample diagnostic invalid:{target}:maximum"
-        )
+    if average_diagnostic is not None:
+        try:
+            average_diagnostic = json_finite_number(
+                average_diagnostic,
+                field=(
+                    f"{target}.advisory_evidence."
+                    "average_row_bytes_diagnostic"
+                ),
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage sample diagnostic invalid:{target}:average"
+            ) from None
+        if average_diagnostic < 0:
+            raise ValueError(
+                f"shared stage sample diagnostic invalid:{target}:average"
+            )
+    if max_diagnostic is not None:
+        try:
+            max_diagnostic = json_safe_integer(
+                max_diagnostic,
+                field=(
+                    f"{target}.advisory_evidence."
+                    "sample_max_row_bytes_diagnostic"
+                ),
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage sample diagnostic invalid:{target}:maximum"
+            ) from None
+        if max_diagnostic < 0:
+            raise ValueError(
+                f"shared stage sample diagnostic invalid:{target}:maximum"
+            )
     if selected_rows > 0:
         if (
             sample_rows <= 0
             or sample_basis <= 0
             or max_diagnostic != sample_basis
             or average_diagnostic is None
-            or float(average_diagnostic) <= 0
+            or average_diagnostic <= 0
         ):
             raise ValueError(f"shared stage sample basis invalid:{target}")
     elif (
@@ -598,9 +791,10 @@ def validate_shared_stage_sample_estimate_contract(
             raise ValueError(
                 f"shared stage sample advisory mismatch:{target}:{field}"
             )
-    if int(report.get("advisory_required_bytes")) != int(
-        expected["advisory_required_bytes"]
-    ):
+    if json_safe_integer(
+        report.get("advisory_required_bytes"),
+        field=f"{target}.advisory_required_bytes",
+    ) != int(expected["advisory_required_bytes"]):
         raise ValueError(f"shared stage sample advisory total mismatch:{target}")
     return int(expected["advisory_required_bytes"])
 
@@ -630,8 +824,16 @@ def validate_shared_stage_estimate_contract(
         )
 
     def nonnegative_int(name: str) -> int:
-        value = evidence.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        try:
+            value = json_safe_integer(
+                evidence.get(name),
+                field=f"{target}.advisory_evidence.{name}",
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage advisory numeric invalid:{target}:{name}"
+            ) from None
+        if value < 0:
             raise ValueError(
                 f"shared stage advisory numeric invalid:{target}:{name}"
             )
@@ -650,8 +852,14 @@ def validate_shared_stage_estimate_contract(
     sample_rows = nonnegative_int("sample_rows")
     pinned_read_view_id = str(evidence.get("pinned_read_view_id") or "")
     pinned_read_view_role = str(evidence.get("pinned_read_view_role") or "")
-    dbstat_timeout = evidence.get("dbstat_timeout_sec")
-    dbstat_elapsed = evidence.get("dbstat_elapsed_sec")
+    dbstat_timeout = json_finite_number(
+        evidence.get("dbstat_timeout_sec"),
+        field=f"{target}.advisory_evidence.dbstat_timeout_sec",
+    )
+    dbstat_elapsed = json_finite_number(
+        evidence.get("dbstat_elapsed_sec"),
+        field=f"{target}.advisory_evidence.dbstat_elapsed_sec",
+    )
 
     if (
         evidence.get("source_measurement_trust_boundary")
@@ -668,14 +876,8 @@ def validate_shared_stage_estimate_contract(
         or evidence.get("capacity_sample_used") is not False
         or evidence.get("dbstat_completed") is not True
         or evidence.get("dbstat_timed_out") is not False
-        or isinstance(dbstat_timeout, bool)
-        or not isinstance(dbstat_timeout, (int, float))
-        or not math.isfinite(float(dbstat_timeout))
-        or float(dbstat_timeout) != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
-        or isinstance(dbstat_elapsed, bool)
-        or not isinstance(dbstat_elapsed, (int, float))
-        or not math.isfinite(float(dbstat_elapsed))
-        or float(dbstat_elapsed) < 0
+        or dbstat_timeout != SHARED_STAGE_DBSTAT_ADVISORY_TIMEOUT_SEC
+        or dbstat_elapsed < 0
         or evidence.get("sample_row_bytes_basis") is not None
         or evidence.get("table_sample_payload_advisory_bytes") is not None
         or evidence.get("advisory_row_overhead_bytes")
@@ -700,23 +902,40 @@ def validate_shared_stage_estimate_contract(
 
     average_diagnostic = evidence.get("average_row_bytes_diagnostic")
     max_diagnostic = evidence.get("sample_max_row_bytes_diagnostic")
-    if average_diagnostic is not None and (
-        isinstance(average_diagnostic, bool)
-        or not isinstance(average_diagnostic, (int, float))
-        or not math.isfinite(float(average_diagnostic))
-        or float(average_diagnostic) < 0
-    ):
-        raise ValueError(
-            f"shared stage advisory diagnostic invalid:{target}:average"
-        )
-    if max_diagnostic is not None and (
-        isinstance(max_diagnostic, bool)
-        or not isinstance(max_diagnostic, int)
-        or max_diagnostic < 0
-    ):
-        raise ValueError(
-            f"shared stage advisory diagnostic invalid:{target}:maximum"
-        )
+    if average_diagnostic is not None:
+        try:
+            average_diagnostic = json_finite_number(
+                average_diagnostic,
+                field=(
+                    f"{target}.advisory_evidence."
+                    "average_row_bytes_diagnostic"
+                ),
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage advisory diagnostic invalid:{target}:average"
+            ) from None
+        if average_diagnostic < 0:
+            raise ValueError(
+                f"shared stage advisory diagnostic invalid:{target}:average"
+            )
+    if max_diagnostic is not None:
+        try:
+            max_diagnostic = json_safe_integer(
+                max_diagnostic,
+                field=(
+                    f"{target}.advisory_evidence."
+                    "sample_max_row_bytes_diagnostic"
+                ),
+            )
+        except ValueError:
+            raise ValueError(
+                f"shared stage advisory diagnostic invalid:{target}:maximum"
+            ) from None
+        if max_diagnostic < 0:
+            raise ValueError(
+                f"shared stage advisory diagnostic invalid:{target}:maximum"
+            )
 
     candidate_order_index_storage: dict[str, int] | None = None
     if target == SHARED_STAGE_TARGET_CANDIDATE:
@@ -853,9 +1072,10 @@ def validate_shared_stage_estimate_contract(
     for field, expected_value in expected.items():
         if nonnegative_int(field) != int(expected_value):
             raise ValueError(f"shared stage advisory mismatch:{target}:{field}")
-    if int(report.get("advisory_required_bytes")) != int(
-        expected["advisory_required_bytes"]
-    ):
+    if json_safe_integer(
+        report.get("advisory_required_bytes"),
+        field=f"{target}.advisory_required_bytes",
+    ) != int(expected["advisory_required_bytes"]):
         raise ValueError(f"shared stage advisory total mismatch:{target}")
     return int(expected["advisory_required_bytes"])
 
@@ -872,6 +1092,13 @@ def validate_shared_stage_budget_contract(
         raise ValueError("shared stage budget missing")
     if shared != disk_shared:
         raise ValueError("shared stage budget copies diverged")
+
+    def contract_int(value: object, field: str) -> int:
+        return json_safe_integer(value, field=f"shared_stage.{field}")
+
+    def contract_number(value: object, field: str) -> float:
+        return json_finite_number(value, field=f"shared_stage.{field}")
+
     if (
         shared.get("schema_version") != SHARED_STAGE_BUDGET_SCHEMA_VERSION
         or shared.get("allocation_mode")
@@ -932,10 +1159,14 @@ def validate_shared_stage_budget_contract(
             or ()
         )
         != expected_omitted_tables
-        or int(disk_preflight.get("candidate_stage_minimum_cap_bytes"))
+        or contract_int(
+            disk_preflight.get("candidate_stage_minimum_cap_bytes"),
+            "disk.candidate_stage_minimum_cap_bytes",
+        )
         != MIN_CANDIDATE_STAGE_CAP_BYTES
-        or int(
-            disk_preflight.get("parallel_paper_stage_minimum_cap_bytes")
+        or contract_int(
+            disk_preflight.get("parallel_paper_stage_minimum_cap_bytes"),
+            "disk.parallel_paper_stage_minimum_cap_bytes",
         )
         != MIN_PARALLEL_PAPER_STAGE_CAP_BYTES
     ):
@@ -947,21 +1178,45 @@ def validate_shared_stage_budget_contract(
         or set(raw_targets) != set(expected_targets)
     ):
         raise ValueError("shared stage target inventory invalid")
-    disk_free = int(disk_preflight.get("free_bytes"))
-    output_cap = int(disk_preflight.get("selective_snapshot_output_cap_bytes"))
-    reserve = int(disk_preflight.get("required_reserve_bytes"))
+    disk_free = contract_int(disk_preflight.get("free_bytes"), "disk.free_bytes")
+    output_cap = contract_int(
+        disk_preflight.get("selective_snapshot_output_cap_bytes"),
+        "disk.selective_snapshot_output_cap_bytes",
+    )
+    reserve = contract_int(
+        disk_preflight.get("required_reserve_bytes"),
+        "disk.required_reserve_bytes",
+    )
     raw_cap = max(0, disk_free - output_cap - reserve)
     aligned_cap = raw_cap // SHARED_STAGE_PAGE_SIZE * SHARED_STAGE_PAGE_SIZE
     alignment_reserve = raw_cap - aligned_cap
-    total_cap = int(shared.get("total_cap_bytes"))
-    total_granted = int(shared.get("total_granted_bytes"))
-    actual_total = int(shared.get("actual_total_bytes"))
-    unconsumed = int(shared.get("unconsumed_bytes"))
+    total_cap = contract_int(shared.get("total_cap_bytes"), "total_cap_bytes")
+    total_granted = contract_int(
+        shared.get("total_granted_bytes"),
+        "total_granted_bytes",
+    )
+    actual_total = contract_int(
+        shared.get("actual_total_bytes"),
+        "actual_total_bytes",
+    )
+    unconsumed = contract_int(
+        shared.get("unconsumed_bytes"),
+        "unconsumed_bytes",
+    )
     if (
-        int(disk_preflight.get("temporary_stage_raw_cap_bytes")) != raw_cap
-        or int(disk_preflight.get("temporary_stage_alignment_reserve_bytes"))
+        contract_int(
+            disk_preflight.get("temporary_stage_raw_cap_bytes"),
+            "disk.temporary_stage_raw_cap_bytes",
+        ) != raw_cap
+        or contract_int(
+            disk_preflight.get("temporary_stage_alignment_reserve_bytes"),
+            "disk.temporary_stage_alignment_reserve_bytes",
+        )
         != alignment_reserve
-        or int(disk_preflight.get("temporary_stage_total_cap_bytes"))
+        or contract_int(
+            disk_preflight.get("temporary_stage_total_cap_bytes"),
+            "disk.temporary_stage_total_cap_bytes",
+        )
         != aligned_cap
         or total_cap != aligned_cap
         or total_granted != total_cap
@@ -1008,17 +1263,50 @@ def validate_shared_stage_budget_contract(
             target,
             report,
         )
-        advisory = int(report.get("advisory_required_bytes"))
-        baseline = int(report.get("baseline_required_bytes"))
-        grant = int(report.get("granted_cap_bytes"))
-        actual = int(report.get("actual_usage_bytes"))
-        high_water = int(report.get("high_water_bytes"))
-        actual_rows_copied = int(report.get("actual_rows_copied"))
-        borrowed = int(report.get("borrowed_shared_pool_bytes"))
-        allocation_weight = int(report.get("allocation_weight_bytes"))
-        advisory_shortfall = int(report.get("advisory_shortfall_bytes"))
-        history_high_water = int(report.get("history_high_water_bytes"))
-        history_grant = int(report.get("history_granted_cap_bytes"))
+        advisory = contract_int(
+            report.get("advisory_required_bytes"),
+            f"targets.{target}.advisory_required_bytes",
+        )
+        baseline = contract_int(
+            report.get("baseline_required_bytes"),
+            f"targets.{target}.baseline_required_bytes",
+        )
+        grant = contract_int(
+            report.get("granted_cap_bytes"),
+            f"targets.{target}.granted_cap_bytes",
+        )
+        actual = contract_int(
+            report.get("actual_usage_bytes"),
+            f"targets.{target}.actual_usage_bytes",
+        )
+        high_water = contract_int(
+            report.get("high_water_bytes"),
+            f"targets.{target}.high_water_bytes",
+        )
+        actual_rows_copied = contract_int(
+            report.get("actual_rows_copied"),
+            f"targets.{target}.actual_rows_copied",
+        )
+        borrowed = contract_int(
+            report.get("borrowed_shared_pool_bytes"),
+            f"targets.{target}.borrowed_shared_pool_bytes",
+        )
+        allocation_weight = contract_int(
+            report.get("allocation_weight_bytes"),
+            f"targets.{target}.allocation_weight_bytes",
+        )
+        advisory_shortfall = contract_int(
+            report.get("advisory_shortfall_bytes"),
+            f"targets.{target}.advisory_shortfall_bytes",
+        )
+        history_high_water = contract_int(
+            report.get("history_high_water_bytes"),
+            f"targets.{target}.history_high_water_bytes",
+        )
+        history_grant = contract_int(
+            report.get("history_granted_cap_bytes"),
+            f"targets.{target}.history_granted_cap_bytes",
+        )
         history_cap_hit = report.get("history_cap_hit") is True
         history_copy_completed = report.get("history_copy_completed") is True
         history_state = str(report.get("history_state") or "")
@@ -1050,9 +1338,11 @@ def validate_shared_stage_budget_contract(
         )
         raw_advisory_rows = advisory_evidence.get("selected_row_count")
         advisory_rows = (
-            int(raw_advisory_rows)
-            if isinstance(raw_advisory_rows, int)
-            and not isinstance(raw_advisory_rows, bool)
+            contract_int(
+                raw_advisory_rows,
+                f"targets.{target}.advisory_evidence.selected_row_count",
+            )
+            if raw_advisory_rows is not None
             else None
         )
         row_count_bound = bool(
@@ -1072,7 +1362,10 @@ def validate_shared_stage_budget_contract(
                 and actual_rows_copied >= 0
             )
         )
-        utilization = float(report.get("utilization_ratio"))
+        utilization = contract_number(
+            report.get("utilization_ratio"),
+            f"targets.{target}.utilization_ratio",
+        )
         advisory_exceeded = actual > advisory
         advisory_delta = actual - advisory
         if history_cap_hit:
@@ -1092,7 +1385,10 @@ def validate_shared_stage_budget_contract(
                 not history_storage_compatible
                 and history_storage_schema_version == storage_schema_version
             )
-            or int(report.get("minimum_cap_bytes")) != minimum
+            or contract_int(
+                report.get("minimum_cap_bytes"),
+                f"targets.{target}.minimum_cap_bytes",
+            ) != minimum
             or report.get("advisory_query_bounded") is not True
             or report.get("physical_upper_bound_claimed") is not False
             or advisory != validated_advisory
@@ -1121,7 +1417,10 @@ def validate_shared_stage_budget_contract(
             or not row_count_bound
             or report.get("row_count_bound_to_snapshot") is not True
             or report.get("advisory_exceeded") is not advisory_exceeded
-            or int(report.get("advisory_delta_bytes")) != advisory_delta
+            or contract_int(
+                report.get("advisory_delta_bytes"),
+                f"targets.{target}.advisory_delta_bytes",
+            ) != advisory_delta
             or report.get("copy_completed") is not True
             or report.get("cap_hit") is not False
             or report.get("within_grant") is not True
@@ -1204,9 +1503,12 @@ def validate_shared_stage_budget_contract(
         or not isinstance(raw_advisory_exceeded, list)
         or [str(target) for target in raw_advisory_exceeded]
         != advisory_exceeded_targets
-        or int(shared.get("advisory_miss_count"))
+        or contract_int(
+            shared.get("advisory_miss_count"),
+            "advisory_miss_count",
+        )
         != len(advisory_exceeded_targets)
-        or bool(shared.get("history_used")) != history_used
+        or shared.get("history_used") is not history_used
         or (
             history_used
             and not history_lineage_valid
@@ -1222,14 +1524,29 @@ def validate_shared_stage_budget_contract(
         )
         or sum(grants.values()) != total_cap
         or sum(actuals.values()) != actual_total
-        or int(shared.get("minimum_total_bytes")) != minimum_total
-        or int(shared.get("baseline_required_total_bytes"))
+        or contract_int(
+            shared.get("minimum_total_bytes"),
+            "minimum_total_bytes",
+        ) != minimum_total
+        or contract_int(
+            shared.get("baseline_required_total_bytes"),
+            "baseline_required_total_bytes",
+        )
         != baseline_total
-        or int(shared.get("advisory_demand_total_bytes"))
+        or contract_int(
+            shared.get("advisory_demand_total_bytes"),
+            "advisory_demand_total_bytes",
+        )
         != advisory_total
-        or int(shared.get("allocation_weight_total_bytes"))
+        or contract_int(
+            shared.get("allocation_weight_total_bytes"),
+            "allocation_weight_total_bytes",
+        )
         != sum(expected_weights.values())
-        or int(shared.get("residual_pool_bytes")) != residual_pool
+        or contract_int(
+            shared.get("residual_pool_bytes"),
+            "residual_pool_bytes",
+        ) != residual_pool
         or residual_pool < 0
         or residual_pool % SHARED_STAGE_PAGE_SIZE != 0
         or borrowed_total != residual_pool
@@ -1238,18 +1555,25 @@ def validate_shared_stage_budget_contract(
     candidate_grant = grants[SHARED_STAGE_TARGET_CANDIDATE]
     parallel_grants = {table: grants[table] for table in active_stage_tables}
     if (
-        int(disk_preflight.get("temporary_candidate_stage_cap_bytes"))
+        contract_int(
+            disk_preflight.get("temporary_candidate_stage_cap_bytes"),
+            "disk.temporary_candidate_stage_cap_bytes",
+        )
         != candidate_grant
         or {
-            str(table): int(value)
+            str(table): contract_int(
+                value,
+                f"disk.temporary_parallel_paper_stage_cap_bytes.{table}",
+            )
             for table, value in (
                 disk_preflight.get("temporary_parallel_paper_stage_cap_bytes")
                 or {}
             ).items()
         }
         != parallel_grants
-        or int(
-            disk_preflight.get("temporary_paper_decision_stage_cap_bytes")
+        or contract_int(
+            disk_preflight.get("temporary_paper_decision_stage_cap_bytes"),
+            "disk.temporary_paper_decision_stage_cap_bytes",
         )
         != parallel_grants.get(PAPER_DECISION_STAGE_TABLE, 0)
         or disk_preflight.get("candidate_stage_budget_mode")
@@ -1257,17 +1581,27 @@ def validate_shared_stage_budget_contract(
         or disk_preflight.get("fixed_percentage_allocation_used") is not False
     ):
         raise ValueError("shared stage aliases mismatch")
-    estimated_peak = int(disk_preflight.get("estimated_peak_working_bytes"))
-    estimated_free_at_peak = int(
-        disk_preflight.get("estimated_free_at_peak_bytes")
+    estimated_peak = contract_int(
+        disk_preflight.get("estimated_peak_working_bytes"),
+        "disk.estimated_peak_working_bytes",
+    )
+    estimated_free_at_peak = contract_int(
+        disk_preflight.get("estimated_free_at_peak_bytes"),
+        "disk.estimated_free_at_peak_bytes",
     )
     if (
         estimated_peak != output_cap + total_cap
         or estimated_free_at_peak != disk_free - estimated_peak
         or estimated_free_at_peak < reserve
-        or int(disk_preflight.get("estimated_free_after_bytes"))
+        or contract_int(
+            disk_preflight.get("estimated_free_after_bytes"),
+            "disk.estimated_free_after_bytes",
+        )
         != disk_free - output_cap
-        or int(disk_preflight.get("temporary_full_backup_bytes") or 0) != 0
+        or contract_int(
+            disk_preflight.get("temporary_full_backup_bytes"),
+            "disk.temporary_full_backup_bytes",
+        ) != 0
         or disk_preflight.get("fail_closed_on_insufficient_space") is not True
     ):
         raise ValueError("shared stage disk reserve invalid")
@@ -1297,8 +1631,14 @@ def validate_shared_stage_snapshot_row_counts(
             )
         report = targets.get(target) or {}
         selection = selected_tables.get(target) or {}
-        actual_rows = int(report.get("actual_rows_copied"))
-        selected_rows = int(selection.get("rows_copied"))
+        actual_rows = json_safe_integer(
+            report.get("actual_rows_copied"),
+            field=f"{target}.actual_rows_copied",
+        )
+        selected_rows = json_safe_integer(
+            selection.get("rows_copied"),
+            field=f"{target}.selection.rows_copied",
+        )
         if (
             actual_rows != selected_rows
             or actual_rows != int(frozen_counts[frozen_table])
@@ -1308,7 +1648,10 @@ def validate_shared_stage_snapshot_row_counts(
             )
         if target == SHARED_STAGE_TARGET_CANDIDATE:
             projection = selection.get("storage_projection") or {}
-            if int(projection.get("rows_copied")) != actual_rows:
+            if json_safe_integer(
+                projection.get("rows_copied"),
+                field="candidate_projection.rows_copied",
+            ) != actual_rows:
                 raise ValueError(
                     "candidate projection row count mismatch"
                 )
@@ -1538,6 +1881,8 @@ def evaluator_snapshot_bundle_status(
                         "evaluator_snapshot_shared_stage_history_anchor_invalid"
                     )
     if manifest_loaded:
+        if not json_numeric_evidence_types_valid(manifest):
+            blockers.append("evaluator_snapshot_numeric_evidence_type_invalid")
         if manifest.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
             blockers.append("evaluator_snapshot_schema_version_invalid")
         if manifest.get("accepted") is not True:
@@ -1576,7 +1921,10 @@ def evaluator_snapshot_bundle_status(
             or not parallel_paper_stage_inventory_valid(
                 manifest_parallel_stage_tables
             )
-            or int(manifest.get("parallel_paper_stage_count") or 0)
+            or not is_json_safe_integer(
+                manifest.get("parallel_paper_stage_count")
+            )
+            or manifest.get("parallel_paper_stage_count")
             != len(manifest_parallel_stage_tables)
             or manifest.get("parallel_paper_stage_inventory_passed") is not True
         ):
@@ -1610,7 +1958,10 @@ def evaluator_snapshot_bundle_status(
         ):
             blockers.append("evaluator_snapshot_paper_decision_stage_cleanup_invalid")
         try:
-            manifest_read_lock_limit = float(manifest.get("max_source_read_lock_sec"))
+            manifest_read_lock_limit = json_finite_number(
+                manifest.get("max_source_read_lock_sec"),
+                field="manifest.max_source_read_lock_sec",
+            )
             if manifest_read_lock_limit <= 0:
                 raise ValueError("non-positive")
         except (TypeError, ValueError):
@@ -1640,13 +1991,22 @@ def evaluator_snapshot_bundle_status(
                     "evaluator_snapshot_shared_stage_budget_contract_invalid"
                 )
         try:
-            output_size_bytes = int(manifest.get("output_size_bytes"))
-            output_cap_bytes = int(manifest.get("output_cap_bytes"))
+            output_size_bytes = json_safe_integer(
+                manifest.get("output_size_bytes"),
+                field="manifest.output_size_bytes",
+            )
+            output_cap_bytes = json_safe_integer(
+                manifest.get("output_cap_bytes"),
+                field="manifest.output_cap_bytes",
+            )
             if output_size_bytes <= 0 or output_cap_bytes <= 0 or output_size_bytes > output_cap_bytes:
                 blockers.append("evaluator_snapshot_output_size_contract_invalid")
             if isinstance(disk_preflight, dict) and disk_preflight.get("accepted") is True:
                 try:
-                    if int(disk_preflight.get("selective_snapshot_output_cap_bytes")) != output_cap_bytes:
+                    if json_safe_integer(
+                        disk_preflight.get("selective_snapshot_output_cap_bytes"),
+                        field="disk.selective_snapshot_output_cap_bytes",
+                    ) != output_cap_bytes:
                         blockers.append("evaluator_snapshot_disk_output_cap_mismatch")
                 except (TypeError, ValueError):
                     blockers.append("evaluator_snapshot_disk_output_cap_mismatch")
@@ -1669,8 +2029,17 @@ def evaluator_snapshot_bundle_status(
         if not {24, 48, 72}.issubset(supported_windows):
             blockers.append("evaluator_snapshot_capture_window_coverage_invalid")
         try:
-            snapshot_upper_epoch = float(manifest.get("snapshot_ts"))
-            if abs(float(selection.get("common_upper_epoch")) - snapshot_upper_epoch) > 0.001:
+            snapshot_upper_epoch = json_finite_number(
+                manifest.get("snapshot_ts"),
+                field="manifest.snapshot_ts",
+            )
+            if abs(
+                json_finite_number(
+                    selection.get("common_upper_epoch"),
+                    field="selection.common_upper_epoch",
+                )
+                - snapshot_upper_epoch
+            ) > 0.001:
                 blockers.append("evaluator_snapshot_common_upper_timestamp_mismatch")
         except (TypeError, ValueError):
             blockers.append("evaluator_snapshot_common_upper_timestamp_invalid")
@@ -1682,7 +2051,10 @@ def evaluator_snapshot_bundle_status(
             try:
                 snapshot_age_sec_value = (
                     float(now_ts if now_ts is not None else time.time())
-                    - float(manifest["snapshot_ts"])
+                    - json_finite_number(
+                        manifest["snapshot_ts"],
+                        field="manifest.snapshot_ts",
+                    )
                 )
                 if snapshot_age_sec_value < -60:
                     blockers.append("evaluator_snapshot_timestamp_in_future")
@@ -1721,9 +2093,13 @@ def evaluator_snapshot_bundle_status(
                     f"evaluator_snapshot_{name}_index_build_lock_order_invalid"
                 )
             try:
-                report_read_lock_limit = float(report.get("source_read_lock_limit_sec"))
-                report_read_lock_duration = float(
-                    report.get("source_read_lock_duration_sec")
+                report_read_lock_limit = json_finite_number(
+                    report.get("source_read_lock_limit_sec"),
+                    field=f"databases.{name}.source_read_lock_limit_sec",
+                )
+                report_read_lock_duration = json_finite_number(
+                    report.get("source_read_lock_duration_sec"),
+                    field=f"databases.{name}.source_read_lock_duration_sec",
                 )
                 if (
                     report_read_lock_limit <= 0
@@ -1739,10 +2115,22 @@ def evaluator_snapshot_bundle_status(
                 blockers.append(
                     f"evaluator_snapshot_{name}_source_read_lock_contract_invalid"
                 )
-            if int(report.get("temporary_full_backup_size_bytes") or 0) != 0:
+            if json_safe_integer(
+                report.get("temporary_full_backup_size_bytes"),
+                field=f"databases.{name}.temporary_full_backup_size_bytes",
+            ) != 0:
                 blockers.append(f"evaluator_snapshot_{name}_full_backup_intermediate_detected")
             try:
-                if abs(float(report.get("selection_upper_epoch")) - float(manifest.get("snapshot_ts"))) > 0.001:
+                if abs(
+                    json_finite_number(
+                        report.get("selection_upper_epoch"),
+                        field=f"databases.{name}.selection_upper_epoch",
+                    )
+                    - json_finite_number(
+                        manifest.get("snapshot_ts"),
+                        field="manifest.snapshot_ts",
+                    )
+                ) > 0.001:
                     blockers.append(f"evaluator_snapshot_{name}_selection_upper_mismatch")
             except (TypeError, ValueError):
                 blockers.append(f"evaluator_snapshot_{name}_selection_upper_invalid")
@@ -1826,12 +2214,24 @@ def evaluator_snapshot_bundle_status(
                     )
                     if not isinstance(parallel_lock_durations, dict):
                         raise ValueError("parallel lock durations missing")
-                    main_lock_duration_sec = float(
-                        report.get("main_source_read_lock_duration_sec")
+                    main_lock_duration_sec = json_finite_number(
+                        report.get("main_source_read_lock_duration_sec"),
+                        field="paper.main_source_read_lock_duration_sec",
                     )
-                    reported_max_lock_duration_sec = float(
-                        report.get("source_read_lock_duration_sec")
+                    reported_max_lock_duration_sec = json_finite_number(
+                        report.get("source_read_lock_duration_sec"),
+                        field="paper.source_read_lock_duration_sec",
                     )
+                    parallel_lock_duration_values = {
+                        table: json_finite_number(
+                            parallel_lock_durations.get(table),
+                            field=(
+                                "paper.parallel_source_read_lock_duration_sec."
+                                f"{table}"
+                            ),
+                        )
+                        for table in active_parallel_stage_tables
+                    }
                     roles = {
                         str(view.get("role"))
                         for view in pinned_read_views
@@ -1862,6 +2262,9 @@ def evaluator_snapshot_bundle_status(
                         )
                         or report_parallel_stage_tables
                         != active_parallel_stage_tables
+                        or not is_json_safe_integer(
+                            report.get("parallel_paper_stage_count")
+                        )
                         or report.get("parallel_paper_stage_count")
                         != len(active_parallel_stage_tables)
                         or set(parallel_stage_reports)
@@ -1886,8 +2289,7 @@ def evaluator_snapshot_bundle_status(
                         or roles != expected_paper_roles
                         or main_lock_duration_sec < 0
                         or any(
-                            not math.isfinite(float(parallel_lock_durations[table]))
-                            or float(parallel_lock_durations[table]) < 0
+                            parallel_lock_duration_values[table] < 0
                             for table in active_parallel_stage_tables
                         )
                         or abs(
@@ -1895,7 +2297,7 @@ def evaluator_snapshot_bundle_status(
                             - max(
                                 main_lock_duration_sec,
                                 *[
-                                    float(parallel_lock_durations[table])
+                                    parallel_lock_duration_values[table]
                                     for table in active_parallel_stage_tables
                                 ],
                             )
@@ -1908,16 +2310,37 @@ def evaluator_snapshot_bundle_status(
                         stage_report = parallel_stage_reports.get(table) or {}
                         selection_report = selected_tables.get(table) or {}
                         nested_stage = selection_report.get("parallel_stage") or {}
-                        stage_size_bytes = int(stage_report.get("stage_size_bytes"))
-                        stage_budget_bytes = int(stage_report.get("stage_budget_bytes"))
-                        stage_page_size = int(stage_report.get("stage_page_size"))
-                        rows_copied = int(stage_report.get("rows_copied"))
-                        rows_merged = int(stage_report.get("rows_merged"))
-                        merge_duration_sec = float(
-                            stage_report.get("merge_duration_sec")
+                        stage_size_bytes = json_safe_integer(
+                            stage_report.get("stage_size_bytes"),
+                            field=f"{table}.stage_size_bytes",
                         )
-                        lock_duration_sec = float(
-                            stage_report.get("source_read_lock_duration_sec")
+                        stage_budget_bytes = json_safe_integer(
+                            stage_report.get("stage_budget_bytes"),
+                            field=f"{table}.stage_budget_bytes",
+                        )
+                        stage_page_size = json_safe_integer(
+                            stage_report.get("stage_page_size"),
+                            field=f"{table}.stage_page_size",
+                        )
+                        rows_copied = json_safe_integer(
+                            stage_report.get("rows_copied"),
+                            field=f"{table}.rows_copied",
+                        )
+                        rows_merged = json_safe_integer(
+                            stage_report.get("rows_merged"),
+                            field=f"{table}.rows_merged",
+                        )
+                        selection_rows_copied = json_safe_integer(
+                            selection_report.get("rows_copied"),
+                            field=f"{table}.selection.rows_copied",
+                        )
+                        merge_duration_sec = json_finite_number(
+                            stage_report.get("merge_duration_sec"),
+                            field=f"{table}.merge_duration_sec",
+                        )
+                        lock_duration_sec = json_finite_number(
+                            stage_report.get("source_read_lock_duration_sec"),
+                            field=f"{table}.source_read_lock_duration_sec",
                         )
                         final_schema = final_stage_schema_evidence.get(table) or {}
                         source_create_sql_sha256 = str(
@@ -1937,26 +2360,116 @@ def evaluator_snapshot_bundle_status(
                             )
                             or ""
                         )
-                        stage_column_count = int(
-                            stage_report.get("stage_column_count")
+                        stage_column_count = json_safe_integer(
+                            stage_report.get("stage_column_count"),
+                            field=f"{table}.stage_column_count",
                         )
-                        stage_index_count = int(
-                            stage_report.get("stage_index_count")
+                        stage_index_count = json_safe_integer(
+                            stage_report.get("stage_index_count"),
+                            field=f"{table}.stage_index_count",
                         )
                         stage_storage_contract_sha256 = str(
                             stage_report.get("stage_storage_contract_sha256")
                             or ""
                         )
-                        stage_chunk_count = int(
-                            stage_report.get("stage_chunk_count")
+                        stage_chunk_target_bytes = json_safe_integer(
+                            stage_report.get("stage_chunk_target_bytes"),
+                            field=f"{table}.stage_chunk_target_bytes",
                         )
-                        stage_raw_size_bytes = int(
-                            stage_report.get("stage_raw_size_bytes")
+                        stage_chunk_count = json_safe_integer(
+                            stage_report.get("stage_chunk_count"),
+                            field=f"{table}.stage_chunk_count",
                         )
-                        stage_compressed_payload_size_bytes = int(
+                        stage_raw_size_bytes = json_safe_integer(
+                            stage_report.get("stage_raw_size_bytes"),
+                            field=f"{table}.stage_raw_size_bytes",
+                        )
+                        stage_compressed_payload_size_bytes = json_safe_integer(
                             stage_report.get(
                                 "stage_compressed_payload_size_bytes"
+                            ),
+                            field=(
+                                f"{table}."
+                                "stage_compressed_payload_size_bytes"
+                            ),
+                        )
+                        parallel_stage_cap_bytes = json_safe_integer(
+                            parallel_stage_caps[table],
+                            field=f"{table}.shared_stage_cap_bytes",
+                        )
+                        selection_stage_integers = {
+                            field: json_safe_integer(
+                                selection_report.get(field),
+                                field=f"{table}.selection.{field}",
                             )
+                            for field in (
+                                "stage_column_count",
+                                "stage_index_count",
+                                "stage_chunk_target_bytes",
+                                "stage_chunk_count",
+                                "stage_raw_size_bytes",
+                                "stage_compressed_payload_size_bytes",
+                            )
+                        }
+                        nested_stage_column_count = json_safe_integer(
+                            nested_stage.get("stage_column_count"),
+                            field=f"{table}.nested.stage_column_count",
+                        )
+                        nested_stage_chunk_target_bytes = json_safe_integer(
+                            nested_stage.get("stage_chunk_target_bytes"),
+                            field=f"{table}.nested.stage_chunk_target_bytes",
+                        )
+                        nested_stage_chunk_count = json_safe_integer(
+                            nested_stage.get("stage_chunk_count"),
+                            field=f"{table}.nested.stage_chunk_count",
+                        )
+                        nested_stage_raw_size_bytes = json_safe_integer(
+                            nested_stage.get("stage_raw_size_bytes"),
+                            field=f"{table}.nested.stage_raw_size_bytes",
+                        )
+                        nested_stage_compressed_size_bytes = json_safe_integer(
+                            nested_stage.get(
+                                "stage_compressed_payload_size_bytes"
+                            ),
+                            field=(
+                                f"{table}.nested."
+                                "stage_compressed_payload_size_bytes"
+                            ),
+                        )
+                        nested_stage_index_count = json_safe_integer(
+                            nested_stage.get("stage_index_count"),
+                            field=f"{table}.nested.stage_index_count",
+                        )
+                        nested_stage_rows_copied = json_safe_integer(
+                            nested_stage.get("stage_rows_copied"),
+                            field=f"{table}.nested.stage_rows_copied",
+                        )
+                        nested_rows_merged = json_safe_integer(
+                            nested_stage.get("rows_merged"),
+                            field=f"{table}.nested.rows_merged",
+                        )
+                        nested_stage_page_size = json_safe_integer(
+                            nested_stage.get("stage_page_size"),
+                            field=f"{table}.nested.stage_page_size",
+                        )
+                        nested_stage_size_bytes = json_safe_integer(
+                            nested_stage.get("stage_size_bytes"),
+                            field=f"{table}.nested.stage_size_bytes",
+                        )
+                        nested_stage_budget_bytes = json_safe_integer(
+                            nested_stage.get("stage_budget_bytes"),
+                            field=f"{table}.nested.stage_budget_bytes",
+                        )
+                        nested_merge_duration_sec = json_finite_number(
+                            nested_stage.get("merge_duration_sec"),
+                            field=f"{table}.nested.merge_duration_sec",
+                        )
+                        nested_lock_duration_sec = json_finite_number(
+                            nested_stage.get("source_read_lock_duration_sec"),
+                            field=(
+                                f"{table}.nested."
+                                "source_read_lock_duration_sec"
+                            ),
                         )
                         stage_rows_sha256 = str(
                             stage_report.get("stage_rows_sha256") or ""
@@ -2001,7 +2514,7 @@ def evaluator_snapshot_bundle_status(
                             != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
                             or stage_report.get("stage_compression")
                             != PARALLEL_PAPER_STAGE_COMPRESSION
-                            or int(stage_report.get("stage_chunk_target_bytes"))
+                            or stage_chunk_target_bytes
                             != PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
                             or stage_chunk_count < 0
                             or stage_raw_size_bytes < 0
@@ -2039,7 +2552,7 @@ def evaluator_snapshot_bundle_status(
                             )
                             is not True
                             or stage_size_bytes <= 0
-                            or stage_budget_bytes != int(parallel_stage_caps[table])
+                            or stage_budget_bytes != parallel_stage_cap_bytes
                             or stage_size_bytes > stage_budget_bytes
                             or stage_page_size not in PARALLEL_PAPER_STAGE_PAGE_SIZES
                             or stage_size_bytes % stage_page_size != 0
@@ -2049,11 +2562,11 @@ def evaluator_snapshot_bundle_status(
                                 and stage_budget_bytes
                                 < PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES
                             )
-                            or rows_copied != int(selection_report.get("rows_copied"))
+                            or rows_copied != selection_rows_copied
                             or rows_merged != rows_copied
                             or merge_duration_sec < 0
                             or lock_duration_sec
-                            != float(parallel_lock_durations[table])
+                            != parallel_lock_duration_values[table]
                             or stage_report.get("source_read_lock_budget_passed")
                             is not True
                             or stage_report.get(
@@ -2064,6 +2577,52 @@ def evaluator_snapshot_bundle_status(
                             or stage_report.get("quick_check") != ["ok"]
                             or stage_report.get("full_fidelity_row_copy") is not True
                             or stage_report.get("payload_semantics_preserved") is not True
+                            or selection_report.get("stage_schema_mode")
+                            != PARALLEL_PAPER_STAGE_STORAGE_MODE
+                            or selection_report.get("source_create_sql_sha256")
+                            != source_create_sql_sha256
+                            or selection_report.get(
+                                "source_column_contract_sha256"
+                            )
+                            != source_column_contract_sha256
+                            or selection_report.get(
+                                "source_constraints_deferred_off_source_lock"
+                            )
+                            is not True
+                            or selection_report.get(
+                                "stage_storage_contract_sha256"
+                            )
+                            != stage_storage_contract_sha256
+                            or selection_report.get(
+                                "stage_storage_contract_passed"
+                            )
+                            is not True
+                            or selection_report.get(
+                                "stage_codec_schema_version"
+                            )
+                            != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
+                            or selection_report.get("stage_compression")
+                            != PARALLEL_PAPER_STAGE_COMPRESSION
+                            or selection_stage_integers["stage_column_count"]
+                            != stage_column_count
+                            or selection_stage_integers["stage_index_count"]
+                            != stage_index_count
+                            or selection_stage_integers[
+                                "stage_chunk_target_bytes"
+                            ]
+                            != stage_chunk_target_bytes
+                            or selection_stage_integers["stage_chunk_count"]
+                            != stage_chunk_count
+                            or selection_stage_integers[
+                                "stage_raw_size_bytes"
+                            ]
+                            != stage_raw_size_bytes
+                            or selection_stage_integers[
+                                "stage_compressed_payload_size_bytes"
+                            ]
+                            != stage_compressed_payload_size_bytes
+                            or selection_report.get("stage_rows_sha256")
+                            != stage_rows_sha256
                             or nested_stage.get("schema_version")
                             != PARALLEL_PAPER_STAGE_SCHEMA_VERSION
                             or nested_stage.get("role") != config["role"]
@@ -2081,8 +2640,7 @@ def evaluator_snapshot_bundle_status(
                                 "destination_column_contract_sha256"
                             )
                             != destination_column_contract_sha256
-                            or int(nested_stage.get("stage_column_count"))
-                            != stage_column_count
+                            or nested_stage_column_count != stage_column_count
                             or nested_stage.get(
                                 "stage_storage_contract_sha256"
                             ) != stage_storage_contract_sha256
@@ -2092,17 +2650,13 @@ def evaluator_snapshot_bundle_status(
                             != PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION
                             or nested_stage.get("stage_compression")
                             != PARALLEL_PAPER_STAGE_COMPRESSION
-                            or int(nested_stage.get("stage_chunk_target_bytes"))
+                            or nested_stage_chunk_target_bytes
                             != PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
-                            or int(nested_stage.get("stage_chunk_count"))
-                            != stage_chunk_count
-                            or int(nested_stage.get("stage_raw_size_bytes"))
+                            or nested_stage_chunk_count != stage_chunk_count
+                            or nested_stage_raw_size_bytes
                             != stage_raw_size_bytes
-                            or int(
-                                nested_stage.get(
-                                    "stage_compressed_payload_size_bytes"
-                                )
-                            ) != stage_compressed_payload_size_bytes
+                            or nested_stage_compressed_size_bytes
+                            != stage_compressed_payload_size_bytes
                             or nested_stage.get("stage_rows_sha256")
                             != stage_rows_sha256
                             or nested_stage.get("hydrated_rows_sha256")
@@ -2118,7 +2672,7 @@ def evaluator_snapshot_bundle_status(
                             or nested_stage.get(
                                 "hydrated_after_source_read_lock_release"
                             ) is not True
-                            or int(nested_stage.get("stage_index_count")) != 0
+                            or nested_stage_index_count != 0
                             or nested_stage.get(
                                 "source_constraints_deferred_off_source_lock"
                             )
@@ -2134,16 +2688,14 @@ def evaluator_snapshot_bundle_status(
                             or nested_stage.get("full_fidelity_row_copy") is not True
                             or nested_stage.get("payload_semantics_preserved") is not True
                             or nested_stage.get("row_count_matched") is not True
-                            or int(nested_stage.get("stage_rows_copied"))
-                            != rows_copied
-                            or int(nested_stage.get("rows_merged")) != rows_merged
+                            or nested_stage_rows_copied != rows_copied
+                            or nested_rows_merged != rows_merged
+                            or nested_merge_duration_sec != merge_duration_sec
+                            or nested_lock_duration_sec != lock_duration_sec
                             or nested_stage.get("quick_check") != ["ok"]
-                            or int(nested_stage.get("stage_page_size"))
-                            != stage_page_size
-                            or int(nested_stage.get("stage_size_bytes"))
-                            != stage_size_bytes
-                            or int(nested_stage.get("stage_budget_bytes"))
-                            != stage_budget_bytes
+                            or nested_stage_page_size != stage_page_size
+                            or nested_stage_size_bytes != stage_size_bytes
+                            or nested_stage_budget_bytes != stage_budget_bytes
                             or nested_stage.get("source_read_lock_budget_passed")
                             is not True
                             or nested_stage.get(
@@ -2155,6 +2707,28 @@ def evaluator_snapshot_bundle_status(
                                 f"invalid parallel paper stage evidence:{table}"
                             )
                     paper_alias = parallel_stage_reports[PAPER_DECISION_STAGE_TABLE]
+                    alias_stage_size_bytes = json_safe_integer(
+                        paper_alias.get("stage_size_bytes"),
+                        field="paper_decision_events.alias.stage_size_bytes",
+                    )
+                    alias_stage_page_size = json_safe_integer(
+                        paper_alias.get("stage_page_size"),
+                        field="paper_decision_events.alias.stage_page_size",
+                    )
+                    alias_stage_budget_bytes = json_safe_integer(
+                        paper_alias.get("stage_budget_bytes"),
+                        field="paper_decision_events.alias.stage_budget_bytes",
+                    )
+                    alias_rows_merged = json_safe_integer(
+                        paper_alias.get("rows_merged"),
+                        field="paper_decision_events.alias.rows_merged",
+                    )
+                    alias_merge_duration_sec = json_finite_number(
+                        paper_alias.get("merge_duration_sec"),
+                        field=(
+                            "paper_decision_events.alias.merge_duration_sec"
+                        ),
+                    )
                     if (
                         report.get("paper_decision_parallel_stage_used") is not True
                         or report.get("paper_decision_parallel_stage_schema_version")
@@ -2169,14 +2743,38 @@ def evaluator_snapshot_bundle_status(
                             "paper_decision_parallel_stage_removed_before_publish"
                         )
                         is not True
-                        or int(report.get("paper_decision_parallel_stage_size_bytes"))
-                        != int(paper_alias.get("stage_size_bytes"))
-                        or int(report.get("paper_decision_parallel_stage_page_size"))
-                        != int(paper_alias.get("stage_page_size"))
-                        or int(report.get("paper_decision_parallel_stage_budget_bytes"))
-                        != int(paper_alias.get("stage_budget_bytes"))
-                        or int(report.get("paper_decision_parallel_stage_rows_merged"))
-                        != int(paper_alias.get("rows_merged"))
+                        or json_safe_integer(
+                            report.get(
+                                "paper_decision_parallel_stage_size_bytes"
+                            ),
+                            field="paper.paper_decision_stage_size_bytes",
+                        ) != alias_stage_size_bytes
+                        or json_safe_integer(
+                            report.get(
+                                "paper_decision_parallel_stage_page_size"
+                            ),
+                            field="paper.paper_decision_stage_page_size",
+                        ) != alias_stage_page_size
+                        or json_safe_integer(
+                            report.get(
+                                "paper_decision_parallel_stage_budget_bytes"
+                            ),
+                            field="paper.paper_decision_stage_budget_bytes",
+                        ) != alias_stage_budget_bytes
+                        or json_safe_integer(
+                            report.get(
+                                "paper_decision_parallel_stage_rows_merged"
+                            ),
+                            field="paper.paper_decision_stage_rows_merged",
+                        ) != alias_rows_merged
+                        or json_finite_number(
+                            report.get(
+                                "paper_decision_parallel_stage_merge_duration_sec"
+                            ),
+                            field=(
+                                "paper.paper_decision_stage_merge_duration_sec"
+                            ),
+                        ) != alias_merge_duration_sec
                     ):
                         raise ValueError("paper decision compatibility alias mismatch")
                 except (KeyError, TypeError, ValueError, sqlite3.Error):
@@ -2197,14 +2795,17 @@ def evaluator_snapshot_bundle_status(
                 if candidate_projection.get("applied") is not True:
                     blockers.append("evaluator_snapshot_candidate_payload_projection_required")
                 try:
-                    stage_size_bytes = int(
-                        report.get("temporary_candidate_stage_size_bytes")
+                    stage_size_bytes = json_safe_integer(
+                        report.get("temporary_candidate_stage_size_bytes"),
+                        field="paper.temporary_candidate_stage_size_bytes",
                     )
-                    stage_cap_bytes = int(
-                        disk_preflight.get("temporary_candidate_stage_cap_bytes")
+                    stage_cap_bytes = json_safe_integer(
+                        disk_preflight.get("temporary_candidate_stage_cap_bytes"),
+                        field="disk.temporary_candidate_stage_cap_bytes",
                     )
-                    projection_duration_sec = float(
-                        report.get("candidate_projection_duration_sec")
+                    projection_duration_sec = json_finite_number(
+                        report.get("candidate_projection_duration_sec"),
+                        field="paper.candidate_projection_duration_sec",
                     )
                     stage_plan = candidate_projection.get("stage_query_plan") or []
                     if (
@@ -2219,7 +2820,12 @@ def evaluator_snapshot_bundle_status(
                         is not True
                         or candidate_projection.get("source_stage_schema_version")
                         != "candidate_observation_selective_stage.v1"
-                        or int(candidate_projection.get("source_stage_size_bytes") or 0)
+                        or json_safe_integer(
+                            candidate_projection.get("source_stage_size_bytes"),
+                            field=(
+                                "candidate_projection.source_stage_size_bytes"
+                            ),
+                        )
                         != stage_size_bytes
                         or candidate_projection.get("stage_order_index_name")
                         != "idx_a3_candidate_stage_signal"
@@ -2334,7 +2940,11 @@ def evaluator_snapshot_bundle_status(
                     blockers.append(
                         f"evaluator_snapshot_{name}_time_semantics_invalid:{table}"
                     )
-            if candidate.is_file() and int(report.get("snapshot_size_bytes") or -1) != candidate.stat().st_size:
+            reported_snapshot_size = report.get("snapshot_size_bytes")
+            if candidate.is_file() and (
+                not is_json_safe_integer(reported_snapshot_size)
+                or reported_snapshot_size != candidate.stat().st_size
+            ):
                 blockers.append(f"evaluator_snapshot_{name}_size_mismatch")
             if candidate.is_file():
                 try:
@@ -2406,22 +3016,35 @@ def evaluator_snapshot_bundle_status(
                 str(view.get("role")) for view in all_pinned_read_views
             }
             pinned_midpoints = [
-                float(view.get("pinned_midpoint_epoch"))
+                json_finite_number(
+                    view.get("pinned_midpoint_epoch"),
+                    field="pinned_read_view.pinned_midpoint_epoch",
+                )
                 for view in all_pinned_read_views
             ]
             pinned_limits = [
-                float(view.get("source_read_lock_limit_sec"))
+                json_finite_number(
+                    view.get("source_read_lock_limit_sec"),
+                    field="pinned_read_view.source_read_lock_limit_sec",
+                )
                 for view in all_pinned_read_views
             ]
             recomputed_skew = max(pinned_midpoints) - min(pinned_midpoints)
-            manifest_skew = float(manifest.get("cross_database_time_skew_sec"))
-            manifest_max_skew = float(
-                manifest.get("max_allowed_cross_database_time_skew_sec")
+            manifest_skew = json_finite_number(
+                manifest.get("cross_database_time_skew_sec"),
+                field="manifest.cross_database_time_skew_sec",
+            )
+            manifest_max_skew = json_finite_number(
+                manifest.get("max_allowed_cross_database_time_skew_sec"),
+                field="manifest.max_allowed_cross_database_time_skew_sec",
             )
             if (
                 len(all_pinned_read_views)
                 != 4 + len(safe_manifest_parallel_stage_tables)
-                or int(manifest.get("pinned_read_view_count"))
+                or json_safe_integer(
+                    manifest.get("pinned_read_view_count"),
+                    field="manifest.pinned_read_view_count",
+                )
                 != 4 + len(safe_manifest_parallel_stage_tables)
                 or pinned_roles != expected_pinned_roles
                 or len(pinned_roles) != len(all_pinned_read_views)

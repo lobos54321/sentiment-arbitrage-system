@@ -19,6 +19,8 @@ from evaluator_db_contract import (  # noqa: E402
     evaluator_snapshot_bundle_lease,
     evaluator_snapshot_bundle_status,
     evaluator_snapshot_provenance,
+    json_numeric_evidence_contract_sha256,
+    json_numeric_evidence_types_valid,
     require_evaluator_db_source,
     require_evaluator_snapshot_bundle,
     sha256_file,
@@ -184,6 +186,51 @@ def test_missing_evidence_db_is_rejected(tmp_path):
     assert status["accepted"] is False
     assert status["blockers"] == ["evaluator_db_missing"]
     assert status["promotion_allowed"] is False
+
+
+def test_numeric_evidence_contract_matches_dashboard_golden_hash():
+    assert json_numeric_evidence_contract_sha256() == (
+        "8338e46d071d0bd8a03956b890e8182d7d8aa3deedf150f48f9366c12cbcf244"
+    )
+
+
+def test_every_current_manifest_numeric_leaf_is_type_guarded(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert json_numeric_evidence_types_valid(manifest) is True
+
+    numeric_slots = []
+
+    def collect(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(child, (int, float)) and not isinstance(
+                    child, bool
+                ):
+                    numeric_slots.append((value, key, child))
+                else:
+                    collect(child)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, (int, float)) and not isinstance(
+                    child, bool
+                ):
+                    numeric_slots.append((value, index, child))
+                else:
+                    collect(child)
+
+    collect(manifest)
+    assert len(numeric_slots) >= 900
+    for container, key, original in numeric_slots:
+        container[key] = "numeric-type-tamper"
+        assert json_numeric_evidence_types_valid(manifest) is False
+        container[key] = original
+    assert json_numeric_evidence_types_valid(manifest) is True
 
 
 def test_active_paper_db_is_rejected_by_default(tmp_path):
@@ -944,6 +991,226 @@ def test_parallel_stage_schema_contract_tampering_is_rejected(
         "evaluator_snapshot_parallel_paper_stage_contract_invalid"
         in status["blockers"]
     )
+
+
+def test_parallel_stage_fractional_integer_evidence_is_rejected(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    stage_table = "opportunity_events"
+    stage_report = paper_report["parallel_paper_stages"][stage_table]
+    nested_stage = paper_report["selected_tables"][stage_table][
+        "parallel_stage"
+    ]
+    for field in (
+        "stage_chunk_count",
+        "stage_raw_size_bytes",
+        "stage_compressed_payload_size_bytes",
+        "stage_index_count",
+    ):
+        stage_report[field] = 0.5
+        nested_stage[field] = 0.5
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert (
+        "evaluator_snapshot_parallel_paper_stage_contract_invalid"
+        in status["blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence_layer", "tampered_value"),
+    tuple(
+        pytest.param(layer, value, id=f"{layer}-{label}")
+        for layer in (
+            "parallel_stage_copies",
+            "shared_budget_copies",
+            "disk_preflight",
+            "stage_inventory",
+            "output_budget",
+        )
+        for value, label in (
+            (0.5, "fractional"),
+            ("0", "numeric-string"),
+            (False, "boolean"),
+            (None, "null"),
+            (2**53, "unsafe-integer"),
+            ({}, "object"),
+            ([], "array"),
+        )
+    )
+    + tuple(
+        pytest.param(layer, value, id=f"{layer}-{label}")
+        for layer in ("duration_copies", "paper_alias_copies")
+        for value, label in (
+            ("0", "numeric-string"),
+            (False, "boolean"),
+            (None, "null"),
+            (10**400, "non-finite-after-json-number-conversion"),
+            ({}, "object"),
+            ([], "array"),
+        )
+    ),
+)
+def test_numeric_evidence_type_tamper_matrix_is_rejected(
+    tmp_path,
+    monkeypatch,
+    evidence_layer,
+    tampered_value,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    stage_table = "opportunity_events"
+
+    if evidence_layer == "parallel_stage_copies":
+        stage_report = paper_report["parallel_paper_stages"][stage_table]
+        selection_report = paper_report["selected_tables"][stage_table]
+        nested_stage = selection_report["parallel_stage"]
+        for field in (
+            "stage_chunk_count",
+            "stage_raw_size_bytes",
+            "stage_compressed_payload_size_bytes",
+            "stage_index_count",
+        ):
+            stage_report[field] = tampered_value
+            selection_report[field] = tampered_value
+            nested_stage[field] = tampered_value
+    elif evidence_layer == "shared_budget_copies":
+        manifest["shared_stage_budget"]["advisory_miss_count"] = (
+            tampered_value
+        )
+        try:
+            synchronize_shared_budget_copies(manifest)
+        except ValueError:
+            manifest["disk_preflight"]["shared_stage_budget"] = json.loads(
+                json.dumps(manifest["shared_stage_budget"])
+            )
+    elif evidence_layer == "disk_preflight":
+        manifest["disk_preflight"]["temporary_full_backup_bytes"] = (
+            tampered_value
+        )
+    elif evidence_layer == "stage_inventory":
+        manifest["parallel_paper_stage_count"] = tampered_value
+        paper_report["parallel_paper_stage_count"] = tampered_value
+    elif evidence_layer == "duration_copies":
+        manifest["max_source_read_lock_sec"] = tampered_value
+        for report in manifest["databases"].values():
+            report["source_read_lock_limit_sec"] = tampered_value
+            for pinned_view in report["pinned_read_views"]:
+                pinned_view["source_read_lock_limit_sec"] = tampered_value
+    elif evidence_layer == "paper_alias_copies":
+        stage_report = paper_report["parallel_paper_stages"][
+            "paper_decision_events"
+        ]
+        nested_stage = paper_report["selected_tables"][
+            "paper_decision_events"
+        ]["parallel_stage"]
+        paper_report[
+            "paper_decision_parallel_stage_merge_duration_sec"
+        ] = tampered_value
+        stage_report["merge_duration_sec"] = tampered_value
+        nested_stage["merge_duration_sec"] = tampered_value
+    elif evidence_layer == "output_budget":
+        manifest["output_size_bytes"] = tampered_value
+    else:  # pragma: no cover - parametrization is the complete inventory
+        raise AssertionError(evidence_layer)
+
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    if tampered_value is not None:
+        assert (
+            "evaluator_snapshot_numeric_evidence_type_invalid"
+            in status["blockers"]
+        )
+
+
+def test_integral_json_float_integer_evidence_remains_cross_runtime_valid(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(tmp_path, monkeypatch)
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    paper_report = manifest["databases"]["paper"]
+    stage_table = "opportunity_events"
+    stage_report = paper_report["parallel_paper_stages"][stage_table]
+    selection_report = paper_report["selected_tables"][stage_table]
+    nested_stage = selection_report["parallel_stage"]
+    for field in (
+        "stage_chunk_count",
+        "stage_raw_size_bytes",
+        "stage_compressed_payload_size_bytes",
+        "stage_index_count",
+    ):
+        stage_report[field] = 0.0
+        selection_report[field] = 0.0
+        nested_stage[field] = 0.0
+    manifest["parallel_paper_stage_count"] = float(
+        manifest["parallel_paper_stage_count"]
+    )
+    paper_report["parallel_paper_stage_count"] = float(
+        paper_report["parallel_paper_stage_count"]
+    )
+    manifest["pinned_read_view_count"] = float(
+        manifest["pinned_read_view_count"]
+    )
+    manifest["output_size_bytes"] = float(manifest["output_size_bytes"])
+    manifest["disk_preflight"]["temporary_full_backup_bytes"] = 0.0
+    manifest["shared_stage_budget"]["advisory_miss_count"] = float(
+        manifest["shared_stage_budget"]["advisory_miss_count"]
+    )
+    synchronize_shared_budget_copies(manifest)
+    for _attempt in range(8):
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        actual_bundle_size = sum(
+            item.stat().st_size
+            for item in manifest_path.parent.iterdir()
+            if item.is_file()
+        )
+        if int(manifest["output_size_bytes"]) == actual_bundle_size:
+            break
+        manifest["output_size_bytes"] = float(actual_bundle_size)
+    else:  # pragma: no cover - decimal width converges in at most two writes
+        raise AssertionError("manifest output size did not converge")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is True, status["blockers"]
 
 
 def test_final_snapshot_schema_drift_is_rejected_even_if_manifest_claims_restored(

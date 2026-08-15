@@ -53,6 +53,8 @@ import {
   PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION,
   PARALLEL_PAPER_STAGE_COMPRESSION,
   PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
+  JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+  jsonNumericEvidenceTypesValid,
   sharedStageBudgetEvidenceSha256,
   sharedStageBudgetPlanSha256,
   readV27DenominatorReadModelHealth,
@@ -85,6 +87,13 @@ test('parallel compressed-stage storage contract matches the Python golden hash'
   assert.equal(
     PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
     'abddfbfe3e94bea539b850bd05fe5d76b9f5517671f406ac13259e51952ac1bf',
+  );
+});
+
+test('numeric evidence type contract matches the Python golden hash', () => {
+  assert.equal(
+    JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
+    '8338e46d071d0bd8a03956b890e8182d7d8aa3deedf150f48f9366c12cbcf244',
   );
 });
 
@@ -121,6 +130,43 @@ test('shared stage hashes match the Python cross-runtime golden vector', () => {
     sharedStageBudgetEvidenceSha256(payload),
     'ac61bf1db4807887f4640760b0e57a5ca0e0c8a2ca90e29b068742de55fa1b49',
   );
+  for (const value of [2 ** 53, -(2 ** 53)]) {
+    assert.throws(
+      () => sharedStageBudgetPlanSha256({
+        capacity_sufficient: true,
+        grants_sum_matches_total_cap: true,
+        total_cap_bytes: value,
+        total_granted_bytes: value,
+        targets: {},
+      }),
+      /safe integer/,
+    );
+  }
+  for (const value of ['4096', false, null, 0.5, {}, []]) {
+    assert.throws(
+      () => sharedStageBudgetPlanSha256({
+        capacity_sufficient: true,
+        grants_sum_matches_total_cap: true,
+        total_cap_bytes: value,
+        total_granted_bytes: value,
+        targets: {},
+      }),
+      /safe integers/,
+    );
+  }
+  for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.throws(
+      () => sharedStageBudgetPlanSha256({
+        capacity_sufficient: true,
+        grants_sum_matches_total_cap: true,
+        total_cap_bytes: 4096,
+        total_granted_bytes: 4096,
+        diagnostic_ratio: value,
+        targets: {},
+      }),
+      /non-finite/,
+    );
+  }
 });
 
 test('redactLogMessage masks dashboard secrets without hiding token addresses', () => {
@@ -1739,6 +1785,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       'opportunity_event_path_samples_parallel_stage',
   };
   const databaseReport = (name) => ({
+    schema_version: 1,
     snapshot_path: `/snapshot/${name}.db`,
     snapshot_size_bytes: 100,
     quick_check: ['ok'],
@@ -1746,6 +1793,12 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     missing_required_tables: [],
     missing_required_watermarks: [],
     source_read_lock_budget_passed: true,
+    source_read_lock_limit_sec: 300,
+    source_read_lock_duration_sec: 3.33,
+    source_read_lock_released_before_index_build: true,
+    source_open_mode: 'read_only_attached_uri',
+    selection_upper_epoch: snapshotTs,
+    temporary_full_backup_size_bytes: 0,
     database_budget_passed: true,
     pinned_read_views: [
       {
@@ -2112,6 +2165,13 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       source_mutation_free: true,
       bounded_selective_snapshot: true,
       selection_upper_bounds_consistent: true,
+      selection_contract: {
+        schema_version: 'evaluator_snapshot_selection.v1',
+        future_rows_excluded: true,
+        table_rules_are_explicit: true,
+        common_upper_epoch: snapshotTs,
+        supported_capture_windows_hours: [24, 48, 72],
+      },
       output_cap_passed: true,
       output_size_bytes: 1000,
       output_cap_bytes: 10000,
@@ -2167,6 +2227,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
           source_read_lock_duration_sec: 3.33,
           main_source_read_lock_duration_sec: 3.33,
           temporary_candidate_stage_size_bytes: 16000,
+          temporary_candidate_stage_removed_before_publish: true,
+          candidate_projection_duration_sec: 0.1,
           shared_stage_estimates_bound_to_copy_read_views: true,
           parallel_paper_source_read_lock_duration_sec: {
             paper_decision_events: 2.5,
@@ -2368,6 +2430,23 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               source_query_plan_uses_range_search: true,
               source_query_plan_full_table_scan_detected: false,
               rows_copied: 1,
+              storage_projection: {
+                schema_version: 'candidate_observation_payload_projection.v1',
+                applied: true,
+                projection_started_after_source_read_view_release: true,
+                source_stage_schema_version:
+                  'candidate_observation_selective_stage.v1',
+                source_stage_size_bytes: 16000,
+                stage_order_index_name: 'idx_a3_candidate_stage_signal',
+                stage_query_plan: [
+                  'SCAN stage USING INDEX idx_a3_candidate_stage_signal',
+                ],
+                stage_query_plan_uses_order_index: true,
+                stage_query_plan_temp_btree_detected: false,
+                payload_semantics_preserved: true,
+                unknown_payload_keys_preserved: true,
+                missing_and_null_keys_preserved: true,
+              },
             },
             candidate_shadow_virtual_trades: {
               included: true,
@@ -2385,6 +2464,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               rows_copied: 13392,
             },
             paper_decision_events: {
+              ...stageSchemaEvidence(10),
               included: true,
               predicate_strategy: 'indexed_epoch_seconds',
               indexed_time_anchor: 'event_ts',
@@ -2405,6 +2485,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 payload_semantics_preserved: true,
                 stage_rows_copied: 1,
                 rows_merged: 1,
+                merge_duration_sec: 0.25,
+                source_read_lock_duration_sec: 2.5,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
@@ -2415,6 +2497,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               },
             },
             a_class_decision_events: {
+              ...stageSchemaEvidence(8),
               included: true,
               predicate_strategy: 'indexed_epoch_seconds',
               indexed_time_anchor: 'event_ts',
@@ -2435,6 +2518,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 payload_semantics_preserved: true,
                 stage_rows_copied: 1,
                 rows_merged: 1,
+                merge_duration_sec: 0.20,
+                source_read_lock_duration_sec: 2.75,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
@@ -2445,6 +2530,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               },
             },
             opportunity_events: {
+              ...stageSchemaEvidence(7),
               included: true,
               predicate_strategy: 'indexed_epoch_seconds',
               indexed_time_anchor: 'event_ts',
@@ -2465,6 +2551,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 payload_semantics_preserved: true,
                 stage_rows_copied: 1,
                 rows_merged: 1,
+                merge_duration_sec: 0.15,
+                source_read_lock_duration_sec: 2.25,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
@@ -2475,6 +2563,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
               },
             },
             opportunity_event_path_samples: {
+              ...stageSchemaEvidence(6),
               included: true,
               selection_mode: 'recent',
               time_semantics: 'event_time',
@@ -2489,6 +2578,8 @@ function evaluatorSnapshotHealthFixture(nowMs) {
                 payload_semantics_preserved: true,
                 stage_rows_copied: 1,
                 rows_merged: 1,
+                merge_duration_sec: 0.30,
+                source_read_lock_duration_sec: 2.9,
                 row_count_matched: true,
                 quick_check: ['ok'],
                 stage_page_size: 4096,
@@ -2523,6 +2614,41 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     },
   };
 }
+
+test('every current evaluator manifest numeric leaf is type guarded', () => {
+  const fixture = evaluatorSnapshotHealthFixture(
+    Date.parse('2026-08-08T04:00:00.000Z'),
+  );
+  const manifest = structuredClone(fixture.manifestPayload);
+  assert.equal(jsonNumericEvidenceTypesValid(manifest), true);
+  const numericSlots = [];
+  const collect = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => {
+        if (typeof child === 'number') numericSlots.push([value, index, child]);
+        else if (child && typeof child === 'object') collect(child);
+      });
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [field, child] of Object.entries(value)) {
+      if (typeof child === 'number') numericSlots.push([value, field, child]);
+      else if (child && typeof child === 'object') collect(child);
+    }
+  };
+  collect(manifest);
+  assert.ok(numericSlots.length >= 150);
+  for (const [container, field, original] of numericSlots) {
+    container[field] = 'numeric-type-tamper';
+    assert.equal(
+      jsonNumericEvidenceTypesValid(manifest),
+      false,
+      String(field),
+    );
+    container[field] = original;
+  }
+  assert.equal(jsonNumericEvidenceTypesValid(manifest), true);
+});
 
 test('evaluator snapshot worker health accepts only fresh matching indexed bundles', () => {
   const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
@@ -3475,6 +3601,215 @@ test('evaluator snapshot worker health distinguishes starting failed stale and c
       stageSchemaBlocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
     );
   }
+
+  const fractionalStageManifest = structuredClone(fixture.manifestPayload);
+  const fractionalStageTable = 'opportunity_events';
+  const fractionalStage = fractionalStageManifest.databases.paper
+    .parallel_paper_stages[fractionalStageTable];
+  const fractionalNestedStage = fractionalStageManifest.databases.paper
+    .selected_tables[fractionalStageTable].parallel_stage;
+  for (const field of [
+    'stage_chunk_count',
+    'stage_raw_size_bytes',
+    'stage_compressed_payload_size_bytes',
+    'stage_index_count',
+  ]) {
+    fractionalStage[field] = 0.5;
+    fractionalNestedStage[field] = 0.5;
+  }
+  const fractionalStageBlocked = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: fractionalStageManifest,
+  });
+  assert.equal(fractionalStageBlocked.status, 'contract_blocked');
+  assert.equal(fractionalStageBlocked.consumer_ready, false);
+  assert.equal(
+    fractionalStageBlocked.manifest_contract.parallel_paper_stages_passed,
+    false,
+  );
+  assert.equal(
+    fractionalStageBlocked.parallel_paper_stages.stages[fractionalStageTable]
+      .passed,
+    false,
+  );
+  assert.ok(
+    fractionalStageBlocked.blockers.includes(
+      'evaluator_snapshot_manifest_contract_blocked',
+    ),
+  );
+
+  const applyNumericEvidenceTamper = (manifest, layer, value) => {
+    const paper = manifest.databases.paper;
+    if (layer === 'parallel_stage_copies') {
+      const table = 'opportunity_events';
+      const stage = paper.parallel_paper_stages[table];
+      const selection = paper.selected_tables[table];
+      const nested = selection.parallel_stage;
+      for (const field of [
+        'stage_chunk_count',
+        'stage_raw_size_bytes',
+        'stage_compressed_payload_size_bytes',
+        'stage_index_count',
+      ]) {
+        stage[field] = value;
+        selection[field] = value;
+        nested[field] = value;
+      }
+    } else if (layer === 'shared_budget_copies') {
+      const shared = manifest.shared_stage_budget;
+      shared.advisory_miss_count = value;
+      try {
+        shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+        shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+      } catch (error) {
+        assert.match(String(error?.message || error), /safe integer/);
+      }
+      manifest.disk_preflight.shared_stage_budget = structuredClone(shared);
+    } else if (layer === 'disk_preflight') {
+      manifest.disk_preflight.temporary_full_backup_bytes = value;
+    } else if (layer === 'stage_inventory') {
+      manifest.parallel_paper_stage_count = value;
+      paper.parallel_paper_stage_count = value;
+    } else if (layer === 'duration_copies') {
+      manifest.max_source_read_lock_sec = value;
+      for (const report of Object.values(manifest.databases)) {
+        report.source_read_lock_limit_sec = value;
+        for (const pinnedView of report.pinned_read_views) {
+          pinnedView.source_read_lock_limit_sec = value;
+        }
+      }
+    } else if (layer === 'paper_alias_copies') {
+      const stage = paper.parallel_paper_stages.paper_decision_events;
+      const nested = paper.selected_tables.paper_decision_events.parallel_stage;
+      paper.paper_decision_parallel_stage_merge_duration_sec = value;
+      stage.merge_duration_sec = value;
+      nested.merge_duration_sec = value;
+    } else if (layer === 'output_budget') {
+      manifest.output_size_bytes = value;
+    } else {
+      assert.fail(`unknown numeric evidence layer: ${layer}`);
+    }
+  };
+  const invalidIntegerValues = [
+    [0.5, 'fractional'],
+    ['0', 'numeric-string'],
+    [false, 'boolean'],
+    [null, 'null'],
+    [Number.MAX_SAFE_INTEGER + 1, 'unsafe-integer'],
+    [{}, 'object'],
+    [[], 'array'],
+  ];
+  const invalidFiniteNumberValues = [
+    ['0', 'numeric-string'],
+    [false, 'boolean'],
+    [null, 'null'],
+    [Number.POSITIVE_INFINITY, 'non-finite'],
+    [{}, 'object'],
+    [[], 'array'],
+  ];
+  const numericTamperCases = [
+    ...[
+      'parallel_stage_copies',
+      'shared_budget_copies',
+      'disk_preflight',
+      'stage_inventory',
+      'output_budget',
+    ].flatMap((layer) => invalidIntegerValues.map(([value, label]) => ({
+      layer,
+      value,
+      label,
+    }))),
+    ...['duration_copies', 'paper_alias_copies'].flatMap(
+      (layer) => invalidFiniteNumberValues.map(([value, label]) => ({
+        layer,
+        value,
+        label,
+      })),
+    ),
+  ];
+  for (const { layer, value, label } of numericTamperCases) {
+    const manifest = structuredClone(fixture.manifestPayload);
+    applyNumericEvidenceTamper(manifest, layer, value);
+    const blocked = readEvaluatorSnapshotWorkerHealth({
+      ...base,
+      manifestPayload: manifest,
+    });
+    const caseLabel = `${layer}:${label}`;
+    assert.equal(blocked.status, 'contract_blocked', caseLabel);
+    assert.equal(blocked.consumer_ready, false, caseLabel);
+    if (value !== null) {
+      assert.equal(
+        blocked.manifest_contract.numeric_evidence_types_passed,
+        false,
+        caseLabel,
+      );
+    }
+    assert.ok(
+      blocked.blockers.includes('evaluator_snapshot_manifest_contract_blocked'),
+      caseLabel,
+    );
+  }
+
+  const integralFloatManifest = structuredClone(fixture.manifestPayload);
+  const jsonIntegralFloat = (value) => JSON.parse(`${value}.0`);
+  const integralStageTable = 'opportunity_events';
+  const integralStage = integralFloatManifest.databases.paper
+    .parallel_paper_stages[integralStageTable];
+  const integralSelection = integralFloatManifest.databases.paper
+    .selected_tables[integralStageTable];
+  const integralNested = integralSelection.parallel_stage;
+  for (const field of [
+    'stage_chunk_count',
+    'stage_raw_size_bytes',
+    'stage_compressed_payload_size_bytes',
+    'stage_index_count',
+  ]) {
+    const value = jsonIntegralFloat(integralStage[field]);
+    integralStage[field] = value;
+    integralSelection[field] = value;
+    integralNested[field] = value;
+  }
+  integralFloatManifest.parallel_paper_stage_count = jsonIntegralFloat(
+    integralFloatManifest.parallel_paper_stage_count,
+  );
+  integralFloatManifest.databases.paper.parallel_paper_stage_count = (
+    jsonIntegralFloat(
+      integralFloatManifest.databases.paper.parallel_paper_stage_count,
+    )
+  );
+  integralFloatManifest.pinned_read_view_count = jsonIntegralFloat(
+    integralFloatManifest.pinned_read_view_count,
+  );
+  integralFloatManifest.output_size_bytes = jsonIntegralFloat(
+    integralFloatManifest.output_size_bytes,
+  );
+  integralFloatManifest.disk_preflight.temporary_full_backup_bytes = (
+    JSON.parse('0.0')
+  );
+  const integralShared = integralFloatManifest.shared_stage_budget;
+  integralShared.advisory_miss_count = jsonIntegralFloat(
+    integralShared.advisory_miss_count,
+  );
+  integralShared.plan_sha256 = sharedStageBudgetPlanSha256(integralShared);
+  integralShared.evidence_sha256 = sharedStageBudgetEvidenceSha256(
+    integralShared,
+  );
+  integralFloatManifest.disk_preflight.shared_stage_budget = structuredClone(
+    integralShared,
+  );
+  const integralFloatAccepted = readEvaluatorSnapshotWorkerHealth({
+    ...base,
+    manifestPayload: integralFloatManifest,
+  });
+  assert.equal(
+    integralFloatAccepted.status,
+    'producer_accepted',
+    JSON.stringify(integralFloatAccepted.manifest_contract),
+  );
+  assert.equal(
+    integralFloatAccepted.manifest_contract.numeric_evidence_types_passed,
+    true,
+  );
 
   const nullIndexManifest = structuredClone(fixture.manifestPayload);
   nullIndexManifest.databases.paper.parallel_paper_stages.opportunity_events.stage_index_count = null;

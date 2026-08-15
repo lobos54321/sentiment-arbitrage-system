@@ -611,6 +611,21 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
+def json_safe_integer(value: Any, *, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a JSON safe integer")
+    if isinstance(value, int) and abs(value) <= 9_007_199_254_740_991:
+        return value
+    if (
+        isinstance(value, float)
+        and math.isfinite(value)
+        and value.is_integer()
+        and abs(value) <= 9_007_199_254_740_991
+    ):
+        return int(value)
+    raise ValueError(f"{field} must be a JSON safe integer")
+
+
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -1367,9 +1382,13 @@ def validated_shared_stage_budget_history(
             "targets": {},
         }
     plan_sha256 = str(payload.get("plan_sha256") or "")
+    try:
+        computed_plan_sha256 = shared_stage_budget_plan_sha256(payload)
+    except (TypeError, ValueError, OverflowError):
+        computed_plan_sha256 = None
     if (
         not re.fullmatch(r"[a-f0-9]{64}", plan_sha256)
-        or shared_stage_budget_plan_sha256(payload) != plan_sha256
+        or computed_plan_sha256 != plan_sha256
     ):
         return {
             "accepted": False,
@@ -1377,9 +1396,15 @@ def validated_shared_stage_budget_history(
             "targets": {},
         }
     evidence_sha256 = str(payload.get("evidence_sha256") or "")
+    try:
+        computed_evidence_sha256 = shared_stage_budget_evidence_sha256(
+            payload
+        )
+    except (TypeError, ValueError, OverflowError):
+        computed_evidence_sha256 = None
     if (
         not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256)
-        or shared_stage_budget_evidence_sha256(payload) != evidence_sha256
+        or computed_evidence_sha256 != evidence_sha256
     ):
         return {
             "accepted": False,
@@ -1415,8 +1440,14 @@ def validated_shared_stage_budget_history(
             "targets": {},
         }
     try:
-        history_total_cap = int(payload.get("total_cap_bytes"))
-        history_total_granted = int(payload.get("total_granted_bytes"))
+        history_total_cap = json_safe_integer(
+            payload.get("total_cap_bytes"),
+            field="history.total_cap_bytes",
+        )
+        history_total_granted = json_safe_integer(
+            payload.get("total_granted_bytes"),
+            field="history.total_granted_bytes",
+        )
     except (TypeError, ValueError, OverflowError):
         return {
             "accepted": False,
@@ -1480,11 +1511,17 @@ def validated_shared_stage_budget_history(
                 "targets": {},
             }
         try:
-            granted = int(raw.get("granted_cap_bytes"))
+            granted = json_safe_integer(
+                raw.get("granted_cap_bytes"),
+                field=f"history.targets.{target}.granted_cap_bytes",
+            )
             raw_high_water = raw.get("high_water_bytes")
             if raw_high_water is None:
                 raw_high_water = raw.get("actual_usage_bytes")
-            high_water = int(raw_high_water)
+            high_water = json_safe_integer(
+                raw_high_water,
+                field=f"history.targets.{target}.high_water_bytes",
+            )
         except (TypeError, ValueError, OverflowError):
             return {
                 "accepted": False,
@@ -7341,11 +7378,23 @@ def shared_stage_budget_plan_hash_payload(
         "cleanup_completed",
     ):
         payload[key] = None
+    try:
+        total_granted = json_safe_integer(
+            payload.get("total_granted_bytes"),
+            field="shared_stage.total_granted_bytes",
+        )
+        total_cap = json_safe_integer(
+            payload.get("total_cap_bytes"),
+            field="shared_stage.total_cap_bytes",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "shared stage plan totals must be safe integers"
+        ) from exc
     payload["accepted"] = bool(
         payload.get("capacity_sufficient") is True
         and payload.get("grants_sum_matches_total_cap") is True
-        and int(payload.get("total_granted_bytes") or 0)
-        == int(payload.get("total_cap_bytes") or 0)
+        and int(total_granted) == int(total_cap)
     )
     for report in (payload.get("targets") or {}).values():
         if not isinstance(report, dict):
@@ -7381,12 +7430,18 @@ def shared_stage_hash_normalize(value: Any) -> Any:
     binary64 bit pattern so both runtimes hash the same value without relying
     on language-specific decimal formatting.
     """
-    if value is None or isinstance(value, (bool, str, int)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 9_007_199_254_740_991:
+            raise ValueError("shared stage hash contains unsafe integer")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("shared stage hash contains non-finite float")
-        if value.is_integer() and abs(value) <= 9_007_199_254_740_991:
+        if value.is_integer():
+            if abs(value) > 9_007_199_254_740_991:
+                raise ValueError("shared stage hash contains unsafe integer")
             return int(value)
         return {"__float64__": struct.pack(">d", value).hex()}
     if isinstance(value, list):
