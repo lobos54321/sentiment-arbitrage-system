@@ -1,9 +1,9 @@
 {
-  "schema_version": "evaluator_snapshot_numeric_evidence.v2",
+  "schema_version": "evaluator_snapshot_numeric_evidence.v3",
   "scope": "immutable_cross_db_evaluator_snapshot_manifest",
   "unknown_numeric_policy": "reject",
-  "selector_policy": "explicit_path_or_field_only",
-  "path_syntax": "dot_segments_with_single_segment_wildcards_and_array_suffixes",
+  "selector_policy": "explicit_path_or_field_with_parent_path_only",
+  "path_syntax": "dot_segments_with_single_segment_wildcards_array_suffixes_and_root_dollar",
   "container_rules": [
     {
       "id": "watermark_database_maps",
@@ -63,6 +63,10 @@
       "fields": [
         "advisory_delta_bytes"
       ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*",
+        "shared_stage_budget.targets.*"
+      ],
       "kind": "safe_integer",
       "nullable": false
     },
@@ -72,6 +76,9 @@
         "source_copy_rowid_lower",
         "source_copy_rowid_upper"
       ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*"
+      ],
       "kind": "safe_integer",
       "nullable": true
     },
@@ -79,6 +86,9 @@
       "id": "nullable_source_rowid_span",
       "fields": [
         "source_copy_rowid_span"
+      ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*"
       ],
       "kind": "safe_integer",
       "nullable": true,
@@ -158,6 +168,9 @@
       "fields": [
         "lower_epoch"
       ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*"
+      ],
       "kind": "finite_number",
       "nullable": true,
       "minimum": 0,
@@ -167,6 +180,10 @@
       "id": "nullable_advisory_diagnostics",
       "fields": [
         "average_row_bytes_diagnostic"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*.advisory_evidence",
+        "shared_stage_budget.targets.*.advisory_evidence"
       ],
       "kind": "finite_number",
       "nullable": true,
@@ -198,6 +215,10 @@
         "source_row_fraction_numerator",
         "table_sample_payload_advisory_bytes"
       ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*.advisory_evidence",
+        "shared_stage_budget.targets.*.advisory_evidence"
+      ],
       "kind": "safe_integer",
       "nullable": true,
       "minimum": 0
@@ -212,188 +233,344 @@
       "minimum": 0
     },
     {
-      "id": "named_safe_integers",
+      "id": "root_safe_integer_fields",
+      "fields": [
+        "database_payload_size_bytes",
+        "manifest_size_bytes",
+        "output_cap_bytes",
+        "output_size_bytes",
+        "parallel_paper_stage_count",
+        "pinned_read_view_count"
+      ],
+      "parent_path_patterns": ["$"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "budget_plan_safe_integer_fields",
+      "fields": [
+        "reclaimed_to_paper_bytes",
+        "total_budget_bytes",
+        "total_output_cap_bytes"
+      ],
+      "parent_path_patterns": ["database_budget_plan"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "selection_safe_integer_fields",
+      "fields": [
+        "long_history_hours",
+        "review_history_hours"
+      ],
+      "parent_path_patterns": ["selection_contract"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "database_report_safe_integer_fields",
       "fields": [
         "application_id",
+        "database_budget_bytes",
         "destination_connection_total_changes",
-        "keep_previous",
+        "freelist_count",
+        "page_count",
         "page_size",
-        "rows_copied",
-        "rows_merged",
-        "semantic_rows_verified",
+        "paper_decision_parallel_stage_budget_bytes",
+        "paper_decision_parallel_stage_page_size",
+        "paper_decision_parallel_stage_rows_merged",
+        "paper_decision_parallel_stage_size_bytes",
+        "parallel_paper_stage_count",
+        "snapshot_size_bytes",
         "source_data_version_after",
         "source_data_version_before",
-        "source_row_count_upper",
         "source_schema_version",
         "source_size_bytes_after",
         "source_size_bytes_before",
+        "table_count",
+        "temporary_candidate_stage_size_bytes",
+        "temporary_full_backup_size_bytes",
         "user_version"
+      ],
+      "parent_path_patterns": ["databases.*"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "pinned_view_safe_integer_fields",
+      "fields": [
+        "estimated_compact_bytes",
+        "freelist_count",
+        "page_count",
+        "page_size",
+        "source_size_bytes"
+      ],
+      "parent_path_patterns": [
+        "databases.*.pinned_read_view",
+        "databases.*.pinned_read_views[]"
       ],
       "kind": "safe_integer",
       "nullable": false,
       "minimum": 0
     },
     {
-      "id": "declared_safe_integer_fields",
+      "id": "selected_table_safe_integer_fields",
       "fields": [
-        "a3_candidate_shadow_observation_rows",
-        "actual_rows_copied",
-        "actual_total_bytes",
-        "actual_usage_bytes",
-        "advisory_delta_bytes",
-        "advisory_demand_total_bytes",
-        "advisory_index_overhead_bytes",
-        "advisory_miss_count",
-        "advisory_required_bytes",
-        "advisory_root_reserve_pages",
-        "advisory_row_overhead_bytes",
-        "advisory_shortfall_bytes",
-        "allocated_high_water_bytes",
-        "allocated_size_bytes",
-        "allocation_weight_bytes",
-        "allocation_weight_total_bytes",
-        "baseline_required_bytes",
-        "baseline_required_total_bytes",
-        "borrowed_shared_pool_bytes",
-        "candidate_order_index_advisory_bytes",
-        "candidate_order_index_row_overhead_advisory_bytes",
-        "candidate_order_index_scaled_physical_advisory_bytes",
-        "candidate_order_source_index_dbstat_cell_upper_count",
-        "candidate_order_source_index_dbstat_max_payload_bytes",
-        "candidate_order_source_index_dbstat_page_count",
-        "candidate_order_source_index_dbstat_page_size",
-        "candidate_order_source_index_dbstat_payload_bytes",
-        "candidate_order_source_index_dbstat_physical_bytes",
-        "candidate_order_source_index_dbstat_unused_bytes",
-        "candidate_order_source_index_structural_overhead_bytes",
-        "candidate_stage_minimum_cap_bytes",
-        "cell_upper_count",
-        "chunk_count",
-        "column_count",
-        "compressed_size_bytes",
-        "consecutive_failure_code_count",
-        "consecutive_failure_count",
-        "context_rows",
-        "current_table_compressed_bytes",
-        "current_table_raw_bytes",
-        "current_table_rows_copied",
-        "database_budget_bytes",
-        "database_payload_size_bytes",
-        "dbstat_proportional_advisory_with_indexed_row_count",
-        "error_count",
-        "estimated_compact_bytes",
-        "estimated_free_after_bytes",
-        "estimated_free_at_peak_bytes",
-        "estimated_peak_working_bytes",
-        "exact_selected_rows",
-        "exact_signal_index_entry_count",
-        "file_count",
-        "final_row_count",
-        "free_bytes",
-        "freelist_count",
-        "granted_cap_bytes",
-        "high_water_bytes",
-        "history_granted_cap_bytes",
-        "history_high_water_bytes",
-        "logical_high_water_bytes",
-        "logical_size_bytes",
-        "long_history_hours",
-        "manifest_size_bytes",
-        "max_page_count",
-        "max_page_size",
-        "max_payload_bytes",
-        "min_page_size",
-        "minimum_cap_bytes",
-        "minimum_total_bytes",
-        "output_cap_bytes",
-        "output_size_bytes",
-        "padded_non_paper_estimate_bytes",
-        "page_count",
-        "paper_decision_parallel_stage_budget_bytes",
-        "paper_decision_parallel_stage_page_size",
-        "paper_decision_parallel_stage_rows_merged",
-        "paper_decision_parallel_stage_size_bytes",
-        "paper_decision_stage_minimum_cap_bytes",
-        "parallel_paper_stage_chunk_trailing_bytes",
-        "parallel_paper_stage_count",
-        "parallel_paper_stage_minimum_cap_bytes",
-        "parallel_paper_stage_row_trailing_bytes",
-        "payload_bytes",
-        "physical_bytes",
-        "pinned_read_view_count",
-        "projected_payload_bytes",
-        "raw_size_bytes",
-        "reclaimed_to_paper_bytes",
-        "required_reserve_bytes",
-        "residual_pool_bytes",
-        "review_history_hours",
-        "row_count",
-        "sample_limit_rows",
-        "sample_rows",
-        "selected_row_count",
-        "selective_snapshot_output_cap_bytes",
-        "snapshot_size_bytes",
-        "source_compact_estimate_bytes",
-        "source_dbstat_cell_upper_count",
-        "source_dbstat_max_payload_bytes",
-        "source_dbstat_page_count",
-        "source_dbstat_page_size",
-        "source_dbstat_payload_bytes",
-        "source_dbstat_physical_bytes",
-        "source_dbstat_unused_bytes",
-        "source_payload_bytes",
-        "source_row_fraction_denominator",
-        "source_row_fraction_numerator",
-        "source_size_bytes",
-        "source_stage_size_bytes",
+        "rows_copied",
+        "stage_chunk_count",
+        "stage_chunk_target_bytes",
+        "stage_column_count",
+        "stage_compressed_payload_size_bytes",
+        "stage_index_count",
+        "stage_raw_size_bytes"
+      ],
+      "parent_path_patterns": ["databases.*.selected_tables.*"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "selected_parallel_stage_safe_integer_fields",
+      "fields": [
+        "rows_merged",
         "stage_budget_bytes",
         "stage_chunk_count",
         "stage_chunk_target_bytes",
         "stage_column_count",
         "stage_compressed_payload_size_bytes",
-        "stage_compressed_size_bytes",
         "stage_index_count",
         "stage_page_size",
         "stage_raw_size_bytes",
-        "stage_row_count",
         "stage_rows_copied",
-        "stage_size_bytes",
-        "static_share_budget_bytes",
-        "structural_overhead_bytes",
-        "supported_capture_windows_hours",
-        "table_advisory_bytes",
-        "table_count",
-        "table_root_reserve_advisory_bytes",
-        "table_row_overhead_advisory_bytes",
-        "table_sample_payload_advisory_bytes",
-        "table_scaled_physical_advisory_bytes",
-        "temporary_candidate_stage_cap_bytes",
-        "temporary_candidate_stage_size_bytes",
-        "temporary_full_backup_bytes",
-        "temporary_full_backup_size_bytes",
-        "temporary_paper_decision_stage_cap_bytes",
-        "temporary_parallel_paper_stage_cap_bytes",
-        "temporary_stage_alignment_reserve_bytes",
-        "temporary_stage_raw_cap_bytes",
-        "temporary_stage_total_cap_bytes",
-        "total_budget_bytes",
-        "total_cap_bytes",
-        "total_granted_bytes",
-        "total_output_cap_bytes",
-        "total_size_bytes",
-        "unconsumed_bytes",
-        "unused_bytes"
+        "stage_size_bytes"
+      ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*.parallel_stage"
       ],
       "kind": "safe_integer",
       "nullable": false,
       "minimum": 0
     },
     {
-      "id": "named_finite_numbers",
+      "id": "storage_projection_safe_integer_fields",
       "fields": [
-        "snapshot_ts",
+        "context_rows",
+        "projected_payload_bytes",
+        "rows_copied",
+        "semantic_rows_verified",
+        "source_payload_bytes",
+        "source_stage_size_bytes"
+      ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*.storage_projection"
+      ],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "parallel_stage_safe_integer_fields",
+      "fields": [
+        "rows_copied",
+        "rows_merged",
+        "stage_budget_bytes",
+        "stage_chunk_count",
+        "stage_chunk_target_bytes",
+        "stage_column_count",
+        "stage_compressed_payload_size_bytes",
+        "stage_index_count",
+        "stage_page_size",
+        "stage_raw_size_bytes",
+        "stage_size_bytes"
+      ],
+      "parent_path_patterns": ["databases.*.parallel_paper_stages.*"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "disk_preflight_safe_integer_fields",
+      "fields": [
+        "candidate_stage_minimum_cap_bytes",
+        "estimated_free_after_bytes",
+        "estimated_free_at_peak_bytes",
+        "estimated_peak_working_bytes",
+        "free_bytes",
+        "paper_decision_stage_minimum_cap_bytes",
+        "parallel_paper_stage_minimum_cap_bytes",
+        "required_reserve_bytes",
+        "selective_snapshot_output_cap_bytes",
+        "temporary_candidate_stage_cap_bytes",
+        "temporary_full_backup_bytes",
+        "temporary_paper_decision_stage_cap_bytes",
+        "temporary_stage_alignment_reserve_bytes",
+        "temporary_stage_raw_cap_bytes",
+        "temporary_stage_total_cap_bytes"
+      ],
+      "parent_path_patterns": ["disk_preflight"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "shared_budget_safe_integer_fields",
+      "fields": [
+        "actual_total_bytes",
+        "advisory_demand_total_bytes",
+        "advisory_miss_count",
+        "allocation_weight_total_bytes",
+        "baseline_required_total_bytes",
+        "minimum_total_bytes",
+        "page_size",
+        "residual_pool_bytes",
+        "total_cap_bytes",
+        "total_granted_bytes",
+        "unconsumed_bytes"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget",
+        "shared_stage_budget"
+      ],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "shared_target_safe_integer_fields",
+      "fields": [
+        "actual_rows_copied",
+        "actual_usage_bytes",
+        "advisory_required_bytes",
+        "advisory_shortfall_bytes",
+        "allocation_weight_bytes",
+        "baseline_required_bytes",
+        "borrowed_shared_pool_bytes",
+        "granted_cap_bytes",
+        "high_water_bytes",
+        "history_granted_cap_bytes",
+        "history_high_water_bytes",
+        "minimum_cap_bytes"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*",
+        "shared_stage_budget.targets.*"
+      ],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "shared_advisory_safe_integer_fields",
+      "fields": [
+        "advisory_index_overhead_bytes",
+        "advisory_required_bytes",
+        "advisory_root_reserve_pages",
+        "advisory_row_overhead_bytes",
+        "candidate_order_index_advisory_bytes",
+        "candidate_order_index_row_overhead_advisory_bytes",
+        "candidate_order_index_scaled_physical_advisory_bytes",
+        "sample_limit_rows",
+        "sample_rows",
+        "selected_row_count",
+        "table_advisory_bytes",
+        "table_root_reserve_advisory_bytes",
+        "table_row_overhead_advisory_bytes",
+        "table_scaled_physical_advisory_bytes"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*.advisory_evidence",
+        "shared_stage_budget.targets.*.advisory_evidence"
+      ],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "retention_safe_integer_fields",
+      "fields": ["keep_previous"],
+      "parent_path_patterns": ["retention"],
+      "kind": "safe_integer",
+      "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "root_finite_number_fields",
+      "fields": [
+        "cross_database_time_skew_sec",
+        "max_allowed_cross_database_time_skew_sec",
+        "max_source_read_lock_sec",
+        "snapshot_ts"
+      ],
+      "parent_path_patterns": ["$"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "budget_plan_finite_number_fields",
+      "fields": ["headroom_ratio"],
+      "parent_path_patterns": ["database_budget_plan"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "selection_finite_number_fields",
+      "fields": [
+        "common_upper_epoch",
+        "long_lower_epoch",
+        "review_lower_epoch"
+      ],
+      "parent_path_patterns": ["selection_contract"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "database_report_finite_number_fields",
+      "fields": [
+        "candidate_projection_duration_sec",
+        "deferred_index_build_duration_sec",
+        "duration_sec",
+        "finished_epoch",
+        "main_source_read_lock_duration_sec",
+        "midpoint_epoch",
+        "paper_decision_parallel_stage_merge_duration_sec",
+        "paper_decision_source_read_lock_duration_sec",
+        "selection_long_lower_epoch",
+        "selection_review_lower_epoch",
+        "selection_upper_epoch",
         "source_mtime_after",
-        "source_mtime_before"
+        "source_mtime_before",
+        "source_read_lock_duration_sec",
+        "source_read_lock_limit_sec",
+        "started_epoch"
+      ],
+      "parent_path_patterns": ["databases.*"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "pinned_view_finite_number_fields",
+      "fields": [
+        "pinned_finished_epoch",
+        "pinned_midpoint_epoch",
+        "pinned_started_epoch",
+        "pinned_started_monotonic",
+        "source_read_lock_limit_sec"
+      ],
+      "parent_path_patterns": [
+        "databases.*.pinned_read_view",
+        "databases.*.pinned_read_views[]"
       ],
       "kind": "finite_number",
       "nullable": false,
@@ -401,61 +578,82 @@
       "maximum": 9007199254740991
     },
     {
-      "id": "declared_finite_number_fields",
+      "id": "selected_table_finite_number_fields",
       "fields": [
-        "cancel_deadline_monotonic",
-        "candidate_projection_duration_sec",
-        "common_upper_epoch",
-        "cross_database_time_skew_sec",
-        "current_table_elapsed_sec",
-        "current_table_started_monotonic",
-        "dbstat_elapsed_sec",
-        "dbstat_timeout_sec",
-        "deferred_index_build_duration_sec",
-        "duration_sec",
-        "elapsed_sec",
-        "failure_retry_sec",
-        "finished_epoch",
-        "headroom_ratio",
-        "indexed_count_elapsed_sec",
-        "indexed_count_timeout_sec",
-        "interval_sec",
-        "lock_deadline_monotonic",
-        "long_lower_epoch",
-        "lower_epoch",
-        "main_source_read_lock_duration_sec",
-        "max_allowed_cross_database_time_skew_sec",
-        "max_source_read_lock_duration_sec",
-        "max_source_read_lock_sec",
-        "merge_duration_sec",
-        "midpoint_epoch",
-        "next_attempt_delay_sec",
-        "off_source_lock_projection_duration_sec",
-        "paper_decision_parallel_stage_merge_duration_sec",
-        "paper_decision_source_read_lock_duration_sec",
-        "parallel_paper_source_read_lock_duration_sec",
-        "payload_storage_ratio",
-        "pin_started_monotonic",
-        "pinned_finished_epoch",
-        "pinned_midpoint_epoch",
-        "pinned_started_epoch",
-        "pinned_started_monotonic",
-        "review_lower_epoch",
-        "selection_long_lower_epoch",
-        "selection_review_lower_epoch",
-        "selection_upper_epoch",
         "source_copy_duration_sec",
         "source_lock_elapsed_after_table_sec",
-        "source_lock_elapsed_sec",
         "source_lock_remaining_after_table_sec",
-        "source_lock_remaining_sec",
-        "source_read_lock_duration_sec",
-        "source_read_lock_limit_sec",
-        "source_read_view_released_epoch",
-        "started_epoch",
-        "success_interval_sec",
-        "upper_epoch",
-        "utilization_ratio"
+        "upper_epoch"
+      ],
+      "parent_path_patterns": ["databases.*.selected_tables.*"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "selected_stage_finite_number_fields",
+      "fields": [
+        "merge_duration_sec",
+        "source_read_lock_duration_sec"
+      ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*.parallel_stage"
+      ],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "storage_projection_finite_number_fields",
+      "fields": [
+        "off_source_lock_projection_duration_sec",
+        "payload_storage_ratio"
+      ],
+      "parent_path_patterns": [
+        "databases.*.selected_tables.*.storage_projection"
+      ],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "parallel_stage_finite_number_fields",
+      "fields": [
+        "merge_duration_sec",
+        "source_read_lock_duration_sec"
+      ],
+      "parent_path_patterns": ["databases.*.parallel_paper_stages.*"],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "shared_advisory_finite_number_fields",
+      "fields": [
+        "dbstat_elapsed_sec",
+        "dbstat_timeout_sec",
+        "indexed_count_elapsed_sec",
+        "indexed_count_timeout_sec"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*.advisory_evidence",
+        "shared_stage_budget.targets.*.advisory_evidence"
+      ],
+      "kind": "finite_number",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    {
+      "id": "shared_target_finite_number_fields",
+      "fields": ["utilization_ratio"],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*",
+        "shared_stage_budget.targets.*"
       ],
       "kind": "finite_number",
       "nullable": false,

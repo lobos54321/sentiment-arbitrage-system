@@ -37,7 +37,7 @@ function validateSelectors(rule, category) {
   if (Object.hasOwn(rule, 'suffixes')) {
     failSchema(`${category}.${rule.id} suffix selectors forbidden`);
   }
-  for (const field of ['path_patterns', 'fields']) {
+  for (const field of ['path_patterns', 'fields', 'parent_path_patterns']) {
     const values = rule[field];
     if (values == null) continue;
     if (
@@ -45,7 +45,16 @@ function validateSelectors(rule, category) {
       || values.length === 0
       || values.some((item) => typeof item !== 'string' || item.length === 0)
     ) failSchema(`${category}.${rule.id}.${field} invalid`);
-    selectorCount += values.length;
+    if (field !== 'parent_path_patterns') selectorCount += values.length;
+  }
+  if (rule.fields != null && rule.parent_path_patterns == null) {
+    failSchema(`${category}.${rule.id} field selectors require parent path patterns`);
+  }
+  if (rule.parent_path_patterns != null && rule.fields == null) {
+    failSchema(`${category}.${rule.id} parent path patterns require field selectors`);
+  }
+  if (rule.parent_path_patterns?.includes('*')) {
+    failSchema(`${category}.${rule.id} unbounded parent path forbidden`);
   }
   if (selectorCount === 0) failSchema(`${category}.${rule.id} has no selector`);
 }
@@ -67,18 +76,21 @@ function loadEvidenceSchema() {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     failSchema('root must be an object');
   }
-  if (payload.schema_version !== 'evaluator_snapshot_numeric_evidence.v2') {
+  if (payload.schema_version !== 'evaluator_snapshot_numeric_evidence.v3') {
     failSchema('version invalid');
   }
   if (payload.unknown_numeric_policy !== 'reject') {
     failSchema('must reject unknown numerics');
   }
-  if (payload.selector_policy !== 'explicit_path_or_field_only') {
+  if (
+    payload.selector_policy
+    !== 'explicit_path_or_field_with_parent_path_only'
+  ) {
     failSchema('selector policy invalid');
   }
   if (
     payload.path_syntax
-    !== 'dot_segments_with_single_segment_wildcards_and_array_suffixes'
+    !== 'dot_segments_with_single_segment_wildcards_array_suffixes_and_root_dollar'
   ) failSchema('path syntax invalid');
 
   const seenIds = new Set();
@@ -153,6 +165,10 @@ export const EVIDENCE_SCHEMA_SHA256 = createHash('sha256')
   .update(canonicalEvidenceJson(EVIDENCE_SCHEMA))
   .digest('hex');
 export const JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256 = EVIDENCE_SCHEMA_SHA256;
+export const EVIDENCE_SCHEMA_FIELD_NAMES = new Set(
+  [...EVIDENCE_SCHEMA.container_rules, ...EVIDENCE_SCHEMA.scalar_rules]
+    .flatMap((rule) => rule.fields || []),
+);
 
 export function isJsonSafeInteger(value) {
   return Number.isSafeInteger(value);
@@ -221,6 +237,7 @@ export function isDecimalIdentifier(value) {
 }
 
 function pathMatches(pattern, path) {
+  if (pattern === '$') return path === '';
   const expected = pattern ? pattern.split('.') : [];
   const actual = path ? path.split('.') : [];
   return expected.length === actual.length && expected.every(
@@ -229,14 +246,23 @@ function pathMatches(pattern, path) {
 }
 
 function ruleMatches(rule, path, field) {
+  const dot = path.lastIndexOf('.');
+  const parentPath = dot < 0 ? '' : path.slice(0, dot);
   return Boolean(
     (rule.path_patterns || []).some((pattern) => pathMatches(pattern, path))
-    || (rule.fields || []).includes(field)
+    || (
+      (rule.fields || []).includes(field)
+      && (rule.parent_path_patterns || []).some(
+        (pattern) => pathMatches(pattern, parentPath),
+      )
+    )
   );
 }
 
 export function numericEvidenceRule(path, field = null) {
-  const leaf = String(field ?? path.split('.').at(-1) ?? '');
+  const pathLeaf = String(path.split('.').at(-1) ?? '');
+  if (field != null && String(field) !== pathLeaf) return null;
+  const leaf = pathLeaf;
   for (const rule of EVIDENCE_SCHEMA.container_rules) {
     if (ruleMatches(rule, path, leaf)) return ['container', rule];
   }
@@ -448,6 +474,10 @@ export function validateNumericEvidenceSchema(
         if (matched?.[0] === 'scalar') {
           if (typeof child === 'number') numericLeafCount += 1;
           validateDeclared(child, childPath, matched[1]);
+          continue;
+        }
+        if (EVIDENCE_SCHEMA_FIELD_NAMES.has(field)) {
+          reject(childPath, 'declared_numeric_field_parent_path_mismatch');
           continue;
         }
         if (child && typeof child === 'object') {

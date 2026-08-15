@@ -36,6 +36,7 @@ from evaluator_db_contract import (  # noqa: E402
     validate_shared_stage_estimate_contract,
 )
 from evaluator_evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA,
     EVIDENCE_SCHEMA_SHA256,
     EVIDENCE_SCHEMA_VERSION,
     validate_numeric_evidence_schema,
@@ -6934,7 +6935,7 @@ def test_snapshot_worker_status_is_atomic_and_summarizes_accepted_bundle(tmp_pat
     assert persisted["promotion_allowed"] is False
 
 
-def test_producer_rejects_undeclared_numeric_before_any_publish(
+def test_producer_rejects_every_known_field_on_wrong_path_before_any_publish(
     tmp_path,
     monkeypatch,
 ):
@@ -6944,7 +6945,17 @@ def test_producer_rejects_undeclared_numeric_before_any_publish(
 
     def bind_with_undeclared_numeric(manifest):
         original_bind(manifest)
-        manifest["undeclared_attacker_count"] = 1
+        manifest["attacker"] = {
+            "rows_copied": 1,
+            "output_size_bytes": 1,
+            "duration_sec": 1,
+            "rules": {
+            rule["id"]: {field: 1 for field in rule["fields"]}
+            for category in ("container_rules", "scalar_rules")
+            for rule in EVIDENCE_SCHEMA[category]
+            if rule.get("fields")
+            },
+        }
 
     monkeypatch.setattr(
         snapshot_module,

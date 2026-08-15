@@ -31,6 +31,7 @@ from cross_db_evaluator_snapshot import (  # noqa: E402
     shared_stage_budget_plan_sha256,
 )
 from evaluator_evidence_schema import (  # noqa: E402
+    EVIDENCE_SCHEMA,
     EVIDENCE_SCHEMA_SHA256,
     EVIDENCE_SCHEMA_VERSION,
     is_decimal_identifier,
@@ -229,6 +230,28 @@ def synchronize_producer_manifest_sha(out: Path, manifest_path: Path) -> None:
     status_path.write_text(json.dumps(status), encoding="utf-8")
 
 
+def write_manifest_with_converged_sizes(
+    manifest: dict,
+    manifest_path: Path,
+) -> None:
+    for _attempt in range(8):
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        manifest_size = manifest_path.stat().st_size
+        bundle_size = sum(
+            item.stat().st_size
+            for item in manifest_path.parent.iterdir()
+            if item.is_file()
+        )
+        if (
+            int(manifest["manifest_size_bytes"]) == manifest_size
+            and int(manifest["output_size_bytes"]) == bundle_size
+        ):
+            return
+        manifest["manifest_size_bytes"] = manifest_size
+        manifest["output_size_bytes"] = bundle_size
+    raise AssertionError("manifest size evidence did not converge")
+
+
 def test_missing_evidence_db_is_rejected(tmp_path):
     status = evaluator_db_source_status(
         str(tmp_path / "agent_evidence" / "paper_evidence.db"),
@@ -242,7 +265,7 @@ def test_missing_evidence_db_is_rejected(tmp_path):
 
 def test_numeric_evidence_contract_matches_dashboard_golden_hash():
     assert json_numeric_evidence_contract_sha256() == (
-        "c39db1a96055b6fb92e126ba3348893c20594c43de7b21e1b5379b758869c2a9"
+        "162b8163b0664cffb0f08739e964c425c569c8dc287a2826e2ba82ddcfbfbd4e"
     )
 
 
@@ -590,6 +613,133 @@ def test_all_nonempty_dynamic_watermarks_reject_every_invalid_numeric_shape(
     }
 
 
+def test_every_field_selector_is_bound_to_declared_parent_paths(
+    tmp_path,
+    monkeypatch,
+):
+    _live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest = json.loads(
+        (out / "current" / "manifest.json").read_text(encoding="utf-8")
+    )
+    field_rules = [
+        rule
+        for category in ("container_rules", "scalar_rules")
+        for rule in EVIDENCE_SCHEMA[category]
+        if rule.get("fields")
+    ]
+    assert len(field_rules) >= 10
+
+    attack_paths = set()
+    manifest["attacker"] = {
+        "rows_copied": 1,
+        "output_size_bytes": 1,
+        "duration_sec": 1,
+    }
+    attack_paths.update(
+        {
+            "attacker.rows_copied",
+            "attacker.output_size_bytes",
+            "attacker.duration_sec",
+        }
+    )
+    wrong_path_values = (1, 0.5, "1", False, None, {}, [])
+    for index, attack_value in enumerate(wrong_path_values):
+        manifest["attacker"][f"shape_{index}"] = {}
+        for rule in field_rules:
+            attack_container = {}
+            manifest["attacker"][f"shape_{index}"][rule["id"]] = (
+                attack_container
+            )
+            for field in rule["fields"]:
+                attack_container[field] = attack_value
+                attack_path = (
+                    f"attacker.shape_{index}.{rule['id']}.{field}"
+                )
+                attack_paths.add(attack_path)
+                assert numeric_evidence_rule(attack_path, field) is None
+                assert validate_numeric_evidence_value(
+                    manifest,
+                    attack_path,
+                    attack_value,
+                )["accepted"] is False
+    for rule in field_rules:
+        parent_patterns = rule.get("parent_path_patterns")
+        assert isinstance(parent_patterns, list) and parent_patterns
+        assert "*" not in parent_patterns
+        attack_container = {}
+        manifest["attacker"][rule["id"]] = attack_container
+        for field in rule["fields"]:
+            attack_container[field] = 1
+            root_attack = f"attacker.{rule['id']}.{field}"
+            attack_paths.add(root_attack)
+            assert numeric_evidence_rule(root_attack, field) is None
+            assert numeric_evidence_rule(
+                f"databases.paper.attacker.{rule['id']}.{field}",
+                field,
+            ) is None
+            assert numeric_evidence_rule(
+                f"shared_stage_budget.attacker.{rule['id']}.{field}",
+                field,
+            ) is None
+
+    report = validate_numeric_evidence_schema(manifest, max_errors=4096)
+    assert report["accepted"] is False
+    observed = {
+        error["path"]
+        for error in report["errors"]
+        if error["code"]
+        in {
+            "undeclared_numeric_evidence",
+            "declared_numeric_field_parent_path_mismatch",
+        }
+    }
+    assert attack_paths <= observed
+    assert numeric_evidence_rule(
+        "attacker.rows_copied",
+        "output_size_bytes",
+    ) is None
+    del manifest["attacker"]
+
+    known_wrong_locations = (
+        (manifest["databases"]["paper"], "databases.paper", "rows_copied"),
+        (
+            manifest["databases"]["paper"],
+            "databases.paper",
+            "output_size_bytes",
+        ),
+        (manifest["selection_contract"], "selection_contract", "output_size_bytes"),
+        (manifest, "", "duration_sec"),
+        (manifest["shared_stage_budget"], "shared_stage_budget", "duration_sec"),
+        (manifest["disk_preflight"], "disk_preflight", "rows_copied"),
+        (manifest["database_budget_plan"], "database_budget_plan", "stage_size_bytes"),
+        (
+            manifest["databases"]["paper"]["selected_tables"]
+            ["a_class_decision_events"],
+            "databases.paper.selected_tables.a_class_decision_events",
+            "output_size_bytes",
+        ),
+        (manifest["shared_stage_budget"], "shared_stage_budget", "page_count"),
+        (manifest["disk_preflight"], "disk_preflight", "utilization_ratio"),
+    )
+    for container, parent_path, field in known_wrong_locations:
+        path = f"{parent_path}.{field}" if parent_path else field
+        assert numeric_evidence_rule(path, field) is None
+        container[field] = 1
+        location_report = validate_numeric_evidence_schema(manifest)
+        assert location_report["accepted"] is False, path
+        assert any(
+            error["path"] == path
+            and error["code"]
+            == "declared_numeric_field_parent_path_mismatch"
+            for error in location_report["errors"]
+        ), (path, location_report["errors"])
+        del container[field]
+
+
 def test_watermark_nullability_is_explicit_and_bound_to_empty_selected_table(
     tmp_path,
     monkeypatch,
@@ -648,6 +798,44 @@ def test_coherent_watermark_tamper_is_rejected_by_authoritative_consumer(
         "a_class_decision_events"
     ]["event_ts"] = tampered_value
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    synchronize_producer_manifest_sha(out, manifest_path)
+
+    status = evaluator_snapshot_bundle_status(
+        signal_db=str(out / "current" / "signal.db"),
+        paper_db=str(out / "current" / "paper_evidence.db"),
+        raw_db=str(out / "current" / "raw.db"),
+        kline_db=str(out / "current" / "kline.db"),
+        data_dir=str(live),
+        manifest_path=str(manifest_path),
+    )
+
+    assert status["accepted"] is False
+    assert "evaluator_snapshot_numeric_evidence_type_invalid" in status["blockers"]
+
+
+def test_coherent_known_field_wrong_path_tamper_is_rejected_by_authority(
+    tmp_path,
+    monkeypatch,
+):
+    live, _sources, out = create_valid_bundle(
+        tmp_path,
+        monkeypatch,
+        seed_all_database_rows=True,
+    )
+    manifest_path = (out / "current" / "manifest.json").resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["attacker"] = {
+        "rows_copied": 1,
+        "output_size_bytes": 1,
+        "duration_sec": 1,
+        "rules": {
+        rule["id"]: {field: 1 for field in rule["fields"]}
+        for category in ("container_rules", "scalar_rules")
+        for rule in EVIDENCE_SCHEMA[category]
+        if rule.get("fields")
+        },
+    }
+    write_manifest_with_converged_sizes(manifest, manifest_path)
     synchronize_producer_manifest_sha(out, manifest_path)
 
     status = evaluator_snapshot_bundle_status(

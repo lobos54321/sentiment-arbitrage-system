@@ -50,7 +50,7 @@ def _validate_selectors(rule: dict[str, Any], *, category: str) -> None:
         raise RuntimeError(
             f"evaluator evidence schema {category}.{rule.get('id')} suffix selectors forbidden"
         )
-    for field in ("path_patterns", "fields"):
+    for field in ("path_patterns", "fields", "parent_path_patterns"):
         values = rule.get(field)
         if values is None:
             continue
@@ -62,7 +62,25 @@ def _validate_selectors(rule: dict[str, Any], *, category: str) -> None:
             raise RuntimeError(
                 f"evaluator evidence schema {category}.{rule.get('id')}.{field} invalid"
             )
-        selector_count += len(values)
+        if field != "parent_path_patterns":
+            selector_count += len(values)
+    fields = rule.get("fields")
+    parent_patterns = rule.get("parent_path_patterns")
+    if fields is not None and parent_patterns is None:
+        raise RuntimeError(
+            f"evaluator evidence schema {category}.{rule.get('id')} "
+            "field selectors require parent path patterns"
+        )
+    if parent_patterns is not None and fields is None:
+        raise RuntimeError(
+            f"evaluator evidence schema {category}.{rule.get('id')} "
+            "parent path patterns require field selectors"
+        )
+    if isinstance(parent_patterns, list) and "*" in parent_patterns:
+        raise RuntimeError(
+            f"evaluator evidence schema {category}.{rule.get('id')} "
+            "unbounded parent path forbidden"
+        )
     if selector_count == 0:
         raise RuntimeError(
             f"evaluator evidence schema {category}.{rule.get('id')} has no selector"
@@ -83,14 +101,16 @@ def _load_schema() -> dict[str, Any]:
         ) from exc
     if not isinstance(payload, dict):
         raise RuntimeError("evaluator evidence schema root must be an object")
-    if payload.get("schema_version") != "evaluator_snapshot_numeric_evidence.v2":
+    if payload.get("schema_version") != "evaluator_snapshot_numeric_evidence.v3":
         raise RuntimeError("evaluator evidence schema version invalid")
     if payload.get("unknown_numeric_policy") != "reject":
         raise RuntimeError("evaluator evidence schema must reject unknown numerics")
-    if payload.get("selector_policy") != "explicit_path_or_field_only":
+    if payload.get("selector_policy") != (
+        "explicit_path_or_field_with_parent_path_only"
+    ):
         raise RuntimeError("evaluator evidence schema selector policy invalid")
     if payload.get("path_syntax") != (
-        "dot_segments_with_single_segment_wildcards_and_array_suffixes"
+        "dot_segments_with_single_segment_wildcards_array_suffixes_and_root_dollar"
     ):
         raise RuntimeError("evaluator evidence schema path syntax invalid")
 
@@ -181,6 +201,12 @@ EVIDENCE_SCHEMA_VERSION = str(EVIDENCE_SCHEMA["schema_version"])
 EVIDENCE_SCHEMA_SHA256 = hashlib.sha256(
     canonical_json(EVIDENCE_SCHEMA).encode("utf-8")
 ).hexdigest()
+EVIDENCE_SCHEMA_FIELD_NAMES = frozenset(
+    field
+    for category in ("container_rules", "scalar_rules")
+    for rule in EVIDENCE_SCHEMA[category]
+    for field in rule.get("fields", [])
+)
 
 
 def is_json_safe_integer(value: object) -> bool:
@@ -257,6 +283,8 @@ def is_decimal_identifier(value: object) -> bool:
 
 
 def _path_matches(pattern: str, path: str) -> bool:
+    if pattern == "$":
+        return path == ""
     expected = pattern.split(".") if pattern else []
     actual = path.split(".") if path else []
     return len(expected) == len(actual) and all(
@@ -266,12 +294,19 @@ def _path_matches(pattern: str, path: str) -> bool:
 
 
 def _rule_matches(rule: dict[str, Any], *, path: str, field: str) -> bool:
+    parent_path = path.rsplit(".", 1)[0] if "." in path else ""
     return bool(
         any(
             _path_matches(pattern, path)
             for pattern in rule.get("path_patterns", [])
         )
-        or field in rule.get("fields", [])
+        or (
+            field in rule.get("fields", [])
+            and any(
+                _path_matches(pattern, parent_path)
+                for pattern in rule.get("parent_path_patterns", [])
+            )
+        )
     )
 
 
@@ -281,7 +316,10 @@ def numeric_evidence_rule(
 ) -> tuple[str, dict[str, Any]] | None:
     """Return the first declared container/scalar rule for a manifest path."""
 
-    leaf = str(field if field is not None else path.rsplit(".", 1)[-1])
+    path_leaf = path.rsplit(".", 1)[-1]
+    if field is not None and str(field) != path_leaf:
+        return None
+    leaf = str(path_leaf)
     for rule in EVIDENCE_SCHEMA["container_rules"]:
         if _rule_matches(rule, path=path, field=leaf):
             return "container", rule
@@ -558,6 +596,12 @@ def validate_numeric_evidence_schema(
                         child,
                         path=child_path,
                         rule=matched[1],
+                    )
+                    continue
+                if str(field) in EVIDENCE_SCHEMA_FIELD_NAMES:
+                    reject(
+                        child_path,
+                        "declared_numeric_field_parent_path_mismatch",
                     )
                     continue
                 if isinstance(child, (dict, list)):
