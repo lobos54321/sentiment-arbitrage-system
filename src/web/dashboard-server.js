@@ -9167,12 +9167,12 @@ function publicEvaluatorCopyTiming(value) {
 
 export const PARALLEL_PAPER_STAGE_BULK_PAGE_SIZE = 65536;
 export const PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES = 384 * 1024 ** 2;
-export const PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION = 'sqlite_value_tlv_rows.v1';
+export const PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION = 'sqlite_value_tlv_stream.v2';
 export const PARALLEL_PAPER_STAGE_COMPRESSION = 'zlib_level_1';
 export const PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES = 4 * 1024 ** 2;
 const PARALLEL_PAPER_STAGE_STORAGE_SQL = [
   'CREATE TABLE "__a3_parallel_stage_metadata" (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), stage_schema_version TEXT NOT NULL, codec_schema_version TEXT NOT NULL, compression TEXT NOT NULL, source_table TEXT NOT NULL, source_create_sql TEXT NOT NULL, source_create_sql_sha256 TEXT NOT NULL, source_column_contract_json TEXT NOT NULL, source_column_contract_sha256 TEXT NOT NULL, deferred_indexes_json TEXT NOT NULL, row_count INTEGER NOT NULL CHECK(row_count >= 0), chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0), raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes >= 0), compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes >= 0), rows_sha256 TEXT NOT NULL, storage_contract_sha256 TEXT NOT NULL)',
-  'CREATE TABLE "__a3_parallel_stage_chunks" (sequence INTEGER PRIMARY KEY CHECK(sequence >= 0), row_count INTEGER NOT NULL CHECK(row_count > 0), raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes > 0), compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes > 0), raw_sha256 TEXT NOT NULL, compressed_sha256 TEXT NOT NULL, payload BLOB NOT NULL)',
+  'CREATE TABLE "__a3_parallel_stage_chunks" (sequence INTEGER PRIMARY KEY CHECK(sequence >= 0), row_count INTEGER NOT NULL CHECK(row_count >= 0), raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes > 0), compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes > 0), raw_sha256 TEXT NOT NULL, compressed_sha256 TEXT NOT NULL, payload BLOB NOT NULL)',
 ];
 export const PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256 = auditSha256Hex(
   PARALLEL_PAPER_STAGE_STORAGE_SQL,
@@ -10243,7 +10243,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     const historyState = String(raw.history_state || '');
     const expectedStorageSchemaVersion = target === 'candidate_shadow_observations'
       ? 'candidate_observation_selective_stage.v1'
-      : 'parallel_paper_event_stage.v3';
+      : 'parallel_paper_event_stage.v4';
     const storageSchemaVersion = String(raw.storage_schema_version || '');
     const historyStorageSchemaVersion = String(
       raw.history_storage_schema_version || '',
@@ -11242,7 +11242,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
       source_constraints_rebuilt_after_source_read_lock_release:
         stage.source_constraints_rebuilt_after_source_read_lock_release === true,
       passed: Boolean(
-        stage.schema_version === 'parallel_paper_event_stage.v3'
+        stage.schema_version === 'parallel_paper_event_stage.v4'
         && stage.role === parallelPaperStageConfigs[table].role
         && stage.stage_schema_mode === 'lossless_compressed_chunk_spool'
         && sha256Pattern.test(sourceCreateSqlSha256)
@@ -11306,7 +11306,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
         && stage.payload_semantics_preserved === true
         && stage.compressed_during_source_read_lock === true
         && stage.hydrated_after_source_read_lock_release === true
-        && nested.schema_version === 'parallel_paper_event_stage.v3'
+        && nested.schema_version === 'parallel_paper_event_stage.v4'
         && nested.role === parallelPaperStageConfigs[table].role
         && nested.stage_schema_mode === stage.stage_schema_mode
         && nested.source_create_sql_sha256 === sourceCreateSqlSha256
@@ -11360,7 +11360,7 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     : [];
   const parallelPaperStagesPassed = Boolean(
     parallelPaperStageInventoryValid
-    && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v3'
+    && manifestPayload?.parallel_paper_stage_schema_version === 'parallel_paper_event_stage.v4'
     && Number(manifestPayload?.parallel_paper_stage_count) === activeParallelPaperStageTables.length
     && manifestPayload?.parallel_paper_stages_all_pinned === true
     && manifestPayload?.parallel_paper_stages_all_merged_after_source_read_lock_release === true

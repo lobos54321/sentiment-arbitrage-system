@@ -84,7 +84,7 @@ test('parallel stage bulk-page claims use the production-calibrated 384 MiB floo
 test('parallel compressed-stage storage contract matches the Python golden hash', () => {
   assert.equal(
     PARALLEL_PAPER_STAGE_STORAGE_CONTRACT_SHA256,
-    'a7704ff8eb3c5051112377902655f0d45a866c1a7f67bd35d3cbdb1b0990ccc6',
+    'abddfbfe3e94bea539b850bd05fe5d76b9f5517671f406ac13259e51952ac1bf',
   );
 });
 
@@ -1757,7 +1757,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     ],
   });
   const stageSchemaEvidence = (columnCount = 10) => ({
-    schema_version: 'parallel_paper_event_stage.v3',
+    schema_version: 'parallel_paper_event_stage.v4',
     stage_schema_mode: 'lossless_compressed_chunk_spool',
     source_create_sql_sha256: '1'.repeat(64),
     destination_create_sql_sha256: '1'.repeat(64),
@@ -1894,7 +1894,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
     stage_filename: stageFilename,
     storage_schema_version: target === 'candidate_shadow_observations'
       ? 'candidate_observation_selective_stage.v1'
-      : 'parallel_paper_event_stage.v3',
+      : 'parallel_paper_event_stage.v4',
     history_storage_schema_version: null,
     history_storage_compatible: false,
     required: target !== 'opportunity_event_path_samples',
@@ -2094,7 +2094,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
       candidate_projection_after_source_read_lock_release: true,
       candidate_stage_removed_before_publish: true,
       shared_stage_estimates_bound_to_copy_read_views: true,
-      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v3',
+      parallel_paper_stage_schema_version: 'parallel_paper_event_stage.v4',
       parallel_paper_stage_tables: [
         'paper_decision_events',
         'a_class_decision_events',
@@ -2256,7 +2256,7 @@ function evaluatorSnapshotHealthFixture(nowMs) {
             },
           },
           paper_decision_parallel_stage_used: true,
-          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v3',
+          paper_decision_parallel_stage_schema_version: 'parallel_paper_event_stage.v4',
           paper_decision_parallel_read_view_pinned: true,
           paper_decision_parallel_stage_merged_after_source_read_lock_release: true,
           paper_decision_parallel_stage_removed_before_publish: true,
@@ -2663,7 +2663,7 @@ test('evaluator snapshot worker rejects shared-stage storage lineage tampering',
   for (const [field, value] of [
     ['storage_schema_version', 'parallel_paper_event_stage.v2'],
     ['history_storage_compatible', true],
-    ['history_storage_schema_version', 'parallel_paper_event_stage.v3'],
+    ['history_storage_schema_version', 'parallel_paper_event_stage.v4'],
   ]) {
     const fixture = evaluatorSnapshotHealthFixture(nowMs);
     const manifestPayload = structuredClone(fixture.manifestPayload);

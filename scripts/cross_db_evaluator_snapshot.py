@@ -44,18 +44,15 @@ CANDIDATE_STAGE_TABLE = "__a3_candidate_shadow_observation_stage"
 CANDIDATE_STAGE_ORDER_INDEX = "idx_a3_candidate_stage_signal"
 MIN_CANDIDATE_STAGE_CAP_BYTES = 3 * 4096
 CANDIDATE_STAGE_BUDGET_MODE = "shared_stage_budget_coordinator"
-PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v3"
+PARALLEL_PAPER_STAGE_SCHEMA_VERSION = "parallel_paper_event_stage.v4"
 PARALLEL_PAPER_STAGE_STORAGE_MODE = "lossless_compressed_chunk_spool"
-PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION = "sqlite_value_tlv_rows.v1"
+PARALLEL_PAPER_STAGE_CODEC_SCHEMA_VERSION = "sqlite_value_tlv_stream.v2"
 PARALLEL_PAPER_STAGE_COMPRESSION = "zlib_level_1"
 PARALLEL_PAPER_STAGE_COMPRESSION_LEVEL = 1
 PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES = 4 * 1024**2
-PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES = 64 * 1024**2
-PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES = (
-    PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES + 8
-)
+PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES = PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
 PARALLEL_PAPER_STAGE_MAX_COMPRESSED_CHUNK_BYTES = (
-    PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES + 1024**2
+    PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES + 64 * 1024
 )
 PARALLEL_PAPER_STAGE_METADATA_TABLE = "__a3_parallel_stage_metadata"
 PARALLEL_PAPER_STAGE_CHUNK_TABLE = "__a3_parallel_stage_chunks"
@@ -4584,7 +4581,7 @@ def compressed_stage_storage_sql() -> tuple[str, str]:
         (
             f"CREATE TABLE {quote_identifier(PARALLEL_PAPER_STAGE_CHUNK_TABLE)} ("
             "sequence INTEGER PRIMARY KEY CHECK(sequence >= 0), "
-            "row_count INTEGER NOT NULL CHECK(row_count > 0), "
+            "row_count INTEGER NOT NULL CHECK(row_count >= 0), "
             "raw_size_bytes INTEGER NOT NULL CHECK(raw_size_bytes > 0), "
             "compressed_size_bytes INTEGER NOT NULL CHECK(compressed_size_bytes > 0), "
             "raw_sha256 TEXT NOT NULL, "
@@ -4604,38 +4601,54 @@ def compressed_stage_storage_contract_sha256() -> str:
     )
 
 
-def encode_sqlite_stage_value(value: Any) -> bytes:
+def _encode_sqlite_stage_value_parts(value: Any) -> tuple[bytes, ...]:
     if value is None:
-        return b"\x00"
+        return (b"\x00",)
     if isinstance(value, bool):
         value = int(value)
     if isinstance(value, int):
         try:
-            return b"\x01" + struct.pack(">q", value)
+            return (b"\x01" + struct.pack(">q", value),)
         except struct.error as exc:
             raise RuntimeError("parallel_paper_stage_integer_out_of_range") from exc
     if isinstance(value, float):
         if not math.isfinite(value):
             raise RuntimeError("parallel_paper_stage_non_finite_float")
-        return b"\x02" + struct.pack(">d", value)
+        return (b"\x02" + struct.pack(">d", value),)
     if isinstance(value, str):
         payload = value.encode("utf-8")
-        return b"\x03" + struct.pack(">Q", len(payload)) + payload
+        header = b"\x03" + struct.pack(">Q", len(payload))
+        return (header, payload) if payload else (header,)
     if isinstance(value, (bytes, bytearray, memoryview)):
         payload = bytes(value)
-        return b"\x04" + struct.pack(">Q", len(payload)) + payload
+        header = b"\x04" + struct.pack(">Q", len(payload))
+        return (header, payload) if payload else (header,)
     raise RuntimeError(
         f"parallel_paper_stage_value_type_unsupported:{type(value).__name__}"
     )
 
 
-def encode_sqlite_stage_row(row: Any, column_count: int) -> bytes:
+def encode_sqlite_stage_value(value: Any) -> bytes:
+    return b"".join(_encode_sqlite_stage_value_parts(value))
+
+
+def encode_sqlite_stage_row_parts(
+    row: Any,
+    column_count: int,
+) -> tuple[bytes, ...]:
     if len(row) != column_count:
         raise RuntimeError("parallel_paper_stage_row_column_count_mismatch")
-    payload = b"".join(encode_sqlite_stage_value(value) for value in row)
-    if len(payload) > PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES:
-        raise RuntimeError("parallel_paper_stage_encoded_row_too_large")
-    return struct.pack(">Q", len(payload)) + payload
+    value_parts = tuple(
+        part
+        for value in row
+        for part in _encode_sqlite_stage_value_parts(value)
+    )
+    payload_size = sum(len(part) for part in value_parts)
+    return (struct.pack(">Q", payload_size), *value_parts)
+
+
+def encode_sqlite_stage_row(row: Any, column_count: int) -> bytes:
+    return b"".join(encode_sqlite_stage_row_parts(row, column_count))
 
 
 def _decode_sqlite_stage_value(
@@ -4674,38 +4687,52 @@ def _decode_sqlite_stage_value(
     raise RuntimeError(f"parallel_paper_stage_value_tag_invalid:{tag}")
 
 
-def decode_sqlite_stage_chunk(
-    payload: bytes,
-    *,
-    row_count: int,
-    column_count: int,
-) -> list[tuple[Any, ...]]:
-    view = memoryview(payload)
-    offset = 0
-    rows: list[tuple[Any, ...]] = []
-    for _ in range(row_count):
-        length_end = offset + 8
-        if length_end > len(view):
+class SQLiteStageRowStreamDecoder:
+    def __init__(
+        self,
+        *,
+        column_count: int,
+        max_encoded_row_bytes: int,
+    ) -> None:
+        self.column_count = int(column_count)
+        self.max_encoded_row_bytes = int(max_encoded_row_bytes)
+        self.pending = bytearray()
+
+    def feed(self, payload: bytes) -> list[tuple[Any, ...]]:
+        self.pending.extend(payload)
+        view = memoryview(self.pending)
+        offset = 0
+        rows: list[tuple[Any, ...]] = []
+        while offset + 8 <= len(view):
+            length_end = offset + 8
+            row_size = int(struct.unpack(">Q", view[offset:length_end])[0])
+            if row_size > self.max_encoded_row_bytes:
+                raise RuntimeError("parallel_paper_stage_encoded_row_too_large")
+            row_end = length_end + row_size
+            if row_end > len(view):
+                break
+            row_view = view[length_end:row_end]
+            row_offset = 0
+            values: list[Any] = []
+            for _column in range(self.column_count):
+                value, row_offset = _decode_sqlite_stage_value(
+                    row_view,
+                    row_offset,
+                )
+                values.append(value)
+            if row_offset != len(row_view):
+                raise RuntimeError("parallel_paper_stage_row_trailing_bytes")
+            rows.append(tuple(values))
+            offset = row_end
+            del row_view
+        del view
+        if offset:
+            del self.pending[:offset]
+        return rows
+
+    def finish(self) -> None:
+        if self.pending:
             raise RuntimeError("parallel_paper_stage_chunk_truncated")
-        row_size = int(struct.unpack(">Q", view[offset:length_end])[0])
-        if row_size > PARALLEL_PAPER_STAGE_MAX_ENCODED_ROW_BYTES:
-            raise RuntimeError("parallel_paper_stage_encoded_row_too_large")
-        row_end = length_end + row_size
-        if row_end > len(view):
-            raise RuntimeError("parallel_paper_stage_chunk_truncated")
-        row_view = view[length_end:row_end]
-        row_offset = 0
-        values: list[Any] = []
-        for _column in range(column_count):
-            value, row_offset = _decode_sqlite_stage_value(row_view, row_offset)
-            values.append(value)
-        if row_offset != len(row_view):
-            raise RuntimeError("parallel_paper_stage_row_trailing_bytes")
-        rows.append(tuple(values))
-        offset = row_end
-    if offset != len(view):
-        raise RuntimeError("parallel_paper_stage_chunk_trailing_bytes")
-    return rows
 
 
 def decompress_sqlite_stage_chunk(
@@ -4883,22 +4910,40 @@ def stage_single_source_table(
                 f"source_read_lock_budget_exceeded:paper:copy_table:{table}"
             )
 
+    def append_row_parts(parts: tuple[bytes, ...]) -> None:
+        nonlocal chunk_rows
+        final_part_index = len(parts) - 1
+        for part_index, part in enumerate(parts):
+            part_view = memoryview(part)
+            part_offset = 0
+            while part_offset < len(part_view):
+                capacity = (
+                    PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
+                    - len(chunk_buffer)
+                )
+                take = min(capacity, len(part_view) - part_offset)
+                next_offset = part_offset + take
+                piece = part_view[part_offset:next_offset]
+                chunk_buffer.extend(piece)
+                rows_sha256.update(piece)
+                part_offset = next_offset
+                row_completed = bool(
+                    part_index == final_part_index
+                    and part_offset == len(part_view)
+                )
+                if row_completed:
+                    chunk_rows += 1
+                if len(chunk_buffer) == PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES:
+                    flush_chunk()
+                    ensure_stage_copy_active()
+
     for row in source_cursor:
         ensure_stage_copy_active()
-        encoded = encode_sqlite_stage_row(
+        encoded_parts = encode_sqlite_stage_row_parts(
             row,
             source_column_contract["column_count"],
         )
-        if (
-            chunk_buffer
-            and len(chunk_buffer) + len(encoded)
-            > PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES
-        ):
-            flush_chunk()
-            ensure_stage_copy_active()
-        chunk_buffer.extend(encoded)
-        rows_sha256.update(encoded)
-        chunk_rows += 1
+        append_row_parts(encoded_parts)
         copied_rows += 1
         if progress is not None and copied_rows % 256 == 0:
             progress["current_table_rows_copied"] = copied_rows
@@ -5240,6 +5285,13 @@ def merge_staged_table(
     compressed_size_total = 0
     rows_sha256 = hashlib.sha256()
     chunk_count = 0
+    maximum_encoded_row_bytes = int(
+        connection.getlimit(sqlite3.SQLITE_LIMIT_LENGTH)
+    ) + 9 * len(column_names)
+    row_decoder = SQLiteStageRowStreamDecoder(
+        column_count=len(column_names),
+        max_encoded_row_bytes=maximum_encoded_row_bytes,
+    )
     before_changes = int(connection.total_changes)
     for chunk in connection.execute(
         f"SELECT sequence, row_count, raw_size_bytes, compressed_size_bytes, "
@@ -5254,7 +5306,7 @@ def merge_staged_table(
         compressed_size = int(chunk["compressed_size_bytes"])
         compressed = bytes(chunk["payload"])
         if (
-            row_count <= 0
+            row_count < 0
             or raw_size <= 0
             or raw_size > PARALLEL_PAPER_STAGE_MAX_CHUNK_RAW_BYTES
             or compressed_size <= 0
@@ -5270,17 +5322,17 @@ def merge_staged_table(
         )
         if hashlib.sha256(raw).hexdigest() != str(chunk["raw_sha256"]):
             raise RuntimeError(f"parallel_paper_stage_chunk_integrity_failed:{table}")
-        rows = decode_sqlite_stage_chunk(
-            raw,
-            row_count=row_count,
-            column_count=len(column_names),
-        )
-        connection.executemany(insert_sql, rows)
+        rows = row_decoder.feed(raw)
+        if len(rows) != row_count:
+            raise RuntimeError(f"parallel_paper_stage_chunk_integrity_failed:{table}")
+        if rows:
+            connection.executemany(insert_sql, rows)
         rows_sha256.update(raw)
         chunk_rows_total += row_count
         raw_size_total += raw_size
         compressed_size_total += compressed_size
         chunk_count += 1
+    row_decoder.finish()
     rows_merged = int(connection.total_changes) - before_changes
     final_row_count = int(
         connection.execute(
