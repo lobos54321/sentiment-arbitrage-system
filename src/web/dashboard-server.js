@@ -76,6 +76,10 @@ import {
   normalizeRawPathBar,
   summarizeRawPathDiagnostics,
 } from '../analytics/raw-path-observer.js';
+import {
+  createSharedQuoteClient,
+  SOL_MINT,
+} from '../market-data/shared-quote-client.js';
 
 dotenv.config();
 
@@ -3492,7 +3496,7 @@ function openRawSignalOutcomesDb({ readonly = false } = {}) {
   return db;
 }
 
-function ensureRawSignalOutcomesSchema(db) {
+export function ensureRawSignalOutcomesSchema(db) {
   ensureRawPathObserverSchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS raw_signal_outcomes (
@@ -3561,6 +3565,15 @@ function ensureRawSignalOutcomesSchema(db) {
       sold_before_silver INTEGER DEFAULT 0,
       sold_before_gold INTEGER DEFAULT 0,
       exit_reason TEXT,
+      executable_quote_evidence_version TEXT,
+      executable_quote_size_sol REAL,
+      executable_entry_quote_json TEXT,
+      executable_exit_quote_json TEXT,
+      executable_quote_return_pct REAL,
+      executable_quote_evidence_status TEXT,
+      executable_quote_failure_reason TEXT,
+      executable_quote_last_attempt_ts INTEGER,
+      executable_quote_attempt_count INTEGER DEFAULT 0,
       payload_json TEXT,
       created_at INTEGER DEFAULT (strftime('%s', 'now')),
       updated_at INTEGER DEFAULT (strftime('%s', 'now'))
@@ -3583,8 +3596,421 @@ function ensureRawSignalOutcomesSchema(db) {
     `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_expected_minutes INTEGER DEFAULT 15`,
     `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_bar_coverage_pct REAL`,
     `ALTER TABLE raw_signal_outcomes ADD COLUMN early_15m_complete INTEGER DEFAULT 0`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_evidence_version TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_size_sol REAL`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_entry_quote_json TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_exit_quote_json TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_return_pct REAL`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_evidence_status TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_failure_reason TEXT`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_last_attempt_ts INTEGER`,
+    `ALTER TABLE raw_signal_outcomes ADD COLUMN executable_quote_attempt_count INTEGER DEFAULT 0`,
   ]) {
     try { db.exec(stmt); } catch {}
+  }
+}
+
+export const RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION = 'raw_executable_quote_evidence.v1';
+export const RAW_EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION = 'raw_executable_quote_record.v1';
+export const RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT = 0.003;
+export const RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC = 600;
+export const RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC = 600;
+const LAMPORTS_PER_SOL = 1_000_000_000;
+
+function positiveIntegerText(value) {
+  const text = String(value ?? '');
+  return /^[1-9][0-9]*$/.test(text) ? text : null;
+}
+
+function rawExecutableQuoteFailure(result) {
+  return String(result?.reason || result?.error || 'executable_quote_unavailable').slice(0, 200);
+}
+
+export function normalizeRawExecutableQuoteRecord({
+  result,
+  side,
+  signalId,
+  tokenCa,
+  signalTs,
+  horizonSec,
+  inputMint,
+  outputMint,
+  inputAmountRaw,
+  capturedAtMs = Date.now(),
+} = {}) {
+  const expectedInputAmount = positiveIntegerText(inputAmountRaw);
+  if (result?.ok !== true || result?.provider !== 'jupiter-ultra' || result?.source !== 'shared-quote-client') {
+    return { ok: false, error: rawExecutableQuoteFailure(result) };
+  }
+  const quote = result.quote;
+  if (!quote || typeof quote !== 'object' || Array.isArray(quote)) {
+    return { ok: false, error: 'executable_quote_payload_missing' };
+  }
+  const quoteInputAmount = positiveIntegerText(quote.inAmount);
+  const quoteOutputAmount = positiveIntegerText(quote.outAmount);
+  const requestId = String(quote.requestId || '').trim();
+  const routePlan = quote.routePlan;
+  if (!expectedInputAmount || quoteInputAmount !== expectedInputAmount || !quoteOutputAmount) {
+    return { ok: false, error: 'executable_quote_amount_mismatch' };
+  }
+  if (String(quote.inputMint || '') !== String(inputMint || '')
+      || String(quote.outputMint || '') !== String(outputMint || '')) {
+    return { ok: false, error: 'executable_quote_mint_mismatch' };
+  }
+  if (!requestId || !Array.isArray(routePlan) || routePlan.length === 0) {
+    return { ok: false, error: 'executable_quote_route_identity_missing' };
+  }
+  const capturedMs = Number(capturedAtMs);
+  const fetchedMs = Number(result.fetchedAt);
+  if (!Number.isSafeInteger(capturedMs) || capturedMs <= 0
+      || !Number.isSafeInteger(fetchedMs) || fetchedMs <= 0
+      || fetchedMs > capturedMs + 5_000
+      || capturedMs - fetchedMs > 60_000) {
+    return { ok: false, error: 'executable_quote_timestamp_invalid' };
+  }
+  const routePlanJson = canonicalAuditJson(routePlan);
+  return {
+    ok: true,
+    record: {
+      schema_version: RAW_EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION,
+      side,
+      signal_id: String(signalId),
+      token_ca: String(tokenCa),
+      signal_ts: Number(signalTs),
+      horizon_sec: Number(horizonSec),
+      provider: 'jupiter-ultra',
+      source: 'shared-quote-client',
+      input_mint: String(inputMint),
+      output_mint: String(outputMint),
+      input_amount_raw: quoteInputAmount,
+      output_amount_raw: quoteOutputAmount,
+      provider_request_id: requestId,
+      route_plan_json: routePlanJson,
+      route_plan_sha256: auditSha256Hex(routePlanJson),
+      route_plan_hop_count: routePlan.length,
+      provider_fetched_at_ms: fetchedMs,
+      captured_at_ms: capturedMs,
+      executable: true,
+    },
+  };
+}
+
+function rawExecutableQuoteReturnPct(entryRecord, exitRecord) {
+  const input = positiveIntegerText(entryRecord?.input_amount_raw);
+  const output = positiveIntegerText(exitRecord?.output_amount_raw);
+  if (!input || !output) return null;
+  const inputValue = Number(input);
+  const outputValue = Number(output);
+  if (!Number.isSafeInteger(inputValue) || !Number.isSafeInteger(outputValue)) return null;
+  const pct = ((outputValue / inputValue) - 1) * 100;
+  return Number.isFinite(pct) ? pct : null;
+}
+
+function boundedRawExecutableQuoteSizeSol(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 && numeric <= 1
+    ? numeric
+    : RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT;
+}
+
+function rawExecutableQuoteMutation(row, patch, { incrementAttempt = false } = {}) {
+  const attempts = Number(row?.executable_quote_attempt_count);
+  return {
+    ...row,
+    ...patch,
+    executable_quote_attempt_count: incrementAttempt
+      ? (Number.isSafeInteger(attempts) && attempts >= 0 ? attempts : 0) + 1
+      : row?.executable_quote_attempt_count,
+  };
+}
+
+export async function collectRawExecutableQuoteEvidence({
+  db: suppliedDb = null,
+  quoteClient: suppliedQuoteClient = null,
+  nowMs = Date.now(),
+  sizeSol = RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT,
+  entryMaxLagSec = RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC,
+  exitMaxLagSec = RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC,
+  historyWindowSec = 24 * 3600,
+  limit = 1000,
+} = {}) {
+  const capturedAtMs = Number(nowMs);
+  if (!Number.isSafeInteger(capturedAtMs) || capturedAtMs <= 0) {
+    throw new Error('raw_executable_quote_now_ms_invalid');
+  }
+  const nowSec = Math.floor(capturedAtMs / 1000);
+  const boundedSizeSol = boundedRawExecutableQuoteSizeSol(sizeSol);
+  const inputLamports = Math.round(boundedSizeSol * LAMPORTS_PER_SOL);
+  const boundedEntryLag = Math.trunc(Math.max(60, Math.min(3600, Number(entryMaxLagSec) || RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC)));
+  const boundedExitLag = Math.trunc(Math.max(60, Math.min(3600, Number(exitMaxLagSec) || RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC)));
+  const boundedHistoryWindow = Math.trunc(Math.max(3600, Math.min(7 * 24 * 3600, Number(historyWindowSec) || 24 * 3600)));
+  const boundedLimit = Math.trunc(Math.max(1, Math.min(5000, Number(limit) || 1000)));
+  let db = suppliedDb;
+  let quoteClient = suppliedQuoteClient;
+  let ownsDb = false;
+  let ownsQuoteClient = false;
+  const summary = {
+    schema_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+    observe_only: true,
+    size_sol: boundedSizeSol,
+    entry_attempted: 0,
+    entry_captured: 0,
+    entry_failed: 0,
+    exit_attempted: 0,
+    exit_captured: 0,
+    exit_failed: 0,
+    entry_window_expired: 0,
+    exit_window_expired: 0,
+    errors: [],
+  };
+  const client = () => {
+    if (!quoteClient) {
+      quoteClient = createSharedQuoteClient();
+      ownsQuoteClient = true;
+    }
+    return quoteClient;
+  };
+  try {
+    if (!db) {
+      db = openRawSignalOutcomesDb();
+      ownsDb = true;
+    } else {
+      ensureRawSignalOutcomesSchema(db);
+    }
+    const entryExpiredRows = db.prepare(`
+      SELECT * FROM raw_signal_outcomes
+      WHERE executable_entry_quote_json IS NULL
+        AND signal_id IS NOT NULL
+        AND token_ca IS NOT NULL
+        AND signal_ts IS NOT NULL
+        AND signal_ts >= @historyCutoff
+        AND signal_ts < @entryCutoff
+        AND COALESCE(executable_quote_evidence_status, '') != 'entry_window_expired'
+    `).all({
+      historyCutoff: nowSec - boundedHistoryWindow,
+      entryCutoff: nowSec - boundedEntryLag,
+    });
+    if (entryExpiredRows.length) {
+      upsertRawSignalOutcomes(db, entryExpiredRows.map((row) => rawExecutableQuoteMutation(row, {
+        executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+        executable_quote_evidence_status: 'entry_window_expired',
+        executable_quote_failure_reason: 'entry_quote_not_captured_in_time_legal_window',
+      })));
+    }
+    summary.entry_window_expired = entryExpiredRows.length;
+
+    const entryRows = db.prepare(`
+      SELECT *
+      FROM raw_signal_outcomes
+      WHERE executable_entry_quote_json IS NULL
+        AND signal_id IS NOT NULL
+        AND token_ca IS NOT NULL
+        AND signal_ts BETWEEN @entryCutoff AND @nowSec
+        AND horizon_sec IS NOT NULL
+        AND horizon_sec >= 0
+      ORDER BY signal_ts ASC, id ASC
+      LIMIT @limit
+    `).all({ entryCutoff: nowSec - boundedEntryLag, nowSec, limit: boundedLimit });
+    const entryMutations = [];
+    for (const row of entryRows) {
+      summary.entry_attempted += 1;
+      try {
+        const result = await client().getSwapQuote({
+          inputMint: SOL_MINT,
+          outputMint: String(row.token_ca),
+          amount: inputLamports,
+        });
+        const quoteCapturedAtMs = Date.now();
+        if (quoteCapturedAtMs > (Number(row.signal_ts) + boundedEntryLag + 1) * 1000) {
+          entryMutations.push(rawExecutableQuoteMutation(row, {
+            executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+            executable_quote_size_sol: boundedSizeSol,
+            executable_quote_evidence_status: 'entry_window_expired',
+            executable_quote_failure_reason: 'entry_quote_not_captured_in_time_legal_window',
+            executable_quote_last_attempt_ts: nowSec,
+          }, { incrementAttempt: true }));
+          summary.entry_failed += 1;
+          continue;
+        }
+        const normalized = normalizeRawExecutableQuoteRecord({
+          result,
+          side: 'entry',
+          signalId: row.signal_id,
+          tokenCa: row.token_ca,
+          signalTs: row.signal_ts,
+          horizonSec: row.horizon_sec,
+          inputMint: SOL_MINT,
+          outputMint: row.token_ca,
+          inputAmountRaw: inputLamports,
+          capturedAtMs: quoteCapturedAtMs,
+        });
+        if (!normalized.ok) {
+          entryMutations.push(rawExecutableQuoteMutation(row, {
+            executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+            executable_quote_size_sol: boundedSizeSol,
+            executable_quote_evidence_status: 'entry_retry_pending',
+            executable_quote_failure_reason: `entry:${normalized.error}`,
+            executable_quote_last_attempt_ts: nowSec,
+          }, { incrementAttempt: true }));
+          summary.entry_failed += 1;
+          continue;
+        }
+        entryMutations.push(rawExecutableQuoteMutation(row, {
+          executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          executable_quote_size_sol: boundedSizeSol,
+          executable_entry_quote_json: JSON.stringify(normalized.record),
+          executable_quote_evidence_status: 'entry_captured',
+          executable_quote_failure_reason: '',
+          executable_quote_last_attempt_ts: nowSec,
+        }, { incrementAttempt: true }));
+        summary.entry_captured += 1;
+      } catch (error) {
+        const reason = String(error?.message || error || 'entry_quote_exception').slice(0, 180);
+        entryMutations.push(rawExecutableQuoteMutation(row, {
+          executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          executable_quote_size_sol: boundedSizeSol,
+          executable_quote_evidence_status: 'entry_retry_pending',
+          executable_quote_failure_reason: `entry:${reason}`,
+          executable_quote_last_attempt_ts: nowSec,
+        }, { incrementAttempt: true }));
+        summary.entry_failed += 1;
+        summary.errors.push(`entry:${row.id}:${reason}`);
+      }
+    }
+    if (entryMutations.length) upsertRawSignalOutcomes(db, entryMutations);
+
+    const exitExpiredRows = db.prepare(`
+      SELECT * FROM raw_signal_outcomes
+      WHERE executable_entry_quote_json IS NOT NULL
+        AND executable_exit_quote_json IS NULL
+        AND signal_id IS NOT NULL
+        AND token_ca IS NOT NULL
+        AND signal_ts IS NOT NULL
+        AND horizon_sec IS NOT NULL
+        AND signal_ts >= @historyCutoff
+        AND signal_ts + horizon_sec < @exitCutoff
+        AND COALESCE(executable_quote_evidence_status, '') != 'exit_window_expired'
+    `).all({
+      historyCutoff: nowSec - boundedHistoryWindow,
+      exitCutoff: nowSec - boundedExitLag,
+    });
+    if (exitExpiredRows.length) {
+      upsertRawSignalOutcomes(db, exitExpiredRows.map((row) => rawExecutableQuoteMutation(row, {
+        executable_quote_evidence_status: 'exit_window_expired',
+        executable_quote_failure_reason: 'exit_quote_not_captured_in_time_legal_window',
+      })));
+    }
+    summary.exit_window_expired = exitExpiredRows.length;
+
+    const exitRows = db.prepare(`
+      SELECT *
+      FROM raw_signal_outcomes
+      WHERE executable_entry_quote_json IS NOT NULL
+        AND executable_exit_quote_json IS NULL
+        AND signal_ts IS NOT NULL
+        AND horizon_sec IS NOT NULL
+        AND signal_ts + horizon_sec BETWEEN @exitCutoff AND @nowSec
+      ORDER BY signal_ts + horizon_sec ASC, id ASC
+      LIMIT @limit
+    `).all({ exitCutoff: nowSec - boundedExitLag, nowSec, limit: boundedLimit });
+    const exitMutations = [];
+    for (const row of exitRows) {
+      summary.exit_attempted += 1;
+      let entryRecord;
+      try {
+        entryRecord = JSON.parse(row.executable_entry_quote_json);
+      } catch {
+        entryRecord = null;
+      }
+      const tokenAmountRaw = positiveIntegerText(entryRecord?.output_amount_raw);
+      if (!tokenAmountRaw) {
+        exitMutations.push(rawExecutableQuoteMutation(row, {
+          executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          executable_quote_size_sol: boundedSizeSol,
+          executable_quote_evidence_status: 'entry_evidence_invalid',
+          executable_quote_failure_reason: 'exit:entry_output_amount_invalid',
+          executable_quote_last_attempt_ts: nowSec,
+        }, { incrementAttempt: true }));
+        summary.exit_failed += 1;
+        continue;
+      }
+      try {
+        const result = await client().getSwapQuote({
+          inputMint: String(row.token_ca),
+          outputMint: SOL_MINT,
+          amount: tokenAmountRaw,
+        });
+        const quoteCapturedAtMs = Date.now();
+        if (quoteCapturedAtMs > (Number(row.signal_ts) + Number(row.horizon_sec) + boundedExitLag + 1) * 1000) {
+          exitMutations.push(rawExecutableQuoteMutation(row, {
+            executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+            executable_quote_size_sol: boundedSizeSol,
+            executable_quote_evidence_status: 'exit_window_expired',
+            executable_quote_failure_reason: 'exit_quote_not_captured_in_time_legal_window',
+            executable_quote_last_attempt_ts: nowSec,
+          }, { incrementAttempt: true }));
+          summary.exit_failed += 1;
+          continue;
+        }
+        const normalized = normalizeRawExecutableQuoteRecord({
+          result,
+          side: 'exit',
+          signalId: row.signal_id,
+          tokenCa: row.token_ca,
+          signalTs: row.signal_ts,
+          horizonSec: row.horizon_sec,
+          inputMint: row.token_ca,
+          outputMint: SOL_MINT,
+          inputAmountRaw: tokenAmountRaw,
+          capturedAtMs: quoteCapturedAtMs,
+        });
+        const returnPct = normalized.ok
+          ? rawExecutableQuoteReturnPct(entryRecord, normalized.record)
+          : null;
+        if (!normalized.ok || returnPct == null) {
+          exitMutations.push(rawExecutableQuoteMutation(row, {
+            executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+            executable_quote_size_sol: boundedSizeSol,
+            executable_quote_evidence_status: 'exit_retry_pending',
+            executable_quote_failure_reason: `exit:${normalized.error || 'return_pct_invalid'}`,
+            executable_quote_last_attempt_ts: nowSec,
+          }, { incrementAttempt: true }));
+          summary.exit_failed += 1;
+          continue;
+        }
+        exitMutations.push(rawExecutableQuoteMutation(row, {
+          executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          executable_quote_size_sol: boundedSizeSol,
+          executable_exit_quote_json: JSON.stringify(normalized.record),
+          executable_quote_return_pct: returnPct,
+          executable_quote_evidence_status: 'complete',
+          executable_quote_failure_reason: '',
+          executable_quote_last_attempt_ts: nowSec,
+        }, { incrementAttempt: true }));
+        summary.exit_captured += 1;
+      } catch (error) {
+        const reason = String(error?.message || error || 'exit_quote_exception').slice(0, 180);
+        exitMutations.push(rawExecutableQuoteMutation(row, {
+          executable_quote_evidence_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          executable_quote_size_sol: boundedSizeSol,
+          executable_quote_evidence_status: 'exit_retry_pending',
+          executable_quote_failure_reason: `exit:${reason}`,
+          executable_quote_last_attempt_ts: nowSec,
+        }, { incrementAttempt: true }));
+        summary.exit_failed += 1;
+        summary.errors.push(`exit:${row.id}:${reason}`);
+      }
+    }
+    if (exitMutations.length) upsertRawSignalOutcomes(db, exitMutations);
+    summary.errors = summary.errors.slice(0, 20);
+    return summary;
+  } finally {
+    if (ownsDb) {
+      try { db?.close(); } catch {}
+    }
+    if (ownsQuoteClient) {
+      try { await quoteClient?.close(); } catch {}
+    }
   }
 }
 
@@ -3608,7 +4034,12 @@ function upsertRawSignalOutcomes(db, outcomes) {
       sustained_evaluable, sustained_reason,
       outlier_flag, outlier_reason, did_enter, paper_trade_id, canonical_trade_id,
       entered_before_peak, held_to_silver, held_to_gold, raw_dog_entered, raw_dog_realized,
-      sold_before_silver, sold_before_gold, exit_reason, payload_json, updated_at
+      sold_before_silver, sold_before_gold, exit_reason,
+      executable_quote_evidence_version, executable_quote_size_sol,
+      executable_entry_quote_json, executable_exit_quote_json, executable_quote_return_pct,
+      executable_quote_evidence_status, executable_quote_failure_reason,
+      executable_quote_last_attempt_ts, executable_quote_attempt_count,
+      payload_json, updated_at
     ) VALUES (
       @signal_id, @token_ca, @symbol, @signal_ts, @signal_type, @route, @hard_gate_status, @source,
       @observation_status, @right_censored, @matured_at_ts, @horizon_sec,
@@ -3626,7 +4057,12 @@ function upsertRawSignalOutcomes(db, outcomes) {
       @sustained_evaluable, @sustained_reason,
       @outlier_flag, @outlier_reason, @did_enter, @paper_trade_id, @canonical_trade_id,
       @entered_before_peak, @held_to_silver, @held_to_gold, @raw_dog_entered, @raw_dog_realized,
-      @sold_before_silver, @sold_before_gold, @exit_reason, @payload_json, @updated_at
+      @sold_before_silver, @sold_before_gold, @exit_reason,
+      @executable_quote_evidence_version, @executable_quote_size_sol,
+      @executable_entry_quote_json, @executable_exit_quote_json, @executable_quote_return_pct,
+      @executable_quote_evidence_status, @executable_quote_failure_reason,
+      @executable_quote_last_attempt_ts, @executable_quote_attempt_count,
+      @payload_json, @updated_at
     )
     ON CONFLICT(signal_id, token_ca, signal_ts) DO UPDATE SET
       symbol = excluded.symbol,
@@ -3690,6 +4126,42 @@ function upsertRawSignalOutcomes(db, outcomes) {
       sold_before_silver = excluded.sold_before_silver,
       sold_before_gold = excluded.sold_before_gold,
       exit_reason = excluded.exit_reason,
+      executable_quote_evidence_version = COALESCE(
+        excluded.executable_quote_evidence_version,
+        raw_signal_outcomes.executable_quote_evidence_version
+      ),
+      executable_quote_size_sol = COALESCE(
+        excluded.executable_quote_size_sol,
+        raw_signal_outcomes.executable_quote_size_sol
+      ),
+      executable_entry_quote_json = COALESCE(
+        excluded.executable_entry_quote_json,
+        raw_signal_outcomes.executable_entry_quote_json
+      ),
+      executable_exit_quote_json = COALESCE(
+        excluded.executable_exit_quote_json,
+        raw_signal_outcomes.executable_exit_quote_json
+      ),
+      executable_quote_return_pct = COALESCE(
+        excluded.executable_quote_return_pct,
+        raw_signal_outcomes.executable_quote_return_pct
+      ),
+      executable_quote_evidence_status = COALESCE(
+        excluded.executable_quote_evidence_status,
+        raw_signal_outcomes.executable_quote_evidence_status
+      ),
+      executable_quote_failure_reason = COALESCE(
+        excluded.executable_quote_failure_reason,
+        raw_signal_outcomes.executable_quote_failure_reason
+      ),
+      executable_quote_last_attempt_ts = COALESCE(
+        excluded.executable_quote_last_attempt_ts,
+        raw_signal_outcomes.executable_quote_last_attempt_ts
+      ),
+      executable_quote_attempt_count = COALESCE(
+        excluded.executable_quote_attempt_count,
+        raw_signal_outcomes.executable_quote_attempt_count
+      ),
       payload_json = excluded.payload_json,
       updated_at = excluded.updated_at
   `);
@@ -3775,7 +4247,16 @@ function serializeRawSignalOutcomeForDb(row) {
     sold_before_silver: boolInt(row.sold_before_silver),
     sold_before_gold: boolInt(row.sold_before_gold),
     exit_reason: textOrNull(row.exit_reason),
-    payload_json: JSON.stringify(row),
+    executable_quote_evidence_version: textOrNull(row.executable_quote_evidence_version),
+    executable_quote_size_sol: row.executable_quote_size_sol ?? null,
+    executable_entry_quote_json: textOrNull(row.executable_entry_quote_json),
+    executable_exit_quote_json: textOrNull(row.executable_exit_quote_json),
+    executable_quote_return_pct: row.executable_quote_return_pct ?? null,
+    executable_quote_evidence_status: textOrNull(row.executable_quote_evidence_status),
+    executable_quote_failure_reason: textOrNull(row.executable_quote_failure_reason),
+    executable_quote_last_attempt_ts: row.executable_quote_last_attempt_ts ?? null,
+    executable_quote_attempt_count: row.executable_quote_attempt_count ?? null,
+    payload_json: typeof row.payload_json === 'string' ? row.payload_json : JSON.stringify(row),
     updated_at: Math.floor(Date.now() / 1000),
   };
 }
@@ -5191,6 +5672,7 @@ const rawDogDiscoveryObserverState = {
   last_persisted_rows: null,
   last_summary: null,
   last_diagnostics: null,
+  last_executable_quote_evidence: null,
   error_count: 0,
   last_error: null,
 };
@@ -5222,7 +5704,7 @@ function startRawDogDiscoveryObserver() {
   rawDogDiscoveryObserverState.window_hours = windowHours;
   rawDogDiscoveryObserverState.limit = limit;
 
-  const runOnce = () => {
+  const runOnce = async () => {
     if (rawDogDiscoveryObserverBusy) return;
     rawDogDiscoveryObserverBusy = true;
     const started = Date.now();
@@ -5241,16 +5723,41 @@ function startRawDogDiscoveryObserver() {
         coverageTargetPct,
         persist: true,
       });
+      const quoteEvidence = envBool('RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED', true)
+        ? await collectRawExecutableQuoteEvidence({
+          nowMs: Date.now(),
+          sizeSol: process.env.PAPER_TINY_SCOUT_SIZE_SOL || RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT,
+          entryMaxLagSec: envInt(
+            'RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC',
+            RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC,
+            60,
+            3600,
+          ),
+          exitMaxLagSec: envInt(
+            'RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC',
+            RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC,
+            60,
+            3600,
+          ),
+          limit: envInt('RAW_EXECUTABLE_QUOTE_BATCH_LIMIT', 1000, 1, 5000),
+        })
+        : {
+          schema_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+          observe_only: true,
+          enabled: false,
+          reason: 'disabled_by_RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED',
+        };
       rawDogDiscoveryObserverState.last_completed_at = new Date().toISOString();
       rawDogDiscoveryObserverState.last_duration_ms = Date.now() - started;
       rawDogDiscoveryObserverState.last_persisted_rows = snapshot.diagnostics?.raw_db?.persisted_rows ?? null;
       rawDogDiscoveryObserverState.last_summary = snapshot.report?.summary || null;
       rawDogDiscoveryObserverState.last_diagnostics = snapshot.diagnostics || null;
+      rawDogDiscoveryObserverState.last_executable_quote_evidence = quoteEvidence;
       if (!snapshot.available || snapshot.diagnostics?.raw_db?.error) {
         rawDogDiscoveryObserverState.error_count += 1;
         rawDogDiscoveryObserverState.last_error = snapshot.error || snapshot.diagnostics?.raw_db?.error || 'raw_discovery_snapshot_unavailable';
       }
-      console.log(`[RAW_DOG_DISCOVERY_OBSERVER] persisted=${rawDogDiscoveryObserverState.last_persisted_rows ?? 'n/a'} coverage=${rawDogDiscoveryObserverState.last_summary?.raw_kline_coverage_pct ?? 'n/a'} status=${rawDogDiscoveryObserverState.last_summary?.denominator_status || 'unknown'}`);
+      console.log(`[RAW_DOG_DISCOVERY_OBSERVER] persisted=${rawDogDiscoveryObserverState.last_persisted_rows ?? 'n/a'} coverage=${rawDogDiscoveryObserverState.last_summary?.raw_kline_coverage_pct ?? 'n/a'} quote_entry=${quoteEvidence.entry_captured ?? 'n/a'} quote_exit=${quoteEvidence.exit_captured ?? 'n/a'} status=${rawDogDiscoveryObserverState.last_summary?.denominator_status || 'unknown'}`);
     } catch (error) {
       rawDogDiscoveryObserverState.error_count += 1;
       rawDogDiscoveryObserverState.last_error = error?.message || String(error);

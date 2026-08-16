@@ -12,7 +12,9 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import time
@@ -27,6 +29,19 @@ DEFAULT_CONTRACT = PROJECT_ROOT / "docs" / "agents" / "contracts" / "telegram-ou
 MESSAGE_ID_COLUMNS = ("telegram_message_id", "source_message_id", "message_id")
 CHANNEL_ID_COLUMNS = ("telegram_channel_id", "source_channel_id", "channel_id", "chat_id")
 LIFECYCLE_COLUMNS = ("downstream_lifecycle_id", "lifecycle_id")
+SOL_MINT = "So11111111111111111111111111111111111111112"
+EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION = "raw_executable_quote_evidence.v1"
+EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION = "raw_executable_quote_record.v1"
+EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC = 600
+EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC = 600
+EXECUTABLE_QUOTE_REQUIRED_COLUMNS = {
+    "executable_quote_evidence_version",
+    "executable_quote_size_sol",
+    "executable_entry_quote_json",
+    "executable_exit_quote_json",
+    "executable_quote_return_pct",
+    "executable_quote_evidence_status",
+}
 
 
 def utc_now_iso() -> str:
@@ -251,7 +266,15 @@ def select_raw_outcomes(
             "raw_primary_tier",
             "max_wick_peak_pct",
             "max_sustained_peak_pct",
+            "executable_quote_evidence_version",
+            "executable_quote_size_sol",
+            "executable_entry_quote_json",
+            "executable_exit_quote_json",
             "executable_quote_return_pct",
+            "executable_quote_evidence_status",
+            "executable_quote_failure_reason",
+            "executable_quote_last_attempt_ts",
+            "executable_quote_attempt_count",
             "sustained_evaluable",
             "baseline_confidence",
             "updated_at",
@@ -324,6 +347,128 @@ def raw_outcome_maturity(row: dict[str, Any], snapshot_ts: int) -> dict[str, Any
         "explicit_right_censored": explicit_right_censored,
         "reasons": reasons,
     }
+
+
+def _strict_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _positive_integer_text(value: Any) -> str | None:
+    if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+        return None
+    return value
+
+
+def _parse_quote_record(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def validate_executable_quote_evidence(row: dict[str, Any]) -> dict[str, Any]:
+    def reject(reason: str) -> dict[str, Any]:
+        return {"valid": False, "reason": reason, "return_pct": None}
+
+    if row.get("executable_quote_evidence_version") != EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION:
+        return reject("evidence_version_missing_or_invalid")
+    if row.get("executable_quote_evidence_status") != "complete":
+        return reject("evidence_status_not_complete")
+    signal_id = normalized_text(row.get("signal_id"))
+    token_ca = normalized_text(row.get("token_ca"))
+    signal_ts = _strict_int(row.get("signal_ts"))
+    horizon_sec = _strict_int(row.get("horizon_sec"))
+    if not signal_id or not token_ca or signal_ts is None or horizon_sec is None or horizon_sec < 0:
+        return reject("row_identity_or_horizon_invalid")
+    size_sol = row.get("executable_quote_size_sol")
+    if (not isinstance(size_sol, (int, float)) or isinstance(size_sol, bool)
+            or not math.isfinite(float(size_sol)) or not 0 < float(size_sol) <= 1):
+        return reject("quote_size_invalid")
+    stored_return_pct = row.get("executable_quote_return_pct")
+    if (not isinstance(stored_return_pct, (int, float)) or isinstance(stored_return_pct, bool)
+            or not math.isfinite(float(stored_return_pct))):
+        return reject("stored_return_pct_invalid")
+    entry = _parse_quote_record(row.get("executable_entry_quote_json"))
+    exit_quote = _parse_quote_record(row.get("executable_exit_quote_json"))
+    if entry is None or exit_quote is None:
+        return reject("entry_or_exit_quote_json_invalid")
+
+    def validate_record(record: dict[str, Any], side: str) -> str | None:
+        if record.get("schema_version") != EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION:
+            return f"{side}_record_version_invalid"
+        if record.get("side") != side:
+            return f"{side}_side_invalid"
+        if normalized_text(record.get("signal_id")) != signal_id:
+            return f"{side}_signal_id_mismatch"
+        if normalized_text(record.get("token_ca")) != token_ca:
+            return f"{side}_token_ca_mismatch"
+        if _strict_int(record.get("signal_ts")) != signal_ts:
+            return f"{side}_signal_ts_mismatch"
+        if _strict_int(record.get("horizon_sec")) != horizon_sec:
+            return f"{side}_horizon_sec_mismatch"
+        if record.get("provider") != "jupiter-ultra" or record.get("source") != "shared-quote-client":
+            return f"{side}_provider_invalid"
+        if record.get("executable") is not True:
+            return f"{side}_executable_flag_invalid"
+        if not normalized_text(record.get("provider_request_id")):
+            return f"{side}_request_id_missing"
+        if _positive_integer_text(record.get("input_amount_raw")) is None:
+            return f"{side}_input_amount_invalid"
+        if _positive_integer_text(record.get("output_amount_raw")) is None:
+            return f"{side}_output_amount_invalid"
+        route_plan_json = record.get("route_plan_json")
+        if not isinstance(route_plan_json, str) or not route_plan_json:
+            return f"{side}_route_plan_missing"
+        if hashlib.sha256(route_plan_json.encode("utf-8")).hexdigest() != record.get("route_plan_sha256"):
+            return f"{side}_route_plan_hash_mismatch"
+        try:
+            route_plan = json.loads(route_plan_json)
+        except (TypeError, ValueError):
+            return f"{side}_route_plan_json_invalid"
+        hop_count = _strict_int(record.get("route_plan_hop_count"))
+        if not isinstance(route_plan, list) or not route_plan or hop_count != len(route_plan):
+            return f"{side}_route_plan_hop_count_invalid"
+        fetched_at_ms = _strict_int(record.get("provider_fetched_at_ms"))
+        captured_at_ms = _strict_int(record.get("captured_at_ms"))
+        if fetched_at_ms is None or captured_at_ms is None or fetched_at_ms <= 0 or captured_at_ms <= 0:
+            return f"{side}_timestamp_invalid"
+        if fetched_at_ms > captured_at_ms + 5_000 or captured_at_ms - fetched_at_ms > 60_000:
+            return f"{side}_provider_timestamp_unbound"
+        return None
+
+    for record, side in ((entry, "entry"), (exit_quote, "exit")):
+        reason = validate_record(record, side)
+        if reason:
+            return reject(reason)
+
+    if entry.get("input_mint") != SOL_MINT or entry.get("output_mint") != token_ca:
+        return reject("entry_mint_direction_invalid")
+    if exit_quote.get("input_mint") != token_ca or exit_quote.get("output_mint") != SOL_MINT:
+        return reject("exit_mint_direction_invalid")
+    expected_entry_input = round(float(size_sol) * 1_000_000_000)
+    if int(entry["input_amount_raw"]) != expected_entry_input:
+        return reject("entry_size_amount_mismatch")
+    if exit_quote["input_amount_raw"] != entry["output_amount_raw"]:
+        return reject("entry_exit_amount_chain_mismatch")
+    entry_captured_ms = int(entry["captured_at_ms"])
+    exit_captured_ms = int(exit_quote["captured_at_ms"])
+    if not signal_ts * 1000 <= entry_captured_ms <= (signal_ts + EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC) * 1000 + 999:
+        return reject("entry_capture_outside_time_legal_window")
+    exit_target_ts = signal_ts + horizon_sec
+    if not exit_target_ts * 1000 <= exit_captured_ms <= (exit_target_ts + EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC) * 1000 + 999:
+        return reject("exit_capture_outside_time_legal_window")
+    recomputed_return_pct = (
+        (int(exit_quote["output_amount_raw"]) / int(entry["input_amount_raw"])) - 1
+    ) * 100
+    if not math.isfinite(recomputed_return_pct):
+        return reject("recomputed_return_pct_invalid")
+    tolerance = max(1e-9, abs(recomputed_return_pct) * 1e-12)
+    if abs(float(stored_return_pct) - recomputed_return_pct) > tolerance:
+        return reject("stored_return_pct_mismatch")
+    return {"valid": True, "reason": None, "return_pct": recomputed_return_pct}
 
 
 def file_metadata(path: str | Path | None) -> dict[str, Any]:
@@ -475,14 +620,24 @@ def build_audit(
     )
     wick_tiers = Counter(tier_for_pct(row.get("max_wick_peak_pct"), contract) for row in matured_rows)
     sustained_tiers = Counter(tier_for_pct(row.get("max_sustained_peak_pct"), contract) for row in matured_rows)
-    executable_tier_available = "executable_quote_return_pct" in raw_columns
+    executable_tier_available = EXECUTABLE_QUOTE_REQUIRED_COLUMNS.issubset(raw_columns)
+    executable_validations = [
+        validate_executable_quote_evidence(row)
+        for row in matured_rows
+    ] if executable_tier_available else []
     executable_rows = [
-        row for row in matured_rows
-        if row.get("executable_quote_return_pct") is not None
+        (row, validation)
+        for row, validation in zip(matured_rows, executable_validations)
+        if validation["valid"]
     ]
+    executable_invalid_reason_counts = Counter(
+        validation["reason"]
+        for validation in executable_validations
+        if not validation["valid"]
+    )
     executable_tiers = Counter(
-        tier_for_pct(row.get("executable_quote_return_pct"), contract)
-        for row in executable_rows
+        tier_for_pct(validation["return_pct"], contract)
+        for _row, validation in executable_rows
     )
     executable_coverage_rate = round_rate(len(executable_rows), len(matured_rows))
 
@@ -660,7 +815,19 @@ def build_audit(
                 "coverage_rate": executable_coverage_rate,
                 "tier_counts": dict(sorted(executable_tiers.items())),
                 "calculated": executable_tier_calculated,
-                "rule": "Never infer executable tier from wick or OHLCV high.",
+                "evidence_schema_version": EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+                "record_schema_version": EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION,
+                "invalid_reason_counts": dict(sorted(executable_invalid_reason_counts.items())),
+                "invalid_examples": [
+                    {
+                        "signal_id": normalized_text(row.get("signal_id")),
+                        "token_ca": normalized_text(row.get("token_ca")),
+                        "reason": validation["reason"],
+                    }
+                    for row, validation in zip(matured_rows, executable_validations)
+                    if not validation["valid"]
+                ][:20],
+                "rule": "Require time-legal Jupiter entry and exit quote records; never infer executable tier from wick or OHLCV high.",
             },
         },
         "earliest_legal_capture_contract": contract.get("earliest_legal_capture"),
@@ -669,6 +836,67 @@ def build_audit(
         "warnings": sorted(set(warnings)),
         "next_stage": "A3_frozen_cross_db_snapshot" if acceptance["passed"] and not blockers else "resolve_A1_input_blockers",
     }
+
+
+def _self_test_executable_quote_evidence(
+    signal_id: str,
+    token_ca: str,
+    signal_ts: int,
+    horizon_sec: int,
+    return_pct: float,
+) -> tuple[Any, ...]:
+    entry_input = 3_000_000
+    token_amount = 12_345_678 + int(signal_id)
+    exit_output = round(entry_input * (1 + return_pct / 100))
+    route_plan_json = '[{"percent":100}]'
+    route_hash = hashlib.sha256(route_plan_json.encode()).hexdigest()
+
+    def record(
+        side: str,
+        input_mint: str,
+        output_mint: str,
+        input_amount: int,
+        output_amount: int,
+        captured_at_ms: int,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION,
+            "side": side,
+            "signal_id": signal_id,
+            "token_ca": token_ca,
+            "signal_ts": signal_ts,
+            "horizon_sec": horizon_sec,
+            "provider": "jupiter-ultra",
+            "source": "shared-quote-client",
+            "input_mint": input_mint,
+            "output_mint": output_mint,
+            "input_amount_raw": str(input_amount),
+            "output_amount_raw": str(output_amount),
+            "provider_request_id": f"self-test-{signal_id}-{side}",
+            "route_plan_json": route_plan_json,
+            "route_plan_sha256": route_hash,
+            "route_plan_hop_count": 1,
+            "provider_fetched_at_ms": captured_at_ms,
+            "captured_at_ms": captured_at_ms,
+            "executable": True,
+        }
+
+    entry = record(
+        "entry", SOL_MINT, token_ca, entry_input, token_amount, (signal_ts + 60) * 1000,
+    )
+    exit_quote = record(
+        "exit", token_ca, SOL_MINT, token_amount, exit_output,
+        (signal_ts + horizon_sec + 60) * 1000,
+    )
+    exact_return = ((exit_output / entry_input) - 1) * 100
+    return (
+        EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+        0.003,
+        json.dumps(entry, sort_keys=True),
+        json.dumps(exit_quote, sort_keys=True),
+        exact_return,
+        "complete",
+    )
 
 
 def self_test() -> None:
@@ -718,17 +946,25 @@ def self_test() -> None:
               horizon_sec INTEGER,
               max_wick_peak_pct REAL,
               max_sustained_peak_pct REAL,
+              executable_quote_evidence_version TEXT,
+              executable_quote_size_sol REAL,
+              executable_entry_quote_json TEXT,
+              executable_exit_quote_json TEXT,
               executable_quote_return_pct REAL,
+              executable_quote_evidence_status TEXT,
               updated_at INTEGER
             )
             """
         )
         raw.executemany(
-            "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO raw_signal_outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
-                (1, "1", "TOKEN_A", now - 8300, "matured", 0, 7200, 1200.0, 950.0, 900.0, now),
-                (2, "2", "TOKEN_A", now - 8200, "matured", 0, 7200, 60.0, 55.0, 52.0, now),
-                (3, "3", "TOKEN_B", now - 8100, "matured", 0, 7200, 30.0, 27.0, 26.0, now),
+                (1, "1", "TOKEN_A", now - 8300, "matured", 0, 7200, 1200.0, 950.0,
+                 *_self_test_executable_quote_evidence("1", "TOKEN_A", now - 8300, 7200, 900.0), now),
+                (2, "2", "TOKEN_A", now - 8200, "matured", 0, 7200, 60.0, 55.0,
+                 *_self_test_executable_quote_evidence("2", "TOKEN_A", now - 8200, 7200, 52.0), now),
+                (3, "3", "TOKEN_B", now - 8100, "matured", 0, 7200, 30.0, 27.0,
+                 *_self_test_executable_quote_evidence("3", "TOKEN_B", now - 8100, 7200, 26.0), now),
             ],
         )
         raw.commit()

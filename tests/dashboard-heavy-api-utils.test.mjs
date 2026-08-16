@@ -68,6 +68,11 @@ import {
   readV27DenominatorReadModelHealth,
   readV27ModeReadiness,
   readV27ReadModelWorkerHealth,
+  collectRawExecutableQuoteEvidence,
+  ensureRawSignalOutcomesSchema,
+  normalizeRawExecutableQuoteRecord,
+  RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+  RAW_EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION,
   LOG_REDACTION_PATTERN_SET,
   redactLogMessage,
   V27_API_RESPONSE_ENVELOPE_VERSION,
@@ -77,6 +82,184 @@ import {
   tryBeginPaperReport,
   verifyDashboardAuditChain,
 } from '../src/web/dashboard-server.js';
+import { SOL_MINT } from '../src/market-data/shared-quote-client.js';
+
+test('raw executable quote evidence migrates old DBs and stores a genuine round trip', async () => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), 'raw-executable-quote-'));
+  const legacyDb = new Database(join(tmp, 'legacy.db'));
+  legacyDb.exec(`
+    CREATE TABLE raw_signal_outcomes (
+      id INTEGER PRIMARY KEY,
+      signal_id TEXT,
+      token_ca TEXT,
+      signal_ts INTEGER,
+      horizon_sec INTEGER,
+      observation_status TEXT,
+      right_censored INTEGER,
+      raw_primary_tier TEXT,
+      updated_at INTEGER
+    )
+  `);
+  ensureRawSignalOutcomesSchema(legacyDb);
+  const migratedColumns = new Set(
+    legacyDb.prepare('PRAGMA table_info(raw_signal_outcomes)').all().map((row) => row.name),
+  );
+  assert.equal(migratedColumns.has('executable_entry_quote_json'), true);
+  assert.equal(migratedColumns.has('executable_exit_quote_json'), true);
+  assert.equal(migratedColumns.has('executable_quote_return_pct'), true);
+  legacyDb.close();
+
+  const rawDb = new Database(join(tmp, 'raw.db'));
+  ensureRawSignalOutcomesSchema(rawDb);
+  const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000);
+  rawDb.exec(`
+    INSERT INTO raw_signal_outcomes (
+      id, signal_id, token_ca, signal_ts, horizon_sec, observation_status, right_censored, updated_at
+    ) VALUES (1, 'signal-1', 'TOKEN_A', ${nowSec - 30}, 0, 'matured', 0, ${nowSec});
+  `);
+  const calls = [];
+  const quoteClient = {
+    async getSwapQuote({ inputMint, outputMint, amount }) {
+      calls.push({ inputMint, outputMint, amount: String(amount) });
+      const entry = inputMint === SOL_MINT;
+      return {
+        ok: true,
+        provider: 'jupiter-ultra',
+        source: 'shared-quote-client',
+        fetchedAt: Date.now(),
+        quote: {
+          inputMint,
+          outputMint,
+          inAmount: String(amount),
+          outAmount: entry ? '12345678' : '3300000',
+          requestId: entry ? 'entry-request-1' : 'exit-request-1',
+          routePlan: [{ percent: 100, swapInfo: { ammKey: entry ? 'entry-pool' : 'exit-pool' } }],
+        },
+      };
+    },
+  };
+  try {
+    const summary = await collectRawExecutableQuoteEvidence({
+      db: rawDb,
+      quoteClient,
+      nowMs,
+    });
+    assert.equal(summary.entry_captured, 1);
+    assert.equal(summary.exit_captured, 1);
+    assert.deepEqual(calls, [
+      { inputMint: SOL_MINT, outputMint: 'TOKEN_A', amount: '3000000' },
+      { inputMint: 'TOKEN_A', outputMint: SOL_MINT, amount: '12345678' },
+    ]);
+    const row = rawDb.prepare('SELECT * FROM raw_signal_outcomes WHERE id = 1').get();
+    const entry = JSON.parse(row.executable_entry_quote_json);
+    const exitQuote = JSON.parse(row.executable_exit_quote_json);
+    assert.equal(row.executable_quote_evidence_version, RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION);
+    assert.equal(entry.schema_version, RAW_EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION);
+    assert.equal(exitQuote.schema_version, RAW_EXECUTABLE_QUOTE_RECORD_SCHEMA_VERSION);
+    assert.equal(entry.output_amount_raw, exitQuote.input_amount_raw);
+    assert.equal(row.executable_quote_evidence_status, 'complete');
+    assert.ok(Math.abs(row.executable_quote_return_pct - 10) < 1e-9);
+    assert.equal(entry.executable, true);
+    assert.equal(exitQuote.executable, true);
+  } finally {
+    rawDb.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('raw executable quote evidence never backfills expired entry windows or accepts malformed routes', async () => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), 'raw-executable-quote-expired-'));
+  const rawDb = new Database(join(tmp, 'raw.db'));
+  ensureRawSignalOutcomesSchema(rawDb);
+  const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000);
+  rawDb.exec(`
+    INSERT INTO raw_signal_outcomes (
+      id, signal_id, token_ca, signal_ts, horizon_sec, observation_status, right_censored,
+      raw_primary_tier, updated_at
+    ) VALUES
+      (1, 'expired', 'TOKEN_OLD', ${nowSec - 601}, 7200, 'pending', 1, NULL, ${nowSec}),
+      (2, 'fresh', 'TOKEN_FRESH', ${nowSec - 30}, 7200, 'pending', 1, NULL, ${nowSec});
+  `);
+  let calls = 0;
+  const quoteClient = {
+    async getSwapQuote({ inputMint, outputMint, amount }) {
+      calls += 1;
+      return {
+        ok: true,
+        provider: 'jupiter-ultra',
+        source: 'shared-quote-client',
+        fetchedAt: Date.now(),
+        quote: {
+          inputMint,
+          outputMint,
+          inAmount: String(amount),
+          outAmount: '123',
+          requestId: 'route-less',
+          routePlan: [],
+        },
+      };
+    },
+  };
+  try {
+    const summary = await collectRawExecutableQuoteEvidence({ db: rawDb, quoteClient, nowMs });
+    assert.equal(calls, 1);
+    assert.equal(summary.entry_window_expired, 1);
+    assert.equal(summary.entry_failed, 1);
+    const expired = rawDb.prepare('SELECT * FROM raw_signal_outcomes WHERE id = 1').get();
+    const fresh = rawDb.prepare('SELECT * FROM raw_signal_outcomes WHERE id = 2').get();
+    assert.equal(expired.executable_quote_evidence_status, 'entry_window_expired');
+    assert.equal(expired.executable_entry_quote_json, null);
+    assert.equal(fresh.executable_quote_evidence_status, 'entry_retry_pending');
+    assert.equal(fresh.executable_quote_return_pct, null);
+  } finally {
+    rawDb.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('raw executable quote normalization rejects mismatched mints and stale timestamps', () => {
+  const nowMs = Date.now();
+  const base = {
+    ok: true,
+    provider: 'jupiter-ultra',
+    source: 'shared-quote-client',
+    fetchedAt: nowMs,
+    quote: {
+      inputMint: SOL_MINT,
+      outputMint: 'TOKEN_A',
+      inAmount: '3000000',
+      outAmount: '12345678',
+      requestId: 'request-1',
+      routePlan: [{ percent: 100 }],
+    },
+  };
+  const args = {
+    result: base,
+    side: 'entry',
+    signalId: 'signal-1',
+    tokenCa: 'TOKEN_A',
+    signalTs: Math.floor(nowMs / 1000),
+    horizonSec: 7200,
+    inputMint: SOL_MINT,
+    outputMint: 'TOKEN_A',
+    inputAmountRaw: '3000000',
+    capturedAtMs: nowMs,
+  };
+  assert.equal(normalizeRawExecutableQuoteRecord(args).ok, true);
+  assert.deepEqual(
+    normalizeRawExecutableQuoteRecord({
+      ...args,
+      result: { ...base, quote: { ...base.quote, outputMint: 'TOKEN_B' } },
+    }),
+    { ok: false, error: 'executable_quote_mint_mismatch' },
+  );
+  assert.deepEqual(
+    normalizeRawExecutableQuoteRecord({ ...args, capturedAtMs: nowMs + 61_000 }),
+    { ok: false, error: 'executable_quote_timestamp_invalid' },
+  );
+});
 
 test('parallel stage bulk-page claims use the production-calibrated 384 MiB floor', () => {
   const threshold = PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES;
