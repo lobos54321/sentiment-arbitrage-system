@@ -475,7 +475,6 @@
         "candidate_order_index_scaled_physical_advisory_bytes",
         "sample_limit_rows",
         "sample_rows",
-        "selected_row_count",
         "table_advisory_bytes",
         "table_root_reserve_advisory_bytes",
         "table_row_overhead_advisory_bytes",
@@ -487,6 +486,20 @@
       ],
       "kind": "safe_integer",
       "nullable": false,
+      "minimum": 0
+    },
+    {
+      "id": "nullable_shared_advisory_row_count_fields",
+      "fields": [
+        "sample_row_count_advisory_basis",
+        "selected_row_count"
+      ],
+      "parent_path_patterns": [
+        "disk_preflight.shared_stage_budget.targets.*.advisory_evidence",
+        "shared_stage_budget.targets.*.advisory_evidence"
+      ],
+      "kind": "safe_integer",
+      "nullable": true,
       "minimum": 0
     },
     {

@@ -101,7 +101,7 @@ test('parallel compressed-stage storage contract matches the Python golden hash'
 test('numeric evidence type contract matches the Python golden hash', () => {
   assert.equal(
     JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
-    '162b8163b0664cffb0f08739e964c425c569c8dc287a2826e2ba82ddcfbfbd4e',
+    'e111584ff5368a54ba03ad938ce7f136409a0dc5438c89694e54a13e0bf234f3',
   );
 });
 
@@ -2868,6 +2868,91 @@ test('declarative evidence schema rejects all dynamic watermark tamper shapes', 
   ));
 });
 
+test('indexed-count-timeout advisory numerics are strict across both manifest copies', () => {
+  const targetNames = [
+    'candidate_shadow_observations',
+    'paper_decision_events',
+    'a_class_decision_events',
+    'opportunity_events',
+  ];
+  const targets = () => Object.fromEntries(targetNames.map((target) => [
+    target,
+    {
+      advisory_evidence: {
+        selected_row_count: null,
+        sample_row_count_advisory_basis: 256,
+      },
+    },
+  ]));
+  const payload = {
+    disk_preflight: { shared_stage_budget: { targets: targets() } },
+    shared_stage_budget: { targets: targets() },
+  };
+  const report = validateNumericEvidenceSchema(payload);
+  assert.equal(report.accepted, true, JSON.stringify(report.errors));
+  assert.equal(report.numeric_leaf_count, 8);
+  assert.equal(report.declared_numeric_leaf_count, 8);
+
+  const selectedRule = numericEvidenceRule(
+    'disk_preflight.shared_stage_budget.targets.candidate_shadow_observations'
+      + '.advisory_evidence.selected_row_count',
+    'selected_row_count',
+  );
+  const sampleRule = numericEvidenceRule(
+    'disk_preflight.shared_stage_budget.targets.candidate_shadow_observations'
+      + '.advisory_evidence.sample_row_count_advisory_basis',
+    'sample_row_count_advisory_basis',
+  );
+  assert.equal(selectedRule[1].id, 'nullable_shared_advisory_row_count_fields');
+  assert.equal(selectedRule[1].nullable, true);
+  assert.equal(sampleRule[1].id, 'nullable_shared_advisory_row_count_fields');
+  assert.equal(sampleRule[1].nullable, true);
+
+  const parentTargets = [
+    [
+      'disk_preflight.shared_stage_budget.targets',
+      payload.disk_preflight.shared_stage_budget.targets,
+    ],
+    ['shared_stage_budget.targets', payload.shared_stage_budget.targets],
+  ];
+  const invalidSelected = [-1, 0.5, '256', false, null, {}, [], Number.MAX_SAFE_INTEGER + 1];
+  const invalidSample = [-1, 0.5, '256', false, null, {}, [], Number.MAX_SAFE_INTEGER + 1];
+  for (const [parentPath, targetMap] of parentTargets) {
+    for (const [target, targetPayload] of Object.entries(targetMap)) {
+      const evidence = targetPayload.advisory_evidence;
+      const selectedPath = `${parentPath}.${target}.advisory_evidence.selected_row_count`;
+      const samplePath = (
+        `${parentPath}.${target}.advisory_evidence.sample_row_count_advisory_basis`
+      );
+      for (const invalid of invalidSelected) {
+        evidence.selected_row_count = invalid;
+        const selectedReport = validateNumericEvidenceSchema(payload);
+        if (invalid === null) {
+          assert.equal(selectedReport.accepted, true, selectedPath);
+        } else {
+          assert.equal(
+            selectedReport.accepted,
+            false,
+            `${selectedPath}:${String(invalid)}`,
+          );
+        }
+      }
+      evidence.selected_row_count = null;
+      for (const invalid of invalidSample) {
+        evidence.sample_row_count_advisory_basis = invalid;
+        const report = validateNumericEvidenceSchema(payload);
+        if (invalid === null) {
+          assert.equal(report.accepted, true, samplePath);
+        } else {
+          assert.equal(report.accepted, false, `${samplePath}:${String(invalid)}`);
+        }
+      }
+      evidence.sample_row_count_advisory_basis = 256;
+    }
+  }
+  assert.equal(validateNumericEvidenceSchema(payload).accepted, true);
+});
+
 test('every field selector requires an allowed parent path', () => {
   const payload = {
     numeric_evidence_schema_version: 'evaluator_snapshot_numeric_evidence.v3',
@@ -3411,6 +3496,119 @@ test('evaluator snapshot worker health validates bounded sample advisory fallbac
   });
   assert.equal(blocked.status, 'contract_blocked');
   assert.equal(blocked.shared_stage_budget.contract_passed, false);
+});
+
+test('evaluator snapshot worker health validates indexed-count-timeout advisory fallback', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const manifestPayload = structuredClone(fixture.manifestPayload);
+  const shared = manifestPayload.shared_stage_budget;
+  const target = shared.targets.paper_decision_events;
+  target.advisory_strategy = 'bounded_index_count_timeout_advisory_fallback';
+  Object.assign(target.advisory_evidence, {
+    advisory_schema_version: 'bounded_index_count_timeout_advisory_demand.v1',
+    advisory_formula:
+      'bounded_edge_sample_rows_times_sample_max_plus_per_row_overhead_'
+      + 'plus_root_reserve_plus_candidate_signal_index_overhead',
+    capacity_sample_used: true,
+    indexed_count_completed: false,
+    indexed_count_timed_out: true,
+    indexed_count_timeout_sec: 20,
+    indexed_count_elapsed_sec: 20.5,
+    dbstat_completed: false,
+    dbstat_timed_out: false,
+    dbstat_timeout_sec: 20,
+    dbstat_elapsed_sec: 0,
+    dbstat_skipped_reason: 'indexed_count_timeout',
+    row_count_binding_mode: 'copy_report_exact_after_indexed_count_timeout',
+    selected_row_count: null,
+    sample_row_count_advisory_basis: 1,
+    source_row_count_upper: null,
+    source_row_count_upper_basis:
+      'unavailable_after_bounded_index_count_timeout',
+    sample_rows: 1,
+    average_row_bytes_diagnostic: 4096,
+    sample_max_row_bytes_diagnostic: 4096,
+    sample_row_bytes_basis: 4096,
+    source_dbstat_page_count: null,
+    source_dbstat_page_size: null,
+    source_dbstat_physical_bytes: null,
+    source_dbstat_payload_bytes: null,
+    source_dbstat_unused_bytes: null,
+    source_dbstat_max_payload_bytes: null,
+    source_dbstat_cell_upper_count: null,
+    source_row_fraction_numerator: null,
+    source_row_fraction_denominator: null,
+    table_sample_payload_advisory_bytes: 4096,
+    table_scaled_physical_advisory_bytes: 0,
+    table_row_overhead_advisory_bytes: 32,
+    table_root_reserve_advisory_bytes: 8192,
+    table_advisory_bytes: 16384,
+    candidate_order_index_scaled_physical_advisory_bytes: 0,
+    candidate_order_index_row_overhead_advisory_bytes: 0,
+    candidate_order_index_advisory_bytes: 0,
+  });
+  shared.plan_sha256 = sharedStageBudgetPlanSha256(shared);
+  shared.evidence_sha256 = sharedStageBudgetEvidenceSha256(shared);
+  manifestPayload.disk_preflight.shared_stage_budget = structuredClone(shared);
+  const statusPayload = structuredClone(fixture.statusPayload);
+  statusPayload.shared_stage_budget = structuredClone(shared);
+  const healthInput = {
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload,
+    manifestPayload,
+    statusArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 100,
+    },
+    manifestArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 1000,
+    },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  };
+  const health = readEvaluatorSnapshotWorkerHealth(healthInput);
+  assert.equal(health.status, 'producer_accepted');
+  assert.equal(health.shared_stage_budget.contract_passed, true);
+  assert.equal(
+    health.shared_stage_budget.targets.paper_decision_events
+      .advisory_evidence_passed,
+    true,
+  );
+
+  for (const [field, value] of [
+    ['selected_row_count', 1],
+    ['sample_row_count_advisory_basis', 2],
+  ]) {
+    const tamperedManifest = structuredClone(manifestPayload);
+    const tamperedShared = tamperedManifest.shared_stage_budget;
+    tamperedShared.targets.paper_decision_events.advisory_evidence[field] = value;
+    tamperedShared.plan_sha256 = sharedStageBudgetPlanSha256(tamperedShared);
+    tamperedShared.evidence_sha256 = sharedStageBudgetEvidenceSha256(
+      tamperedShared,
+    );
+    tamperedManifest.disk_preflight.shared_stage_budget = structuredClone(
+      tamperedShared,
+    );
+    const tamperedStatus = structuredClone(statusPayload);
+    tamperedStatus.shared_stage_budget = structuredClone(tamperedShared);
+    const blocked = readEvaluatorSnapshotWorkerHealth({
+      ...healthInput,
+      manifestPayload: tamperedManifest,
+      statusPayload: tamperedStatus,
+    });
+    assert.equal(blocked.status, 'contract_blocked', field);
+    assert.equal(blocked.shared_stage_budget.contract_passed, false, field);
+  }
 });
 
 test('evaluator snapshot worker health accepts advisory miss within hard grant', () => {

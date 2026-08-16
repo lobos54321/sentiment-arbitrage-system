@@ -265,7 +265,7 @@ def test_missing_evidence_db_is_rejected(tmp_path):
 
 def test_numeric_evidence_contract_matches_dashboard_golden_hash():
     assert json_numeric_evidence_contract_sha256() == (
-        "162b8163b0664cffb0f08739e964c425c569c8dc287a2826e2ba82ddcfbfbd4e"
+        "e111584ff5368a54ba03ad938ce7f136409a0dc5438c89694e54a13e0bf234f3"
     )
 
 
@@ -611,6 +611,102 @@ def test_all_nonempty_dynamic_watermarks_reject_every_invalid_numeric_shape(
         "path": "undeclared_attacker_count",
         "code": "undeclared_numeric_evidence",
     }
+
+
+def test_indexed_count_timeout_advisory_numeric_schema_is_strict_and_complete():
+    target_names = (
+        "candidate_shadow_observations",
+        "paper_decision_events",
+        "a_class_decision_events",
+        "opportunity_events",
+    )
+
+    def targets():
+        return {
+            target: {
+                "advisory_evidence": {
+                    "selected_row_count": None,
+                    "sample_row_count_advisory_basis": 256,
+                }
+            }
+            for target in target_names
+        }
+
+    payload = {
+        "disk_preflight": {
+            "shared_stage_budget": {"targets": targets()}
+        },
+        "shared_stage_budget": {"targets": targets()},
+    }
+    report = validate_numeric_evidence_schema(payload)
+    assert report["accepted"] is True, report["errors"]
+    assert report["numeric_leaf_count"] == 8
+    assert report["declared_numeric_leaf_count"] == 8
+
+    selected_rule = numeric_evidence_rule(
+        "disk_preflight.shared_stage_budget.targets."
+        "candidate_shadow_observations.advisory_evidence."
+        "selected_row_count",
+        "selected_row_count",
+    )
+    sample_rule = numeric_evidence_rule(
+        "disk_preflight.shared_stage_budget.targets."
+        "candidate_shadow_observations.advisory_evidence."
+        "sample_row_count_advisory_basis",
+        "sample_row_count_advisory_basis",
+    )
+    assert selected_rule is not None
+    assert selected_rule[1]["id"] == (
+        "nullable_shared_advisory_row_count_fields"
+    )
+    assert selected_rule[1]["nullable"] is True
+    assert sample_rule is not None
+    assert sample_rule[1]["id"] == "nullable_shared_advisory_row_count_fields"
+    assert sample_rule[1]["nullable"] is True
+
+    parent_targets = (
+        (
+            "disk_preflight.shared_stage_budget.targets",
+            payload["disk_preflight"]["shared_stage_budget"]["targets"],
+        ),
+        ("shared_stage_budget.targets", payload["shared_stage_budget"]["targets"]),
+    )
+    invalid_selected = (-1, 0.5, "256", False, None, {}, [], 2**53)
+    invalid_sample = (-1, 0.5, "256", False, None, {}, [], 2**53)
+    for parent_path, target_map in parent_targets:
+        for target, target_payload in target_map.items():
+            evidence = target_payload["advisory_evidence"]
+            selected_path = (
+                f"{parent_path}.{target}.advisory_evidence.selected_row_count"
+            )
+            sample_path = (
+                f"{parent_path}.{target}.advisory_evidence."
+                "sample_row_count_advisory_basis"
+            )
+            for invalid in invalid_selected:
+                evidence["selected_row_count"] = invalid
+                selected_report = validate_numeric_evidence_schema(payload)
+                if invalid is None:
+                    assert selected_report["accepted"] is True, selected_path
+                else:
+                    assert selected_report["accepted"] is False, (
+                        selected_path,
+                        invalid,
+                    )
+            evidence["selected_row_count"] = None
+            for invalid in invalid_sample:
+                evidence["sample_row_count_advisory_basis"] = invalid
+                sample_report = validate_numeric_evidence_schema(payload)
+                if invalid is None:
+                    assert sample_report["accepted"] is True, sample_path
+                else:
+                    assert sample_report["accepted"] is False, (
+                        sample_path,
+                        invalid,
+                    )
+            evidence["sample_row_count_advisory_basis"] = 256
+
+    assert validate_numeric_evidence_schema(payload)["accepted"] is True
 
 
 def test_every_field_selector_is_bound_to_declared_parent_paths(
