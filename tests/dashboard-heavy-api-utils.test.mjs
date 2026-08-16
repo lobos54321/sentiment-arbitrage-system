@@ -3587,11 +3587,20 @@ test('evaluator snapshot worker health validates indexed-count-timeout advisory 
 
   for (const [field, value] of [
     ['selected_row_count', 1],
+    ['selected_row_count', undefined],
     ['sample_row_count_advisory_basis', 2],
+    ['sample_row_count_advisory_basis', undefined],
   ]) {
     const tamperedManifest = structuredClone(manifestPayload);
     const tamperedShared = tamperedManifest.shared_stage_budget;
-    tamperedShared.targets.paper_decision_events.advisory_evidence[field] = value;
+    const tamperedEvidence = (
+      tamperedShared.targets.paper_decision_events.advisory_evidence
+    );
+    if (value === undefined) {
+      delete tamperedEvidence[field];
+    } else {
+      tamperedEvidence[field] = value;
+    }
     tamperedShared.plan_sha256 = sharedStageBudgetPlanSha256(tamperedShared);
     tamperedShared.evidence_sha256 = sharedStageBudgetEvidenceSha256(
       tamperedShared,

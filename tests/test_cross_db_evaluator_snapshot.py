@@ -1263,6 +1263,15 @@ def test_indexed_count_timeout_uses_bounded_sample_before_dbstat(
     with pytest.raises(ValueError, match="row claim invalid"):
         validate_shared_stage_estimate_contract(target, tampered)
 
+    for missing_field, expected_error in (
+        ("selected_row_count", "row claim invalid"),
+        ("sample_row_count_advisory_basis", "numeric invalid"),
+    ):
+        missing = json.loads(json.dumps(consumer_report))
+        del missing["advisory_evidence"][missing_field]
+        with pytest.raises(ValueError, match=expected_error):
+            validate_shared_stage_estimate_contract(target, missing)
+
 
 @pytest.mark.parametrize(
     ("interruption", "expected_error"),

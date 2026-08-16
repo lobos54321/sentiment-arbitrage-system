@@ -412,7 +412,10 @@ def validate_shared_stage_sample_estimate_contract(
         == SHARED_STAGE_INDEXED_COUNT_TIMEOUT_ADVISORY_FORMULA
     )
     if indexed_count_timeout_contract:
-        if evidence.get("selected_row_count") is not None:
+        if (
+            "selected_row_count" not in evidence
+            or evidence["selected_row_count"] is not None
+        ):
             raise ValueError(
                 f"shared stage indexed count advisory row claim invalid:{target}"
             )
