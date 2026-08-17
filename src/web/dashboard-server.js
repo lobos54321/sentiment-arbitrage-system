@@ -3733,6 +3733,8 @@ export async function collectRawExecutableQuoteEvidence({
   exitMaxLagSec = RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC,
   historyWindowSec = 24 * 3600,
   limit = 1000,
+  captureEntries = true,
+  captureExits = true,
 } = {}) {
   const capturedAtMs = Number(nowMs);
   if (!Number.isSafeInteger(capturedAtMs) || capturedAtMs <= 0) {
@@ -3745,6 +3747,8 @@ export async function collectRawExecutableQuoteEvidence({
   const boundedExitLag = Math.trunc(Math.max(60, Math.min(3600, Number(exitMaxLagSec) || RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC)));
   const boundedHistoryWindow = Math.trunc(Math.max(3600, Math.min(7 * 24 * 3600, Number(historyWindowSec) || 24 * 3600)));
   const boundedLimit = Math.trunc(Math.max(1, Math.min(5000, Number(limit) || 1000)));
+  const shouldCaptureEntries = captureEntries !== false;
+  const shouldCaptureExits = captureExits !== false;
   let db = suppliedDb;
   let quoteClient = suppliedQuoteClient;
   let ownsDb = false;
@@ -3777,7 +3781,8 @@ export async function collectRawExecutableQuoteEvidence({
     } else {
       ensureRawSignalOutcomesSchema(db);
     }
-    const entryExpiredRows = db.prepare(`
+    if (shouldCaptureEntries) {
+      const entryExpiredRows = db.prepare(`
       SELECT * FROM raw_signal_outcomes
       WHERE executable_entry_quote_json IS NULL
         AND signal_id IS NOT NULL
@@ -3877,9 +3882,11 @@ export async function collectRawExecutableQuoteEvidence({
         summary.errors.push(`entry:${row.id}:${reason}`);
       }
     }
-    if (entryMutations.length) upsertRawSignalOutcomes(db, entryMutations);
+      if (entryMutations.length) upsertRawSignalOutcomes(db, entryMutations);
+    }
 
-    const exitExpiredRows = db.prepare(`
+    if (shouldCaptureExits) {
+      const exitExpiredRows = db.prepare(`
       SELECT * FROM raw_signal_outcomes
       WHERE executable_entry_quote_json IS NOT NULL
         AND executable_exit_quote_json IS NULL
@@ -4001,7 +4008,8 @@ export async function collectRawExecutableQuoteEvidence({
         summary.errors.push(`exit:${row.id}:${reason}`);
       }
     }
-    if (exitMutations.length) upsertRawSignalOutcomes(db, exitMutations);
+      if (exitMutations.length) upsertRawSignalOutcomes(db, exitMutations);
+    }
     summary.errors = summary.errors.slice(0, 20);
     return summary;
   } finally {
@@ -4012,6 +4020,43 @@ export async function collectRawExecutableQuoteEvidence({
       try { await quoteClient?.close(); } catch {}
     }
   }
+}
+
+export function mergeRawExecutableQuoteEvidenceSummaries(...summaries) {
+  const valid = summaries.filter((summary) => summary && typeof summary === 'object');
+  const merged = {
+    schema_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+    observe_only: true,
+    size_sol: valid.find((summary) => Number.isFinite(Number(summary.size_sol)))?.size_sol
+      ?? RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT,
+    entry_attempted: 0,
+    entry_captured: 0,
+    entry_failed: 0,
+    exit_attempted: 0,
+    exit_captured: 0,
+    exit_failed: 0,
+    entry_window_expired: 0,
+    exit_window_expired: 0,
+    errors: [],
+  };
+  for (const summary of valid) {
+    for (const key of [
+      'entry_attempted',
+      'entry_captured',
+      'entry_failed',
+      'exit_attempted',
+      'exit_captured',
+      'exit_failed',
+      'entry_window_expired',
+      'exit_window_expired',
+    ]) {
+      const value = Number(summary[key]);
+      if (Number.isSafeInteger(value) && value >= 0) merged[key] += value;
+    }
+    if (Array.isArray(summary.errors)) merged.errors.push(...summary.errors.map(String));
+  }
+  merged.errors = merged.errors.slice(0, 20);
+  return merged;
 }
 
 function upsertRawSignalOutcomes(db, outcomes) {
@@ -5712,41 +5757,75 @@ function startRawDogDiscoveryObserver() {
     rawDogDiscoveryObserverState.last_started_at = new Date(started).toISOString();
     rawDogDiscoveryObserverState.last_error = null;
     try {
-      const signalDb = getDb();
-      const snapshot = buildRawDogDiscoverySnapshot({
-        signalDb,
-        sinceTs: nowTs - windowHours * 3600,
-        limit,
-        nowTs,
-        horizonSec,
-        baselineMaxLagSec,
-        coverageTargetPct,
-        persist: true,
-      });
-      const quoteEvidence = envBool('RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED', true)
-        ? await collectRawExecutableQuoteEvidence({
+      const quoteEnabled = envBool('RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED', true);
+      const quoteOptions = {
+        sizeSol: process.env.PAPER_TINY_SCOUT_SIZE_SOL || RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT,
+        entryMaxLagSec: envInt(
+          'RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC',
+          RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC,
+          60,
+          3600,
+        ),
+        exitMaxLagSec: envInt(
+          'RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC',
+          RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC,
+          60,
+          3600,
+        ),
+        limit: envInt('RAW_EXECUTABLE_QUOTE_BATCH_LIMIT', 1000, 1, 5000),
+      };
+      let exitQuoteEvidence = null;
+      let quoteEvidence = {
+        schema_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
+        observe_only: true,
+        enabled: false,
+        reason: 'disabled_by_RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED',
+      };
+      if (quoteEnabled) {
+        // Exit quotes have a short legal window. Capture them before the paper
+        // evidence snapshot can block or fail on the live paper database.
+        exitQuoteEvidence = await collectRawExecutableQuoteEvidence({
+          ...quoteOptions,
           nowMs: Date.now(),
-          sizeSol: process.env.PAPER_TINY_SCOUT_SIZE_SOL || RAW_EXECUTABLE_QUOTE_SIZE_SOL_DEFAULT,
-          entryMaxLagSec: envInt(
-            'RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC',
-            RAW_EXECUTABLE_QUOTE_ENTRY_MAX_LAG_SEC,
-            60,
-            3600,
-          ),
-          exitMaxLagSec: envInt(
-            'RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC',
-            RAW_EXECUTABLE_QUOTE_EXIT_MAX_LAG_SEC,
-            60,
-            3600,
-          ),
-          limit: envInt('RAW_EXECUTABLE_QUOTE_BATCH_LIMIT', 1000, 1, 5000),
-        })
-        : {
-          schema_version: RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
-          observe_only: true,
-          enabled: false,
-          reason: 'disabled_by_RAW_EXECUTABLE_QUOTE_OBSERVER_ENABLED',
-        };
+          captureEntries: false,
+          captureExits: true,
+        });
+        quoteEvidence = exitQuoteEvidence;
+        rawDogDiscoveryObserverState.last_executable_quote_evidence = quoteEvidence;
+      }
+      const signalDb = getDb();
+      let snapshot = null;
+      let snapshotError = null;
+      try {
+        snapshot = buildRawDogDiscoverySnapshot({
+          signalDb,
+          sinceTs: nowTs - windowHours * 3600,
+          limit,
+          nowTs,
+          horizonSec,
+          baselineMaxLagSec,
+          coverageTargetPct,
+          persist: true,
+        });
+      } catch (error) {
+        snapshotError = error;
+      }
+      if (quoteEnabled) {
+        // The snapshot may have just materialized new rows, so collect fresh
+        // entries afterwards without retrying the already-protected exits.
+        const entryQuoteEvidence = await collectRawExecutableQuoteEvidence({
+          ...quoteOptions,
+          nowMs: Date.now(),
+          captureEntries: true,
+          captureExits: false,
+        });
+        quoteEvidence = mergeRawExecutableQuoteEvidenceSummaries(
+          exitQuoteEvidence,
+          entryQuoteEvidence,
+        );
+        rawDogDiscoveryObserverState.last_executable_quote_evidence = quoteEvidence;
+      }
+      if (snapshotError) throw snapshotError;
       rawDogDiscoveryObserverState.last_completed_at = new Date().toISOString();
       rawDogDiscoveryObserverState.last_duration_ms = Date.now() - started;
       rawDogDiscoveryObserverState.last_persisted_rows = snapshot.diagnostics?.raw_db?.persisted_rows ?? null;

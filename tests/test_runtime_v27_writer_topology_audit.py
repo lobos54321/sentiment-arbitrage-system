@@ -1,12 +1,20 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
+from opportunity_events import (  # noqa: E402
+    init_opportunity_events,
+    record_opportunity_event,
+    record_opportunity_path_sample,
+)
 from runtime_v27_writer_topology_audit import build_audit  # noqa: E402
 
 
@@ -86,3 +94,63 @@ def test_process_command_lines_are_redacted(tmp_path):
     assert "command" not in process
     assert process["command_redacted"] is True
     assert process["matched_markers"] == ["v27_read_model_refresh.py"]
+
+
+def test_opportunity_path_commit_lock_failure_releases_writer_transaction(tmp_path):
+    db_path = tmp_path / "paper_trades.db"
+    setup = sqlite3.connect(db_path)
+    setup.row_factory = sqlite3.Row
+    try:
+        setup.execute("PRAGMA journal_mode=DELETE")
+        init_opportunity_events(setup)
+        record_opportunity_event(
+            setup,
+            {
+                "opportunity_key": "source:locked:TOKEN",
+                "event_ts": 1_000,
+                "token_ca": "TOKEN",
+                "source_type": "unit",
+                "route_bucket": "ATH",
+                "record_decision_sample": False,
+            },
+        )
+    finally:
+        setup.close()
+
+    reader = sqlite3.connect(db_path, timeout=0.05)
+    writer = sqlite3.connect(db_path, timeout=0.05)
+    reader.row_factory = sqlite3.Row
+    writer.row_factory = sqlite3.Row
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM opportunity_event_path_samples").fetchone()
+        writer.execute("PRAGMA busy_timeout=25")
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            record_opportunity_path_sample(
+                writer,
+                "source:locked:TOKEN",
+                {
+                    "sample_ts": 1_060,
+                    "quote_clean": True,
+                    "quote_executable": True,
+                    "route_available": True,
+                    "current_price": 1.2,
+                },
+            )
+
+        assert writer.in_transaction is False
+        reader.rollback()
+        writer.execute("BEGIN IMMEDIATE")
+        writer.rollback()
+        assert writer.execute(
+            "SELECT COUNT(*) FROM opportunity_event_path_samples WHERE opportunity_key = ?",
+            ("source:locked:TOKEN",),
+        ).fetchone()[0] == 0
+    finally:
+        if reader.in_transaction:
+            reader.rollback()
+        if writer.in_transaction:
+            writer.rollback()
+        reader.close()
+        writer.close()

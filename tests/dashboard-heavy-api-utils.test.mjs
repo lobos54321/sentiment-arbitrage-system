@@ -69,6 +69,7 @@ import {
   readV27ModeReadiness,
   readV27ReadModelWorkerHealth,
   collectRawExecutableQuoteEvidence,
+  mergeRawExecutableQuoteEvidenceSummaries,
   ensureRawSignalOutcomesSchema,
   normalizeRawExecutableQuoteRecord,
   RAW_EXECUTABLE_QUOTE_EVIDENCE_SCHEMA_VERSION,
@@ -217,6 +218,104 @@ test('raw executable quote evidence never backfills expired entry windows or acc
     rawDb.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test('raw executable quote evidence protects due exits before collecting fresh entries', async () => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), 'raw-executable-quote-phases-'));
+  const rawDb = new Database(join(tmp, 'raw.db'));
+  ensureRawSignalOutcomesSchema(rawDb);
+  const nowMs = Date.now();
+  const nowSec = Math.floor(nowMs / 1000);
+  rawDb.exec(`
+    INSERT INTO raw_signal_outcomes (
+      id, signal_id, token_ca, signal_ts, horizon_sec, observation_status, right_censored,
+      executable_entry_quote_json, executable_quote_evidence_status, updated_at
+    ) VALUES
+      (1, 'fresh-entry', 'TOKEN_ENTRY', ${nowSec - 30}, 7200, 'pending', 1,
+       NULL, NULL, ${nowSec}),
+      (2, 'due-exit', 'TOKEN_EXIT', ${nowSec - 60}, 60, 'matured', 0,
+       '{"input_amount_raw":"3000000","output_amount_raw":"12345678"}', 'entry_captured', ${nowSec});
+  `);
+  const calls = [];
+  const quoteClient = {
+    async getSwapQuote({ inputMint, outputMint, amount }) {
+      calls.push({ inputMint, outputMint, amount: String(amount) });
+      const entry = inputMint === SOL_MINT;
+      return {
+        ok: true,
+        provider: 'jupiter-ultra',
+        source: 'shared-quote-client',
+        fetchedAt: Date.now(),
+        quote: {
+          inputMint,
+          outputMint,
+          inAmount: String(amount),
+          outAmount: entry ? '24681357' : '3300000',
+          requestId: entry ? 'phase-entry-request' : 'phase-exit-request',
+          routePlan: [{ percent: 100, swapInfo: { ammKey: entry ? 'entry-pool' : 'exit-pool' } }],
+        },
+      };
+    },
+  };
+  try {
+    const exitSummary = await collectRawExecutableQuoteEvidence({
+      db: rawDb,
+      quoteClient,
+      nowMs,
+      captureEntries: false,
+      captureExits: true,
+    });
+    assert.equal(exitSummary.entry_attempted, 0);
+    assert.equal(exitSummary.exit_attempted, 1);
+    assert.equal(exitSummary.exit_captured, 1);
+    assert.deepEqual(calls, [
+      { inputMint: 'TOKEN_EXIT', outputMint: SOL_MINT, amount: '12345678' },
+    ]);
+
+    const entrySummary = await collectRawExecutableQuoteEvidence({
+      db: rawDb,
+      quoteClient,
+      nowMs,
+      captureEntries: true,
+      captureExits: false,
+    });
+    assert.equal(entrySummary.entry_attempted, 1);
+    assert.equal(entrySummary.entry_captured, 1);
+    assert.equal(entrySummary.exit_attempted, 0);
+    assert.deepEqual(calls, [
+      { inputMint: 'TOKEN_EXIT', outputMint: SOL_MINT, amount: '12345678' },
+      { inputMint: SOL_MINT, outputMint: 'TOKEN_ENTRY', amount: '3000000' },
+    ]);
+
+    const merged = mergeRawExecutableQuoteEvidenceSummaries(exitSummary, entrySummary);
+    assert.equal(merged.entry_attempted, 1);
+    assert.equal(merged.entry_captured, 1);
+    assert.equal(merged.exit_attempted, 1);
+    assert.equal(merged.exit_captured, 1);
+    assert.deepEqual(merged.errors, []);
+  } finally {
+    rawDb.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('raw dog observer wires exit capture before the lock-prone snapshot', () => {
+  const source = fs.readFileSync(
+    new URL('../src/web/dashboard-server.js', import.meta.url),
+    'utf8',
+  );
+  const start = source.indexOf('function startRawDogDiscoveryObserver()');
+  const end = source.indexOf('\nfunction fileInfo(', start);
+  const observer = source.slice(start, end);
+  const exitCapture = observer.indexOf('captureEntries: false');
+  const snapshot = observer.indexOf('buildRawDogDiscoverySnapshot({');
+  const entryCapture = observer.indexOf('captureEntries: true');
+  const snapshotRethrow = observer.indexOf('if (snapshotError) throw snapshotError;');
+
+  assert.ok(start >= 0 && end > start);
+  assert.ok(exitCapture >= 0 && exitCapture < snapshot);
+  assert.ok(snapshot < entryCapture);
+  assert.ok(entryCapture < snapshotRethrow);
 });
 
 test('raw executable quote normalization rejects mismatched mints and stale timestamps', () => {

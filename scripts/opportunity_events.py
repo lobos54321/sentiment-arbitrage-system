@@ -37,6 +37,18 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value if value is not None else {}, sort_keys=True, default=str)
 
 
+def _commit_or_rollback(db) -> None:
+    """Never leave a failed SQLite commit holding the production writer lock."""
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+
+
 def _get(value: Any, key: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(key, default)
@@ -291,10 +303,7 @@ def init_opportunity_events(db):
         ON opportunity_event_path_samples(opportunity_key, sample_ts ASC)
         """
     )
-    try:
-        db.commit()
-    except Exception:
-        pass
+    _commit_or_rollback(db)
 
 
 def record_opportunity_path_sample(db, opportunity_key: str, sample: Any) -> bool:
@@ -396,10 +405,7 @@ def record_opportunity_path_sample(db, opportunity_key: str, sample: Any) -> boo
         """,
         (str(opportunity_key), now_ts, str(opportunity_key)),
     )
-    try:
-        db.commit()
-    except Exception:
-        pass
+    _commit_or_rollback(db)
     return True
 
 
@@ -571,10 +577,7 @@ def record_opportunity_event(db, event: Any) -> str:
         pass
     if _get(event, "record_decision_sample", True):
         record_decision_time_path_sample(db, str(opportunity_key), event, event_ts=event_ts)
-    try:
-        db.commit()
-    except Exception:
-        pass
+    _commit_or_rollback(db)
     return str(opportunity_key)
 
 
