@@ -353,6 +353,7 @@ def load_registry(path):
 
 
 def open_sqlite(path, label):
+    conn = None
     try:
         conn = sqlite3.connect(path, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -360,8 +361,32 @@ def open_sqlite(path, label):
         if label == "out_db":
             configure_paper_sqlite_connection(conn)
         return conn
-    except sqlite3.Error as exc:
-        raise RuntimeError(f"{label}_connect_error path={path}: {exc}") from exc
+    except Exception as exc:
+        cleanup_errors = []
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(("rollback", cleanup_exc))
+            try:
+                conn.close()
+            except Exception as cleanup_exc:
+                cleanup_errors.append(("close", cleanup_exc))
+                # sqlite3.connect() returns sqlite3.Connection here. If a
+                # custom close override fails, still release the native handle.
+                try:
+                    sqlite3.Connection.close(conn)
+                except Exception as fallback_exc:
+                    cleanup_errors.append(("native_close", fallback_exc))
+        if cleanup_errors:
+            details = "; ".join(
+                f"{operation}={type(error).__name__}: {error}"
+                for operation, error in cleanup_errors
+            )
+            exc.add_note(f"{label}_connect_cleanup_error {details}")
+        if isinstance(exc, sqlite3.Error):
+            raise RuntimeError(f"{label}_connect_error path={path}: {exc}") from exc
+        raise
 
 
 def warn_json(**payload):
