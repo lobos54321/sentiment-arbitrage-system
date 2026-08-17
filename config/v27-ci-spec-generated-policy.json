@@ -270,7 +270,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "a622346398ded8afd27dde402329f5ab1fff451ff70eb2959f34ebfdfdaf7c12",
+      "impact_hash": "5d062936216e62a76c97138cb381096d2ed2704f33729ee88291c18e8b969bc9",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -308,6 +308,7 @@
         "scripts/run_zeabur_services.sh",
         "scripts/zeabur_prestart.sh",
         "scripts/run_with_timeout.py",
+        "scripts/paper_decision_audit.py",
         "scripts/paper_evidence_log.py",
         "scripts/paper_db_retention.py",
         "scripts/opportunity_events.py",
@@ -416,6 +417,7 @@
         "scripts/offline_raw_gold_silver_funnel_audit.py": "50501e0f07ca46421ff87cf819dfd57e740c2431c517fe49b3c69093a019bd05",
         "scripts/opportunity_events.py": "36807f2444b35899808fe15664315e9e622a84d564e65f7982df39a039082c75",
         "scripts/paper_db_retention.py": "5dfdeb2cec62284653c5ff7c73136eb82155b3d87e4b059129bb83daa2a6d2a6",
+        "scripts/paper_decision_audit.py": "84171f50f9b3b34ec45803e4675ad4a3cdf018aa502e1fa882e79731643c1774",
         "scripts/paper_evidence_log.py": "7f790238212c66b90f25a0f2e79a7bfe97f4e8bfde4cbe6a8e8312d211ec20b8",
         "scripts/paper_fast_lane.py": "ed291f9d6a10fbeeaa7da21101a33d891a1163a5a42db9fbf8eac6d0ce7d6fa0",
         "scripts/paper_trade_monitor.py": "c20910905003e134a8451c7530a4a503b1c437f85741ee0786919e4453353768",
@@ -472,7 +474,7 @@
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
         "tests/test_candidate_shadow_observer_connection_lifecycle.py": "8a9f0bf808ce1804424897730563dea82da338a3912ae66a9731065207e1ae80",
-        "tests/test_paper_trade_monitor_transaction_lifecycle.py": "cb49072a047fc7718ebc2b315fd6bc60f179334ca1a2890da2f0c4c513637435",
+        "tests/test_paper_trade_monitor_transaction_lifecycle.py": "689210d0cfa68c9795f34ff5a56c9570a203b36b0529fbe1666f8386b5d3fe46",
         "tests/test_cross_db_evaluator_snapshot.py": "f0ffa79215d732ad59e5398a75066af4182e1eb6a9493c835214b74dde799236",
         "tests/test_data_lifecycle_retention.py": "9e3c76903d16787b9b9513047da21d685bbc4aae05ed2b1672f86281e4c583d0",
         "tests/test_evaluator_db_contract.py": "8901edd73bcee21cc23e2e3144566939ca826073ec9497f3521634b77f128e98",

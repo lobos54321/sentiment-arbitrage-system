@@ -492,6 +492,24 @@ def record_decision_event(
                 lifecycle=lifecycle,
             )
     except Exception as exc:
+        rollback_error = None
+        try:
+            if db.in_transaction:
+                db.rollback()
+        except Exception as cleanup_exc:
+            rollback_error = cleanup_exc
+            exc.add_note(
+                "paper_decision_audit_rollback_error "
+                f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+            )
+        if getattr(db, "in_transaction", False):
+            log.error(
+                "[AUDIT] decision event write failed and transaction could not be cleared: %s",
+                exc,
+            )
+            raise exc
+        if rollback_error is not None:
+            log.debug("[AUDIT] rollback reported an error after clearing transaction: %s", rollback_error)
         log.debug("[AUDIT] decision event write failed: %s", exc)
 
 
