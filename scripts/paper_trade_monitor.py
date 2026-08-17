@@ -25,6 +25,7 @@ Usage:
 """
 
 import sqlite3
+import functools
 import json
 import re
 import time
@@ -36,7 +37,7 @@ import logging
 import urllib.request
 import urllib.parse
 import threading
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import Counter, defaultdict, deque
@@ -1272,6 +1273,7 @@ class PersistentExecutionBridge:
         self._lock = threading.Lock()
         
     def _start_if_needed(self):
+        _guard_monitor_blocking_boundary("execution_bridge_start")
         with self._lock:
             try:
                 status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.1)
@@ -1297,7 +1299,10 @@ class PersistentExecutionBridge:
                         return
                 except Exception:
                     pass
-                time.sleep(0.1)
+                _guarded_blocking_sleep(
+                    0.1,
+                    operation="execution_bridge_start_retry",
+                )
             
     def call(self, command, payload, timeout=10):
         self._start_if_needed()
@@ -1319,6 +1324,7 @@ class PersistentExecutionBridge:
 _daemon_bridge = PersistentExecutionBridge()
 
 def call_execution_bridge(command, payload, timeout=10):
+    _guard_monitor_blocking_boundary(f"execution_bridge_call:{command}")
     return _daemon_bridge.call(command, payload, timeout)
 
 
@@ -1614,24 +1620,40 @@ def run_db_write_with_retry(
                 return writer()
         except TimeoutError as exc:
             last_exc = exc
-            try:
-                db.rollback()
-            except Exception:
-                pass
             log.warning(f"  [DB_RETRY] {label} single_writer_timeout attempt={attempt}/{attempts}")
             if attempt < attempts:
-                time.sleep(min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))))
+                _sleep_after_monitor_transaction_settle(
+                    db,
+                    min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))),
+                    success=False,
+                    root_error=exc,
+                )
+            else:
+                _settle_monitor_transaction_before_blocking(
+                    db,
+                    success=False,
+                    operation=f"db_retry_exhausted:{label}",
+                    root_error=exc,
+                )
         except sqlite3.OperationalError as exc:
             if not _sqlite_is_locked_error(exc):
                 raise
             last_exc = exc
-            try:
-                db.rollback()
-            except Exception:
-                pass
             log.warning(f"  [DB_RETRY] {label} database_locked attempt={attempt}/{attempts}")
             if attempt < attempts:
-                time.sleep(min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))))
+                _sleep_after_monitor_transaction_settle(
+                    db,
+                    min(max_sleep_sec, base_sleep_sec * (2 ** (attempt - 1))),
+                    success=False,
+                    root_error=exc,
+                )
+            else:
+                _settle_monitor_transaction_before_blocking(
+                    db,
+                    success=False,
+                    operation=f"db_retry_exhausted:{label}",
+                    root_error=exc,
+                )
     append_paper_evidence_event(
         source="paper_trade_monitor",
         event_type="paper_db_write_failed",
@@ -17830,7 +17852,11 @@ def call_shared_runtime(method, payload=None, timeout=8, namespace='paper-monito
                 _SHARED_RUNTIME_INFLIGHT[cache_key] = inflight_entry
                 leader = True
         if not leader:
-            inflight_entry['event'].wait(max(0.05, float(timeout or 1)))
+            _guarded_event_wait(
+                inflight_entry['event'],
+                max(0.05, float(timeout or 1)),
+                operation=f"shared_runtime_inflight:{method}",
+            )
             with _PROVIDER_CACHE_LOCK:
                 cached = _SHARED_RUNTIME_LOCAL_CACHE.get(cache_key)
                 if cached and time.time() < cached.get('expires_at', 0.0):
@@ -18512,7 +18538,10 @@ def get_recent_signatures(token_ca, limit=100):
         except Exception:
             pass
         if attempt < 2:
-            time.sleep(0.1)
+            _guarded_blocking_sleep(
+                0.1,
+                operation="helius_signature_retry",
+            )
     record_provider_result('helius', success=False, error='signatures_unavailable')
     return []
 
@@ -18623,7 +18652,10 @@ def evaluate_entry_timing(token_ca, symbol='?', pool_address=None, strict_fail_o
 
     for round_i in range(max_rounds):
         if round_i > 0:
-            time.sleep(interval)
+            _guarded_blocking_sleep(
+                interval,
+                operation="entry_timing_poll",
+            )
 
         price, src, age_ms = fetch_realtime_price(token_ca, pool_address)
         if not price or price <= 0:
@@ -18818,7 +18850,10 @@ def drain_timing_results(pending_entries, lifecycles, positions):
             continue
 
         try:
-            should_enter, reason, detail, trigger_price = future.result()
+            should_enter, reason, detail, trigger_price = _guarded_future_result(
+                future,
+                operation="entry_timing_future",
+            )
         except Exception as e:
             log.exception(f"  [TIMING_DRAIN] {symbol} eval raised: {e}")
             continue
@@ -19240,6 +19275,7 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
     converted to SOL via sol_price. This eliminates phantom PnL from
     SOL/USD fluctuations during trades.
     """
+    _guard_monitor_blocking_boundary("live_price_quote")
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
@@ -20055,7 +20091,10 @@ def wait_for_local_signal_source():
         if attempts % 12 == 0:
             log.warning(f"Waiting for local signal DB/table: {SENTIMENT_DB} (attempt {attempts + 1})")
         attempts += 1
-        time.sleep(5)
+        _guarded_blocking_sleep(
+            5,
+            operation="local_signal_source_wait",
+        )
 
 
 # === Position Tracking ===
@@ -21356,6 +21395,11 @@ def _settle_monitor_iteration_transaction(db, *, success, root_error=None):
             db.commit()
         else:
             db.rollback()
+        if getattr(db, "in_transaction", False):
+            action = "commit" if success else "rollback"
+            raise sqlite3.OperationalError(
+                f"paper monitor transaction remains active after {action}"
+            )
         return True
     except Exception as cleanup_error:
         if success:
@@ -21371,6 +21415,205 @@ def _settle_monitor_iteration_transaction(db, *, success, root_error=None):
         raise
 
 
+class MonitorSupervisorRestartRequired(BaseException):
+    """Fail closed past ordinary exception handlers so the supervisor restarts us."""
+
+
+_MONITOR_TRANSACTION_GUARD_DB = None
+_MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = None
+_MONITOR_SUPERVISOR_RESTART_LOCK = threading.Lock()
+_MONITOR_SUPERVISOR_RESTART_REQUEST = None
+
+
+@contextmanager
+def _monitor_transaction_guard_scope(db):
+    global _MONITOR_TRANSACTION_GUARD_DB
+    global _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID
+
+    previous_db = _MONITOR_TRANSACTION_GUARD_DB
+    previous_owner_thread_id = _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID
+    _MONITOR_TRANSACTION_GUARD_DB = db
+    _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = threading.get_ident()
+    try:
+        yield
+    finally:
+        _MONITOR_TRANSACTION_GUARD_DB = previous_db
+        _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = previous_owner_thread_id
+
+
+def _monitor_transaction_guarded(func):
+    @functools.wraps(func)
+    def wrapped(db, *args, **kwargs):
+        with _monitor_transaction_guard_scope(db):
+            return func(db, *args, **kwargs)
+
+    return wrapped
+
+
+def _monitor_restart_required(operation, cause):
+    restart = MonitorSupervisorRestartRequired(
+        f"paper monitor supervisor restart required before {operation}"
+    )
+    restart.add_note(
+        f"paper_monitor_transaction_boundary_error "
+        f"{type(cause).__name__}: {cause}"
+    )
+    return restart
+
+
+def _request_monitor_supervisor_restart(restart):
+    global _MONITOR_SUPERVISOR_RESTART_REQUEST
+
+    with _MONITOR_SUPERVISOR_RESTART_LOCK:
+        if _MONITOR_SUPERVISOR_RESTART_REQUEST is None:
+            _MONITOR_SUPERVISOR_RESTART_REQUEST = restart
+        requested = _MONITOR_SUPERVISOR_RESTART_REQUEST
+    SHUTDOWN_REQUESTED.set()
+    return requested
+
+
+def _clear_monitor_supervisor_restart_request():
+    global _MONITOR_SUPERVISOR_RESTART_REQUEST
+
+    with _MONITOR_SUPERVISOR_RESTART_LOCK:
+        _MONITOR_SUPERVISOR_RESTART_REQUEST = None
+
+
+def _raise_monitor_supervisor_restart_if_requested():
+    with _MONITOR_SUPERVISOR_RESTART_LOCK:
+        requested = _MONITOR_SUPERVISOR_RESTART_REQUEST
+    if requested is not None:
+        raise requested
+
+
+def _settle_monitor_transaction_before_blocking(
+    db,
+    *,
+    success,
+    operation,
+    root_error=None,
+):
+    try:
+        settled = _settle_monitor_iteration_transaction(
+            db,
+            success=success,
+            root_error=root_error,
+        )
+        if getattr(db, "in_transaction", True):
+            raise sqlite3.OperationalError(
+                f"paper monitor transaction remains active before {operation}"
+            )
+        return settled
+    except Exception as cleanup_error:
+        raise _monitor_restart_required(operation, cleanup_error) from cleanup_error
+
+
+def _guard_monitor_db_blocking_boundary(db, owner_thread_id, operation):
+    _raise_monitor_supervisor_restart_if_requested()
+    if db is None:
+        return False
+    try:
+        active = bool(db.in_transaction)
+    except Exception as state_error:
+        restart = _monitor_restart_required(operation, state_error)
+        if threading.get_ident() != owner_thread_id:
+            restart = _request_monitor_supervisor_restart(restart)
+        raise restart from state_error
+    if not active:
+        return False
+
+    if threading.get_ident() != owner_thread_id:
+        boundary_error = RuntimeError(
+            f"paper monitor transaction active on owner thread before {operation}"
+        )
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, boundary_error)
+        )
+        raise restart from boundary_error
+
+    boundary_error = RuntimeError(
+        f"paper monitor transaction active before {operation}"
+    )
+    _settle_monitor_transaction_before_blocking(
+        db,
+        success=False,
+        operation=operation,
+        root_error=boundary_error,
+    )
+    restart = _monitor_restart_required(operation, boundary_error)
+    restart.add_note(
+        "paper_monitor_transaction_boundary_rollback_completed; "
+        "restart prevents stale in-memory state from continuing"
+    )
+    raise restart from boundary_error
+
+
+def _guard_monitor_blocking_boundary(operation):
+    return _guard_monitor_db_blocking_boundary(
+        _MONITOR_TRANSACTION_GUARD_DB,
+        _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID,
+        operation,
+    )
+
+
+def _monitor_blocking_guard_for_db(db):
+    owner_thread_id = threading.get_ident()
+
+    def guard(operation):
+        return _guard_monitor_db_blocking_boundary(
+            db,
+            owner_thread_id,
+            operation,
+        )
+
+    return guard
+
+
+def _guarded_blocking_sleep(seconds, *, operation):
+    _guard_monitor_blocking_boundary(operation)
+    return time.sleep(seconds)
+
+
+def _guarded_event_wait(event, seconds, *, operation):
+    _guard_monitor_blocking_boundary(operation)
+    return event.wait(seconds)
+
+
+def _guarded_future_result(future, *, operation):
+    _guard_monitor_blocking_boundary(operation)
+    return future.result()
+
+
+def _sleep_after_monitor_transaction_settle(
+    db,
+    seconds,
+    *,
+    success=True,
+    root_error=None,
+):
+    """Settle monitor work before any blocking sleep."""
+    _settle_monitor_transaction_before_blocking(
+        db,
+        success=success,
+        operation="monitor_sleep",
+        root_error=root_error,
+    )
+    _guarded_blocking_sleep(seconds, operation="monitor_sleep")
+
+
+def _settle_fast_lane_sync_failure(db, sync_err):
+    """Rollback failed fast-lane adoption before later work can block."""
+    _settle_monitor_transaction_before_blocking(
+        db,
+        success=False,
+        operation="fast_lane_sync_failure",
+        root_error=sync_err,
+    )
+    fatal_sqlite_malformed(sync_err, context='fast_lane_sync')
+    log.warning(f"  [FAST_LANE_SYNC] failed: {sync_err}")
+
+
+@_monitor_transaction_guarded
 def run_monitor(db):
     """Main monitoring loop."""
     strategy_config = load_active_strategy_config()
@@ -21581,7 +21824,7 @@ def run_monitor(db):
             )
             sanitized_monitor_states += 1
         positions[pos.trade_id] = pos
-        time.sleep(0.2)
+        _sleep_after_monitor_transaction_settle(db, 0.2)
 
     if positions:
         log.info(f"  Restored {len(positions)} open positions")
@@ -21648,6 +21891,7 @@ def run_monitor(db):
         exit_queue=guardian_exit_queue,
         fetch_price_fn=fetch_realtime_price,
         simulate_exit_fn=simulate_exit_execution,
+        blocking_guard_fn=_monitor_blocking_guard_for_db(db),
     )
     exit_guardian.start()
 
@@ -21656,6 +21900,7 @@ def run_monitor(db):
     _active_holdings_count = lambda: len(positions)
 
     while not SHUTDOWN_REQUESTED.is_set():
+      _raise_monitor_supervisor_restart_if_requested()
       try:
         now = time.time()
         now_utc = datetime.utcfromtimestamp(now)
@@ -21705,8 +21950,7 @@ def run_monitor(db):
                     db.commit()
                     log.info(f"  [FAST_LANE_SYNC] adopted {adopted} external open paper positions")
             except Exception as sync_err:
-                fatal_sqlite_malformed(sync_err, context='fast_lane_sync')
-                log.warning(f"  [FAST_LANE_SYNC] failed: {sync_err}")
+                _settle_fast_lane_sync_failure(db, sync_err)
         pending_priority = (
             smart_entry_result_ready(pending_entries)
             or dog_catcher_fast_lane_pending_ready(pending_entries)
@@ -22274,7 +22518,7 @@ def run_monitor(db):
                             log.info(f"  [LOTTO_OBSERVE] {symbol} not added to LOTTO watchlist: pool_not_found")
                             continue
 
-                        time.sleep(0.1)
+                        _sleep_after_monitor_transaction_settle(db, 0.1)
                         sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
                         sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
                         try:
@@ -22649,7 +22893,7 @@ def run_monitor(db):
                             payload=with_lifecycle_payload({'token_ca': token_ca}, routed_lifecycle),
                         )
                         continue
-                    time.sleep(0.1)
+                    _sleep_after_monitor_transaction_settle(db, 0.1)
                     sig_price_val, _, _ = fetch_realtime_price(token_ca, pool, max_age_ms=15000)
                     sig_price = sig_price_val if sig_price_val and sig_price_val > 0 else None
 
@@ -24197,7 +24441,15 @@ def run_monitor(db):
                             continue
 
                         try:
-                            should_enter, timing_reason, timing_detail, timing_trigger_price = _se_future.result()
+                            (
+                                should_enter,
+                                timing_reason,
+                                timing_detail,
+                                timing_trigger_price,
+                            ) = _guarded_future_result(
+                                _se_future,
+                                operation="smart_entry_future",
+                            )
                         except Exception as _se_err:
                             log.error(f"  [SmartEntry] {pending['symbol']} evaluation error: {_se_err}", exc_info=True)
                             pending_entries.pop(lifecycle_id, None)
@@ -25279,7 +25531,7 @@ def run_monitor(db):
                     entry_ts = int((execution.get('quoteTs') or time.time() * 1000) / 1000)
                     if sol_price is None:
                         sol_price = get_sol_price()
-                        time.sleep(0.2)
+                        _sleep_after_monitor_transaction_settle(db, 0.2)
                     # SOL pricing: quote_price_sol is already SOL/token from Jupiter
                     # No USD conversion needed — all monitoring now uses SOL
                     quote_price = quote_price_sol
@@ -26468,7 +26720,7 @@ def run_monitor(db):
                             initial_sl=_final_sl,  # Private slip-adjusted SL
                         )
                     last_progress = time.time()
-                    time.sleep(0.2)
+                    _sleep_after_monitor_transaction_settle(db, 0.2)
                 except Exception as e:
                     fatal_sqlite_malformed(e, context='pending_entry')
                     # Safety net: always pop to prevent infinite retry loop
@@ -26487,7 +26739,7 @@ def run_monitor(db):
                 new_sol = get_sol_price()
                 if new_sol:
                     sol_price = new_sol
-                time.sleep(0.2)
+                _sleep_after_monitor_transaction_settle(db, 0.2)
             except Exception as e:
                 log.debug(f"SOL price update failed: {e}")
 
@@ -27494,7 +27746,7 @@ def run_monitor(db):
                             'mark_source': mark_source,
                             'exit_eval': exit_eval,
                         })
-                    time.sleep(0.05)
+                    _sleep_after_monitor_transaction_settle(db, 0.05)
                 except Exception as e:
                     log.error(f"  Position update error for {pos.symbol}: {e}")
 
@@ -28134,23 +28386,38 @@ def run_monitor(db):
                     f"pool={pool_count} kline+dex_trend=cleared"
                 )
 
-        _settle_monitor_iteration_transaction(db, success=True)
-        SHUTDOWN_REQUESTED.wait(MAIN_LOOP_TICK_SEC)
+        _settle_monitor_transaction_before_blocking(
+            db,
+            success=True,
+            operation="main_loop_tick_wait",
+        )
+        _guarded_event_wait(
+            SHUTDOWN_REQUESTED,
+            MAIN_LOOP_TICK_SEC,
+            operation="main_loop_tick_wait",
+        )
       except KeyboardInterrupt as loop_err:
-        _settle_monitor_iteration_transaction(
+        _settle_monitor_transaction_before_blocking(
             db,
             success=False,
+            operation="keyboard_interrupt_exit",
             root_error=loop_err,
         )
         raise
       except Exception as loop_err:
-        _settle_monitor_iteration_transaction(
+        _settle_monitor_transaction_before_blocking(
             db,
             success=False,
+            operation="main_loop_error_wait",
             root_error=loop_err,
         )
         log.error(f"[MAIN_LOOP] Unhandled error in main loop iteration (recovering): {loop_err}", exc_info=True)
-        SHUTDOWN_REQUESTED.wait(5)
+        _guarded_event_wait(
+            SHUTDOWN_REQUESTED,
+            5,
+            operation="main_loop_error_wait",
+        )
+    _raise_monitor_supervisor_restart_if_requested()
     try:
         smart_entry_pool.shutdown(wait=False, cancel_futures=True)
         log.info("[SHUTDOWN] SmartEntry thread pool shutdown requested")
@@ -28160,22 +28427,13 @@ def run_monitor(db):
 
 # === Main ===
 
-def main():
-    # Graceful shutdown
-    def handle_signal(signum, frame):
-        log.info(f"Shutting down gracefully signal={signum}...")
-        SHUTDOWN_REQUESTED.set()
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    db = init_paper_db()
-
-    if '--dry-run' not in sys.argv and '--stats' not in sys.argv and '--daily' not in sys.argv:
-        wait_for_local_signal_source()
-
-    commit_pending_on_close = True
+def _run_main_command(db):
+    commit_pending_on_close = False
     try:
+        if '--dry-run' not in sys.argv and '--stats' not in sys.argv and '--daily' not in sys.argv:
+            wait_for_local_signal_source()
+
+        commit_pending_on_close = True
         if '--dry-run' in sys.argv:
             dry_run(db)
         elif '--stats' in sys.argv:
@@ -28211,6 +28469,21 @@ def main():
             context='shutdown' if commit_pending_on_close else 'monitor_failure',
             commit_pending=commit_pending_on_close,
         )
+
+
+def main():
+    # Graceful shutdown
+    def handle_signal(signum, frame):
+        log.info(f"Shutting down gracefully signal={signum}...")
+        SHUTDOWN_REQUESTED.set()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    db = init_paper_db()
+    _clear_monitor_supervisor_restart_request()
+    with _monitor_transaction_guard_scope(db):
+        _run_main_command(db)
 
 
 if __name__ == '__main__':

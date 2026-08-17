@@ -596,7 +596,8 @@ class ExitGuardianThread(threading.Thread):
     """
 
     def __init__(self, positions_ref, positions_lock, watchlist_store_ref,
-                 exit_queue, fetch_price_fn, simulate_exit_fn=None):
+                 exit_queue, fetch_price_fn, simulate_exit_fn=None,
+                 blocking_guard_fn=None):
         super().__init__(daemon=True, name='exit-guardian')
         self.positions = positions_ref      # shared dict reference
         self.lock = positions_lock          # threading.Lock
@@ -606,8 +607,17 @@ class ExitGuardianThread(threading.Thread):
         self._exit_pending = set()           # trade_ids already queued (dedup)
         self.fetch_price = fetch_price_fn   # fetch_realtime_price function
         self.simulate_exit = simulate_exit_fn  # simulate_exit_execution (for instant SL quotes)
+        self.blocking_guard = blocking_guard_fn
         self.interval = 3  # seconds
         self._running = True
+
+    def _guard_blocking_boundary(self, operation):
+        if self.blocking_guard is not None:
+            self.blocking_guard(operation)
+
+    def _blocking_sleep(self, seconds, operation):
+        self._guard_blocking_boundary(operation)
+        time.sleep(seconds)
 
     def run(self):
         log.info("[ExitGuardian] 🛡️ Started — monitoring positions every 3s")
@@ -616,7 +626,7 @@ class ExitGuardianThread(threading.Thread):
                 self._check_all_positions()
             except Exception as e:
                 log.error(f"[ExitGuardian] Error: {e}", exc_info=True)
-            time.sleep(self.interval)
+            self._blocking_sleep(self.interval, "exit_guardian_interval_wait")
 
     def stop(self):
         self._running = False
@@ -624,6 +634,7 @@ class ExitGuardianThread(threading.Thread):
     def _get_instant_quote(self, pos, ca, sell_pct=1.0):
         if not self.simulate_exit: return None
         try:
+            self._guard_blocking_boundary("exit_guardian_executable_sell_quote")
             _sell_pct = min(1.0, max(0.0, float(sell_pct or 1.0)))
             _sell_amount = int(float(pos.token_amount_raw) * _sell_pct) if pos.token_amount_raw else 0
             _instant_sim = self.simulate_exit(
@@ -707,6 +718,7 @@ class ExitGuardianThread(threading.Thread):
                     continue
 
                 # Fetch current price
+                self._guard_blocking_boundary("exit_guardian_live_price_quote")
                 price, src, age_ms = self.fetch_price(ca, pool)
                 if not price or price <= 0:
                     continue
@@ -861,7 +873,8 @@ class ExitGuardianThread(threading.Thread):
                     # Second check after short delay (0.3s, not 1.0s)
                     # Data: 1.0s delay cost avg -2.1% extra slippage on SL exits.
                     # 0.3s is enough to detect Redis price glitches but reduces crash exposure.
-                    time.sleep(0.3)
+                    self._blocking_sleep(0.3, "exit_guardian_stop_confirmation_wait")
+                    self._guard_blocking_boundary("exit_guardian_confirm_price_quote")
                     price2, src2, age_ms2 = self.fetch_price(ca, pool)
 
                     if not price2 or price2 <= 0:
