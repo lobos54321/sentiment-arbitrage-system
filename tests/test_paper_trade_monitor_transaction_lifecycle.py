@@ -9,7 +9,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import paper_decision_audit  # noqa: E402
-from paper_trade_monitor import _settle_monitor_iteration_transaction  # noqa: E402
+from paper_trade_monitor import (  # noqa: E402
+    _settle_monitor_iteration_transaction,
+    close_paper_db_gracefully,
+)
 
 
 def _open_delete_journal_db(path):
@@ -72,23 +75,65 @@ def test_failed_monitor_iteration_rolls_back_before_retry_sleep(tmp_path):
         db.close()
 
 
-def test_failed_monitor_iteration_preserves_root_when_rollback_fails():
-    class FailingRollback:
-        in_transaction = True
-
+def test_failed_monitor_iteration_exits_before_retry_wait_when_rollback_fails(
+    tmp_path,
+):
+    class FailingRollbackConnection(sqlite3.Connection):
         def rollback(self):
-            raise RuntimeError("injected rollback failure")
+            raise sqlite3.OperationalError("injected rollback failure")
+
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(
+        db_path,
+        timeout=0.05,
+        factory=FailingRollbackConnection,
+    )
+    db.execute("PRAGMA journal_mode=DELETE")
+    db.execute("CREATE TABLE evidence (value TEXT)")
+    db.commit()
+    db.execute("BEGIN IMMEDIATE")
+    db.execute("INSERT INTO evidence VALUES ('must-not-survive-restart')")
 
     root_error = LookupError("iteration failed")
-    assert not _settle_monitor_iteration_transaction(
-        FailingRollback(),
-        success=False,
-        root_error=root_error,
-    )
-    assert any(
-        "paper_monitor_iteration_rollback_error RuntimeError" in note
-        for note in root_error.__notes__
-    )
+    retry_wait_called = False
+    try:
+        with pytest.raises(LookupError, match="iteration failed") as caught:
+            _settle_monitor_iteration_transaction(
+                db,
+                success=False,
+                root_error=root_error,
+            )
+            retry_wait_called = True
+
+        assert caught.value is root_error
+        assert not retry_wait_called
+        assert db.in_transaction
+        assert Path(f"{db_path}-journal").exists()
+        assert any(
+            "paper_monitor_iteration_rollback_error OperationalError" in note
+            for note in root_error.__notes__
+        )
+
+        competitor = sqlite3.connect(db_path, timeout=0.05)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                competitor.execute("BEGIN IMMEDIATE")
+        finally:
+            competitor.close()
+    finally:
+        close_paper_db_gracefully(
+            db,
+            context="test_monitor_failure",
+            commit_pending=False,
+        )
+
+    assert not Path(f"{db_path}-journal").exists()
+    _assert_competing_writer_can_begin(db_path)
+    reopened = sqlite3.connect(db_path, timeout=1)
+    try:
+        assert reopened.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+    finally:
+        reopened.close()
 
 
 def test_failed_best_effort_audit_commit_releases_delete_journal_before_inner_sleep(

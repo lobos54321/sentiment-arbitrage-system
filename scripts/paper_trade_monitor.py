@@ -17490,13 +17490,17 @@ def connect_paper_db(path):
     return db
 
 
-def close_paper_db_gracefully(db, *, context='shutdown'):
+def close_paper_db_gracefully(db, *, context='shutdown', commit_pending=True):
     if db is None:
         return
     try:
-        db.commit()
+        if commit_pending:
+            db.commit()
+        elif db.in_transaction:
+            db.rollback()
     except Exception as exc:
-        log.warning(f"[DB_SHUTDOWN] commit failed context={context}: {exc}")
+        action = 'commit' if commit_pending else 'rollback'
+        log.warning(f"[DB_SHUTDOWN] {action} failed context={context}: {exc}")
     try:
         checkpoint = db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         log.info(f"[DB_SHUTDOWN] wal_checkpoint PASSIVE context={context} result={tuple(checkpoint) if checkpoint else None}")
@@ -21361,6 +21365,8 @@ def _settle_monitor_iteration_transaction(db, *, success, root_error=None):
                 "paper_monitor_iteration_rollback_error "
                 f"{type(cleanup_error).__name__}: {cleanup_error}"
             )
+            if getattr(db, "in_transaction", False):
+                raise root_error
             return False
         raise
 
@@ -28168,6 +28174,7 @@ def main():
     if '--dry-run' not in sys.argv and '--stats' not in sys.argv and '--daily' not in sys.argv:
         wait_for_local_signal_source()
 
+    commit_pending_on_close = True
     try:
         if '--dry-run' in sys.argv:
             dry_run(db)
@@ -28191,13 +28198,19 @@ def main():
                 date = sys.argv[idx + 1]
             print_daily_report(db, date)
         else:
+            commit_pending_on_close = False
             try:
                 run_monitor(db)
+                commit_pending_on_close = True
             except Exception as e:
                 log.error(f"CRITICAL ERROR: Paper trade monitor crashed: {e}", exc_info=True)
                 sys.exit(1)
     finally:
-        close_paper_db_gracefully(db)
+        close_paper_db_gracefully(
+            db,
+            context='shutdown' if commit_pending_on_close else 'monitor_failure',
+            commit_pending=commit_pending_on_close,
+        )
 
 
 if __name__ == '__main__':
