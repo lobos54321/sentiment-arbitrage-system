@@ -21343,6 +21343,28 @@ def close_position_as_trapped_no_route(db, pos, lifecycle, reason='trapped_no_ro
 
 # === Live Monitor Loop ===
 
+def _settle_monitor_iteration_transaction(db, *, success, root_error=None):
+    """Never carry an implicit SQLite transaction across a monitor sleep."""
+    try:
+        if not db.in_transaction:
+            return False
+        if success:
+            db.commit()
+        else:
+            db.rollback()
+        return True
+    except Exception as cleanup_error:
+        if success:
+            raise
+        if root_error is not None:
+            root_error.add_note(
+                "paper_monitor_iteration_rollback_error "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+            return False
+        raise
+
+
 def run_monitor(db):
     """Main monitoring loop."""
     strategy_config = load_active_strategy_config()
@@ -28106,10 +28128,21 @@ def run_monitor(db):
                     f"pool={pool_count} kline+dex_trend=cleared"
                 )
 
+        _settle_monitor_iteration_transaction(db, success=True)
         SHUTDOWN_REQUESTED.wait(MAIN_LOOP_TICK_SEC)
-      except KeyboardInterrupt:
+      except KeyboardInterrupt as loop_err:
+        _settle_monitor_iteration_transaction(
+            db,
+            success=False,
+            root_error=loop_err,
+        )
         raise
       except Exception as loop_err:
+        _settle_monitor_iteration_transaction(
+            db,
+            success=False,
+            root_error=loop_err,
+        )
         log.error(f"[MAIN_LOOP] Unhandled error in main loop iteration (recovering): {loop_err}", exc_info=True)
         SHUTDOWN_REQUESTED.wait(5)
     try:

@@ -1,7 +1,7 @@
 {
   "ci_merge_gates": [
     {
-      "artifact_hash": "7bd0c4afc8c69d951546fd02f889c905974d95dba6de8fc7b25881da559f2b20",
+      "artifact_hash": "b7f93ccbd680eef191fe5180e7f68a59bc3e1d7b40290b49b6df9e9d83d045cb",
       "gate_result": "pass",
       "merge_gate_id": "v27-readiness-main-pr-gate",
       "required_checks": [
@@ -36,7 +36,7 @@
         "python3 -m pytest test_v27_basic_contract_readiness.py test_v27_mode_readiness.py test_v27_mode_gate_scope_audit.py test_telegram_lifecycle_markov.py test_v27_markov_shadow_forecasts.py test_v27_markov_shadow_calibration_report.py -q -p no:cacheprovider",
         "python3 -m json.tool config/v27-markov-lifecycle-forecast-policy.json",
         "python3 -m py_compile scripts/v27_runtime_mode_gate.py scripts/paper_fast_lane.py scripts/paper_trade_monitor.py",
-        "python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py tests/test_candidate_shadow_observer_connection_lifecycle.py -q -p no:cacheprovider",
+        "python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py tests/test_candidate_shadow_observer_connection_lifecycle.py tests/test_paper_trade_monitor_transaction_lifecycle.py -q -p no:cacheprovider",
         "python3 -m py_compile scripts/cross_db_evaluator_snapshot.py scripts/evaluator_db_contract.py scripts/agent_capture_discovery_loop.py scripts/agent_autoloop_stage_runner.py scripts/autoloop_oos_refresh_worker.py scripts/zeabur_preflight_cleanup.py scripts/offline_raw_gold_silver_funnel_audit.py scripts/paper_db_retention.py scripts/run_with_timeout.py",
         "bash -n scripts/run_zeabur_services.sh scripts/zeabur_prestart.sh",
         "node --check src/index.js && node --check src/web/dashboard-server.js && node --check src/web/evaluator-snapshot-preflight.js && node --check scripts/pump_fun_shadow_observer.js",
@@ -55,7 +55,7 @@
       ],
       "spec_hash": "ca3be0a8274e376c3e8500a41b57f27bdeb84223262a270866dbbc06e6d38b4b",
       "workflow_file": ".github/workflows/v27-readiness.yml",
-      "workflow_sha256": "df8224e5811800a8963fd32ba38b5bb7b444b004de8fffe30192ca475eb969a3"
+      "workflow_sha256": "8a81399a5f798d38ac9051c6e9d994536cfbd596021c039b0daead1ecd3ea118"
     }
   ],
   "failure_action": "ci_fail",
@@ -270,7 +270,7 @@
         "normal_tiny"
       ],
       "approved_at": "2026-08-08T00:00:00Z",
-      "impact_hash": "32f78cad64ea8d057fea5f8bce0a20cf3bc8435aaf83aeb7ed6017ba67600c3f",
+      "impact_hash": "a622346398ded8afd27dde402329f5ab1fff451ff70eb2959f34ebfdfdaf7c12",
       "source_files": [
         "spec/telegram_dog_regime_capture/v2.7.0/spec.manifest.json",
         "spec/telegram_dog_regime_capture/v2.7.0/contract-catalog.json",
@@ -332,6 +332,7 @@
         "tests/test_autoloop_foundation_fail_closed.py",
         "tests/test_autoloop_research_db_isolation.py",
         "tests/test_candidate_shadow_observer_connection_lifecycle.py",
+        "tests/test_paper_trade_monitor_transaction_lifecycle.py",
         "tests/test_telegram_signal_identity_audit.py",
         "tests/test_runtime_v27_writer_topology_audit.py",
         "tests/test_data_lifecycle_retention.py",
@@ -375,7 +376,7 @@
         "test_paper_fast_lane.py"
       ],
       "source_hashes": {
-        ".github/workflows/v27-readiness.yml": "df8224e5811800a8963fd32ba38b5bb7b444b004de8fffe30192ca475eb969a3",
+        ".github/workflows/v27-readiness.yml": "8a81399a5f798d38ac9051c6e9d994536cfbd596021c039b0daead1ecd3ea118",
         "config/evaluator-snapshot-evidence-schema.json": "242408b90e2b186842bb6acda1c40565c7b7ba54bfafdf4cd98e8191ed108482",
         "config/v27-access-control-policy.json": "f130c5b0c253fcb91eb0cdd8007bcb51751ee599640bd7852a96030fd29da348",
         "config/v27-background-job-registry.json": "0dba3ce686bfd9cc04dd36eda76ff974a2759c858f1c0ea5a63808aea2dfbb1a",
@@ -417,7 +418,7 @@
         "scripts/paper_db_retention.py": "5dfdeb2cec62284653c5ff7c73136eb82155b3d87e4b059129bb83daa2a6d2a6",
         "scripts/paper_evidence_log.py": "7f790238212c66b90f25a0f2e79a7bfe97f4e8bfde4cbe6a8e8312d211ec20b8",
         "scripts/paper_fast_lane.py": "ed291f9d6a10fbeeaa7da21101a33d891a1163a5a42db9fbf8eac6d0ce7d6fa0",
-        "scripts/paper_trade_monitor.py": "0e571b61b19ddfceeb88e3b100dff0d68fc415e4501b6c324db21fe34c441288",
+        "scripts/paper_trade_monitor.py": "c20910905003e134a8451c7530a4a503b1c437f85741ee0786919e4453353768",
         "scripts/pump_fun_shadow_observer.js": "f88bd72ca47a50694db90bc1bd0970db5bcdfa72d0293606dbfbbc30e56e24b6",
         "scripts/run_with_timeout.py": "65e60bdd1f91fa55264c006a80b2ae5e04ae19d244ae4e75e3f2224a76195225",
         "scripts/run_zeabur_services.sh": "034dcb39c0f4e9f02f93e7897ee60fa47fbb41d50a1b78a0ab9b5fb860562b25",
@@ -471,6 +472,7 @@
         "tests/test_autoloop_foundation_fail_closed.py": "687e13551d5dcc9cd76c6a8cd8a6e4eb19813408ffc4de7a84e9159c9bbc5df2",
         "tests/test_autoloop_research_db_isolation.py": "2d09b3a605b9b1dcac52e15c9a431e574875149fdcdf33d8018a11a37cbe3dea",
         "tests/test_candidate_shadow_observer_connection_lifecycle.py": "8a9f0bf808ce1804424897730563dea82da338a3912ae66a9731065207e1ae80",
+        "tests/test_paper_trade_monitor_transaction_lifecycle.py": "cb49072a047fc7718ebc2b315fd6bc60f179334ca1a2890da2f0c4c513637435",
         "tests/test_cross_db_evaluator_snapshot.py": "f0ffa79215d732ad59e5398a75066af4182e1eb6a9493c835214b74dde799236",
         "tests/test_data_lifecycle_retention.py": "9e3c76903d16787b9b9513047da21d685bbc4aae05ed2b1672f86281e4c583d0",
         "tests/test_evaluator_db_contract.py": "8901edd73bcee21cc23e2e3144566939ca826073ec9497f3521634b77f128e98",

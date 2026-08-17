@@ -71,7 +71,7 @@ jobs:
       - name: Run focused v27 readiness tests
         run: python3 -m pytest test_v27_basic_contract_readiness.py test_v27_mode_readiness.py test_v27_mode_gate_scope_audit.py test_telegram_lifecycle_markov.py test_v27_markov_shadow_forecasts.py test_v27_markov_shadow_calibration_report.py -q -p no:cacheprovider
       - name: Run v27 runtime mode gate tests
-        run: python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py tests/test_candidate_shadow_observer_connection_lifecycle.py -q -p no:cacheprovider
+        run: python3 -m pytest test_v27_runtime_mode_gate.py test_paper_fast_lane.py tests/test_candidate_shadow_observer_connection_lifecycle.py tests/test_paper_trade_monitor_transaction_lifecycle.py -q -p no:cacheprovider
       - name: Run evaluator snapshot and AutoLoop provenance tests
         run: python3 -m pytest tests/test_cross_db_evaluator_snapshot.py tests/test_evaluator_db_contract.py tests/test_autoloop_evaluator_snapshot_provenance.py tests/test_autoloop_foundation_fail_closed.py tests/test_autoloop_research_db_isolation.py tests/test_runtime_v27_writer_topology_audit.py -q -p no:cacheprovider
       - name: Run process supervision tests
