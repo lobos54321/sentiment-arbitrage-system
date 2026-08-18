@@ -964,7 +964,8 @@ def smart_entry_bounce_reject_reason(pos_detail, entry_readiness_policy=None, mo
 def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
                          momentum_snapshots=None, momentum_pct=0, sustained_ath=False,
                          first_fire_pc_m5=None, spread_abort_count=0,
-                         entry_readiness_policy=None, matrix_scores=None):
+                         entry_readiness_policy=None, matrix_scores=None,
+                         blocking_sleep_fn=None):
     """
     Smart Entry Engine (V6 — Unified Scoring System)
     Replaces serial rejection with a 6-dimension scoring system (Total 100+ points).
@@ -1558,6 +1559,9 @@ def evaluate_smart_entry(token_ca, symbol='?', pool_address=None, entry_count=0,
 
         sleep_for = poll_sec - (_time.time() - loop_start)
         if sleep_for > 0:
-            _time.sleep(sleep_for)
+            if blocking_sleep_fn is not None:
+                blocking_sleep_fn(sleep_for, "smart_entry_poll_wait")
+            else:
+                _time.sleep(sleep_for)
 
     return False, 'entry_node_timeout', f'{best_wait_detail}; armed=({detail_str})', None

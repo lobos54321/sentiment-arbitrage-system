@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import textwrap
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,12 +16,14 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import paper_decision_audit  # noqa: E402
+import entry_engine  # noqa: E402
 import exit_engine  # noqa: E402
 import paper_trade_monitor  # noqa: E402
 from paper_trade_monitor import (  # noqa: E402
     MonitorSupervisorRestartRequired,
     _clear_monitor_supervisor_restart_request,
     _guarded_blocking_sleep,
+    _monitor_blocking_call_for_db,
     _monitor_blocking_guard_for_db,
     _monitor_transaction_guard_scope,
     _raise_monitor_supervisor_restart_if_requested,
@@ -31,6 +34,15 @@ from paper_trade_monitor import (  # noqa: E402
     close_paper_db_gracefully,
     run_db_write_with_retry,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_monitor_restart_state():
+    _clear_monitor_supervisor_restart_request()
+    paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
+    yield
+    _clear_monitor_supervisor_restart_request()
+    paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
 
 
 def _open_delete_journal_db(path):
@@ -615,6 +627,166 @@ def test_cross_thread_guardian_wait_requests_restart_before_raw_sleep(
         db.close()
 
 
+def test_worker_restart_request_rolls_back_instead_of_committing_success_path(
+    tmp_path,
+):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(
+        db_path,
+        timeout=1,
+        factory=paper_trade_monitor.MonitorSQLiteConnection,
+    )
+    db.execute("PRAGMA journal_mode=DELETE")
+    db.execute("CREATE TABLE evidence (value TEXT)")
+    db.commit()
+    worker_errors = []
+    try:
+        with _monitor_transaction_guard_scope(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO evidence VALUES ('must-rollback-on-worker-restart')"
+            )
+
+            def worker():
+                try:
+                    _guarded_blocking_sleep(
+                        0.01,
+                        operation="worker_detects_owner_transaction",
+                    )
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+            assert len(worker_errors) == 1
+
+            with pytest.raises(MonitorSupervisorRestartRequired) as commit_caught:
+                db.commit()
+
+            with pytest.raises(MonitorSupervisorRestartRequired) as caught:
+                _sleep_after_monitor_transaction_settle(
+                    db,
+                    0.01,
+                    success=True,
+                )
+
+            assert commit_caught.value is worker_errors[0]
+            assert caught.value is worker_errors[0]
+            assert not db.in_transaction
+            assert not Path(f"{db_path}-journal").exists()
+            assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+            _assert_competing_writer_can_begin(db_path)
+    finally:
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+    reopened = sqlite3.connect(db_path, timeout=1)
+    try:
+        assert reopened.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+    finally:
+        reopened.close()
+
+
+def test_quote_boundary_gate_prevents_begin_until_actual_call_returns(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _open_delete_journal_db(db_path)
+    entered_quote = threading.Event()
+    release_quote = threading.Event()
+    quote_finished = threading.Event()
+    quote_observations = []
+    worker_errors = []
+    try:
+        with _monitor_transaction_guard_scope(db):
+            blocking_call = _monitor_blocking_call_for_db(db)
+
+            def quote():
+                quote_observations.append(db.in_transaction)
+                entered_quote.set()
+                assert release_quote.wait(timeout=2)
+                quote_observations.append(db.in_transaction)
+                quote_finished.set()
+                return "quoted"
+
+            def worker():
+                try:
+                    assert blocking_call("test_quote", quote) == "quoted"
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            assert entered_quote.wait(timeout=2)
+            timer = threading.Timer(0.05, release_quote.set)
+            timer.start()
+
+            # BEGIN cannot reach SQLite until the exact quote callback returns.
+            db.execute("BEGIN IMMEDIATE")
+            timer.join(timeout=1)
+            thread.join(timeout=2)
+
+            assert not thread.is_alive()
+            assert worker_errors == []
+            assert quote_finished.is_set()
+            assert quote_observations == [False, False]
+            assert db.in_transaction
+            db.rollback()
+            _assert_competing_writer_can_begin(db_path)
+    finally:
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
+def test_sleep_boundary_releases_gate_only_after_wait_has_started(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _open_delete_journal_db(db_path)
+    worker_errors = []
+    try:
+        with _monitor_transaction_guard_scope(db):
+            coordinator = paper_trade_monitor._MONITOR_TRANSACTION_COORDINATOR
+
+            def worker():
+                try:
+                    _guarded_blocking_sleep(
+                        0.1,
+                        operation="test_atomic_sleep_start",
+                    )
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+
+            deadline = time.monotonic() + 2
+            while not coordinator.boundary_condition._waiters:
+                assert time.monotonic() < deadline
+                threading.Event().wait(0.001)
+
+            # A registered Condition waiter proves the guarded wait has begun.
+            assert coordinator.boundary_gate.acquire(timeout=1)
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("INSERT INTO evidence VALUES ('opened-after-wait-start')")
+            finally:
+                coordinator.boundary_gate.release()
+
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+            assert len(worker_errors) == 1
+            assert isinstance(worker_errors[0], MonitorSupervisorRestartRequired)
+            assert db.in_transaction
+            assert Path(f"{db_path}-journal").exists()
+            db.rollback()
+            assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+    finally:
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
 def test_main_installs_guard_before_startup_wait_and_closes_on_restart(
     tmp_path,
     monkeypatch,
@@ -696,7 +868,11 @@ def test_all_blocking_primitives_route_through_transaction_guard():
 
     assert raw_calls == [
         ("_guarded_blocking_sleep", "sleep"),
+        ("_guarded_blocking_sleep", "wait"),
         ("_guarded_event_wait", "wait"),
+        ("_guarded_event_wait", "wait"),
+        ("_guarded_future_result", "result"),
+        ("_guarded_future_result", "wait"),
         ("_guarded_future_result", "result"),
     ]
 
@@ -726,6 +902,10 @@ def test_all_blocking_primitives_route_through_transaction_guard():
     ExitBlockingCallVisitor().visit(exit_tree)
     assert exit_raw_calls == ["_blocking_sleep"]
 
+    smart_entry_source = inspect.getsource(entry_engine.evaluate_smart_entry)
+    assert "blocking_sleep_fn(sleep_for, \"smart_entry_poll_wait\")" in smart_entry_source
+    assert smart_entry_source.count("_time.sleep(sleep_for)") == 1
+
 
 def test_quote_boundaries_require_transaction_guard():
     guarded_functions = (
@@ -744,14 +924,18 @@ def test_quote_boundaries_require_transaction_guard():
             and isinstance(body[0].value.value, str)
         ):
             body = body[1:]
-        first_call = body[0].value
-        assert isinstance(first_call, ast.Call)
-        assert isinstance(first_call.func, ast.Name)
-        assert first_call.func.id == "_guard_monitor_blocking_boundary"
+        first_statement = body[0]
+        assert isinstance(first_statement, ast.With)
+        context_call = first_statement.items[0].context_expr
+        assert isinstance(context_call, ast.Call)
+        assert isinstance(context_call.func, ast.Name)
+        assert context_call.func.id == "_monitor_blocking_boundary_scope"
 
     assert not issubclass(MonitorSupervisorRestartRequired, Exception)
     run_source = inspect.getsource(paper_trade_monitor.run_monitor)
     assert "blocking_guard_fn=_monitor_blocking_guard_for_db(db)" in run_source
+    assert run_source.count("blocking_sleep_fn=_monitor_blocking_sleep_for_db(db)") == 2
+    assert "blocking_call_fn=_monitor_blocking_call_for_db(db)" in run_source
     main_source = inspect.getsource(paper_trade_monitor.main)
     assert "with _monitor_transaction_guard_scope(db):" in main_source
 

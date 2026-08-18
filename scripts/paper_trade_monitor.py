@@ -37,7 +37,7 @@ import logging
 import urllib.request
 import urllib.parse
 import threading
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import Counter, defaultdict, deque
@@ -1273,36 +1273,36 @@ class PersistentExecutionBridge:
         self._lock = threading.Lock()
         
     def _start_if_needed(self):
-        _guard_monitor_blocking_boundary("execution_bridge_start")
-        with self._lock:
-            try:
-                status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.1)
-                if status in [200, 405, 500]:
-                    return
-            except Exception:
-                pass
-            
-            if self._proc is None or self._proc.poll() is not None:
-                env = os.environ.copy()
-                self._proc = subprocess.Popen(
-                    ['node', str(EXECUTION_BRIDGE), 'daemon'],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=str(PROJECT_ROOT),
-                    env=env
-                )
-                
-            for _ in range(50):
+        with _monitor_blocking_boundary_scope("execution_bridge_start"):
+            with self._lock:
                 try:
-                    status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.5)
+                    status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.1)
                     if status in [200, 405, 500]:
                         return
                 except Exception:
                     pass
-                _guarded_blocking_sleep(
-                    0.1,
-                    operation="execution_bridge_start_retry",
-                )
+
+                if self._proc is None or self._proc.poll() is not None:
+                    env = os.environ.copy()
+                    self._proc = subprocess.Popen(
+                        ['node', str(EXECUTION_BRIDGE), 'daemon'],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        cwd=str(PROJECT_ROOT),
+                        env=env
+                    )
+
+                for _ in range(50):
+                    try:
+                        status, _ = _post_json("http://127.0.0.1:38942", {"_command": "ping"}, 0.5)
+                        if status in [200, 405, 500]:
+                            return
+                    except Exception:
+                        pass
+                    _guarded_blocking_sleep(
+                        0.1,
+                        operation="execution_bridge_start_retry",
+                    )
             
     def call(self, command, payload, timeout=10):
         self._start_if_needed()
@@ -1324,8 +1324,8 @@ class PersistentExecutionBridge:
 _daemon_bridge = PersistentExecutionBridge()
 
 def call_execution_bridge(command, payload, timeout=10):
-    _guard_monitor_blocking_boundary(f"execution_bridge_call:{command}")
-    return _daemon_bridge.call(command, payload, timeout)
+    with _monitor_blocking_boundary_scope(f"execution_bridge_call:{command}"):
+        return _daemon_bridge.call(command, payload, timeout)
 
 
 def simulate_entry_execution(token_ca, amount_sol, stage_name, strategy_id=None, lifecycle_id=None, timeout=20, fast_lane_timeout=False):
@@ -1616,8 +1616,9 @@ def run_db_write_with_retry(
     last_exc = None
     for attempt in range(1, max(1, attempts) + 1):
         try:
-            with sqlite_single_writer(f"paper_trade_monitor:{label}", timeout_sec=lock_timeout_sec):
-                return writer()
+            with _monitor_blocking_boundary_scope(f"db_write:{label}"):
+                with sqlite_single_writer(f"paper_trade_monitor:{label}", timeout_sec=lock_timeout_sec):
+                    return writer()
         except TimeoutError as exc:
             last_exc = exc
             log.warning(f"  [DB_RETRY] {label} single_writer_timeout attempt={attempt}/{attempts}")
@@ -17502,9 +17503,58 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 
 # === Database Setup ===
 
+class MonitorSQLiteConnection(sqlite3.Connection):
+    """Paper DB connection that makes restart requests outrank commits."""
+
+    def commit(self):
+        coordinator = _monitor_transaction_coordinator_for_db(self)
+        gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+        with gate:
+            try:
+                requested = _monitor_supervisor_restart_request()
+                if requested is not None:
+                    try:
+                        if self.in_transaction:
+                            super().rollback()
+                    except Exception as rollback_error:
+                        requested.add_note(
+                            "paper_monitor_restart_rollback_error "
+                            f"{type(rollback_error).__name__}: {rollback_error}"
+                        )
+                        raise requested from rollback_error
+                    if getattr(self, "in_transaction", True):
+                        state_error = sqlite3.OperationalError(
+                            "paper monitor transaction remains active before commit restart"
+                        )
+                        requested.add_note(
+                            "paper_monitor_restart_rollback_error "
+                            f"{type(state_error).__name__}: {state_error}"
+                        )
+                        raise requested from state_error
+                    raise requested
+                return super().commit()
+            finally:
+                if coordinator is not None:
+                    coordinator.refresh_transaction_state()
+
+    def rollback(self):
+        coordinator = _monitor_transaction_coordinator_for_db(self)
+        gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+        with gate:
+            try:
+                return super().rollback()
+            finally:
+                if coordinator is not None:
+                    coordinator.refresh_transaction_state()
+
+
 def connect_paper_db(path):
     require_unmarked_paper_db(path, component="paper_trade_monitor")
-    db = sqlite3.connect(path, timeout=PAPER_SQLITE_TIMEOUT_SEC)
+    db = sqlite3.connect(
+        path,
+        timeout=PAPER_SQLITE_TIMEOUT_SEC,
+        factory=MonitorSQLiteConnection,
+    )
     configure_paper_sqlite_connection(
         db,
         busy_timeout_ms=PAPER_SQLITE_BUSY_TIMEOUT_MS,
@@ -19267,7 +19317,7 @@ def _shared_quote_to_sol_price(out_amount_lamports, token_decimals):
     return sol_per_million_raw / tokens_per_million_raw
 
 
-def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, token_decimals=None):
+def _get_live_price_snapshot_unlocked(token_ca, pool_address=None, min_timestamp_ms=None, token_decimals=None):
     """Get live price snapshot — ALL prices returned in SOL per token.
 
     Primary source: Jupiter shared-quote (already in SOL lamports).
@@ -19275,7 +19325,6 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
     converted to SOL via sol_price. This eliminates phantom PnL from
     SOL/USD fluctuations during trades.
     """
-    _guard_monitor_blocking_boundary("live_price_quote")
     payload = read_redis_payload(token_ca)
     if payload and is_redis_payload_fresh(payload, LIVE_PRICE_MAX_AGE_MS, min_timestamp_ms=min_timestamp_ms):
         timestamp_ms = _coerce_timestamp_ms(payload)
@@ -19349,6 +19398,16 @@ def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, 
     if sol_usd and sol_usd > 0:
         direct['price'] = direct['price'] / sol_usd
     return direct
+
+
+def get_live_price_snapshot(token_ca, pool_address=None, min_timestamp_ms=None, token_decimals=None):
+    with _monitor_blocking_boundary_scope("live_price_quote"):
+        return _get_live_price_snapshot_unlocked(
+            token_ca,
+            pool_address,
+            min_timestamp_ms=min_timestamp_ms,
+            token_decimals=token_decimals,
+        )
 
 
 def get_current_price(token_ca, pool_address=None):
@@ -21421,24 +21480,123 @@ class MonitorSupervisorRestartRequired(BaseException):
 
 _MONITOR_TRANSACTION_GUARD_DB = None
 _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = None
+_MONITOR_TRANSACTION_COORDINATOR = None
 _MONITOR_SUPERVISOR_RESTART_LOCK = threading.Lock()
 _MONITOR_SUPERVISOR_RESTART_REQUEST = None
+_MONITOR_BLOCKING_POLL_SEC = 0.05
+
+
+class _MonitorTransactionCoordinator:
+    """Serialize SQLite transaction starts with monitor waits and quote calls."""
+
+    def __init__(self, db, owner_thread_id):
+        self.db = db
+        self.owner_thread_id = owner_thread_id
+        self.boundary_gate = threading.RLock()
+        self.boundary_condition = threading.Condition(self.boundary_gate)
+        self.transaction_may_be_active = bool(getattr(db, "in_transaction", True))
+        self.explicit_transaction_root = self.transaction_may_be_active
+        self.savepoint_depth = 0
+        self.active = True
+
+    @staticmethod
+    def _statement_parts(statement):
+        text = str(statement or "").strip()
+        if not text:
+            return ()
+        return tuple(text.upper().split())
+
+    def trace_transaction_boundary(self, statement):
+        """Mark transaction transitions while mutually excluding blocking calls.
+
+        SQLite invokes the trace callback immediately before executing a
+        statement. Holding ``boundary_gate`` across a quote therefore prevents
+        BEGIN from reaching SQLite until the quote returns. A Condition wait
+        releases the same gate atomically only after the wait has begun.
+        """
+        parts = self._statement_parts(statement)
+        if not parts:
+            return
+        operation = parts[0]
+        with self.boundary_condition:
+            if operation == "BEGIN":
+                self.transaction_may_be_active = True
+                self.explicit_transaction_root = True
+                self.savepoint_depth = 0
+            elif operation == "SAVEPOINT":
+                self.transaction_may_be_active = True
+                self.savepoint_depth += 1
+            elif operation in {"COMMIT", "END"}:
+                self.transaction_may_be_active = False
+                self.explicit_transaction_root = False
+                self.savepoint_depth = 0
+            elif operation == "ROLLBACK" and (
+                len(parts) == 1 or parts[1] != "TO"
+            ):
+                self.transaction_may_be_active = False
+                self.explicit_transaction_root = False
+                self.savepoint_depth = 0
+            elif operation == "RELEASE" and self.savepoint_depth > 0:
+                self.savepoint_depth -= 1
+                if not self.explicit_transaction_root and self.savepoint_depth == 0:
+                    self.transaction_may_be_active = False
+
+    def install(self):
+        self.db.set_trace_callback(self.trace_transaction_boundary)
+
+    def refresh_transaction_state(self):
+        with self.boundary_condition:
+            self.transaction_may_be_active = bool(
+                getattr(self.db, "in_transaction", True)
+            )
+            if not self.transaction_may_be_active:
+                self.explicit_transaction_root = False
+                self.savepoint_depth = 0
+            self.boundary_condition.notify_all()
+
+    def deactivate(self):
+        with self.boundary_condition:
+            self.active = False
+            self.boundary_condition.notify_all()
+        try:
+            self.db.set_trace_callback(None)
+        except Exception:
+            # The normal main path closes the connection before leaving the
+            # outer guard scope. No callback can run on a closed handle.
+            pass
 
 
 @contextmanager
 def _monitor_transaction_guard_scope(db):
     global _MONITOR_TRANSACTION_GUARD_DB
     global _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID
+    global _MONITOR_TRANSACTION_COORDINATOR
 
     previous_db = _MONITOR_TRANSACTION_GUARD_DB
     previous_owner_thread_id = _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID
+    previous_coordinator = _MONITOR_TRANSACTION_COORDINATOR
+    reuse_coordinator = bool(
+        previous_coordinator is not None
+        and previous_coordinator.active
+        and previous_coordinator.db is db
+    )
+    coordinator = previous_coordinator if reuse_coordinator else _MonitorTransactionCoordinator(
+        db,
+        threading.get_ident(),
+    )
+    if not reuse_coordinator:
+        coordinator.install()
     _MONITOR_TRANSACTION_GUARD_DB = db
-    _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = threading.get_ident()
+    _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = coordinator.owner_thread_id
+    _MONITOR_TRANSACTION_COORDINATOR = coordinator
     try:
         yield
     finally:
+        if not reuse_coordinator:
+            coordinator.deactivate()
         _MONITOR_TRANSACTION_GUARD_DB = previous_db
         _MONITOR_TRANSACTION_GUARD_OWNER_THREAD_ID = previous_owner_thread_id
+        _MONITOR_TRANSACTION_COORDINATOR = previous_coordinator
 
 
 def _monitor_transaction_guarded(func):
@@ -21469,6 +21627,10 @@ def _request_monitor_supervisor_restart(restart):
             _MONITOR_SUPERVISOR_RESTART_REQUEST = restart
         requested = _MONITOR_SUPERVISOR_RESTART_REQUEST
     SHUTDOWN_REQUESTED.set()
+    coordinator = _MONITOR_TRANSACTION_COORDINATOR
+    if coordinator is not None:
+        with coordinator.boundary_condition:
+            coordinator.boundary_condition.notify_all()
     return requested
 
 
@@ -21486,6 +21648,51 @@ def _raise_monitor_supervisor_restart_if_requested():
         raise requested
 
 
+def _monitor_supervisor_restart_request():
+    with _MONITOR_SUPERVISOR_RESTART_LOCK:
+        return _MONITOR_SUPERVISOR_RESTART_REQUEST
+
+
+def _monitor_transaction_coordinator_for_db(db):
+    coordinator = _MONITOR_TRANSACTION_COORDINATOR
+    if coordinator is not None and coordinator.active and coordinator.db is db:
+        return coordinator
+    return None
+
+
+def _rollback_for_requested_restart(db, operation, requested):
+    """Never commit owner work after a worker has requested restart."""
+    if db is None:
+        raise requested
+    try:
+        active = bool(db.in_transaction)
+    except Exception as state_error:
+        requested.add_note(
+            "paper_monitor_restart_transaction_state_error "
+            f"{type(state_error).__name__}: {state_error}"
+        )
+        raise requested from state_error
+    if active:
+        try:
+            db.rollback()
+        except Exception as rollback_error:
+            requested.add_note(
+                "paper_monitor_restart_rollback_error "
+                f"{type(rollback_error).__name__}: {rollback_error}"
+            )
+            raise requested from rollback_error
+        if getattr(db, "in_transaction", True):
+            state_error = sqlite3.OperationalError(
+                f"paper monitor transaction remains active before {operation} restart"
+            )
+            requested.add_note(
+                "paper_monitor_restart_rollback_error "
+                f"{type(state_error).__name__}: {state_error}"
+            )
+            raise requested from state_error
+    raise requested
+
+
 def _settle_monitor_transaction_before_blocking(
     db,
     *,
@@ -21493,22 +21700,114 @@ def _settle_monitor_transaction_before_blocking(
     operation,
     root_error=None,
 ):
-    try:
-        settled = _settle_monitor_iteration_transaction(
-            db,
-            success=success,
-            root_error=root_error,
-        )
-        if getattr(db, "in_transaction", True):
-            raise sqlite3.OperationalError(
-                f"paper monitor transaction remains active before {operation}"
+    coordinator = _monitor_transaction_coordinator_for_db(db)
+    gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+    with gate:
+        requested = _monitor_supervisor_restart_request()
+        if requested is not None:
+            _rollback_for_requested_restart(db, operation, requested)
+        try:
+            settled = _settle_monitor_iteration_transaction(
+                db,
+                success=success,
+                root_error=root_error,
             )
-        return settled
-    except Exception as cleanup_error:
-        raise _monitor_restart_required(operation, cleanup_error) from cleanup_error
+            if getattr(db, "in_transaction", True):
+                raise sqlite3.OperationalError(
+                    f"paper monitor transaction remains active before {operation}"
+                )
+            return settled
+        except Exception as cleanup_error:
+            restart = _monitor_restart_required(operation, cleanup_error)
+            raise restart from cleanup_error
+
+
+def _validate_monitor_blocking_boundary_locked(coordinator, operation):
+    requested = _monitor_supervisor_restart_request()
+    if requested is not None:
+        if threading.get_ident() == coordinator.owner_thread_id:
+            _rollback_for_requested_restart(coordinator.db, operation, requested)
+        raise requested
+
+    if not coordinator.active:
+        inactive_error = RuntimeError(
+            f"paper monitor transaction coordinator inactive before {operation}"
+        )
+        restart = _monitor_restart_required(operation, inactive_error)
+        if threading.get_ident() != coordinator.owner_thread_id:
+            restart = _request_monitor_supervisor_restart(restart)
+        raise restart from inactive_error
+
+    try:
+        active = bool(coordinator.db.in_transaction)
+    except Exception as state_error:
+        restart = _monitor_restart_required(operation, state_error)
+        if threading.get_ident() != coordinator.owner_thread_id:
+            restart = _request_monitor_supervisor_restart(restart)
+        raise restart from state_error
+
+    if not active and not coordinator.transaction_may_be_active:
+        return False
+
+    boundary_error = RuntimeError(
+        f"paper monitor transaction active or starting before {operation}"
+    )
+    if threading.get_ident() != coordinator.owner_thread_id:
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, boundary_error)
+        )
+        raise restart from boundary_error
+
+    if active:
+        try:
+            _settle_monitor_iteration_transaction(
+                coordinator.db,
+                success=False,
+                root_error=boundary_error,
+            )
+        except BaseException as cleanup_error:
+            restart = _monitor_restart_required(operation, cleanup_error)
+            raise restart from cleanup_error
+    restart = _monitor_restart_required(operation, boundary_error)
+    restart.add_note(
+        "paper_monitor_transaction_boundary_rollback_completed; "
+        "restart prevents stale in-memory state from continuing"
+    )
+    raise restart from boundary_error
+
+
+@contextmanager
+def _monitor_blocking_boundary_scope(operation, coordinator=None):
+    coordinator = coordinator or _MONITOR_TRANSACTION_COORDINATOR
+    if coordinator is None:
+        _raise_monitor_supervisor_restart_if_requested()
+        yield None
+        return
+
+    acquired = coordinator.boundary_gate.acquire(
+        timeout=max(0.1, float(PAPER_SQLITE_TIMEOUT_SEC))
+    )
+    if not acquired:
+        timeout_error = TimeoutError(
+            f"paper monitor transaction boundary unavailable before {operation}"
+        )
+        restart = _monitor_restart_required(operation, timeout_error)
+        if threading.get_ident() != coordinator.owner_thread_id:
+            restart = _request_monitor_supervisor_restart(restart)
+        raise restart from timeout_error
+    try:
+        _validate_monitor_blocking_boundary_locked(coordinator, operation)
+        yield coordinator
+        _validate_monitor_blocking_boundary_locked(coordinator, operation)
+    finally:
+        coordinator.boundary_gate.release()
 
 
 def _guard_monitor_db_blocking_boundary(db, owner_thread_id, operation):
+    coordinator = _monitor_transaction_coordinator_for_db(db)
+    if coordinator is not None:
+        with _monitor_blocking_boundary_scope(operation, coordinator):
+            return False
     _raise_monitor_supervisor_restart_if_requested()
     if db is None:
         return False
@@ -21558,8 +21857,12 @@ def _guard_monitor_blocking_boundary(operation):
 
 def _monitor_blocking_guard_for_db(db):
     owner_thread_id = threading.get_ident()
+    coordinator = _monitor_transaction_coordinator_for_db(db)
 
     def guard(operation):
+        if coordinator is not None:
+            with _monitor_blocking_boundary_scope(operation, coordinator):
+                return False
         return _guard_monitor_db_blocking_boundary(
             db,
             owner_thread_id,
@@ -21569,19 +21872,83 @@ def _monitor_blocking_guard_for_db(db):
     return guard
 
 
-def _guarded_blocking_sleep(seconds, *, operation):
-    _guard_monitor_blocking_boundary(operation)
-    return time.sleep(seconds)
+def _guarded_blocking_sleep(seconds, *, operation, coordinator=None):
+    with _monitor_blocking_boundary_scope(operation, coordinator) as active_coordinator:
+        if active_coordinator is None:
+            return time.sleep(seconds)
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            active_coordinator.boundary_condition.wait(timeout=remaining)
+            _validate_monitor_blocking_boundary_locked(
+                active_coordinator,
+                operation,
+            )
 
 
-def _guarded_event_wait(event, seconds, *, operation):
-    _guard_monitor_blocking_boundary(operation)
-    return event.wait(seconds)
+def _guarded_event_wait(event, seconds, *, operation, coordinator=None):
+    with _monitor_blocking_boundary_scope(operation, coordinator) as active_coordinator:
+        if active_coordinator is None:
+            return event.wait(seconds)
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while not event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            active_coordinator.boundary_condition.wait(
+                timeout=min(_MONITOR_BLOCKING_POLL_SEC, remaining)
+            )
+            _validate_monitor_blocking_boundary_locked(
+                active_coordinator,
+                operation,
+            )
+        return event.is_set()
 
 
-def _guarded_future_result(future, *, operation):
-    _guard_monitor_blocking_boundary(operation)
-    return future.result()
+def _guarded_future_result(future, *, operation, coordinator=None):
+    with _monitor_blocking_boundary_scope(operation, coordinator) as active_coordinator:
+        if active_coordinator is None:
+            return future.result()
+
+        def notify_done(_future):
+            with active_coordinator.boundary_condition:
+                active_coordinator.boundary_condition.notify_all()
+
+        future.add_done_callback(notify_done)
+        while not future.done():
+            active_coordinator.boundary_condition.wait(
+                timeout=_MONITOR_BLOCKING_POLL_SEC
+            )
+            _validate_monitor_blocking_boundary_locked(
+                active_coordinator,
+                operation,
+            )
+        return future.result()
+
+
+def _monitor_blocking_sleep_for_db(db):
+    coordinator = _monitor_transaction_coordinator_for_db(db)
+
+    def sleep(seconds, operation):
+        return _guarded_blocking_sleep(
+            seconds,
+            operation=operation,
+            coordinator=coordinator,
+        )
+
+    return sleep
+
+
+def _monitor_blocking_call_for_db(db):
+    coordinator = _monitor_transaction_coordinator_for_db(db)
+
+    def call(operation, callback, *args, **kwargs):
+        with _monitor_blocking_boundary_scope(operation, coordinator):
+            return callback(*args, **kwargs)
+
+    return call
 
 
 def _sleep_after_monitor_transaction_settle(
@@ -21892,6 +22259,8 @@ def run_monitor(db):
         fetch_price_fn=fetch_realtime_price,
         simulate_exit_fn=simulate_exit_execution,
         blocking_guard_fn=_monitor_blocking_guard_for_db(db),
+        blocking_sleep_fn=_monitor_blocking_sleep_for_db(db),
+        blocking_call_fn=_monitor_blocking_call_for_db(db),
     )
     exit_guardian.start()
 
@@ -24433,6 +24802,7 @@ def run_monitor(db):
                                 ),
                                 entry_readiness_policy=pending.get('entry_readiness_policy'),
                                 matrix_scores=pending.get('matrix_scores'),
+                                blocking_sleep_fn=_monitor_blocking_sleep_for_db(db),
                             )
                             pending['_smart_entry_future'] = _se_future
                             continue

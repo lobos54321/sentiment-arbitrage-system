@@ -597,7 +597,8 @@ class ExitGuardianThread(threading.Thread):
 
     def __init__(self, positions_ref, positions_lock, watchlist_store_ref,
                  exit_queue, fetch_price_fn, simulate_exit_fn=None,
-                 blocking_guard_fn=None):
+                 blocking_guard_fn=None, blocking_sleep_fn=None,
+                 blocking_call_fn=None):
         super().__init__(daemon=True, name='exit-guardian')
         self.positions = positions_ref      # shared dict reference
         self.lock = positions_lock          # threading.Lock
@@ -608,6 +609,8 @@ class ExitGuardianThread(threading.Thread):
         self.fetch_price = fetch_price_fn   # fetch_realtime_price function
         self.simulate_exit = simulate_exit_fn  # simulate_exit_execution (for instant SL quotes)
         self.blocking_guard = blocking_guard_fn
+        self.blocking_sleep = blocking_sleep_fn
+        self.blocking_call = blocking_call_fn
         self.interval = 3  # seconds
         self._running = True
 
@@ -616,8 +619,16 @@ class ExitGuardianThread(threading.Thread):
             self.blocking_guard(operation)
 
     def _blocking_sleep(self, seconds, operation):
+        if self.blocking_sleep is not None:
+            return self.blocking_sleep(seconds, operation)
         self._guard_blocking_boundary(operation)
         time.sleep(seconds)
+
+    def _blocking_call(self, operation, callback, *args, **kwargs):
+        if self.blocking_call is not None:
+            return self.blocking_call(operation, callback, *args, **kwargs)
+        self._guard_blocking_boundary(operation)
+        return callback(*args, **kwargs)
 
     def run(self):
         log.info("[ExitGuardian] 🛡️ Started — monitoring positions every 3s")
@@ -634,13 +645,15 @@ class ExitGuardianThread(threading.Thread):
     def _get_instant_quote(self, pos, ca, sell_pct=1.0):
         if not self.simulate_exit: return None
         try:
-            self._guard_blocking_boundary("exit_guardian_executable_sell_quote")
             _sell_pct = min(1.0, max(0.0, float(sell_pct or 1.0)))
             _sell_amount = int(float(pos.token_amount_raw) * _sell_pct) if pos.token_amount_raw else 0
-            _instant_sim = self.simulate_exit(
-                ca, str(_sell_amount),
+            _instant_sim = self._blocking_call(
+                "exit_guardian_executable_sell_quote",
+                self.simulate_exit,
+                ca,
+                str(_sell_amount),
                 getattr(pos, 'token_decimals', 0) or 0,
-                pos.strategy_stage
+                pos.strategy_stage,
             )
             log.info(f"[ExitGuardian] ⚡ {pos.symbol} instant quote: {_instant_sim.get('quotedOutputSOL', '?') if _instant_sim else 'FAIL'}")
             return _instant_sim
@@ -718,8 +731,12 @@ class ExitGuardianThread(threading.Thread):
                     continue
 
                 # Fetch current price
-                self._guard_blocking_boundary("exit_guardian_live_price_quote")
-                price, src, age_ms = self.fetch_price(ca, pool)
+                price, src, age_ms = self._blocking_call(
+                    "exit_guardian_live_price_quote",
+                    self.fetch_price,
+                    ca,
+                    pool,
+                )
                 if not price or price <= 0:
                     continue
 
@@ -874,8 +891,12 @@ class ExitGuardianThread(threading.Thread):
                     # Data: 1.0s delay cost avg -2.1% extra slippage on SL exits.
                     # 0.3s is enough to detect Redis price glitches but reduces crash exposure.
                     self._blocking_sleep(0.3, "exit_guardian_stop_confirmation_wait")
-                    self._guard_blocking_boundary("exit_guardian_confirm_price_quote")
-                    price2, src2, age_ms2 = self.fetch_price(ca, pool)
+                    price2, src2, age_ms2 = self._blocking_call(
+                        "exit_guardian_confirm_price_quote",
+                        self.fetch_price,
+                        ca,
+                        pool,
+                    )
 
                     if not price2 or price2 <= 0:
                         log.warning(
