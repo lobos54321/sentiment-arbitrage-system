@@ -397,6 +397,8 @@ LOTTO_NOT_ATH_WATCH_CANARY_BRANCH = "not_ath_reclaim_quote_clean_tiny_probe"
 LOTTO_NOT_ATH_WATCH_CANARY_COMPONENT = "lotto_not_ath_watch_canary"
 
 SQLITE_WRITE_LOCK = SQLiteSingleWriterLock("paper_fast_lane")
+FAST_LANE_SUPERVISOR_RESTART_LOCK = threading.Lock()
+FAST_LANE_SUPERVISOR_RESTART_ERROR = None
 
 
 def connect_db(path, *, ensure_wal=True):
@@ -2290,6 +2292,34 @@ def insert_fast_paper_trade(db, row, execution, guard, *, quote_request_ts_ms, q
     return trade_id
 
 
+def _simulate_entry_with_idle_db(
+    db,
+    token_ca,
+    amount_sol,
+    stage,
+    *,
+    lifecycle_id,
+):
+    with ptm.monitor_standalone_blocking_boundary(
+        db,
+        "paper_fast_lane_entry_quote",
+    ):
+        return ptm.simulate_entry_execution(
+            token_ca,
+            amount_sol,
+            stage,
+            strategy_id="paper-fast-lane-v1",
+            lifecycle_id=lifecycle_id,
+            timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+            fast_lane_timeout=True,
+        )
+
+
+def _wait_with_idle_db(db, stop_event, seconds, operation):
+    with ptm.monitor_standalone_blocking_boundary(db, operation):
+        return stop_event.wait(seconds)
+
+
 def process_queue_item(db, row, owner):
     if not FAST_ENTRY_ENABLED:
         mark_queue(db, row["id"], "disabled", "fast_entry_disabled")
@@ -2468,14 +2498,12 @@ def process_queue_item(db, row, owner):
         return
     try:
         quote_request_ts_ms = int(time.time() * 1000)
-        execution = ptm.simulate_entry_execution(
+        execution = _simulate_entry_with_idle_db(
+            db,
             token_ca,
             entry_size_sol,
             stage,
-            strategy_id="paper-fast-lane-v1",
             lifecycle_id=lifecycle_id,
-            timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
-            fast_lane_timeout=True,
         )
         quote_response_ts_ms = int(time.time() * 1000)
         if not execution.get("success"):
@@ -2518,14 +2546,12 @@ def process_queue_item(db, row, owner):
         requested_size_sol = float(guard.get("position_size_sol") or entry_size_sol)
         if abs(requested_size_sol - entry_size_sol) > 1e-9:
             quote_request_ts_ms = int(time.time() * 1000)
-            execution = ptm.simulate_entry_execution(
+            execution = _simulate_entry_with_idle_db(
+                db,
                 token_ca,
                 requested_size_sol,
                 stage,
-                strategy_id="paper-fast-lane-v1",
                 lifecycle_id=lifecycle_id,
-                timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
-                fast_lane_timeout=True,
             )
             quote_response_ts_ms = int(time.time() * 1000)
             if not execution.get("success"):
@@ -3648,29 +3674,57 @@ def lotto_not_ath_watch_canary_scan(paper_db_path, stop_event):
 
 
 def worker_loop(paper_db_path, worker_id, stop_event):
+    global FAST_LANE_SUPERVISOR_RESTART_ERROR
+
     owner = f"fast-worker-{worker_id}"
     db = connect_db(paper_db_path, ensure_wal=False)
     init_fast_lane_schema(db)
-    while not stop_event.is_set():
-        try:
-            if worker_id == 1:
-                refresh_retry_watch(db)
-            row = claim_queue_item(db, owner)
-            if row is None:
-                stop_event.wait(0.25)
-                continue
-            process_queue_item(db, row, owner)
-        except Exception as exc:
-            log.warning("%s failed: %s", owner, exc, exc_info=True)
-            stop_event.wait(1.0)
-    db.close()
+    try:
+        while not stop_event.is_set():
+            try:
+                if worker_id == 1:
+                    refresh_retry_watch(db)
+                row = claim_queue_item(db, owner)
+                if row is None:
+                    _wait_with_idle_db(
+                        db,
+                        stop_event,
+                        0.25,
+                        "paper_fast_lane_idle_wait",
+                    )
+                    continue
+                process_queue_item(db, row, owner)
+            except Exception as exc:
+                log.warning("%s failed: %s", owner, exc, exc_info=True)
+                _wait_with_idle_db(
+                    db,
+                    stop_event,
+                    1.0,
+                    "paper_fast_lane_error_wait",
+                )
+    except ptm.MonitorSupervisorRestartRequired as exc:
+        with FAST_LANE_SUPERVISOR_RESTART_LOCK:
+            if FAST_LANE_SUPERVISOR_RESTART_ERROR is None:
+                FAST_LANE_SUPERVISOR_RESTART_ERROR = exc
+        log.critical(
+            "%s requires supervisor restart before further waits or quotes: %s",
+            owner,
+            exc,
+        )
+        stop_event.set()
+    finally:
+        db.close()
 
 
 def run_worker(args):
+    global FAST_LANE_SUPERVISOR_RESTART_ERROR
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    with FAST_LANE_SUPERVISOR_RESTART_LOCK:
+        FAST_LANE_SUPERVISOR_RESTART_ERROR = None
     stop_event = threading.Event()
 
     def _stop(signum, frame):
@@ -3723,6 +3777,10 @@ def run_worker(args):
             pool.submit(worker_loop, args.paper_db, i + 1, stop_event)
         while not stop_event.is_set():
             time.sleep(0.5)
+    with FAST_LANE_SUPERVISOR_RESTART_LOCK:
+        restart_error = FAST_LANE_SUPERVISOR_RESTART_ERROR
+    if restart_error is not None:
+        raise restart_error
 
 
 def main():

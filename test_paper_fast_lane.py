@@ -2562,3 +2562,85 @@ def test_sqlite_writer_lock_times_out_on_process_lock_contention(tmp_path):
 
     assert not holder.is_alive()
     assert holder_errors == []
+
+
+def test_fast_lane_worker_requests_process_restart_on_boundary_failure(monkeypatch):
+    class FakeDb:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    db = FakeDb()
+    restart = fast.ptm.MonitorSupervisorRestartRequired("boundary failed")
+    stop_event = threading.Event()
+    monkeypatch.setattr(fast, "connect_db", lambda *_args, **_kwargs: db)
+    monkeypatch.setattr(fast, "init_fast_lane_schema", lambda _db: None)
+    monkeypatch.setattr(fast, "refresh_retry_watch", lambda _db: None)
+    monkeypatch.setattr(fast, "claim_queue_item", lambda *_args: {"id": 1})
+    monkeypatch.setattr(
+        fast,
+        "process_queue_item",
+        lambda *_args: (_ for _ in ()).throw(restart),
+    )
+    with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+        fast.FAST_LANE_SUPERVISOR_RESTART_ERROR = None
+
+    try:
+        fast.worker_loop("paper.db", 1, stop_event)
+
+        assert stop_event.is_set()
+        assert db.closed is True
+        with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+            assert fast.FAST_LANE_SUPERVISOR_RESTART_ERROR is restart
+    finally:
+        with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+            fast.FAST_LANE_SUPERVISOR_RESTART_ERROR = None
+
+
+def test_fast_lane_worker_never_enters_error_wait_with_live_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(db_path, timeout=1, check_same_thread=False)
+    db.execute("PRAGMA journal_mode=DELETE")
+    db.execute("CREATE TABLE evidence (value TEXT)")
+    db.commit()
+    stop_event = threading.Event()
+    root_error = LookupError("injected worker failure")
+
+    def fail_with_transaction(connection, *_args):
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT INTO evidence VALUES ('must-rollback')")
+        raise root_error
+
+    monkeypatch.setattr(fast, "connect_db", lambda *_args, **_kwargs: db)
+    monkeypatch.setattr(fast, "init_fast_lane_schema", lambda _db: None)
+    monkeypatch.setattr(fast, "refresh_retry_watch", lambda _db: None)
+    monkeypatch.setattr(fast, "claim_queue_item", lambda *_args: {"id": 1})
+    monkeypatch.setattr(fast, "process_queue_item", fail_with_transaction)
+    with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+        fast.FAST_LANE_SUPERVISOR_RESTART_ERROR = None
+
+    try:
+        fast.worker_loop(str(db_path), 1, stop_event)
+
+        assert stop_event.is_set()
+        with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+            restart = fast.FAST_LANE_SUPERVISOR_RESTART_ERROR
+        assert isinstance(restart, fast.ptm.MonitorSupervisorRestartRequired)
+        assert "paper_fast_lane_error_wait" in str(restart)
+
+        reopened = sqlite3.connect(db_path, timeout=1)
+        try:
+            assert reopened.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+            reopened.execute("BEGIN IMMEDIATE")
+            reopened.rollback()
+        finally:
+            reopened.close()
+    finally:
+        fast.ptm._clear_monitor_supervisor_restart_request()
+        fast.ptm.SHUTDOWN_REQUESTED.clear()
+        with fast.FAST_LANE_SUPERVISOR_RESTART_LOCK:
+            fast.FAST_LANE_SUPERVISOR_RESTART_ERROR = None

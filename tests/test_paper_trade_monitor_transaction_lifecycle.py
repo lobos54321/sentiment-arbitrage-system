@@ -32,6 +32,7 @@ from paper_trade_monitor import (  # noqa: E402
     _settle_monitor_iteration_transaction,
     call_execution_bridge,
     close_paper_db_gracefully,
+    monitor_standalone_blocking_boundary,
     run_db_write_with_retry,
 )
 
@@ -47,6 +48,18 @@ def _reset_monitor_restart_state():
 
 def _open_delete_journal_db(path):
     db = sqlite3.connect(path, timeout=1)
+    db.execute("PRAGMA journal_mode=DELETE")
+    db.execute("CREATE TABLE IF NOT EXISTS evidence (value TEXT)")
+    db.commit()
+    return db
+
+
+def _open_monitor_delete_journal_db(path):
+    db = sqlite3.connect(
+        path,
+        timeout=1,
+        factory=paper_trade_monitor.MonitorSQLiteConnection,
+    )
     db.execute("PRAGMA journal_mode=DELETE")
     db.execute("CREATE TABLE IF NOT EXISTS evidence (value TEXT)")
     db.commit()
@@ -91,17 +104,25 @@ def test_monitor_blocking_sleep_commits_delete_journal_first(tmp_path, monkeypat
         assert db.in_transaction
         assert Path(f"{db_path}-journal").exists()
 
-        def assert_safe_sleep(seconds):
-            assert seconds == 0.2
+        def assert_safe_wait(timeout=None):
+            assert timeout == pytest.approx(0.2, abs=0.02)
             assert not db.in_transaction
             assert not Path(f"{db_path}-journal").exists()
             _assert_competing_writer_can_begin(db_path)
-            observed_sleeps.append(seconds)
+            observed_sleeps.append(timeout)
+            return original_wait(timeout=timeout)
 
-        monkeypatch.setattr(paper_trade_monitor.time, "sleep", assert_safe_sleep)
-        _sleep_after_monitor_transaction_settle(db, 0.2)
+        with _monitor_transaction_guard_scope(db):
+            coordinator = paper_trade_monitor._MONITOR_TRANSACTION_COORDINATOR
+            original_wait = coordinator.boundary_condition.wait
+            monkeypatch.setattr(
+                coordinator.boundary_condition,
+                "wait",
+                assert_safe_wait,
+            )
+            _sleep_after_monitor_transaction_settle(db, 0.2)
 
-        assert observed_sleeps == [0.2]
+        assert len(observed_sleeps) == 1
         assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
     finally:
         db.close()
@@ -210,28 +231,37 @@ def test_database_retry_rolls_back_before_backoff_sleep(tmp_path, monkeypatch):
             raise sqlite3.OperationalError("database is locked")
         return "recovered"
 
-    def assert_safe_backoff(seconds):
-        assert seconds == 0.01
-        assert not db.in_transaction
-        assert not Path(f"{db_path}-journal").exists()
-        _assert_competing_writer_can_begin(db_path)
-        observed_sleeps.append(seconds)
-
     monkeypatch.setattr(
         paper_trade_monitor,
         "sqlite_single_writer",
         lambda *_args, **_kwargs: contextlib.nullcontext(),
     )
-    monkeypatch.setattr(paper_trade_monitor.time, "sleep", assert_safe_backoff)
     try:
-        assert run_db_write_with_retry(
-            db,
-            writer,
-            label="test_retry",
-            attempts=2,
-            base_sleep_sec=0.01,
-        ) == "recovered"
-        assert observed_sleeps == [0.01]
+        with _monitor_transaction_guard_scope(db):
+            coordinator = paper_trade_monitor._MONITOR_TRANSACTION_COORDINATOR
+            original_wait = coordinator.boundary_condition.wait
+
+            def assert_safe_backoff(timeout=None):
+                assert timeout == pytest.approx(0.01, abs=0.01)
+                assert not db.in_transaction
+                assert not Path(f"{db_path}-journal").exists()
+                _assert_competing_writer_can_begin(db_path)
+                observed_sleeps.append(timeout)
+                return original_wait(timeout=timeout)
+
+            monkeypatch.setattr(
+                coordinator.boundary_condition,
+                "wait",
+                assert_safe_backoff,
+            )
+            assert run_db_write_with_retry(
+                db,
+                writer,
+                label="test_retry",
+                attempts=2,
+                base_sleep_sec=0.01,
+            ) == "recovered"
+        assert len(observed_sleeps) == 1
         assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
     finally:
         db.close()
@@ -258,13 +288,13 @@ def test_database_retry_never_sleeps_with_unclearable_transaction(
     db.execute("PRAGMA journal_mode=DELETE")
     db.execute("CREATE TABLE evidence (value TEXT)")
     db.commit()
-    db.execute("BEGIN IMMEDIATE")
-    db.execute("INSERT INTO evidence VALUES ('must-not-retry-sleep')")
     db.fail_rollback = True
     root_error = sqlite3.OperationalError("database is locked")
     sleep_called = False
 
     def writer():
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO evidence VALUES ('must-not-retry-sleep')")
         raise root_error
 
     def forbidden_sleep(_seconds):
@@ -279,13 +309,14 @@ def test_database_retry_never_sleeps_with_unclearable_transaction(
     monkeypatch.setattr(paper_trade_monitor.time, "sleep", forbidden_sleep)
     try:
         with pytest.raises(MonitorSupervisorRestartRequired) as caught:
-            run_db_write_with_retry(
-                db,
-                writer,
-                label="test_unclearable_retry",
-                attempts=2,
-                base_sleep_sec=0.01,
-            )
+            with _monitor_transaction_guard_scope(db):
+                run_db_write_with_retry(
+                    db,
+                    writer,
+                    label="test_unclearable_retry",
+                    attempts=2,
+                    base_sleep_sec=0.01,
+                )
 
         assert caught.value.__cause__ is root_error
         assert not sleep_called
@@ -322,13 +353,13 @@ def test_database_retry_never_sleeps_when_rollback_leaves_transaction_active(
     db.execute("PRAGMA journal_mode=DELETE")
     db.execute("CREATE TABLE evidence (value TEXT)")
     db.commit()
-    db.execute("BEGIN IMMEDIATE")
-    db.execute("INSERT INTO evidence VALUES ('must-not-retry-sleep')")
     db.leave_transaction_active = True
     root_error = sqlite3.OperationalError("database is locked")
     sleep_called = False
 
     def writer():
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO evidence VALUES ('must-not-retry-sleep')")
         raise root_error
 
     def forbidden_sleep(_seconds):
@@ -343,13 +374,14 @@ def test_database_retry_never_sleeps_when_rollback_leaves_transaction_active(
     monkeypatch.setattr(paper_trade_monitor.time, "sleep", forbidden_sleep)
     try:
         with pytest.raises(MonitorSupervisorRestartRequired) as caught:
-            run_db_write_with_retry(
-                db,
-                writer,
-                label="test_silent_rollback_retry",
-                attempts=2,
-                base_sleep_sec=0.01,
-            )
+            with _monitor_transaction_guard_scope(db):
+                run_db_write_with_retry(
+                    db,
+                    writer,
+                    label="test_silent_rollback_retry",
+                    attempts=2,
+                    base_sleep_sec=0.01,
+                )
 
         assert caught.value.__cause__ is root_error
         assert not sleep_called
@@ -400,13 +432,6 @@ def test_fast_lane_commit_lock_is_settled_before_execution_bridge_sleep(
                 raise ConnectionRefusedError("bridge not ready")
             return 200, {}
 
-        def assert_safe_bridge_sleep(seconds):
-            assert seconds == 0.1
-            assert not db.in_transaction
-            assert not Path(f"{db_path}-journal").exists()
-            _assert_competing_writer_can_begin(db_path)
-            observed_sleeps.append(seconds)
-
         class RunningProcess:
             @staticmethod
             def poll():
@@ -415,10 +440,26 @@ def test_fast_lane_commit_lock_is_settled_before_execution_bridge_sleep(
         bridge = paper_trade_monitor.PersistentExecutionBridge()
         bridge._proc = RunningProcess()
         monkeypatch.setattr(paper_trade_monitor, "_post_json", bridge_ping)
-        monkeypatch.setattr(paper_trade_monitor.time, "sleep", assert_safe_bridge_sleep)
-        bridge._start_if_needed()
+        with _monitor_transaction_guard_scope(db):
+            coordinator = paper_trade_monitor._MONITOR_TRANSACTION_COORDINATOR
+            original_wait = coordinator.boundary_condition.wait
 
-        assert observed_sleeps == [0.1]
+            def assert_safe_bridge_wait(timeout=None):
+                assert timeout == pytest.approx(0.1, abs=0.02)
+                assert not db.in_transaction
+                assert not Path(f"{db_path}-journal").exists()
+                _assert_competing_writer_can_begin(db_path)
+                observed_sleeps.append(timeout)
+                return original_wait(timeout=timeout)
+
+            monkeypatch.setattr(
+                coordinator.boundary_condition,
+                "wait",
+                assert_safe_bridge_wait,
+            )
+            bridge._start_if_needed()
+
+        assert len(observed_sleeps) == 1
     finally:
         reader.rollback()
         reader.close()
@@ -690,9 +731,105 @@ def test_worker_restart_request_rolls_back_instead_of_committing_success_path(
         reopened.close()
 
 
-def test_quote_boundary_gate_prevents_begin_until_actual_call_returns(tmp_path):
+def test_run_monitor_rejects_unprotected_connection_before_partial_commit(
+    tmp_path,
+):
     db_path = tmp_path / "paper.db"
     db = _open_delete_journal_db(db_path)
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO evidence VALUES ('must-not-commit')")
+
+        with pytest.raises(MonitorSupervisorRestartRequired) as caught:
+            paper_trade_monitor.run_monitor(db)
+
+        assert "run_monitor_connection_contract" in str(caught.value)
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
+        assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+        _assert_competing_writer_can_begin(db_path)
+    finally:
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
+def test_missing_coordinator_fails_closed_before_sleep_and_quote(monkeypatch):
+    sleep_called = False
+    bridge_called = False
+
+    def forbidden_sleep(_seconds):
+        nonlocal sleep_called
+        sleep_called = True
+
+    def forbidden_bridge(*_args, **_kwargs):
+        nonlocal bridge_called
+        bridge_called = True
+
+    monkeypatch.setattr(paper_trade_monitor.time, "sleep", forbidden_sleep)
+    monkeypatch.setattr(paper_trade_monitor._daemon_bridge, "call", forbidden_bridge)
+
+    with pytest.raises(MonitorSupervisorRestartRequired) as sleep_caught:
+        _guarded_blocking_sleep(0.01, operation="missing_context_sleep")
+    assert "missing_context_sleep" in str(sleep_caught.value)
+    assert not sleep_called
+
+    _clear_monitor_supervisor_restart_request()
+    paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
+
+    with pytest.raises(MonitorSupervisorRestartRequired) as quote_caught:
+        call_execution_bridge("simulate-sell", {}, timeout=0.01)
+    assert "execution_bridge_call:simulate-sell" in str(quote_caught.value)
+    assert not bridge_called
+
+
+def test_standalone_quote_permit_requires_idle_database(tmp_path, monkeypatch):
+    db_path = tmp_path / "paper.db"
+    db = _open_delete_journal_db(db_path)
+    bridge_calls = []
+
+    def bridge_call(command, payload, timeout):
+        bridge_calls.append((command, payload, timeout, db.in_transaction))
+        return {"success": True}
+
+    monkeypatch.setattr(paper_trade_monitor._daemon_bridge, "call", bridge_call)
+    try:
+        with monitor_standalone_blocking_boundary(db, "standalone_quote"):
+            assert call_execution_bridge(
+                "simulate-buy",
+                {"token": "test"},
+                timeout=0.01,
+            ) == {"success": True}
+
+        assert bridge_calls == [
+            ("simulate-buy", {"token": "test"}, 0.01, False)
+        ]
+
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO evidence VALUES ('must-rollback')")
+        with pytest.raises(MonitorSupervisorRestartRequired):
+            with monitor_standalone_blocking_boundary(
+                db,
+                "standalone_quote_with_transaction",
+            ):
+                call_execution_bridge("simulate-buy", {}, timeout=0.01)
+
+        assert len(bridge_calls) == 1
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
+        assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+        _assert_competing_writer_can_begin(db_path)
+    finally:
+        _clear_monitor_supervisor_restart_request()
+        paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
+def test_quote_boundary_gate_prevents_begin_until_actual_call_returns(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _open_monitor_delete_journal_db(db_path)
     entered_quote = threading.Event()
     release_quote = threading.Event()
     quote_finished = threading.Event()
@@ -740,9 +877,81 @@ def test_quote_boundary_gate_prevents_begin_until_actual_call_returns(tmp_path):
         db.close()
 
 
+def test_transaction_boundary_does_not_depend_on_swallowable_trace_callback(
+    tmp_path,
+):
+    class TraceRejectingConnection(paper_trade_monitor.MonitorSQLiteConnection):
+        def set_trace_callback(self, _callback):
+            raise AssertionError("trace callbacks are forbidden")
+
+    db_path = tmp_path / "paper.db"
+    db = sqlite3.connect(
+        db_path,
+        timeout=1,
+        factory=TraceRejectingConnection,
+    )
+    db.execute("PRAGMA journal_mode=DELETE")
+    db.execute("CREATE TABLE evidence (value TEXT)")
+    db.commit()
+    entered_quote = threading.Event()
+    release_quote = threading.Event()
+    quote_states = []
+    worker_errors = []
+    try:
+        with _monitor_transaction_guard_scope(db):
+            coordinator = paper_trade_monitor._MONITOR_TRANSACTION_COORDINATOR
+            blocking_call = _monitor_blocking_call_for_db(db)
+            cursor = db.execute("SELECT 1")
+            assert isinstance(cursor, paper_trade_monitor.MonitorSQLiteCursor)
+
+            def quote():
+                quote_states.append(("entered", db.in_transaction))
+                entered_quote.set()
+                assert release_quote.wait(timeout=2)
+                quote_states.append(("before_return", db.in_transaction))
+                return "quoted"
+
+            def worker():
+                try:
+                    assert blocking_call("trace_failure_quote", quote) == "quoted"
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            thread = threading.Thread(target=worker)
+            thread.start()
+            assert entered_quote.wait(timeout=2)
+
+            assert not hasattr(coordinator, "trace_transaction_boundary")
+            timer = threading.Timer(0.05, release_quote.set)
+            timer.start()
+
+            cursor.execute("BEGIN IMMEDIATE")
+            cursor.execute("INSERT INTO evidence VALUES ('must-rollback')")
+            timer.join(timeout=1)
+            thread.join(timeout=2)
+
+            assert not thread.is_alive()
+            assert worker_errors == []
+            assert quote_states == [
+                ("entered", False),
+                ("before_return", False),
+            ]
+            assert db.in_transaction
+            db.rollback()
+            assert not Path(f"{db_path}-journal").exists()
+            assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+            _assert_competing_writer_can_begin(db_path)
+    finally:
+        _clear_monitor_supervisor_restart_request()
+        paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
+        if db.in_transaction:
+            sqlite3.Connection.rollback(db)
+        db.close()
+
+
 def test_sleep_boundary_releases_gate_only_after_wait_has_started(tmp_path):
     db_path = tmp_path / "paper.db"
-    db = _open_delete_journal_db(db_path)
+    db = _open_monitor_delete_journal_db(db_path)
     worker_errors = []
     try:
         with _monitor_transaction_guard_scope(db):
