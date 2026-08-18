@@ -17503,19 +17503,69 @@ def compute_exit_debug_fields(exit_rules, pos, trigger_pnl):
 
 # === Database Setup ===
 
+_MONITOR_SQLITE_AUTHORIZATION = threading.local()
+
+
+@contextmanager
+def _monitor_sqlite_authorized_operation(db):
+    """Authorize one protected call into SQLite for the exact connection."""
+    stack = list(getattr(_MONITOR_SQLITE_AUTHORIZATION, "stack", ()))
+    _MONITOR_SQLITE_AUTHORIZATION.stack = (*stack, db)
+    try:
+        yield
+    finally:
+        _MONITOR_SQLITE_AUTHORIZATION.stack = tuple(stack)
+
+
+def _monitor_sqlite_operation_is_authorized(db):
+    stack = getattr(_MONITOR_SQLITE_AUTHORIZATION, "stack", ())
+    if not stack or stack[-1] is not db:
+        return False
+    standalone = getattr(_MONITOR_STANDALONE_BOUNDARY, "state", None)
+    return standalone is None or standalone.db is not db
+
+
+def _monitor_sqlite_engine_authorizer(
+    db,
+    _action_code,
+    _arg1,
+    _arg2,
+    _database_name,
+    _trigger_name,
+):
+    if _monitor_sqlite_operation_is_authorized(db):
+        return sqlite3.SQLITE_OK
+    violation = RuntimeError(
+        "paper monitor SQLite operation bypassed the transaction boundary"
+    )
+    _request_monitor_supervisor_restart(
+        _monitor_restart_required(
+            "sqlite_unprotected_operation",
+            violation,
+        ),
+        notify_coordinator=False,
+    )
+    return sqlite3.SQLITE_DENY
+
+
 class MonitorSQLiteCursor(sqlite3.Cursor):
     """Cursor whose SQLite calls share the monitor transaction boundary."""
 
     def _run_guarded(self, callback):
         db = self.connection
         coordinator = _monitor_transaction_coordinator_for_db(db)
-        gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+        gate = (
+            coordinator.boundary_gate
+            if coordinator is not None
+            else db._monitor_sqlite_operation_gate
+        )
         with gate:
-            try:
-                return callback()
-            finally:
-                if coordinator is not None:
-                    coordinator.refresh_transaction_state()
+            with _monitor_sqlite_authorized_operation(db):
+                try:
+                    return callback()
+                finally:
+                    if coordinator is not None:
+                        coordinator.refresh_transaction_state()
 
     def execute(self, sql, parameters=()):
         return self._run_guarded(
@@ -17538,6 +17588,30 @@ class MonitorSQLiteCursor(sqlite3.Cursor):
 
 class MonitorSQLiteConnection(sqlite3.Connection):
     """Paper DB connection that makes restart requests outrank commits."""
+
+    def __init__(self, *args, **kwargs):
+        # SQLite authorizers run when a statement is prepared. Disabling the
+        # statement cache makes that engine-level check apply on every call,
+        # including attempts made through sqlite3.Connection base methods.
+        if len(args) > 6:
+            positional = list(args)
+            positional[6] = 0
+            args = tuple(positional)
+        else:
+            kwargs["cached_statements"] = 0
+        super().__init__(*args, **kwargs)
+        self._monitor_sqlite_operation_gate = threading.RLock()
+        self._monitor_engine_authorizer = functools.partial(
+            _monitor_sqlite_engine_authorizer,
+            self,
+        )
+        sqlite3.Connection.set_authorizer(
+            self,
+            self._monitor_engine_authorizer,
+        )
+
+    def set_authorizer(self, _callback):
+        raise TypeError("paper monitor SQLite authorizer is immutable")
 
     def execute(self, sql, parameters=()):
         cursor = self.cursor()
@@ -17575,44 +17649,54 @@ class MonitorSQLiteConnection(sqlite3.Connection):
 
     def commit(self):
         coordinator = _monitor_transaction_coordinator_for_db(self)
-        gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+        gate = (
+            coordinator.boundary_gate
+            if coordinator is not None
+            else self._monitor_sqlite_operation_gate
+        )
         with gate:
-            try:
-                requested = _monitor_supervisor_restart_request()
-                if requested is not None:
-                    try:
-                        if self.in_transaction:
-                            super().rollback()
-                    except Exception as rollback_error:
-                        requested.add_note(
-                            "paper_monitor_restart_rollback_error "
-                            f"{type(rollback_error).__name__}: {rollback_error}"
-                        )
-                        raise requested from rollback_error
-                    if getattr(self, "in_transaction", True):
-                        state_error = sqlite3.OperationalError(
-                            "paper monitor transaction remains active before commit restart"
-                        )
-                        requested.add_note(
-                            "paper_monitor_restart_rollback_error "
-                            f"{type(state_error).__name__}: {state_error}"
-                        )
-                        raise requested from state_error
-                    raise requested
-                return super().commit()
-            finally:
-                if coordinator is not None:
-                    coordinator.refresh_transaction_state()
+            with _monitor_sqlite_authorized_operation(self):
+                try:
+                    requested = _monitor_supervisor_restart_request()
+                    if requested is not None:
+                        try:
+                            if self.in_transaction:
+                                super().rollback()
+                        except Exception as rollback_error:
+                            requested.add_note(
+                                "paper_monitor_restart_rollback_error "
+                                f"{type(rollback_error).__name__}: {rollback_error}"
+                            )
+                            raise requested from rollback_error
+                        if getattr(self, "in_transaction", True):
+                            state_error = sqlite3.OperationalError(
+                                "paper monitor transaction remains active before commit restart"
+                            )
+                            requested.add_note(
+                                "paper_monitor_restart_rollback_error "
+                                f"{type(state_error).__name__}: {state_error}"
+                            )
+                            raise requested from state_error
+                        raise requested
+                    return super().commit()
+                finally:
+                    if coordinator is not None:
+                        coordinator.refresh_transaction_state()
 
     def rollback(self):
         coordinator = _monitor_transaction_coordinator_for_db(self)
-        gate = coordinator.boundary_gate if coordinator is not None else nullcontext()
+        gate = (
+            coordinator.boundary_gate
+            if coordinator is not None
+            else self._monitor_sqlite_operation_gate
+        )
         with gate:
-            try:
-                return super().rollback()
-            finally:
-                if coordinator is not None:
-                    coordinator.refresh_transaction_state()
+            with _monitor_sqlite_authorized_operation(self):
+                try:
+                    return super().rollback()
+                finally:
+                    if coordinator is not None:
+                        coordinator.refresh_transaction_state()
 
 
 def connect_paper_db(path):
@@ -21554,6 +21638,15 @@ _MONITOR_SUPERVISOR_RESTART_REQUEST = None
 _MONITOR_BLOCKING_POLL_SEC = 0.05
 
 
+class _MonitorStandaloneBoundaryState:
+    __slots__ = ("db", "operation", "owner_thread_id")
+
+    def __init__(self, db, operation):
+        self.db = db
+        self.operation = str(operation)
+        self.owner_thread_id = threading.get_ident()
+
+
 class _MonitorTransactionCoordinator:
     """Serialize SQLite transaction starts with monitor waits and quote calls."""
 
@@ -21625,7 +21718,7 @@ def _monitor_transaction_guard_scope(db):
 def _monitor_transaction_guarded(func):
     @functools.wraps(func)
     def wrapped(db, *args, **kwargs):
-        if not isinstance(db, MonitorSQLiteConnection):
+        if type(db) is not MonitorSQLiteConnection:
             connection_error = TypeError(
                 "paper monitor requires MonitorSQLiteConnection"
             )
@@ -21661,7 +21754,7 @@ def _monitor_restart_required(operation, cause):
     return restart
 
 
-def _request_monitor_supervisor_restart(restart):
+def _request_monitor_supervisor_restart(restart, *, notify_coordinator=True):
     global _MONITOR_SUPERVISOR_RESTART_REQUEST
 
     with _MONITOR_SUPERVISOR_RESTART_LOCK:
@@ -21670,7 +21763,7 @@ def _request_monitor_supervisor_restart(restart):
         requested = _MONITOR_SUPERVISOR_RESTART_REQUEST
     SHUTDOWN_REQUESTED.set()
     coordinator = _MONITOR_TRANSACTION_COORDINATOR
-    if coordinator is not None:
+    if notify_coordinator and coordinator is not None:
         with coordinator.boundary_condition:
             coordinator.boundary_condition.notify_all()
     return requested
@@ -21702,16 +21795,8 @@ def _monitor_transaction_coordinator_for_db(db):
     return None
 
 
-@contextmanager
-def monitor_standalone_blocking_boundary(db, operation):
-    """Permit one non-monitor worker boundary after proving its DB is idle.
-
-    The paper fast-lane sidecar has one connection per worker and does not run
-    the monitor's cross-thread coordinator. It must opt in explicitly for each
-    quote, and any live or unreadable transaction requests a process restart
-    instead of allowing the quote.
-    """
-    if db is None:
+def _validate_monitor_standalone_boundary(state, operation):
+    if not isinstance(state, _MonitorStandaloneBoundaryState):
         missing_error = RuntimeError(
             f"standalone database context missing before {operation}"
         )
@@ -21719,9 +21804,17 @@ def monitor_standalone_blocking_boundary(db, operation):
             _monitor_restart_required(operation, missing_error)
         )
         raise restart from missing_error
-    _raise_monitor_supervisor_restart_if_requested()
+    if state.owner_thread_id != threading.get_ident():
+        thread_error = RuntimeError(
+            f"standalone database context crossed threads before {operation}"
+        )
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, thread_error)
+        )
+        raise restart from thread_error
+    requested = _monitor_supervisor_restart_request()
     try:
-        active = bool(db.in_transaction)
+        active = bool(state.db.in_transaction)
     except Exception as state_error:
         restart = _request_monitor_supervisor_restart(
             _monitor_restart_required(operation, state_error)
@@ -21731,27 +21824,87 @@ def monitor_standalone_blocking_boundary(db, operation):
         boundary_error = RuntimeError(
             f"standalone transaction active before {operation}"
         )
+        previous_state = getattr(_MONITOR_STANDALONE_BOUNDARY, "state", None)
         try:
-            db.rollback()
+            _MONITOR_STANDALONE_BOUNDARY.state = None
+            state.db.rollback()
         except Exception as rollback_error:
             boundary_error.add_note(
                 "standalone_transaction_rollback_error "
                 f"{type(rollback_error).__name__}: {rollback_error}"
             )
-        restart = _request_monitor_supervisor_restart(
+        finally:
+            _MONITOR_STANDALONE_BOUNDARY.state = previous_state
+        restart = requested or _request_monitor_supervisor_restart(
             _monitor_restart_required(operation, boundary_error)
         )
         raise restart from boundary_error
+    if requested is not None:
+        raise requested
 
-    previous_depth = int(
-        getattr(_MONITOR_STANDALONE_BOUNDARY, "depth", 0) or 0
+
+def monitor_standalone_blocking_call(db, operation, callback, *args, **kwargs):
+    """Run one exact standalone wait or quote while its DB cannot transact."""
+    if type(db) is not MonitorSQLiteConnection:
+        connection_error = TypeError(
+            "standalone boundary requires MonitorSQLiteConnection"
+        )
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, connection_error)
+        )
+        try:
+            if db is not None and bool(getattr(db, "in_transaction", True)):
+                db.rollback()
+        except Exception as rollback_error:
+            restart.add_note(
+                "standalone_unprotected_connection_rollback_error "
+                f"{type(rollback_error).__name__}: {rollback_error}"
+            )
+        raise restart from connection_error
+    if not callable(callback):
+        raise TypeError("standalone boundary callback must be callable")
+    previous_state = getattr(_MONITOR_STANDALONE_BOUNDARY, "state", None)
+    if previous_state is not None:
+        nested_error = RuntimeError(
+            f"nested standalone boundary before {operation}"
+        )
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, nested_error)
+        )
+        raise restart from nested_error
+
+    acquired = db._monitor_sqlite_operation_gate.acquire(
+        timeout=max(0.1, float(PAPER_SQLITE_TIMEOUT_SEC))
     )
-    _MONITOR_STANDALONE_BOUNDARY.depth = previous_depth + 1
+    if not acquired:
+        timeout_error = TimeoutError(
+            f"standalone database boundary unavailable before {operation}"
+        )
+        restart = _request_monitor_supervisor_restart(
+            _monitor_restart_required(operation, timeout_error)
+        )
+        raise restart from timeout_error
+    state = _MonitorStandaloneBoundaryState(db, operation)
     try:
-        yield
-        _raise_monitor_supervisor_restart_if_requested()
+        _validate_monitor_standalone_boundary(state, operation)
+        _MONITOR_STANDALONE_BOUNDARY.state = state
+        try:
+            result = callback(*args, **kwargs)
+        except BaseException as root_error:
+            try:
+                _validate_monitor_standalone_boundary(state, operation)
+            except BaseException as boundary_error:
+                boundary_error.add_note(
+                    "standalone_boundary_callback_error "
+                    f"{type(root_error).__name__}: {root_error}"
+                )
+                raise boundary_error from root_error
+            raise
+        _validate_monitor_standalone_boundary(state, operation)
+        return result
     finally:
-        _MONITOR_STANDALONE_BOUNDARY.depth = previous_depth
+        _MONITOR_STANDALONE_BOUNDARY.state = previous_state
+        db._monitor_sqlite_operation_gate.release()
 
 
 def _rollback_for_requested_restart(db, operation, requested):
@@ -21874,13 +22027,14 @@ def _validate_monitor_blocking_boundary_locked(coordinator, operation):
 
 @contextmanager
 def _monitor_blocking_boundary_scope(operation, coordinator=None):
+    standalone = getattr(_MONITOR_STANDALONE_BOUNDARY, "state", None)
+    if coordinator is None and standalone is not None:
+        _validate_monitor_standalone_boundary(standalone, operation)
+        yield None
+        _validate_monitor_standalone_boundary(standalone, operation)
+        return
     coordinator = coordinator or _MONITOR_TRANSACTION_COORDINATOR
     if coordinator is None:
-        if int(getattr(_MONITOR_STANDALONE_BOUNDARY, "depth", 0) or 0) > 0:
-            _raise_monitor_supervisor_restart_if_requested()
-            yield None
-            _raise_monitor_supervisor_restart_if_requested()
-            return
         missing_error = RuntimeError(
             f"paper monitor transaction coordinator missing before {operation}"
         )

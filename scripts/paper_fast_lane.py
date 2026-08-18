@@ -404,7 +404,12 @@ FAST_LANE_SUPERVISOR_RESTART_ERROR = None
 def connect_db(path, *, ensure_wal=True):
     timeout_sec = float(os.environ.get("PAPER_FAST_LANE_SQLITE_TIMEOUT_SEC", "15"))
     require_unmarked_paper_db(path, component="paper_fast_lane")
-    db = sqlite3.connect(path, timeout=timeout_sec, check_same_thread=False)
+    db = sqlite3.connect(
+        path,
+        timeout=timeout_sec,
+        check_same_thread=False,
+        factory=ptm.MonitorSQLiteConnection,
+    )
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout = {int(timeout_sec * 1000)}")
     if ensure_wal:
@@ -2300,24 +2305,27 @@ def _simulate_entry_with_idle_db(
     *,
     lifecycle_id,
 ):
-    with ptm.monitor_standalone_blocking_boundary(
+    return ptm.monitor_standalone_blocking_call(
         db,
         "paper_fast_lane_entry_quote",
-    ):
-        return ptm.simulate_entry_execution(
-            token_ca,
-            amount_sol,
-            stage,
-            strategy_id="paper-fast-lane-v1",
-            lifecycle_id=lifecycle_id,
-            timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
-            fast_lane_timeout=True,
-        )
+        ptm.simulate_entry_execution,
+        token_ca,
+        amount_sol,
+        stage,
+        strategy_id="paper-fast-lane-v1",
+        lifecycle_id=lifecycle_id,
+        timeout=FAST_ENTRY_QUOTE_TIMEOUT_SEC,
+        fast_lane_timeout=True,
+    )
 
 
 def _wait_with_idle_db(db, stop_event, seconds, operation):
-    with ptm.monitor_standalone_blocking_boundary(db, operation):
-        return stop_event.wait(seconds)
+    return ptm.monitor_standalone_blocking_call(
+        db,
+        operation,
+        stop_event.wait,
+        seconds,
+    )
 
 
 def process_queue_item(db, row, owner):
