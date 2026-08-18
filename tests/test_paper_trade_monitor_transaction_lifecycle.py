@@ -960,6 +960,7 @@ def test_sqlite_base_methods_cannot_bypass_exact_quote_boundary(tmp_path):
     release_quote = threading.Event()
     quote_states = []
     worker_errors = []
+    cursor = None
     try:
         # Warm the exact statement once: cached prepared statements must not
         # bypass the engine authorizer on a later base-method invocation.
@@ -967,6 +968,9 @@ def test_sqlite_base_methods_cannot_bypass_exact_quote_boundary(tmp_path):
         db.rollback()
         with pytest.raises(TypeError, match="authorizer is immutable"):
             db.set_authorizer(None)
+        with pytest.raises(TypeError, match="doesn't apply"):
+            sqlite3.Connection.set_authorizer(db, None)
+        cursor = db.cursor()
 
         with _monitor_transaction_guard_scope(db):
             blocking_call = _monitor_blocking_call_for_db(db)
@@ -988,9 +992,12 @@ def test_sqlite_base_methods_cannot_bypass_exact_quote_boundary(tmp_path):
             thread.start()
             assert entered_quote.wait(timeout=2)
 
-            with pytest.raises(sqlite3.DatabaseError) as caught:
+            with pytest.raises(TypeError, match="doesn't apply"):
                 sqlite3.Connection.execute(db, "BEGIN IMMEDIATE")
-            assert caught.value.sqlite_errorcode == sqlite3.SQLITE_AUTH
+            with pytest.raises(TypeError, match="doesn't apply"):
+                sqlite3.Connection.cursor(db)
+            with pytest.raises(TypeError, match="doesn't apply"):
+                sqlite3.Cursor.execute(cursor, "BEGIN IMMEDIATE")
             assert not db.in_transaction
             assert not Path(f"{db_path}-journal").exists()
             _assert_competing_writer_can_begin(db_path)
@@ -998,16 +1005,92 @@ def test_sqlite_base_methods_cannot_bypass_exact_quote_boundary(tmp_path):
             release_quote.set()
             thread.join(timeout=2)
             assert not thread.is_alive()
-            assert len(worker_errors) == 1
-            assert isinstance(worker_errors[0], MonitorSupervisorRestartRequired)
+            assert worker_errors == []
             assert quote_states == [
                 ("entered", False),
                 ("before_return", False),
             ]
     finally:
         release_quote.set()
+        if cursor is not None:
+            cursor.close()
         _clear_monitor_supervisor_restart_request()
         paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
+def test_standalone_boundary_uses_opaque_sqlite_handle(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _open_monitor_delete_journal_db(db_path)
+    callback_states = []
+
+    def wait_without_native_handle_access():
+        callback_states.append(db.in_transaction)
+        with pytest.raises(TypeError, match="doesn't apply"):
+            sqlite3.Connection.set_authorizer(db, None)
+        with pytest.raises(TypeError, match="doesn't apply"):
+            sqlite3.Connection.execute(db, "BEGIN IMMEDIATE")
+        cursor = db.cursor()
+        try:
+            with pytest.raises(TypeError, match="doesn't apply"):
+                sqlite3.Cursor.execute(cursor, "BEGIN IMMEDIATE")
+        finally:
+            cursor.close()
+        assert threading.Event().wait(0.01) is False
+        callback_states.append(db.in_transaction)
+        return "wait-completed"
+
+    try:
+        assert monitor_standalone_blocking_call(
+            db,
+            "standalone_opaque_handle",
+            wait_without_native_handle_access,
+        ) == "wait-completed"
+        assert callback_states == [False, False]
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
+        _assert_competing_writer_can_begin(db_path)
+    finally:
+        if db.in_transaction:
+            db.rollback()
+        db.close()
+
+
+def test_native_sqlite_descriptors_reject_monitor_proxies(tmp_path):
+    db_path = tmp_path / "paper.db"
+    db = _open_monitor_delete_journal_db(db_path)
+    cursor = db.cursor()
+    try:
+        connection_calls = (
+            lambda: sqlite3.Connection.execute(db, "SELECT 1"),
+            lambda: sqlite3.Connection.executemany(db, "SELECT ?", ((1,),)),
+            lambda: sqlite3.Connection.executescript(db, "SELECT 1;"),
+            lambda: sqlite3.Connection.cursor(db),
+            lambda: sqlite3.Connection.commit(db),
+            lambda: sqlite3.Connection.rollback(db),
+            lambda: sqlite3.Connection.close(db),
+            lambda: sqlite3.Connection.set_authorizer(db, None),
+        )
+        cursor_calls = (
+            lambda: sqlite3.Cursor.execute(cursor, "SELECT 1"),
+            lambda: sqlite3.Cursor.executemany(cursor, "SELECT ?", ((1,),)),
+            lambda: sqlite3.Cursor.executescript(cursor, "SELECT 1;"),
+            lambda: sqlite3.Cursor.fetchone(cursor),
+            lambda: sqlite3.Cursor.fetchall(cursor),
+            lambda: sqlite3.Cursor.close(cursor),
+        )
+        for call in (*connection_calls, *cursor_calls):
+            with pytest.raises(TypeError, match="doesn't apply"):
+                call()
+
+        assert db.execute("SELECT 1").fetchone()[0] == 1
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
+        _assert_competing_writer_can_begin(db_path)
+    finally:
+        cursor.close()
         if db.in_transaction:
             db.rollback()
         db.close()

@@ -17548,8 +17548,42 @@ def _monitor_sqlite_engine_authorizer(
     return sqlite3.SQLITE_DENY
 
 
-class MonitorSQLiteCursor(sqlite3.Cursor):
-    """Cursor whose SQLite calls share the monitor transaction boundary."""
+class MonitorSQLiteCursor:
+    """Opaque cursor proxy whose SQLite calls share the monitor boundary."""
+
+    __slots__ = ("__cursor", "__connection")
+
+    def __init__(self, connection, cursor):
+        if not isinstance(connection, MonitorSQLiteConnection):
+            raise TypeError("paper monitor cursor requires its protected connection")
+        if type(cursor) is not sqlite3.Cursor:
+            raise TypeError("paper monitor cursor requires a native SQLite cursor")
+        self.__connection = connection
+        self.__cursor = cursor
+
+    @property
+    def connection(self):
+        return self.__connection
+
+    @property
+    def description(self):
+        return self.__cursor.description
+
+    @property
+    def rowcount(self):
+        return self.__cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        return self.__cursor.lastrowid
+
+    @property
+    def arraysize(self):
+        return self.__cursor.arraysize
+
+    @arraysize.setter
+    def arraysize(self, value):
+        self.__cursor.arraysize = value
 
     def _run_guarded(self, callback):
         db = self.connection
@@ -17568,47 +17602,119 @@ class MonitorSQLiteCursor(sqlite3.Cursor):
                         coordinator.refresh_transaction_state()
 
     def execute(self, sql, parameters=()):
-        return self._run_guarded(
-            lambda: super(MonitorSQLiteCursor, self).execute(sql, parameters)
-        )
+        self._run_guarded(lambda: self.__cursor.execute(sql, parameters))
+        return self
 
     def executemany(self, sql, seq_of_parameters):
-        return self._run_guarded(
-            lambda: super(MonitorSQLiteCursor, self).executemany(
-                sql,
-                seq_of_parameters,
-            )
+        self._run_guarded(
+            lambda: self.__cursor.executemany(sql, seq_of_parameters)
         )
+        return self
 
     def executescript(self, sql_script):
-        return self._run_guarded(
-            lambda: super(MonitorSQLiteCursor, self).executescript(sql_script)
-        )
+        self._run_guarded(lambda: self.__cursor.executescript(sql_script))
+        return self
+
+    def fetchone(self):
+        return self._run_guarded(self.__cursor.fetchone)
+
+    def fetchmany(self, size=None):
+        if size is None:
+            return self._run_guarded(self.__cursor.fetchmany)
+        return self._run_guarded(lambda: self.__cursor.fetchmany(size))
+
+    def fetchall(self):
+        return self._run_guarded(self.__cursor.fetchall)
+
+    def close(self):
+        return self._run_guarded(self.__cursor.close)
+
+    def setinputsizes(self, sizes):
+        return self.__cursor.setinputsizes(sizes)
+
+    def setoutputsize(self, size, column=None):
+        if column is None:
+            return self.__cursor.setoutputsize(size)
+        return self.__cursor.setoutputsize(size, column)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        row = self.fetchone()
+        if row is None:
+            raise StopIteration
+        return row
 
 
-class MonitorSQLiteConnection(sqlite3.Connection):
-    """Paper DB connection that makes restart requests outrank commits."""
+class MonitorSQLiteConnection:
+    """Opaque paper DB proxy that makes restart requests outrank commits.
+
+    This intentionally is not a ``sqlite3.Connection`` subclass.  Native
+    ``sqlite3.Connection`` and ``sqlite3.Cursor`` descriptors therefore cannot
+    be applied to it to replace the engine authorizer or bypass the boundary.
+    The native handle remains private and every supported operation passes
+    through this proxy.
+    """
+
+    __slots__ = (
+        "__connection",
+        "_monitor_engine_authorizer",
+        "_monitor_sqlite_operation_gate",
+    )
 
     def __init__(self, *args, **kwargs):
-        # SQLite authorizers run when a statement is prepared. Disabling the
-        # statement cache makes that engine-level check apply on every call,
-        # including attempts made through sqlite3.Connection base methods.
-        if len(args) > 6:
-            positional = list(args)
+        # sqlite3.connect passes its factory back to the factory constructor.
+        # Replace that value with the native type and disable statement reuse
+        # before creating the private handle.
+        positional = list(args)
+        if len(positional) > 5:
+            positional[5] = sqlite3.Connection
+        else:
+            kwargs["factory"] = sqlite3.Connection
+        if len(positional) > 6:
             positional[6] = 0
-            args = tuple(positional)
         else:
             kwargs["cached_statements"] = 0
-        super().__init__(*args, **kwargs)
+        self.__connection = sqlite3.connect(*tuple(positional), **kwargs)
         self._monitor_sqlite_operation_gate = threading.RLock()
         self._monitor_engine_authorizer = functools.partial(
             _monitor_sqlite_engine_authorizer,
             self,
         )
-        sqlite3.Connection.set_authorizer(
-            self,
-            self._monitor_engine_authorizer,
-        )
+        self.__connection.set_authorizer(self._monitor_engine_authorizer)
+
+    @property
+    def in_transaction(self):
+        return self.__connection.in_transaction
+
+    @property
+    def total_changes(self):
+        return self.__connection.total_changes
+
+    @property
+    def isolation_level(self):
+        return self.__connection.isolation_level
+
+    @isolation_level.setter
+    def isolation_level(self, value):
+        self.__connection.isolation_level = value
+
+    @property
+    def row_factory(self):
+        return self.__connection.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        self.__connection.row_factory = value
+
+    @property
+    def text_factory(self):
+        return self.__connection.text_factory
+
+    @text_factory.setter
+    def text_factory(self, value):
+        self.__connection.text_factory = value
 
     def set_authorizer(self, _callback):
         raise TypeError("paper monitor SQLite authorizer is immutable")
@@ -17638,14 +17744,9 @@ class MonitorSQLiteConnection(sqlite3.Connection):
             raise
 
     def cursor(self, factory=MonitorSQLiteCursor):
-        if factory is sqlite3.Cursor:
-            factory = MonitorSQLiteCursor
-        if not isinstance(factory, type) or not issubclass(
-            factory,
-            MonitorSQLiteCursor,
-        ):
+        if factory not in (MonitorSQLiteCursor, sqlite3.Cursor):
             raise TypeError("paper monitor cursor must use MonitorSQLiteCursor")
-        return super().cursor(factory)
+        return MonitorSQLiteCursor(self, self.__connection.cursor())
 
     def commit(self):
         coordinator = _monitor_transaction_coordinator_for_db(self)
@@ -17661,7 +17762,7 @@ class MonitorSQLiteConnection(sqlite3.Connection):
                     if requested is not None:
                         try:
                             if self.in_transaction:
-                                super().rollback()
+                                self.__connection.rollback()
                         except Exception as rollback_error:
                             requested.add_note(
                                 "paper_monitor_restart_rollback_error "
@@ -17678,7 +17779,7 @@ class MonitorSQLiteConnection(sqlite3.Connection):
                             )
                             raise requested from state_error
                         raise requested
-                    return super().commit()
+                    return self.__connection.commit()
                 finally:
                     if coordinator is not None:
                         coordinator.refresh_transaction_state()
@@ -17693,10 +17794,30 @@ class MonitorSQLiteConnection(sqlite3.Connection):
         with gate:
             with _monitor_sqlite_authorized_operation(self):
                 try:
-                    return super().rollback()
+                    return self.__connection.rollback()
                 finally:
                     if coordinator is not None:
                         coordinator.refresh_transaction_state()
+
+    def close(self):
+        coordinator = _monitor_transaction_coordinator_for_db(self)
+        gate = (
+            coordinator.boundary_gate
+            if coordinator is not None
+            else self._monitor_sqlite_operation_gate
+        )
+        with gate:
+            return self.__connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
 
 
 def connect_paper_db(path):
