@@ -2211,6 +2211,55 @@ def test_minimum_stage_capacity_supports_empty_table_and_order_index(
     assert report["paper_decision_parallel_stage_removed_before_publish"] is True
 
 
+def test_nonpaper_read_views_pin_after_dynamic_paper_stage_plan(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    original_estimate = snapshot_module.estimate_shared_stage_target_requirement
+    estimate_completed_at = {}
+    estimate_lock = threading.Lock()
+
+    def observed_estimate(connection, target, **kwargs):
+        report = original_estimate(connection, target, **kwargs)
+        with estimate_lock:
+            estimate_completed_at[str(target)] = time.time()
+        return report
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "estimate_shared_stage_target_requirement",
+        observed_estimate,
+    )
+    report = build_snapshot_bundle(
+        sources=sources,
+        out_root=str(tmp_path / "paper-plan-first-evidence"),
+        repo_root=str(ROOT),
+        max_skew_sec=30,
+        min_free_after_gib=0,
+        max_output_gib=0.1,
+        snapshot_id="20260101T000000Z-1234abc1",
+    )
+
+    active_targets = set(report["shared_stage_budget"]["active_targets"])
+    assert set(estimate_completed_at) == active_targets
+    paper_plan_completed_at = max(estimate_completed_at.values())
+    nonpaper_pin_times = {
+        name: report["databases"][name]["pinned_read_view"][
+            "pinned_started_epoch"
+        ]
+        for name in ("signal", "raw", "kline")
+    }
+    assert all(
+        pinned_at >= paper_plan_completed_at
+        for pinned_at in nonpaper_pin_times.values()
+    )
+    assert report["databases"]["paper"]["pinned_read_view"][
+        "pinned_started_epoch"
+    ] < min(nonpaper_pin_times.values())
+    assert report["cross_database_time_skew_passed"] is True
+
+
 def test_optional_opportunity_path_stage_is_skipped_when_source_table_is_absent(
     tmp_path,
     monkeypatch,
@@ -5565,6 +5614,7 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
         review_history_hours=96,
         long_history_hours=720,
         source_busy_timeout_ms=30000,
+        required_paper_journal_mode="",
         max_source_read_lock_sec=300,
         keep_previous=0,
         snapshot_id=snapshot_id,
@@ -5575,6 +5625,58 @@ def snapshot_worker_args(tmp_path, sources, *, max_runs=0, snapshot_id="20260101
         failure_retry_sec=60,
         initial_delay_sec=0,
     )
+
+
+def test_worker_required_paper_wal_fails_before_snapshot_copy(
+    tmp_path,
+    monkeypatch,
+):
+    sources = create_sources(tmp_path)
+    args = snapshot_worker_args(tmp_path, sources, max_runs=1)
+    args.required_paper_journal_mode = "WAL"
+    copy_started = False
+
+    def unexpected_copy(*_args, **_kwargs):
+        nonlocal copy_started
+        copy_started = True
+        raise AssertionError("snapshot copy must not start on DELETE paper DB")
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "build_snapshot_bundle",
+        unexpected_copy,
+    )
+    status = snapshot_module.run_snapshot_once(args)
+
+    assert status["accepted"] is False
+    assert status["last_failure_code"] == "paper_source_journal_mode_mismatch"
+    assert status["required_paper_journal_mode"] == "WAL"
+    assert status["paper_journal_mode"] == "DELETE"
+    assert copy_started is False
+    assert not Path(args.out_root, "current").exists()
+    assert not any(
+        path.name.endswith(".partial")
+        for path in Path(args.out_root, "snapshots").glob(".*.partial")
+    )
+
+
+def test_worker_required_paper_wal_accepts_local_wal_source(tmp_path):
+    sources = create_sources(tmp_path)
+    paper = sqlite3.connect(sources["paper"])
+    try:
+        assert paper.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+    finally:
+        paper.close()
+    args = snapshot_worker_args(tmp_path, sources, max_runs=1)
+    args.required_paper_journal_mode = "WAL"
+
+    status = snapshot_module.run_snapshot_once(args)
+
+    assert status["accepted"] is True
+    assert status["last_failure_code"] is None
+    assert status["required_paper_journal_mode"] == "WAL"
+    assert status["paper_journal_mode"] == "WAL"
+    assert Path(args.out_root, "current", "manifest.json").is_file()
 
 
 def process_identity_fixture(label):

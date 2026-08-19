@@ -209,7 +209,7 @@ if "_RUN_SNAPSHOT_ONCE_LOCK" not in globals():
     _RUN_SNAPSHOT_ONCE_LOCK = threading.RLock()
 if "_WORKER_OWNER_LEASES" not in globals():
     _WORKER_OWNER_LEASES: dict[str, Any] = {}
-DEFAULT_REVIEW_HISTORY_HOURS = 96.0
+DEFAULT_REVIEW_HISTORY_HOURS = 72.0
 MAX_RESEARCH_HISTORY_HOURS = 24.0 * 30.0
 DEFAULT_LONG_HISTORY_HOURS = MAX_RESEARCH_HISTORY_HOURS
 DEFAULT_MAX_OUTPUT_GIB = 10.0
@@ -1739,6 +1739,8 @@ def snapshot_component_failure_code(exc: BaseException) -> str:
         "evaluator_snapshot_prior_worker_active",
         "evaluator_snapshot_worker_owner_invalid",
         "evaluator_snapshot_process_identity_unavailable",
+        "paper_source_journal_mode_mismatch",
+        "paper_source_journal_mode_unavailable",
         "source_read_lock_budget_exceeded",
         "shared_stage_capacity_insufficient",
         "shared_stage_estimate_timeout",
@@ -1894,6 +1896,8 @@ def snapshot_failure_code(exc: BaseException) -> str:
         "evaluator_snapshot_prior_worker_active",
         "evaluator_snapshot_worker_owner_invalid",
         "evaluator_snapshot_process_identity_unavailable",
+        "paper_source_journal_mode_mismatch",
+        "paper_source_journal_mode_unavailable",
         "source_read_lock_budget_exceeded",
         "shared_stage_capacity_insufficient",
         "shared_stage_estimate_timeout",
@@ -2524,6 +2528,22 @@ def readonly_connection(path: Path, *, busy_timeout_ms: int = 30000) -> sqlite3.
     connection.execute("PRAGMA query_only=ON")
     connection.execute(f"PRAGMA busy_timeout={max(0, int(busy_timeout_ms))}")
     return connection
+
+
+def source_journal_mode(
+    path: Path,
+    *,
+    busy_timeout_ms: int = 30000,
+) -> str:
+    connection = readonly_connection(path, busy_timeout_ms=busy_timeout_ms)
+    try:
+        row = connection.execute("PRAGMA journal_mode").fetchone()
+        mode = str(row[0] if row else "").strip().upper()
+    finally:
+        connection.close()
+    if not mode:
+        raise RuntimeError("paper_source_journal_mode_unavailable")
+    return mode
 
 
 def _schema_prefix(schema: str) -> str:
@@ -6858,6 +6878,38 @@ def snapshot_all_concurrently(
     errors: dict[str, str] = {}
     result_lock = threading.Lock()
     dynamic_shared_budget = shared_stage_total_cap_bytes is not None
+    paper_plan_event = threading.Event()
+    paper_plan_lock = threading.Lock()
+    paper_plan_state: dict[str, Any] = {
+        "ready": not dynamic_shared_budget,
+        "error": None,
+    }
+    if not dynamic_shared_budget:
+        paper_plan_event.set()
+
+    def publish_paper_plan_ready() -> None:
+        with paper_plan_lock:
+            if paper_plan_state["error"] is None:
+                paper_plan_state["ready"] = True
+        paper_plan_event.set()
+
+    def publish_paper_plan_error(exc: BaseException) -> None:
+        with paper_plan_lock:
+            if not paper_plan_state["ready"] and paper_plan_state["error"] is None:
+                paper_plan_state["error"] = exc
+        paper_plan_event.set()
+
+    def await_paper_plan_before_nonpaper_pin(name: str) -> None:
+        if not dynamic_shared_budget or name == "paper":
+            return
+        if not paper_plan_event.wait(timeout=max(30.0, float(max_source_read_lock_sec))):
+            raise RuntimeError("paper_shared_stage_plan_timeout")
+        with paper_plan_lock:
+            ready = paper_plan_state["ready"] is True
+            failed = paper_plan_state["error"] is not None
+        if failed or not ready:
+            raise RuntimeError("paper_shared_stage_plan_failed")
+
     fixed_parallel_stage_budgets = dict(
         parallel_paper_stage_budget_bytes or {}
     )
@@ -7050,6 +7102,9 @@ def snapshot_all_concurrently(
             start_barrier.wait(timeout=30)
             for runtime in parallel_stage_runtimes.values():
                 runtime["start_event"].set()
+            if dynamic_shared_budget and name != "paper":
+                progress["stage"] = "wait_for_paper_shared_stage_plan"
+                await_paper_plan_before_nonpaper_pin(name)
             pin_started = time.time()
             pin_started_monotonic = time.monotonic()
             lock_deadline = pin_started_monotonic + float(max_source_read_lock_sec)
@@ -7182,6 +7237,13 @@ def snapshot_all_concurrently(
                             f"{float(max_source_read_lock_sec):.3f}s"
                         ) from barrier_exc
                     raise RuntimeError("parallel_paper_stage_barrier_broken") from barrier_exc
+            if name == "paper" and dynamic_shared_budget:
+                # The paper main view and every parallel paper stage are now
+                # pinned and the shared-stage plan is final. Only now allow the
+                # smaller signal/raw/kline databases to pin. This keeps their
+                # rollback-journal read locks out of the 20-second allocation
+                # estimate phase without weakening the cross-database barrier.
+                publish_paper_plan_ready()
             progress["stage"] = "pinned_barrier"
             try:
                 pinned_barrier.wait(
@@ -7228,6 +7290,8 @@ def snapshot_all_concurrently(
             with result_lock:
                 reports[name] = report
         except Exception as exc:
+            if name == "paper" and dynamic_shared_budget:
+                publish_paper_plan_error(exc)
             sqlite_errorcode, sqlite_errorname = sqlite_error_identity(exc)
             if shared_budget_coordinator is not None:
                 shared_budget_coordinator.abort(exc)
@@ -9219,6 +9283,13 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         int(getattr(args, "failure_retry_sec", DEFAULT_FAILURE_RETRY_SEC)),
     )
     current_path = str(Path(args.out_root).expanduser().resolve() / "current")
+    required_paper_journal_mode = str(
+        getattr(args, "required_paper_journal_mode", "") or ""
+    ).strip().upper()
+    if required_paper_journal_mode not in {"", "DELETE", "WAL"}:
+        raise ValueError(
+            "required_paper_journal_mode must be DELETE, WAL, or empty"
+        )
     try:
         previous_failure_count = max(
             0,
@@ -9276,6 +9347,10 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
         "worker_restart_required": False,
         "cleanup_deferred_until_worker_restart": False,
         "worker_owner_path": str(snapshot_worker_owner_path(out_root_path)),
+        "required_paper_journal_mode": (
+            required_paper_journal_mode or None
+        ),
+        "paper_journal_mode": None,
         "promotion_allowed": False,
     }
     lock_acquired = False
@@ -9286,8 +9361,22 @@ def _run_snapshot_once(args: argparse.Namespace) -> dict[str, Any]:
                 out_root_path,
                 legacy_statuses=legacy_statuses,
             )
+            paper_journal_mode = source_journal_mode(
+                Path(args.paper_db).expanduser().resolve(),
+                busy_timeout_ms=int(args.source_busy_timeout_ms),
+            )
+            base_status["paper_journal_mode"] = paper_journal_mode
             if status_path:
                 atomic_json(status_path, base_status)
+            if (
+                required_paper_journal_mode
+                and paper_journal_mode != required_paper_journal_mode
+            ):
+                raise RuntimeError(
+                    "paper_source_journal_mode_mismatch:"
+                    f"required={required_paper_journal_mode}:"
+                    f"actual={paper_journal_mode}"
+                )
             interrupted_partials_removed = cleanup_interrupted_partials(
                 out_root_path
             )
@@ -9496,6 +9585,11 @@ def main() -> int:
     parser.add_argument("--review-history-hours", type=float, default=DEFAULT_REVIEW_HISTORY_HOURS)
     parser.add_argument("--long-history-hours", type=float, default=DEFAULT_LONG_HISTORY_HOURS)
     parser.add_argument("--source-busy-timeout-ms", type=int, default=30000)
+    parser.add_argument(
+        "--required-paper-journal-mode",
+        choices=("DELETE", "WAL"),
+        default="",
+    )
     parser.add_argument(
         "--max-source-read-lock-sec",
         type=float,

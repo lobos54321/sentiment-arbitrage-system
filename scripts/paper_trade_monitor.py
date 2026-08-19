@@ -21779,6 +21779,8 @@ class _MonitorTransactionCoordinator:
         self.transaction_may_be_active = bool(getattr(db, "in_transaction", True))
         self.explicit_transaction_root = self.transaction_may_be_active
         self.savepoint_depth = 0
+        self.transaction_gate_held = False
+        self.transaction_gate_owner_thread_id = None
         self.active = True
 
     def install(self):
@@ -21789,16 +21791,72 @@ class _MonitorTransactionCoordinator:
 
     def refresh_transaction_state(self):
         with self.boundary_condition:
-            self.transaction_may_be_active = bool(
-                getattr(self.db, "in_transaction", True)
-            )
-            if not self.transaction_may_be_active:
+            active = bool(getattr(self.db, "in_transaction", True))
+            current_thread_id = threading.get_ident()
+            if active and not self.transaction_gate_held:
+                if current_thread_id != self.owner_thread_id:
+                    thread_error = RuntimeError(
+                        "paper monitor transaction started outside owner thread"
+                    )
+                    restart = _request_monitor_supervisor_restart(
+                        _monitor_restart_required(
+                            "cross_thread_transaction_start",
+                            thread_error,
+                        ),
+                        notify_coordinator=False,
+                    )
+                    raise restart from thread_error
+                # Retain one re-entrant acquisition after the current SQLite
+                # call returns.  A guardian wait/quote can then block on the
+                # gate until the owner commits, instead of observing a valid
+                # in-flight owner transaction and falsely demanding restart.
+                self.boundary_gate.acquire()
+                self.transaction_gate_held = True
+                self.transaction_gate_owner_thread_id = current_thread_id
+            elif not active and self.transaction_gate_held:
+                if current_thread_id != self.transaction_gate_owner_thread_id:
+                    thread_error = RuntimeError(
+                        "paper monitor transaction lease crossed threads"
+                    )
+                    restart = _request_monitor_supervisor_restart(
+                        _monitor_restart_required(
+                            "cross_thread_transaction_release",
+                            thread_error,
+                        ),
+                        notify_coordinator=False,
+                    )
+                    raise restart from thread_error
+                self.transaction_gate_held = False
+                self.transaction_gate_owner_thread_id = None
+                self.boundary_gate.release()
+            self.transaction_may_be_active = active
+            if not active:
                 self.explicit_transaction_root = False
                 self.savepoint_depth = 0
             self.boundary_condition.notify_all()
 
     def deactivate(self):
         with self.boundary_condition:
+            if self.transaction_gate_held:
+                if threading.get_ident() != self.transaction_gate_owner_thread_id:
+                    raise RuntimeError(
+                        "paper monitor transaction lease deactivated cross-thread"
+                    )
+                try:
+                    transaction_active = bool(self.db.in_transaction)
+                except sqlite3.ProgrammingError as exc:
+                    if "closed database" not in str(exc).lower():
+                        raise
+                    # Closing a native SQLite connection rolls back any open
+                    # transaction. Treat the lease as inactive so shutdown
+                    # cleanup cannot mask the original monitor failure.
+                    transaction_active = False
+                if transaction_active:
+                    self.db.rollback()
+                if self.transaction_gate_held:
+                    self.transaction_gate_held = False
+                    self.transaction_gate_owner_thread_id = None
+                    self.boundary_gate.release()
             self.active = False
             self.boundary_condition.notify_all()
 
@@ -21885,8 +21943,17 @@ def _request_monitor_supervisor_restart(restart, *, notify_coordinator=True):
     SHUTDOWN_REQUESTED.set()
     coordinator = _MONITOR_TRANSACTION_COORDINATOR
     if notify_coordinator and coordinator is not None:
-        with coordinator.boundary_condition:
-            coordinator.boundary_condition.notify_all()
+        # A non-owner restart request must never wait behind the owner's
+        # transaction lease.  The request and shutdown flag are already
+        # durable in process memory; notification is only an acceleration for
+        # idle waiters.  The owner will observe the request at its next guarded
+        # SQLite operation or commit and roll back fail-closed.
+        acquired = coordinator.boundary_gate.acquire(blocking=False)
+        if acquired:
+            try:
+                coordinator.boundary_condition.notify_all()
+            finally:
+                coordinator.boundary_gate.release()
     return requested
 
 

@@ -33,6 +33,46 @@ def test_paper_connection_allows_explicit_local_wal_override(tmp_path):
         db.close()
 
 
+def test_explicit_local_wal_reader_does_not_block_writer_commit(tmp_path):
+    path = tmp_path / "paper.db"
+    setup = sqlite3.connect(path)
+    try:
+        configure_paper_sqlite_connection(
+            setup,
+            journal_mode="WAL",
+            synchronous="FULL",
+        )
+        setup.execute("CREATE TABLE evidence(value TEXT)")
+        setup.execute("INSERT INTO evidence VALUES ('before-reader')")
+        setup.commit()
+    finally:
+        setup.close()
+
+    reader = sqlite3.connect(path, timeout=0.2)
+    writer = sqlite3.connect(path, timeout=0.2)
+    try:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
+        configure_paper_sqlite_connection(
+            writer,
+            journal_mode="WAL",
+            synchronous="FULL",
+            busy_timeout_ms=200,
+        )
+        writer.execute("INSERT INTO evidence VALUES ('during-reader')")
+        writer.commit()
+        assert reader.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
+        reader.rollback()
+        assert reader.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 2
+    finally:
+        if reader.in_transaction:
+            reader.rollback()
+        if writer.in_transaction:
+            writer.rollback()
+        reader.close()
+        writer.close()
+
+
 @pytest.mark.parametrize(
     ("journal_mode", "synchronous"),
     [("unsafe-name", "FULL"), ("DELETE", "sometimes")],

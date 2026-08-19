@@ -40,6 +40,11 @@ test('startup supervises v27 read model refresh worker', () => {
   assert.match(zeaburSupervisor, /export V27_READ_MODEL_REFRESH_WORKER_ENABLED=/);
   assert.match(zeaburSupervisor, /export V27_READ_MODEL_WORKER_STATUS_PATH=/);
   assert.match(zeaburSupervisor, /export EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC=/);
+  assert.match(zeaburSupervisor, /export EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS="\$\{EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS:-72\}"/);
+  assert.match(zeaburSupervisor, /export EVALUATOR_SNAPSHOT_REQUIRED_PAPER_JOURNAL_MODE=/);
+  assert.match(zeaburSupervisor, /--required-paper-journal-mode "\$EVALUATOR_SNAPSHOT_REQUIRED_PAPER_JOURNAL_MODE"/);
+  assert.match(source, /'--review-history-hours', process\.env\.EVALUATOR_SNAPSHOT_REVIEW_HISTORY_HOURS \|\| '72'/);
+  assert.match(source, /'--required-paper-journal-mode', process\.env\.EVALUATOR_SNAPSHOT_REQUIRED_PAPER_JOURNAL_MODE \|\| 'WAL'/);
   assert.match(zeaburSupervisor, /--failure-retry-sec "\$EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC"/);
   assert.match(source, /'--failure-retry-sec', process\.env\.EVALUATOR_SNAPSHOT_FAILURE_RETRY_SEC \|\| '60'/);
   assert.match(source, /envFlag\('PAPER_FAST_LANE_ENABLED', false\)/);

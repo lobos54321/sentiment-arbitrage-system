@@ -66,6 +66,18 @@ def _open_monitor_delete_journal_db(path):
     return db
 
 
+def _open_monitor_wal_db(path):
+    db = sqlite3.connect(
+        path,
+        timeout=1,
+        factory=paper_trade_monitor.MonitorSQLiteConnection,
+    )
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("CREATE TABLE IF NOT EXISTS evidence (value TEXT)")
+    db.commit()
+    return db
+
+
 def _assert_competing_writer_can_begin(path):
     competitor = sqlite3.connect(path, timeout=1)
     try:
@@ -550,17 +562,17 @@ def test_uncloseable_transaction_exits_before_execution_quote_call(
         db.close()
 
 
-def test_cross_thread_guardian_quote_requests_restart_before_simulate_sell(
+def test_cross_thread_guardian_quote_waits_for_owner_commit_before_simulate_sell(
     tmp_path,
 ):
     db_path = tmp_path / "paper.db"
-    db = _open_delete_journal_db(db_path)
-    simulate_called = False
+    db = _open_monitor_delete_journal_db(db_path)
+    simulate_called = threading.Event()
     worker_errors = []
 
-    def forbidden_simulate(*_args, **_kwargs):
-        nonlocal simulate_called
-        simulate_called = True
+    def simulate(*_args, **_kwargs):
+        simulate_called.set()
+        return {"quotedOutputSOL": 1.0}
 
     guardian = exit_engine.ExitGuardianThread(
         positions_ref={},
@@ -568,7 +580,7 @@ def test_cross_thread_guardian_quote_requests_restart_before_simulate_sell(
         watchlist_store_ref=None,
         exit_queue=[],
         fetch_price_fn=lambda *_args, **_kwargs: (1.0, "test", 0),
-        simulate_exit_fn=forbidden_simulate,
+        simulate_exit_fn=simulate,
         blocking_guard_fn=_monitor_blocking_guard_for_db(db),
     )
     position = SimpleNamespace(
@@ -585,52 +597,100 @@ def test_cross_thread_guardian_quote_requests_restart_before_simulate_sell(
             worker_errors.append(exc)
 
     try:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT INTO evidence VALUES ('must-not-quote')")
-        assert Path(f"{db_path}-journal").exists()
-
         with _monitor_transaction_guard_scope(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO evidence VALUES ('commit-before-quote')")
+            assert Path(f"{db_path}-journal").exists()
             thread = threading.Thread(target=worker)
             thread.start()
+            time.sleep(0.05)
+            assert thread.is_alive()
+            assert not simulate_called.is_set()
+
+            db.commit()
             thread.join(timeout=2)
             assert not thread.is_alive()
-            with pytest.raises(MonitorSupervisorRestartRequired) as caught:
-                _raise_monitor_supervisor_restart_if_requested()
+            _raise_monitor_supervisor_restart_if_requested()
 
-        assert worker_errors == [caught.value]
-        assert not simulate_called
-        assert db.in_transaction
-        assert Path(f"{db_path}-journal").exists()
-        competitor = sqlite3.connect(db_path, timeout=0.05)
-        try:
-            with pytest.raises(sqlite3.OperationalError, match="locked"):
-                competitor.execute("BEGIN IMMEDIATE")
-        finally:
-            competitor.close()
+        assert worker_errors == []
+        assert simulate_called.is_set()
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
+        assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
+        _assert_competing_writer_can_begin(db_path)
     finally:
-        _clear_monitor_supervisor_restart_request()
-        paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
-        db.rollback()
         db.close()
 
-    assert not Path(f"{db_path}-journal").exists()
-    _assert_competing_writer_can_begin(db_path)
+
+def test_wal_guardian_quote_waits_for_owner_commit_without_restart(tmp_path):
+    db_path = tmp_path / "paper-wal.db"
+    db = _open_monitor_wal_db(db_path)
+    quote_called = threading.Event()
+    worker_errors = []
+
+    def quote(*_args, **_kwargs):
+        quote_called.set()
+        return {"quotedOutputSOL": 1.0}
+
+    guardian = exit_engine.ExitGuardianThread(
+        positions_ref={},
+        positions_lock=threading.Lock(),
+        watchlist_store_ref=None,
+        exit_queue=[],
+        fetch_price_fn=lambda *_args, **_kwargs: (1.0, "test", 0),
+        simulate_exit_fn=quote,
+        blocking_guard_fn=_monitor_blocking_guard_for_db(db),
+    )
+    position = SimpleNamespace(
+        token_amount_raw="1",
+        token_decimals=6,
+        strategy_stage="stage1",
+        symbol="TEST",
+    )
+
+    def worker():
+        try:
+            guardian._get_instant_quote(position, "token")
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    try:
+        with _monitor_transaction_guard_scope(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO evidence VALUES ('wal-commit-before-quote')")
+            thread = threading.Thread(target=worker)
+            thread.start()
+            threading.Event().wait(0.05)
+            assert thread.is_alive()
+            assert not quote_called.is_set()
+
+            db.commit()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+            _raise_monitor_supervisor_restart_if_requested()
+
+        assert worker_errors == []
+        assert quote_called.is_set()
+        assert db.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
+        _assert_competing_writer_can_begin(db_path)
+    finally:
+        db.close()
 
 
-def test_cross_thread_guardian_wait_requests_restart_before_raw_sleep(
+def test_cross_thread_guardian_waits_for_owner_commit_before_raw_sleep(
     tmp_path,
     monkeypatch,
 ):
     db_path = tmp_path / "paper.db"
-    db = _open_delete_journal_db(db_path)
-    sleep_called = False
+    db = _open_monitor_delete_journal_db(db_path)
+    sleep_called = threading.Event()
     worker_errors = []
 
-    def forbidden_sleep(_seconds):
-        nonlocal sleep_called
-        sleep_called = True
+    def observed_sleep(_seconds):
+        sleep_called.set()
 
-    monkeypatch.setattr(exit_engine.time, "sleep", forbidden_sleep)
+    monkeypatch.setattr(exit_engine.time, "sleep", observed_sleep)
     guardian = exit_engine.ExitGuardianThread(
         positions_ref={},
         positions_lock=threading.Lock(),
@@ -647,24 +707,25 @@ def test_cross_thread_guardian_wait_requests_restart_before_raw_sleep(
             worker_errors.append(exc)
 
     try:
-        db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT INTO evidence VALUES ('must-not-wait')")
         with _monitor_transaction_guard_scope(db):
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO evidence VALUES ('commit-before-wait')")
             thread = threading.Thread(target=worker)
             thread.start()
+            threading.Event().wait(0.05)
+            assert thread.is_alive()
+            assert not sleep_called.is_set()
+
+            db.commit()
             thread.join(timeout=2)
             assert not thread.is_alive()
-            with pytest.raises(MonitorSupervisorRestartRequired) as caught:
-                _raise_monitor_supervisor_restart_if_requested()
+            _raise_monitor_supervisor_restart_if_requested()
 
-        assert worker_errors == [caught.value]
-        assert not sleep_called
-        assert db.in_transaction
-        assert Path(f"{db_path}-journal").exists()
+        assert worker_errors == []
+        assert sleep_called.is_set()
+        assert not db.in_transaction
+        assert not Path(f"{db_path}-journal").exists()
     finally:
-        _clear_monitor_supervisor_restart_request()
-        paper_trade_monitor.SHUTDOWN_REQUESTED.clear()
-        db.rollback()
         db.close()
 
 
@@ -672,15 +733,8 @@ def test_worker_restart_request_rolls_back_instead_of_committing_success_path(
     tmp_path,
 ):
     db_path = tmp_path / "paper.db"
-    db = sqlite3.connect(
-        db_path,
-        timeout=1,
-        factory=paper_trade_monitor.MonitorSQLiteConnection,
-    )
-    db.execute("PRAGMA journal_mode=DELETE")
-    db.execute("CREATE TABLE evidence (value TEXT)")
-    db.commit()
-    worker_errors = []
+    db = _open_monitor_delete_journal_db(db_path)
+    worker_requests = []
     try:
         with _monitor_transaction_guard_scope(db):
             db.execute("BEGIN IMMEDIATE")
@@ -689,32 +743,25 @@ def test_worker_restart_request_rolls_back_instead_of_committing_success_path(
             )
 
             def worker():
-                try:
-                    _guarded_blocking_sleep(
-                        0.01,
-                        operation="worker_detects_owner_transaction",
-                    )
-                except BaseException as exc:
-                    worker_errors.append(exc)
+                cause = RuntimeError("forced worker restart")
+                restart = paper_trade_monitor._monitor_restart_required(
+                    "worker_forced_restart",
+                    cause,
+                )
+                worker_requests.append(
+                    paper_trade_monitor._request_monitor_supervisor_restart(restart)
+                )
 
             thread = threading.Thread(target=worker)
             thread.start()
             thread.join(timeout=2)
             assert not thread.is_alive()
-            assert len(worker_errors) == 1
+            assert len(worker_requests) == 1
 
             with pytest.raises(MonitorSupervisorRestartRequired) as commit_caught:
                 db.commit()
 
-            with pytest.raises(MonitorSupervisorRestartRequired) as caught:
-                _sleep_after_monitor_transaction_settle(
-                    db,
-                    0.01,
-                    success=True,
-                )
-
-            assert commit_caught.value is worker_errors[0]
-            assert caught.value is worker_errors[0]
+            assert commit_caught.value is worker_requests[0]
             assert not db.in_transaction
             assert not Path(f"{db_path}-journal").exists()
             assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
@@ -1168,7 +1215,7 @@ def test_transaction_boundary_does_not_depend_on_swallowable_trace_callback(
         db.close()
 
 
-def test_sleep_boundary_releases_gate_only_after_wait_has_started(tmp_path):
+def test_sleep_boundary_waits_for_owner_transaction_started_after_wait(tmp_path):
     db_path = tmp_path / "paper.db"
     db = _open_monitor_delete_journal_db(db_path)
     worker_errors = []
@@ -1193,22 +1240,23 @@ def test_sleep_boundary_releases_gate_only_after_wait_has_started(tmp_path):
                 assert time.monotonic() < deadline
                 threading.Event().wait(0.001)
 
-            # A registered Condition waiter proves the guarded wait has begun.
-            assert coordinator.boundary_gate.acquire(timeout=1)
-            try:
-                db.execute("BEGIN IMMEDIATE")
-                db.execute("INSERT INTO evidence VALUES ('opened-after-wait-start')")
-            finally:
-                coordinator.boundary_gate.release()
-
-            thread.join(timeout=2)
-            assert not thread.is_alive()
-            assert len(worker_errors) == 1
-            assert isinstance(worker_errors[0], MonitorSupervisorRestartRequired)
+            # The interval wait itself owns no database state. If the owner
+            # starts a transaction after the wait begins, the waiter must stay
+            # behind that transaction lease and resume only after commit.
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT INTO evidence VALUES ('opened-after-wait-start')")
+            threading.Event().wait(0.15)
+            assert thread.is_alive()
             assert db.in_transaction
             assert Path(f"{db_path}-journal").exists()
-            db.rollback()
-            assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+
+            db.commit()
+            thread.join(timeout=2)
+            assert not thread.is_alive()
+            assert worker_errors == []
+            assert not db.in_transaction
+            assert not Path(f"{db_path}-journal").exists()
+            assert db.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
     finally:
         if db.in_transaction:
             db.rollback()
