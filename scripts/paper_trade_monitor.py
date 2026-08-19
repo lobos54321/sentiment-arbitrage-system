@@ -43,6 +43,15 @@ from pathlib import Path
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
+# entry_engine lazily imports ``paper_trade_monitor`` from inside runtime call
+# paths.  When this file is launched directly, Python otherwise loads it only
+# as ``__main__`` and that lazy import creates a second module with independent
+# transaction-boundary globals.  Bind the canonical name before importing any
+# project modules so every caller observes the same coordinator instance.
+_CANONICAL_MODULE_NAME = "paper_trade_monitor"
+if __name__ == "__main__" or _CANONICAL_MODULE_NAME not in sys.modules:
+    sys.modules[_CANONICAL_MODULE_NAME] = sys.modules[__name__]
+
 from watchlist_store import WatchlistStore
 from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
 from entry_engine import (

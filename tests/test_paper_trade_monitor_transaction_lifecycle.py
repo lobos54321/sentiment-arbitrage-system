@@ -1,6 +1,7 @@
 import ast
 import contextlib
 import inspect
+import importlib.util
 import os
 from pathlib import Path
 import sqlite3
@@ -85,6 +86,51 @@ def _assert_competing_writer_can_begin(path):
         competitor.rollback()
     finally:
         competitor.close()
+
+
+def test_alternate_script_module_claims_canonical_monitor_identity():
+    source_path = Path(paper_trade_monitor.__file__)
+    module_name = "_paper_trade_monitor_script_identity_probe"
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    previous_alias = sys.modules.pop("paper_trade_monitor", None)
+    previous_probe = sys.modules.get(module_name)
+    sys.modules[module_name] = probe
+    try:
+        spec.loader.exec_module(probe)
+        assert sys.modules["paper_trade_monitor"] is probe
+        assert __import__("paper_trade_monitor") is probe
+        assert probe.call_execution_bridge.__globals__ is probe.__dict__
+
+        token = "MODULE_IDENTITY_PROBE_TOKEN"
+        entry_engine._dex_trend_cache.pop(token, None)
+        probe.curl_json = lambda *_args, **_kwargs: {
+            "pairs": [
+                {
+                    "dexId": "module-identity-probe",
+                    "pairAddress": "probe-pair",
+                    "priceUsd": "1",
+                    "volume": {"m5": 1, "h1": 2},
+                    "txns": {"m5": {"buys": 1, "sells": 0}},
+                    "priceChange": {"m5": 0, "h1": 0},
+                    "liquidity": {"usd": 1000},
+                }
+            ]
+        }
+        probe._select_best_dex_pair = lambda _token, pairs: pairs[0]
+        result = entry_engine.fetch_dexscreener_trend_snapshot(token, timeout=0.01)
+        assert result["dex_id"] == "module-identity-probe"
+        entry_engine._dex_trend_cache.pop(token, None)
+    finally:
+        if previous_alias is None:
+            sys.modules.pop("paper_trade_monitor", None)
+        else:
+            sys.modules["paper_trade_monitor"] = previous_alias
+        if previous_probe is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous_probe
 
 
 def test_successful_monitor_iteration_commits_before_sleep(tmp_path):
