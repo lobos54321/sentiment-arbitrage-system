@@ -3622,6 +3622,53 @@ test('evaluator snapshot worker health accepts only fresh matching indexed bundl
   assert.equal(producerOnly.consumer_state, 'authoritative_preflight_required');
 });
 
+test('evaluator snapshot worker treats shared-stage JSON object key order as semantically irrelevant', () => {
+  const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
+  const fixture = evaluatorSnapshotHealthFixture(nowMs);
+  const manifestPayload = structuredClone(fixture.manifestPayload);
+  const nestedBudget = manifestPayload.disk_preflight.shared_stage_budget;
+  manifestPayload.disk_preflight.shared_stage_budget = Object.fromEntries(
+    Object.entries(nestedBudget).reverse(),
+  );
+
+  const health = readEvaluatorSnapshotWorkerHealth({
+    nowMs,
+    enabled: true,
+    pid: 33333,
+    pidAlive: true,
+    lockPid: 33333,
+    lockPidAlive: true,
+    statusPayload: fixture.statusPayload,
+    manifestPayload,
+    statusArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 100,
+    },
+    manifestArtifact: {
+      available: true,
+      mtime: '2026-08-08T03:59:30.000Z',
+      size_bytes: 1000,
+    },
+    manifestFileSha256: 'd'.repeat(64),
+    databaseArtifacts: fixture.databaseArtifacts,
+    authoritativePreflight: fixture.authoritativePreflight,
+  });
+
+  assert.equal(
+    health.status,
+    'producer_accepted',
+    JSON.stringify({
+      blockers: health.blockers,
+      warnings: health.warnings,
+      manifest_contract: health.manifest_contract,
+    }, null, 2),
+  );
+  assert.equal(health.manifest_contract.shared_stage_budget_passed, true);
+  assert.equal(health.shared_stage_budget.contract_passed, true);
+  assert.equal(health.consumer_ready, true);
+});
+
 test('evaluator snapshot worker rejects shared-stage storage lineage tampering', () => {
   const nowMs = Date.parse('2026-08-08T04:00:00.000Z');
   for (const [field, value] of [

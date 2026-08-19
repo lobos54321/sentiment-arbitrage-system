@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 
 function blockedStatus(blocker, context) {
   return {
@@ -16,7 +16,7 @@ function blockedStatus(blocker, context) {
   };
 }
 
-export function runEvaluatorSnapshotPreflight(options) {
+function preflightInvocation(options) {
   const context = {
     candidates: options.candidates,
     live: options.live,
@@ -40,20 +40,29 @@ export function runEvaluatorSnapshotPreflight(options) {
     '--live-raw-db', options.live.raw,
     '--live-kline-db', options.live.kline,
   ];
-  let raw;
-  try {
-    raw = (options.runner || execFileSync)(options.pythonBin || 'python3', args, {
-      cwd: options.repoRoot,
-      encoding: 'utf8',
-      timeout: options.timeoutMs,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch (error) {
-    const reason = error?.code === 'ETIMEDOUT'
-      ? 'evaluator_snapshot_authoritative_preflight_timeout'
-      : 'evaluator_snapshot_authoritative_preflight_failed';
-    return blockedStatus(reason, context);
-  }
+  const execOptions = {
+    cwd: options.repoRoot,
+    encoding: 'utf8',
+    timeout: options.timeoutMs,
+    maxBuffer: 8 * 1024 * 1024,
+  };
+  return { context, args, execOptions };
+}
+
+function preflightFailureBlocker(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const signal = String(error?.signal || '').toUpperCase();
+  const message = String(error?.message || '').toLowerCase();
+  const timedOut = code === 'ETIMEDOUT'
+    || (error?.killed === true && signal === 'SIGTERM')
+    || message.includes('timed out')
+    || message.includes('timeout');
+  return timedOut
+    ? 'evaluator_snapshot_authoritative_preflight_timeout'
+    : 'evaluator_snapshot_authoritative_preflight_failed';
+}
+
+function normalizePreflightOutput(raw, context) {
   let status;
   try {
     status = JSON.parse(String(raw || ''));
@@ -97,15 +106,51 @@ export function runEvaluatorSnapshotPreflight(options) {
   }
   const authoritativeDatabases = status.databases && typeof status.databases === 'object'
     ? status.databases
-    : options.candidates;
+    : context.candidates;
   return {
     ...status,
     evidence_db: authoritativeDatabases.paper,
     evidence_databases: authoritativeDatabases,
-    live_databases: options.live,
-    evidence_manifest: status.manifest_path || options.manifestPath,
+    live_databases: context.live,
+    evidence_manifest: status.manifest_path || context.manifestPath,
     promotion_allowed: false,
   };
+}
+
+export function runEvaluatorSnapshotPreflight(options) {
+  const { context, args, execOptions } = preflightInvocation(options);
+  let raw;
+  try {
+    raw = (options.runner || execFileSync)(options.pythonBin || 'python3', args, execOptions);
+  } catch (error) {
+    return blockedStatus(preflightFailureBlocker(error), context);
+  }
+  return normalizePreflightOutput(raw, context);
+}
+
+function execFileAsync(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+export async function runEvaluatorSnapshotPreflightAsync(options) {
+  const { context, args, execOptions } = preflightInvocation(options);
+  let raw;
+  try {
+    raw = options.runner
+      ? await options.runner(options.pythonBin || 'python3', args, execOptions)
+      : await execFileAsync(options.pythonBin || 'python3', args, execOptions);
+  } catch (error) {
+    return blockedStatus(preflightFailureBlocker(error), context);
+  }
+  return normalizePreflightOutput(raw, context);
 }
 
 export function evaluatorSnapshotProvenance(status = {}) {

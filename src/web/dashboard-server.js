@@ -23,7 +23,7 @@ import {
 import { summarizePremiumSignalGateHealth } from './data-source-health-utils.js';
 import {
   evaluatorSnapshotProvenance,
-  runEvaluatorSnapshotPreflight,
+  runEvaluatorSnapshotPreflightAsync,
 } from './evaluator-snapshot-preflight.js';
 import {
   EVIDENCE_SCHEMA_VERSION,
@@ -2198,6 +2198,8 @@ function getAgentCaptureEvidenceManifestPath() {
 
 let evaluatorSnapshotAuthoritativePreflightState = {
   schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+  running: false,
+  started_at: null,
   checked_at: null,
   accepted: false,
   snapshot_id: null,
@@ -2205,8 +2207,9 @@ let evaluatorSnapshotAuthoritativePreflightState = {
   blockers: ['evaluator_snapshot_authoritative_preflight_not_run'],
   promotion_allowed: false,
 };
+let evaluatorSnapshotAuthoritativePreflightPromise = null;
 
-function agentCaptureEvidenceDbPreflight() {
+function agentCaptureEvidenceDbPreflightOptions() {
   const candidates = {
     signal: resolve(getAgentCaptureEvidenceSignalDbPath()),
     paper: resolve(getAgentCaptureEvidenceDbPath()),
@@ -2219,22 +2222,30 @@ function agentCaptureEvidenceDbPreflight() {
     raw: resolve(getRawSignalOutcomesDbPath()),
     kline: resolve(getKlineCacheDbPath()),
   };
-  const manifestPath = resolve(getAgentCaptureEvidenceManifestPath());
-  const producerStatusPath = resolve(evaluatorSnapshotStatusPath());
-  const result = runEvaluatorSnapshotPreflight({
+  const configuredTimeoutMs = Number(
+    process.env.EVALUATOR_SNAPSHOT_PREFLIGHT_TIMEOUT_MS || 1800000,
+  );
+  return {
     pythonBin: process.env.PYTHON_BIN || 'python3',
     contractScript: join(projectRoot, 'scripts', 'evaluator_db_contract.py'),
     repoRoot: projectRoot,
     dataDir: dirname(live.paper),
     candidates,
     live,
-    manifestPath,
-    producerStatusPath,
+    manifestPath: resolve(getAgentCaptureEvidenceManifestPath()),
+    producerStatusPath: resolve(evaluatorSnapshotStatusPath()),
     maxAgeSec: Number(process.env.EVALUATOR_SNAPSHOT_MAX_AGE_SEC || 28800),
-    timeoutMs: Number(process.env.EVALUATOR_SNAPSHOT_PREFLIGHT_TIMEOUT_MS || 300000),
-  });
+    timeoutMs: Number.isFinite(configuredTimeoutMs)
+      ? Math.min(Math.max(configuredTimeoutMs, 1800000), 3600000)
+      : 1800000,
+  };
+}
+
+function recordEvaluatorSnapshotAuthoritativePreflight(result, startedAt) {
   evaluatorSnapshotAuthoritativePreflightState = {
     schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+    running: false,
+    started_at: startedAt,
     checked_at: new Date().toISOString(),
     accepted: result.accepted === true,
     snapshot_id: result.snapshot_id || null,
@@ -2244,6 +2255,37 @@ function agentCaptureEvidenceDbPreflight() {
     promotion_allowed: false,
   };
   return result;
+}
+
+async function agentCaptureEvidenceDbPreflightAsync() {
+  if (evaluatorSnapshotAuthoritativePreflightPromise) {
+    return evaluatorSnapshotAuthoritativePreflightPromise;
+  }
+  const startedAt = new Date().toISOString();
+  evaluatorSnapshotAuthoritativePreflightState = {
+    schema_version: 'evaluator_snapshot_authoritative_preflight_state.v1',
+    running: true,
+    started_at: startedAt,
+    checked_at: null,
+    accepted: false,
+    snapshot_id: null,
+    manifest_sha256: null,
+    blockers: ['evaluator_snapshot_authoritative_preflight_running'],
+    promotion_allowed: false,
+  };
+  evaluatorSnapshotAuthoritativePreflightPromise = (
+    runEvaluatorSnapshotPreflightAsync(
+      agentCaptureEvidenceDbPreflightOptions(),
+    )
+      .then((result) => recordEvaluatorSnapshotAuthoritativePreflight(
+        result,
+        startedAt,
+      ))
+      .finally(() => {
+        evaluatorSnapshotAuthoritativePreflightPromise = null;
+      })
+  );
+  return evaluatorSnapshotAuthoritativePreflightPromise;
 }
 
 function getRawSignalOutcomesDbPath() {
@@ -2444,7 +2486,10 @@ const agentCaptureSchedulerState = {
   running: false,
   interval_sec: null,
   initial_delay_sec: null,
+  blocked_retry_sec: null,
+  busy_retry_sec: null,
   capture_hours: null,
+  attempt_running: false,
   last_attempt_at: null,
   last_result: null,
   last_error: null,
@@ -2741,7 +2786,7 @@ function sanitizeCaptureHours(value, primaryHours) {
   return out.length ? out.join(',') : fallback;
 }
 
-function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
+async function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
   const trigger = options.trigger || 'dashboard_api';
   const endpoint = trigger === 'dashboard_api' ? '/api/agent/capture-discovery/run' : null;
   const paths = agentCaptureArtifactPaths();
@@ -2758,11 +2803,24 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
     };
   }
 
-  const evaluatorDb = agentCaptureEvidenceDbPreflight();
+  const evaluatorDb = await agentCaptureEvidenceDbPreflightAsync();
   if (!evaluatorDb.accepted) {
     return {
       accepted: false,
       status: 'blocked_evaluator_snapshot_required',
+      evaluator_db: evaluatorDb,
+      promotion_allowed: false,
+      strategy_change_allowed: false,
+      automatic_runtime_change_allowed: false,
+      paper_enablement_allowed: false,
+    };
+  }
+  const currentAfterPreflight = readAgentCaptureLoopRunnerStatus();
+  if (currentAfterPreflight.running) {
+    return {
+      accepted: false,
+      status: 'already_running',
+      runner: currentAfterPreflight,
       evaluator_db: evaluatorDb,
       promotion_allowed: false,
       strategy_change_allowed: false,
@@ -2979,19 +3037,25 @@ function triggerAgentCaptureDiscoveryLoop(url, options = {}) {
 function agentCaptureSchedulerStatus() {
   return {
     ...agentCaptureSchedulerState,
-    running: Boolean(agentCaptureSchedulerTimer),
+    running: Boolean(
+      agentCaptureSchedulerTimer || agentCaptureSchedulerState.attempt_running,
+    ),
   };
 }
 
 function stopAgentCaptureDiscoveryScheduler() {
   if (agentCaptureSchedulerTimer) clearTimeout(agentCaptureSchedulerTimer);
   agentCaptureSchedulerTimer = null;
+  agentCaptureSchedulerState.enabled = false;
   agentCaptureSchedulerState.running = false;
   agentCaptureSchedulerState.next_run_at = null;
 }
 
 function startAgentCaptureDiscoveryScheduler() {
-  if (agentCaptureSchedulerTimer) {
+  if (
+    agentCaptureSchedulerTimer
+    || agentCaptureSchedulerState.attempt_running
+  ) {
     return agentCaptureSchedulerStatus();
   }
   if (!envBool('AGENT_CAPTURE_DISCOVERY_SCHEDULER_ENABLED', false)) {
@@ -3002,6 +3066,18 @@ function startAgentCaptureDiscoveryScheduler() {
 
   const initialDelaySec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_INITIAL_DELAY_SEC', 300, 30, 3600);
   const intervalSec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_INTERVAL_SEC', 21600, 3600, 86400);
+  const blockedRetrySec = envInt(
+    'AGENT_CAPTURE_DISCOVERY_SCHEDULER_BLOCKED_RETRY_SEC',
+    900,
+    60,
+    3600,
+  );
+  const busyRetrySec = envInt(
+    'AGENT_CAPTURE_DISCOVERY_SCHEDULER_BUSY_RETRY_SEC',
+    300,
+    30,
+    1800,
+  );
   const timeoutSec = envInt('AGENT_CAPTURE_DISCOVERY_SCHEDULER_TIMEOUT_SEC', 3600, 300, 7200);
   const reportTimeoutSec = envInt('AGENT_CAPTURE_REPORT_TIMEOUT_SEC', 300, 30, 3600);
   const testTimeoutSec = envInt('AGENT_CAPTURE_TEST_TIMEOUT_SEC', 180, 30, 600);
@@ -3010,26 +3086,20 @@ function startAgentCaptureDiscoveryScheduler() {
     process.env.AGENT_CAPTURE_DISCOVERY_SCHEDULER_CAPTURE_HOURS || '24,48,72',
     24
   );
-  const scheduleNext = (delaySec) => {
-    agentCaptureSchedulerState.next_run_at = new Date(Date.now() + delaySec * 1000).toISOString();
-    agentCaptureSchedulerTimer = setTimeout(() => {
-      agentCaptureSchedulerTimer = null;
-      runOnce();
-      scheduleNext(intervalSec);
-    }, delaySec * 1000);
-    if (typeof agentCaptureSchedulerTimer.unref === 'function') {
-      agentCaptureSchedulerTimer.unref();
-    }
-  };
 
   agentCaptureSchedulerState.enabled = true;
   agentCaptureSchedulerState.interval_sec = intervalSec;
   agentCaptureSchedulerState.initial_delay_sec = initialDelaySec;
+  agentCaptureSchedulerState.blocked_retry_sec = blockedRetrySec;
+  agentCaptureSchedulerState.busy_retry_sec = busyRetrySec;
   agentCaptureSchedulerState.capture_hours = captureHours;
   agentCaptureSchedulerState.last_error = null;
-  const runOnce = () => {
+
+  const runOnce = async () => {
+    agentCaptureSchedulerState.attempt_running = true;
     agentCaptureSchedulerState.last_attempt_at = new Date().toISOString();
     agentCaptureSchedulerState.last_error = null;
+    let result = null;
     try {
       const url = new URL('http://127.0.0.1/api/agent/capture-discovery/run');
       url.searchParams.set('hours', '24');
@@ -3039,7 +3109,9 @@ function startAgentCaptureDiscoveryScheduler() {
       url.searchParams.set('test_timeout_sec', String(testTimeoutSec));
       url.searchParams.set('max_scan_rows', String(maxScanRows));
       url.searchParams.set('timeout_sec', String(timeoutSec));
-      const result = triggerAgentCaptureDiscoveryLoop(url, { trigger: 'dashboard_scheduler' });
+      result = await triggerAgentCaptureDiscoveryLoop(url, {
+        trigger: 'dashboard_scheduler',
+      });
       agentCaptureSchedulerState.last_result = {
         accepted: Boolean(result.accepted),
         status: result.status || null,
@@ -3049,6 +3121,28 @@ function startAgentCaptureDiscoveryScheduler() {
     } catch (error) {
       agentCaptureSchedulerState.error_count += 1;
       agentCaptureSchedulerState.last_error = error?.message || String(error);
+    } finally {
+      agentCaptureSchedulerState.attempt_running = false;
+    }
+    if (result?.accepted === true) return intervalSec;
+    if (result?.status === 'already_running') return busyRetrySec;
+    return blockedRetrySec;
+  };
+
+  const scheduleNext = (delaySec) => {
+    if (!agentCaptureSchedulerState.enabled) return;
+    agentCaptureSchedulerState.next_run_at = new Date(
+      Date.now() + delaySec * 1000,
+    ).toISOString();
+    agentCaptureSchedulerTimer = setTimeout(async () => {
+      agentCaptureSchedulerTimer = null;
+      const nextDelaySec = await runOnce();
+      if (agentCaptureSchedulerState.enabled) {
+        scheduleNext(nextDelaySec);
+      }
+    }, delaySec * 1000);
+    if (typeof agentCaptureSchedulerTimer.unref === 'function') {
+      agentCaptureSchedulerTimer.unref();
     }
   };
 
@@ -11328,10 +11422,16 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const sharedStageEvidenceSha256 = String(
     manifestSharedStageBudget.evidence_sha256 || '',
   );
-  const sharedStageBudgetCopiesMatch = Boolean(
-    Object.keys(manifestSharedStageBudget).length > 0
-    && JSON.stringify(manifestSharedStageBudget) === JSON.stringify(diskSharedStageBudget)
-  );
+  let sharedStageBudgetCopiesMatch = false;
+  try {
+    sharedStageBudgetCopiesMatch = Boolean(
+      Object.keys(manifestSharedStageBudget).length > 0
+      && canonicalAuditJson(sharedStageHashNormalize(manifestSharedStageBudget))
+        === canonicalAuditJson(sharedStageHashNormalize(diskSharedStageBudget))
+    );
+  } catch {
+    sharedStageBudgetCopiesMatch = false;
+  }
   let sharedStagePlanHashMatched = false;
   let sharedStageEvidenceHashMatched = false;
   try {
@@ -12577,11 +12677,16 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
     indexed_watermarks: indexedWatermarks,
     authoritative_consumer_preflight: {
       available: authoritativePreflightValid,
+      running: authoritativePreflightValid && authoritativePreflight.running === true,
+      started_at: authoritativePreflightValid
+        ? authoritativePreflight.started_at || null
+        : null,
       accepted: authoritativePreflightValid && authoritativePreflight.accepted === true,
       checked_at: authoritativePreflightValid ? authoritativePreflight.checked_at || null : null,
       age_sec: authoritativePreflightAgeSec,
       fresh: authoritativePreflightFresh,
       matched_current_bundle: authoritativePreflightMatched,
+      overrides_dashboard_recomputation: false,
       snapshot_id: authoritativePreflightValid ? authoritativePreflight.snapshot_id || null : null,
       manifest_sha256: authoritativePreflightValid ? authoritativePreflight.manifest_sha256 || null : null,
       blockers: authoritativePreflightValid && Array.isArray(authoritativePreflight.blockers)
@@ -16446,7 +16551,7 @@ const server = http.createServer(async (req, res) => {
     if (!checkAuth(req, url, res)) return;
     if (!requirePost(req, res)) return;
     try {
-      const result = triggerAgentCaptureDiscoveryLoop(url);
+      const result = await triggerAgentCaptureDiscoveryLoop(url);
       res.writeHead(result.accepted ? 202 : 409, apiJsonHeaders());
       res.end(JSON.stringify(result, null, 2));
     } catch (error) {

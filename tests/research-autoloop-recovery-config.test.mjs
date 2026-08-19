@@ -37,7 +37,20 @@ test('Zeabur startup restores bounded research-only workers', () => {
 test('dashboard scheduler is guarded, observable, and reuses the read-only runner', () => {
   assert.match(dashboard, /AGENT_CAPTURE_DISCOVERY_SCHEDULER_ENABLED/);
   assert.match(dashboard, /startRawPathObserverScheduler\(\)/);
-  assert.match(dashboard, /triggerAgentCaptureDiscoveryLoop\(url, \{ trigger: 'dashboard_scheduler' \}\)/);
+  assert.match(
+    dashboard,
+    /await triggerAgentCaptureDiscoveryLoop\(url, \{\s*trigger: 'dashboard_scheduler',\s*\}\)/,
+  );
+  assert.match(dashboard, /runEvaluatorSnapshotPreflightAsync/);
+  assert.doesNotMatch(dashboard, /runEvaluatorSnapshotPreflight,\s*$/m);
+  assert.match(dashboard, /AGENT_CAPTURE_DISCOVERY_SCHEDULER_BLOCKED_RETRY_SEC/);
+  assert.match(dashboard, /AGENT_CAPTURE_DISCOVERY_SCHEDULER_BUSY_RETRY_SEC/);
+  assert.match(
+    dashboard,
+    /Math\.min\(Math\.max\(configuredTimeoutMs, 1800000\), 3600000\)/,
+  );
+  assert.match(dashboard, /if \(result\?\.accepted === true\) return intervalSec/);
+  assert.match(dashboard, /return blockedRetrySec/);
   assert.match(dashboard, /agent_capture_scheduler: agentCaptureSchedulerStatus\(\)/);
   assert.match(dashboard, /startRawDogDiscoveryObserver\(\);\s+startAgentCaptureDiscoveryScheduler\(\);/);
   assert.match(dashboard, /promotion_allowed: false/);
@@ -65,6 +78,11 @@ test('dashboard scheduler is guarded, observable, and reuses the read-only runne
     (schedulerBlock.match(/scheduleNext\(initialDelaySec\);/g) || []).length,
     1,
     'AutoLoop scheduler must create one initial timer'
+  );
+  assert.equal(
+    (schedulerBlock.match(/scheduleNext\(intervalSec\);/g) || []).length,
+    0,
+    'blocked or busy AutoLoop attempts must not wait the six-hour success cadence'
   );
 });
 
