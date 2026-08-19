@@ -43,6 +43,15 @@ from pathlib import Path
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
+# Production executes this file directly, so its live module name is
+# ``__main__``. Several extracted helpers intentionally perform lazy imports
+# back into ``paper_trade_monitor``. Register the live script instance before
+# importing those helpers; otherwise Python creates a second module with a
+# separate transaction coordinator and every guarded provider call fails
+# closed with "coordinator missing".
+if __name__ == "__main__":
+    sys.modules.setdefault("paper_trade_monitor", sys.modules[__name__])
+
 from watchlist_store import WatchlistStore
 from matrix_evaluator import MatrixEvaluator, ExitMatrixEvaluator
 from entry_engine import (

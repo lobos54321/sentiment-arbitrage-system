@@ -4,6 +4,7 @@ import inspect
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import textwrap
 import threading
@@ -1381,6 +1382,97 @@ def test_all_blocking_primitives_route_through_transaction_guard():
     smart_entry_source = inspect.getsource(entry_engine.evaluate_smart_entry)
     assert "blocking_sleep_fn(sleep_for, \"smart_entry_poll_wait\")" in smart_entry_source
     assert smart_entry_source.count("_time.sleep(sleep_for)") == 1
+
+
+def test_script_entrypoint_registers_live_module_for_lazy_self_imports():
+    script_path = Path(paper_trade_monitor.__file__).resolve()
+    probe = textwrap.dedent(
+        f"""
+        import importlib
+        import pathlib
+        import sys
+        import types
+
+        path = pathlib.Path({str(script_path)!r})
+        sys.path.insert(0, str(path.parent))
+        source = path.read_text(encoding="utf-8")
+        source = source.rsplit("\\nif __name__ == '__main__':", 1)[0]
+        module = types.ModuleType("__main__")
+        module.__file__ = str(path)
+        module.__package__ = None
+        sys.modules["__main__"] = module
+        exec(compile(source, str(path), "exec"), module.__dict__)
+
+        canonical = importlib.import_module("paper_trade_monitor")
+        assert canonical is module
+        sentinel = object()
+        module._MONITOR_TRANSACTION_COORDINATOR = sentinel
+        namespace = {{}}
+        exec(
+            "from paper_trade_monitor import "
+            "_MONITOR_TRANSACTION_COORDINATOR as observed",
+            namespace,
+        )
+        assert namespace["observed"] is sentinel
+        module._MONITOR_TRANSACTION_COORDINATOR = None
+
+        import json
+        import sqlite3
+        entry = importlib.import_module("entry_engine")
+        entry._dex_trend_cache.clear()
+        module._daemon_bridge = types.SimpleNamespace(
+            call=lambda _command, _payload, _timeout: 0,
+        )
+        module.provider_request_allowed = lambda *_args, **_kwargs: {{"pass": True}}
+        module.record_provider_result = lambda *_args, **_kwargs: None
+        module._dex_rate_limited = lambda: False
+        module._select_best_dex_pair = lambda _token, pairs: pairs[0]
+        module.subprocess.run = lambda *_args, **_kwargs: types.SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=json.dumps(
+                {{
+                    "pairs": [
+                        {{
+                            "volume": {{"m5": 1, "h1": 2}},
+                            "txns": {{
+                                "m5": {{"buys": 2, "sells": 1}},
+                                "h1": {{"buys": 3, "sells": 2}},
+                            }},
+                            "priceChange": {{"m5": 1, "h1": 2}},
+                            "priceUsd": "1",
+                            "liquidity": {{"usd": 1000}},
+                        }}
+                    ]
+                }}
+            ),
+        )
+        db = sqlite3.connect(
+            ":memory:",
+            factory=module.MonitorSQLiteConnection,
+            check_same_thread=False,
+        )
+        try:
+            with module._monitor_transaction_guard_scope(db):
+                trend = entry.fetch_dexscreener_trend_snapshot(
+                    "SCRIPT_ALIAS_TOKEN",
+                    timeout=0.1,
+                )
+                assert trend["price_usd"] == 1.0
+                module._raise_monitor_supervisor_restart_if_requested()
+        finally:
+            db.close()
+        """
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(script_path.parent.parent),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
 def test_quote_boundaries_require_transaction_guard():
