@@ -9906,6 +9906,14 @@ function jsonFiniteNumberOrNaN(value) {
     : Number.NaN;
 }
 
+export function roundSharedStagePage(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  const aligned = Math.ceil(value / 4096) * 4096;
+  return Number.isSafeInteger(aligned) ? aligned : null;
+}
+
 export {
   JSON_NUMERIC_EVIDENCE_CONTRACT_SHA256,
   jsonNumericEvidenceTypesValid,
@@ -10401,11 +10409,6 @@ export function readEvaluatorSnapshotWorkerHealth(options = {}) {
   const sharedStageIndexedCountTimeoutAdvisoryFormula =
     'bounded_edge_sample_rows_times_sample_max_plus_per_row_overhead_'
     + 'plus_root_reserve_plus_candidate_signal_index_overhead';
-  const roundSharedStagePage = (value) => (
-    Number.isSafeInteger(value) && value >= 0
-      ? Math.ceil(value / 4096) * 4096
-      : null
-  );
   const ceilMultiplyDivide = (left, right, denominator) => {
     if (
       !Number.isSafeInteger(left)

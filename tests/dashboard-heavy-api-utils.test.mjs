@@ -55,6 +55,7 @@ import {
   readPaperReviewSnapshotHealth,
   readRuntimeFinalEvidenceHealth,
   readEvaluatorSnapshotWorkerHealth,
+  roundSharedStagePage,
   parallelPaperStagePageClaimValid,
   PARALLEL_PAPER_STAGE_BULK_PAGE_MIN_BUDGET_BYTES,
   PARALLEL_PAPER_STAGE_CHUNK_TARGET_BYTES,
@@ -3479,6 +3480,25 @@ test('dashboard rejects coherent watermark and local schema-binding spoofing', (
     spoofed.manifest_contract.numeric_evidence_schema_binding_passed,
     false,
   );
+});
+
+test('shared-stage page rounding matches producer fractional history headroom', () => {
+  assert.equal(
+    roundSharedStagePage(423_911_424 * 1.10),
+    466_305_024,
+  );
+  assert.equal(
+    roundSharedStagePage(365_428_736 * 1.20),
+    438_517_760,
+  );
+  assert.equal(
+    roundSharedStagePage(46_350_336 * 1.10),
+    50_987_008,
+  );
+  assert.equal(roundSharedStagePage(0), 0);
+  assert.equal(roundSharedStagePage(-1), null);
+  assert.equal(roundSharedStagePage(Number.POSITIVE_INFINITY), null);
+  assert.equal(roundSharedStagePage(Number.MAX_SAFE_INTEGER), null);
 });
 
 test('evaluator snapshot worker health accepts only fresh matching indexed bundles', () => {
