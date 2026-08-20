@@ -43,7 +43,9 @@ function resolvePath(raw) {
 }
 
 function openSqlite(dbPath, options) {
-  const db = options === undefined ? new Database(dbPath) : new Database(dbPath, options);
+  const timeoutMs = envInt('RAW_PATH_OBSERVER_SQLITE_BUSY_TIMEOUT_MS', 30000, 1000, 120000);
+  const db = new Database(dbPath, { ...(options || {}), timeout: timeoutMs });
+  db.pragma(`busy_timeout = ${timeoutMs}`);
   try { db.pragma('mmap_size = 0'); } catch {}
   return db;
 }
@@ -899,6 +901,7 @@ export {
   fetchIndexedRawRows,
   getProviderBackoff,
   isProviderRateLimitError,
+  openSqlite,
   rankSignalsForBackfill,
   selectUniqueSignals,
   setProviderBackoff,
